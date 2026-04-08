@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="theme-color" content="#111111" />
+<title>MClaude</title>
+<style>
+:root {
+  --bg:       #111111;
+  --surf:     #1c1c1e;
+  --surf2:    #2c2c2e;
+  --surf3:    #3a3a3c;
+  --border:   #38383a;
+  --text:     #ffffff;
+  --text2:    #8e8e93;
+  --text3:    #48484a;
+  --blue:     #0a84ff;
+  --green:    #30d158;
+  --orange:   #ff9f0a;
+  --red:      #ff453a;
+  --purple:   #bf5af2;
+  --safe-t:   env(safe-area-inset-top,    0px);
+  --safe-b:   env(safe-area-inset-bottom, 0px);
+  --safe-l:   env(safe-area-inset-left,   0px);
+  --safe-r:   env(safe-area-inset-right,  0px);
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',system-ui,sans-serif;
+  font-size:16px;line-height:1.4;-webkit-text-size-adjust:100%}
+#app{height:100%;display:flex;flex-direction:column;padding-top:var(--safe-t)}
+
+/* ── Navbar ── */
+.nav{display:flex;align-items:center;gap:8px;padding:12px 16px;min-height:52px;
+  background:var(--surf);border-bottom:1px solid var(--border);flex-shrink:0}
+.nav-title{flex:1;font-size:17px;font-weight:600;display:flex;align-items:center;gap:8px}
+.nav-back{background:none;border:none;color:var(--blue);font-size:17px;
+  cursor:pointer;padding:4px 0;display:flex;align-items:center;gap:2px;white-space:nowrap}
+
+/* ── Scrollable content ── */
+.content{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+
+/* ── Auth ── */
+.auth{height:100%;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;padding:32px;gap:20px}
+.auth-icon{font-size:72px;line-height:1}
+.auth-title{font-size:30px;font-weight:700}
+.auth-sub{font-size:14px;color:var(--text2);text-align:center;max-width:260px}
+.auth-form{width:100%;max-width:320px;display:flex;flex-direction:column;gap:10px}
+
+/* ── Inputs ── */
+input,textarea{width:100%;background:var(--surf2);border:1px solid var(--border);
+  border-radius:10px;padding:12px 14px;color:var(--text);font-size:16px;
+  outline:none;font-family:inherit}
+input:focus,textarea:focus{border-color:var(--blue)}
+textarea{resize:none;line-height:1.4}
+
+/* ── Buttons ── */
+.btn{width:100%;background:var(--blue);color:#fff;border:none;border-radius:10px;
+  padding:14px;font-size:16px;font-weight:600;cursor:pointer;transition:opacity .15s}
+.btn:active{opacity:.75}
+.btn-surf{background:var(--surf2);color:var(--text)}
+.btn-green{background:var(--green)}
+.btn-red{background:var(--red)}
+.btn-sm{width:auto;padding:8px 16px;font-size:14px;border-radius:8px}
+
+/* ── Badge ── */
+.badge{background:var(--red);color:#fff;font-size:11px;font-weight:700;
+  min-width:18px;height:18px;border-radius:9px;display:inline-flex;
+  align-items:center;justify-content:center;padding:0 5px}
+
+/* ── Connection dot ── */
+.cdot{width:8px;height:8px;border-radius:50%;background:var(--text3);flex-shrink:0}
+.cdot.ok{background:var(--green)}
+.cdot.err{background:var(--red)}
+
+/* ── Status dot ── */
+.sdot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.sdot.working{background:var(--orange);animation:pulse 1.2s ease-in-out infinite}
+.sdot.needs_permission{background:var(--red)}
+.sdot.plan_mode{background:var(--purple)}
+.sdot.idle{background:var(--green)}
+.sdot.unknown,.sdot.waiting_for_input{background:var(--text3)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ── Session list ── */
+.slist{list-style:none}
+.srow{display:flex;align-items:center;gap:12px;padding:14px 16px;
+  border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
+.srow:active{background:var(--surf)}
+.sinfo{flex:1;min-width:0}
+.sname{font-size:16px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.smeta{font-size:12px;color:var(--text2);margin-top:2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.schev{color:var(--text3);font-size:18px;line-height:1}
+
+/* ── Empty state ── */
+.empty{text-align:center;padding:64px 32px;color:var(--text2)}
+.empty h3{color:var(--text);margin-bottom:8px;font-size:18px}
+
+/* ── FAB ── */
+.fab{position:fixed;bottom:calc(24px + var(--safe-b));right:calc(20px + var(--safe-r));
+  width:56px;height:56px;border-radius:28px;background:var(--blue);color:#fff;
+  font-size:30px;border:none;cursor:pointer;display:flex;align-items:center;
+  justify-content:center;box-shadow:0 4px 20px rgba(10,132,255,.45);z-index:50;
+  transition:transform .1s}
+.fab:active{transform:scale(.9)}
+
+/* ── Sheet modal ── */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100;
+  display:flex;align-items:flex-end;animation:fadeIn .2s}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.sheet{background:var(--surf);border-radius:16px 16px 0 0;width:100%;
+  max-height:80vh;display:flex;flex-direction:column;
+  padding-bottom:var(--safe-b);animation:slideUp .25s ease-out}
+@keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
+.sheet-hdr{display:flex;align-items:center;padding:16px 20px;
+  border-bottom:1px solid var(--border);flex-shrink:0}
+.sheet-title{flex:1;font-size:17px;font-weight:600}
+.sheet-close{background:none;border:none;color:var(--text2);font-size:22px;
+  cursor:pointer;line-height:1;padding:0 4px}
+.plist{list-style:none;overflow-y:auto;flex:1}
+.prow{display:flex;align-items:center;gap:12px;padding:14px 20px;
+  border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
+.prow:active{background:var(--surf2)}
+.picon{font-size:22px;width:28px;text-align:center}
+.pname{font-size:15px;font-weight:500}
+.ppath{font-size:11px;color:var(--text2);margin-top:1px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px}
+
+/* ── Session detail ── */
+.detail{height:100%;display:flex;flex-direction:column}
+.det-meta{padding:8px 16px;background:var(--surf);border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text2);flex-shrink:0}
+.det-meta .win{margin-left:auto;font-size:11px;color:var(--text3);font-variant-numeric:tabular-nums}
+.act-bar{display:flex;gap:8px;padding:8px 16px;background:var(--surf2);
+  border-bottom:1px solid var(--border);flex-shrink:0}
+.prompt-bar{padding:10px 16px;background:var(--surf2);
+  border-bottom:1px solid var(--border);flex-shrink:0}
+.prompt-q{font-size:14px;color:var(--text);margin-bottom:8px;line-height:1.4}
+.prompt-opts{display:flex;flex-wrap:wrap;gap:6px}
+.popt{background:var(--surf);border:1px solid var(--border);border-radius:16px;
+  padding:6px 12px;font-size:13px;cursor:pointer;color:var(--blue)}
+.popt:active{background:var(--surf3)}
+
+/* ── Tabs ── */
+.tabs{display:flex;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--surf)}
+.tab{flex:1;padding:10px;text-align:center;font-size:14px;font-weight:500;
+  color:var(--text2);cursor:pointer;border-bottom:2px solid transparent;transition:color .15s}
+.tab.on{color:var(--blue);border-bottom-color:var(--blue)}
+
+/* ── Events (chat) ── */
+.evlist{padding:12px 14px;display:flex;flex-direction:column;gap:10px;min-height:100%}
+
+.ev-user{align-self:flex-end;max-width:85%;background:var(--blue);color:#fff;
+  border-radius:18px 18px 4px 18px;padding:10px 14px;font-size:15px;
+  white-space:pre-wrap;word-break:break-word;line-height:1.4}
+
+.ev-text{align-self:flex-start;max-width:95%;font-size:15px;line-height:1.55;
+  white-space:pre-wrap;word-break:break-word}
+
+.ev-think{align-self:flex-start;max-width:95%;background:var(--surf);
+  border-radius:10px;padding:10px 14px;font-size:13px;cursor:pointer;
+  border:1px solid var(--border)}
+.think-hdr{display:flex;align-items:center;gap:6px;color:var(--text2);font-style:italic}
+.think-body{margin-top:8px;white-space:pre-wrap;word-break:break-word;
+  font-style:normal;color:var(--text);line-height:1.5;font-size:13px}
+
+.ev-tool{align-self:flex-start;max-width:95%;border:1px solid var(--border);
+  border-radius:10px;overflow:hidden;font-size:13px;width:100%;max-width:100%}
+.tool-hdr{background:var(--surf);padding:8px 12px;display:flex;align-items:center;
+  gap:6px;color:var(--text2);font-family:'SF Mono',Menlo,monospace;font-size:12px;
+  border-bottom:1px solid var(--border)}
+.tool-name{font-weight:600;color:var(--text)}
+.tool-body{padding:8px 12px;background:var(--surf2);font-family:'SF Mono',Menlo,monospace;
+  color:var(--text);white-space:pre-wrap;word-break:break-all;
+  max-height:180px;overflow-y:auto;font-size:12px;line-height:1.5}
+
+.ev-result{align-self:flex-start;max-width:95%;border-radius:10px;overflow:hidden;
+  font-size:13px;border:1px solid var(--border);width:100%;max-width:100%}
+.ev-result.err{border-color:rgba(255,69,58,.5)}
+.result-body{padding:8px 12px;background:var(--surf2);font-family:'SF Mono',Menlo,monospace;
+  white-space:pre-wrap;word-break:break-all;max-height:180px;overflow-y:auto;
+  font-size:12px;line-height:1.5;color:var(--text)}
+.ev-result.err .result-body{color:var(--red)}
+
+.ev-sys{align-self:center;font-size:11px;color:var(--text3);padding:2px 0;text-align:center}
+
+.ev-subagent{align-self:flex-start;width:100%;max-width:95%;background:var(--surf);
+  border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.subagent-hdr{padding:8px 12px;display:flex;align-items:center;gap:6px;
+  font-size:13px;color:var(--text2);border-bottom:1px solid var(--border)}
+.subagent-type{font-weight:600;color:var(--purple)}
+.subagent-desc{font-size:12px;padding:6px 12px;color:var(--text2);font-style:italic}
+
+/* ── Terminal ── */
+.terminal{padding:10px 12px;font-family:'SF Mono',Menlo,'Courier New',monospace;
+  font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-all;
+  background:#000;color:#e5e5e5;flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+
+/* ── Input bar ── */
+.ibar{display:flex;align-items:flex-end;gap:8px;padding:8px 12px;
+  padding-bottom:calc(8px + var(--safe-b));
+  background:var(--surf);border-top:1px solid var(--border);flex-shrink:0}
+.ifield{flex:1;background:var(--surf2);border:1px solid var(--border);
+  border-radius:20px;padding:9px 14px;color:var(--text);font-size:15px;
+  max-height:120px;overflow-y:auto;line-height:1.4}
+.ifield:focus{border-color:var(--blue)}
+.isend{width:34px;height:34px;border-radius:17px;background:var(--blue);
+  border:none;color:#fff;font-size:18px;cursor:pointer;display:flex;
+  align-items:center;justify-content:center;flex-shrink:0;transition:transform .1s}
+.isend:disabled{background:var(--surf3);color:var(--text3)}
+.isend:active:not(:disabled){transform:scale(.88)}
+
+/* ── Misc ── */
+.loading{text-align:center;padding:32px;color:var(--text2);font-size:15px}
+::-webkit-scrollbar{width:3px;height:3px}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+'use strict';
+
+// ── State ──────────────────────────────────────────────────────────────────
+const S = {
+  token: localStorage.getItem('mc_tok') || '',
+  sessions: [],
+  projects: [],
+  events: {},         // sessionId → EventObject[]
+  outputs: {},        // sessionId → raw terminal string
+  expanded: new Set(),// expanded thinking UUIDs
+  activeId: null,
+  activeTab: 'events',
+  ws: null,
+  wsState: 'off',     // off | connecting | ok | err
+  modal: null,        // null | 'newSession'
+  loadingProjects: false,
+};
+
+// ── DOM root ───────────────────────────────────────────────────────────────
+const $app = document.getElementById('app');
+
+// ── Routing ────────────────────────────────────────────────────────────────
+function route() {
+  const h = location.hash.slice(1);
+  if (h.startsWith('s/')) return { page: 'session', id: decodeURIComponent(h.slice(2)) };
+  return { page: 'dashboard' };
+}
+
+window.addEventListener('hashchange', () => {
+  const r = route();
+  if (r.page === 'session') {
+    S.activeId = r.id;
+    S.activeTab = 'events';
+    ensureSessionData(r.id);
+  } else {
+    S.activeId = null;
+  }
+  render();
+});
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+let wsTimer = null;
+let pingTimer = null;
+
+function connectWS() {
+  if (!S.token) return;
+  if (S.ws && S.ws.readyState <= 1) return;
+
+  S.wsState = 'connecting';
+  patchConnDot();
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  S.ws = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(S.token)}`);
+
+  S.ws.onopen = () => {
+    S.wsState = 'ok';
+    clearTimeout(wsTimer);
+    pingTimer = setInterval(() => S.ws?.readyState === 1 && S.ws.send(JSON.stringify({type:'ping'})), 14000);
+    patchConnDot();
+  };
+
+  S.ws.onmessage = e => {
+    try { onWS(JSON.parse(e.data)); } catch(_) {}
+  };
+
+  S.ws.onerror = () => { S.wsState = 'err'; patchConnDot(); };
+
+  S.ws.onclose = () => {
+    S.wsState = 'off';
+    clearInterval(pingTimer);
+    patchConnDot();
+    wsTimer = setTimeout(connectWS, 3500);
+  };
+}
+
+function onWS(msg) {
+  const data = typeof msg.data === 'string' ? safeParse(msg.data, msg.data) : msg.data;
+
+  if (msg.type === 'sessions') {
+    S.sessions = Array.isArray(data) ? data : [];
+    patchDashboard();
+    patchSessionHeader();
+
+  } else if (msg.type === 'output' || msg.type === 'more_output') {
+    if (data?.id) {
+      S.outputs[data.id] = data.output || '';
+      if (S.activeId === data.id && S.activeTab === 'terminal') patchTerminal();
+    }
+
+  } else if (msg.type === 'event') {
+    if (data?.id && data?.event) {
+      const ev = data.event;
+      (S.events[data.id] = S.events[data.id] || []).push(ev);
+      if (S.activeId === data.id && S.activeTab === 'events') appendEventNode(ev);
+    }
+  }
+}
+
+// ── API ────────────────────────────────────────────────────────────────────
+async function api(method, path, body, extraHdrs) {
+  const opts = {
+    method,
+    headers: { 'Authorization': `Bearer ${S.token}`, ...extraHdrs },
+  };
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const ct = r.headers.get('content-type') || '';
+  if (ct.includes('application/json')) return r.json();
+  return r.text();
+}
+
+async function ensureSessionData(id) {
+  if (S.events[id] && S.outputs[id] !== undefined) return;
+  try {
+    const [evs, out] = await Promise.all([
+      api('GET', `/sessions/${encodeURIComponent(id)}/events`),
+      api('GET', `/sessions/${encodeURIComponent(id)}/output`),
+    ]);
+    S.events[id] = Array.isArray(evs) ? evs : [];
+    S.outputs[id] = (typeof out === 'object' ? out?.output : out) || '';
+    if (S.activeId === id) {
+      if (S.activeTab === 'events') patchEventsList();
+      else patchTerminal();
+    }
+  } catch(e) {
+    console.warn('ensureSessionData:', e);
+  }
+}
+
+async function sendInput(id, text) {
+  try { await api('POST', `/sessions/${encodeURIComponent(id)}/input`, {text, sendEnter: true}); }
+  catch(e) { alert('Send failed: ' + e.message); }
+}
+
+async function doApprove(id) {
+  try { await api('POST', `/sessions/${encodeURIComponent(id)}/approve`, {}); }
+  catch(e) { alert('Approve failed: ' + e.message); }
+}
+
+async function doCancel(id) {
+  try { await api('POST', `/sessions/${encodeURIComponent(id)}/cancel`, {}); }
+  catch(e) { alert('Cancel failed: ' + e.message); }
+}
+
+async function doCreate(cwd) {
+  S.modal = null;
+  try {
+    await api('POST', '/sessions', {cwd, runtime: 'tmux'});
+    render();
+  } catch(e) {
+    render();
+    alert('Create failed: ' + e.message);
+  }
+}
+
+async function loadProjects() {
+  S.loadingProjects = true;
+  patchProjectList();
+  try {
+    const data = await api('GET', '/projects');
+    S.projects = Array.isArray(data) ? data : [];
+  } catch(e) {
+    S.projects = [];
+  }
+  S.loadingProjects = false;
+  patchProjectList();
+}
+
+function requestMoreOutput(id) {
+  if (S.ws?.readyState === 1) {
+    S.ws.send(JSON.stringify({type: 'load_more', id, lines: 300}));
+  }
+}
+
+// ── Render (full re-render) ────────────────────────────────────────────────
+function render() {
+  if (!S.token) { renderAuth(); return; }
+  const r = route();
+  if (r.page === 'session') renderDetail(r.id);
+  else renderDashboard();
+}
+
+// ── Auth screen ────────────────────────────────────────────────────────────
+function renderAuth() {
+  $app.innerHTML = `
+<div class="auth">
+  <div class="auth-icon">⚡</div>
+  <div class="auth-title">MClaude</div>
+  <div class="auth-sub">Enter your WEB_TOKEN to connect to the relay</div>
+  <div class="auth-form">
+    <input type="password" id="tok" placeholder="Access token" autocomplete="off" />
+    <button class="btn" id="go-btn">Connect</button>
+  </div>
+</div>`;
+  const inp = document.getElementById('tok');
+  inp.value = S.token;
+  inp.addEventListener('keydown', e => e.key === 'Enter' && doLogin());
+  document.getElementById('go-btn').addEventListener('click', doLogin);
+  setTimeout(() => inp.focus(), 80);
+}
+
+function doLogin() {
+  const v = document.getElementById('tok')?.value?.trim();
+  if (!v) return;
+  S.token = v;
+  localStorage.setItem('mc_tok', v);
+  connectWS();
+  render();
+}
+
+// ── Dashboard ──────────────────────────────────────────────────────────────
+function renderDashboard() {
+  const attn = S.sessions.filter(s => s.status === 'needs_permission' || s.status === 'plan_mode').length;
+  $app.innerHTML = `
+<div class="nav">
+  <div class="nav-title">MClaude ${attn ? `<span class="badge">${attn}</span>` : ''}</div>
+  <div class="cdot ${cdotClass()}" id="cdot"></div>
+</div>
+<div class="content" id="sc">${sessionsHTML()}</div>
+<button class="fab" id="fab">+</button>
+${S.modal === 'newSession' ? newSessionHTML() : ''}`;
+
+  document.getElementById('fab').addEventListener('click', openNewSession);
+  if (S.modal === 'newSession') bindSheetClose();
+}
+
+function sessionsHTML() {
+  if (!S.sessions.length) {
+    return `<div class="empty"><h3>No Sessions</h3><p>Tap + to start a Claude session</p></div>`;
+  }
+  return `<ul class="slist">${S.sessions.map((s, i) => `
+<li class="srow" data-i="${i}">
+  <div class="sdot ${s.status || 'unknown'}"></div>
+  <div class="sinfo">
+    <div class="sname">${esc(s.projectName || s.id)}</div>
+    <div class="smeta">${statusLabel(s)} · ${esc(shortPath(s.cwd))}</div>
+  </div>
+  <div class="schev">›</div>
+</li>`).join('')}</ul>`;
+}
+
+function patchDashboard() {
+  if (route().page !== 'dashboard' || !S.token) return;
+  const sc = document.getElementById('sc');
+  if (sc) sc.innerHTML = sessionsHTML();
+  const attn = S.sessions.filter(s => s.status === 'needs_permission' || s.status === 'plan_mode').length;
+  const t = document.querySelector('.nav-title');
+  if (t) t.innerHTML = `MClaude ${attn ? `<span class="badge">${attn}</span>` : ''}`;
+  patchConnDot();
+  // rebind row clicks
+  bindSessionRows();
+}
+
+function bindSessionRows() {
+  document.querySelectorAll('.srow').forEach(el => {
+    el.addEventListener('click', () => {
+      const i = parseInt(el.dataset.i);
+      const s = S.sessions[i];
+      if (s) navTo(`s/${encodeURIComponent(s.id)}`);
+    });
+  });
+}
+
+// ── New session modal ──────────────────────────────────────────────────────
+function newSessionHTML() {
+  return `
+<div class="overlay" id="overlay">
+  <div class="sheet">
+    <div class="sheet-hdr">
+      <div class="sheet-title">New Session</div>
+      <button class="sheet-close" id="sheet-x">✕</button>
+    </div>
+    <ul class="plist" id="plist">${projectsHTML()}</ul>
+  </div>
+</div>`;
+}
+
+function projectsHTML() {
+  if (S.loadingProjects) return `<div class="loading">Loading projects…</div>`;
+  if (!S.projects.length) return `<div class="loading">No projects found</div>`;
+  return S.projects.map((p, i) =>
+    `<li class="prow" data-pi="${i}"><div class="picon">📁</div><div>
+      <div class="pname">${esc(p.name)}</div>
+      <div class="ppath">${esc(p.path)}</div>
+    </div></li>`
+  ).join('');
+}
+
+function patchProjectList() {
+  const pl = document.getElementById('plist');
+  if (pl) {
+    pl.innerHTML = projectsHTML();
+    bindProjectRows();
+  }
+}
+
+function bindSheetClose() {
+  const x = document.getElementById('sheet-x');
+  if (x) x.addEventListener('click', closeModal);
+  const ov = document.getElementById('overlay');
+  if (ov) ov.addEventListener('click', e => { if (e.target === ov) closeModal(); });
+  bindProjectRows();
+}
+
+function bindProjectRows() {
+  document.querySelectorAll('.prow').forEach(el => {
+    el.addEventListener('click', () => {
+      const i = parseInt(el.dataset.pi);
+      const p = S.projects[i];
+      if (p) doCreate(p.path);
+    });
+  });
+}
+
+function openNewSession() {
+  S.modal = 'newSession';
+  render();
+  bindSessionRows();
+  loadProjects();
+}
+
+function closeModal() {
+  S.modal = null;
+  render();
+  bindSessionRows();
+}
+
+// ── Session detail ─────────────────────────────────────────────────────────
+function renderDetail(id) {
+  const sess = S.sessions.find(s => s.id === id) || {id, projectName: id, status: 'unknown', cwd: ''};
+  const needsAct = sess.status === 'needs_permission' || sess.status === 'plan_mode';
+
+  $app.innerHTML = `
+<div class="detail">
+  <div class="nav">
+    <button class="nav-back" id="back-btn">‹ Back</button>
+    <div class="nav-title" style="justify-content:center">${esc(sess.projectName || id)}</div>
+    <div class="cdot ${cdotClass()}" id="cdot"></div>
+  </div>
+  <div class="det-meta" id="det-meta">
+    <div class="sdot ${sess.status || 'unknown'}" id="sstat-dot"></div>
+    <span id="sstat-lbl">${statusLabel(sess)}</span>
+    <span class="win">#${esc(String(id))}</span>
+  </div>
+  ${needsAct ? actionBarHTML(id) : '<div id="act-bar-ph"></div>'}
+  ${sess.prompt ? promptBarHTML(sess.prompt, id) : ''}
+  <div class="tabs" id="tabs">
+    <div class="tab ${S.activeTab==='events'?'on':''}" data-tab="events">Events</div>
+    <div class="tab ${S.activeTab==='terminal'?'on':''}" data-tab="terminal">Terminal</div>
+  </div>
+  <div class="content" id="tab-content" style="${S.activeTab==='terminal'?'background:#000;padding:0':''}">
+    ${tabContentHTML(id)}
+  </div>
+  <div class="ibar">
+    <textarea class="ifield" id="ifield" rows="1" placeholder="Message…"></textarea>
+    <button class="isend" id="isend">↑</button>
+  </div>
+</div>`;
+
+  bindDetail(id, sess);
+  scrollEventsToBottom();
+}
+
+function actionBarHTML(id) {
+  return `<div class="act-bar" id="act-bar">
+    <button class="btn btn-green btn-sm" id="approve-btn">✓ Approve</button>
+    <button class="btn btn-red btn-sm" id="cancel-btn">✕ Cancel</button>
+  </div>`;
+}
+
+function promptBarHTML(prompt, id) {
+  const opts = prompt.options || [];
+  return `<div class="prompt-bar">
+    <div class="prompt-q">${esc(prompt.question)}</div>
+    ${opts.length ? `<div class="prompt-opts">${opts.map((o, i) =>
+      `<button class="popt" data-n="${i+1}">${i+1}. ${esc(o)}</button>`
+    ).join('')}</div>` : ''}
+  </div>`;
+}
+
+function tabContentHTML(id) {
+  if (S.activeTab === 'events') {
+    const evs = S.events[id] || [];
+    return `<div class="evlist" id="evlist">${evs.map(renderEventHTML).join('')}</div>`;
+  } else {
+    const out = S.outputs[id] || '';
+    return `<div class="terminal" id="term">${ansi(out)}</div>
+      <div style="padding:8px;text-align:center;background:#000">
+        <button onclick="requestMoreOutput('${esc(id)}')" style="background:none;border:1px solid #333;color:#666;border-radius:6px;padding:4px 12px;font-size:11px;cursor:pointer">Load more output</button>
+      </div>`;
+  }
+}
+
+function bindDetail(id, sess) {
+  document.getElementById('back-btn').addEventListener('click', () => navTo(''));
+
+  document.querySelectorAll('.tab').forEach(t => {
+    t.addEventListener('click', () => switchTab(t.dataset.tab, id));
+  });
+
+  const approve = document.getElementById('approve-btn');
+  const cancel  = document.getElementById('cancel-btn');
+  if (approve) approve.addEventListener('click', () => doApprove(id));
+  if (cancel)  cancel.addEventListener('click', () => doCancel(id));
+
+  document.querySelectorAll('.popt').forEach(b => {
+    b.addEventListener('click', () => sendInput(id, b.dataset.n));
+  });
+
+  document.querySelectorAll('.ev-think').forEach(el => {
+    el.addEventListener('click', () => toggleThink(el.dataset.uuid, id));
+  });
+
+  const field = document.getElementById('ifield');
+  const btn   = document.getElementById('isend');
+  field.addEventListener('input', () => autoGrow(field));
+  field.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(id); }
+  });
+  btn.addEventListener('click', () => doSend(id));
+}
+
+function doSend(id) {
+  const f = document.getElementById('ifield');
+  if (!f) return;
+  const t = f.value.trim();
+  if (!t) return;
+  f.value = '';
+  autoGrow(f);
+  sendInput(id, t);
+}
+
+function autoGrow(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+function switchTab(tab, id) {
+  if (S.activeTab === tab) return;
+  S.activeTab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === tab));
+  const tc = document.getElementById('tab-content');
+  if (tc) {
+    tc.style.background = tab === 'terminal' ? '#000' : '';
+    tc.style.padding = tab === 'terminal' ? '0' : '';
+    tc.innerHTML = tabContentHTML(id);
+    if (tab === 'events') {
+      setTimeout(scrollEventsToBottom, 30);
+      rebindThinkToggles(id);
+    }
+  }
+}
+
+function patchSessionHeader() {
+  if (!S.activeId) return;
+  const sess = S.sessions.find(s => s.id === S.activeId);
+  if (!sess) return;
+
+  const dot = document.getElementById('sstat-dot');
+  const lbl = document.getElementById('sstat-lbl');
+  if (dot) dot.className = `sdot ${sess.status || 'unknown'}`;
+  if (lbl) lbl.textContent = statusLabel(sess);
+
+  const needsAct = sess.status === 'needs_permission' || sess.status === 'plan_mode';
+  const bar = document.getElementById('act-bar');
+  const ph  = document.getElementById('act-bar-ph');
+
+  if (needsAct && !bar) {
+    // Insert action bar
+    const det = document.querySelector('.det-meta');
+    if (det) det.insertAdjacentHTML('afterend', actionBarHTML(S.activeId));
+    if (ph) ph.remove();
+    const approve = document.getElementById('approve-btn');
+    const cancel  = document.getElementById('cancel-btn');
+    if (approve) approve.addEventListener('click', () => doApprove(S.activeId));
+    if (cancel)  cancel.addEventListener('click', () => doCancel(S.activeId));
+  } else if (!needsAct && bar) {
+    bar.remove();
+  }
+}
+
+// ── Event rendering ────────────────────────────────────────────────────────
+function renderEventHTML(ev) {
+  if (!ev) return '';
+  switch (ev.type) {
+    case 'user':
+      return `<div class="ev-user">${esc(ev.text || '')}</div>`;
+
+    case 'text':
+      if (!ev.text) return '';
+      return `<div class="ev-text">${esc(ev.text)}</div>`;
+
+    case 'thinking': {
+      const uuid = ev.uuid || Math.random().toString(36).slice(2);
+      const open = S.expanded.has(uuid);
+      return `<div class="ev-think" data-uuid="${uuid}">
+        <div class="think-hdr"><span>${open?'▼':'▶'}</span><span>Claude's thinking…</span></div>
+        ${open ? `<div class="think-body">${esc(ev.thinking || '')}</div>` : ''}
+      </div>`;
+    }
+
+    case 'tool_use': {
+      const t = ev.toolUse;
+      if (!t) return '';
+      const icon = t.name === '!' ? '⚡' : t.name === 'Agent' ? '🤖' :
+                   t.name === 'Bash' ? '💻' : t.name.startsWith('/') ? '🔧' : '🛠';
+      const body = t.inputSummary || t.fullInput || '';
+
+      // Subagent block
+      if (t.name === 'Agent' && ev.subagentInfo) {
+        const sa = ev.subagentInfo;
+        return `<div class="ev-subagent">
+          <div class="subagent-hdr">🤖 <span class="subagent-type">${esc(sa.agentType || 'Agent')}</span> spawned</div>
+          <div class="subagent-desc">${esc(sa.description || body)}</div>
+        </div>`;
+      }
+
+      return `<div class="ev-tool">
+        <div class="tool-hdr">${icon} <span class="tool-name">${esc(t.name)}</span></div>
+        ${body ? `<div class="tool-body">${esc(body)}</div>` : ''}
+      </div>`;
+    }
+
+    case 'tool_result': {
+      const results = ev.toolResults || [];
+      return results.map(r =>
+        `<div class="ev-result ${r.isError?'err':''}">
+          <div class="result-body">${esc(r.content || '')}</div>
+        </div>`
+      ).join('');
+    }
+
+    case 'system': {
+      if (ev.durationMs != null) {
+        return `<div class="ev-sys">Turn completed in ${(ev.durationMs/1000).toFixed(1)}s</div>`;
+      }
+      return `<div class="ev-sys">${esc(ev.text || 'system')}</div>`;
+    }
+
+    case 'compaction':
+      return `<div class="ev-sys">— conversation compacted —</div>`;
+
+    default:
+      return '';
+  }
+}
+
+function appendEventNode(ev) {
+  const list = document.getElementById('evlist');
+  if (!list) return;
+  const html = renderEventHTML(ev);
+  if (!html) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  while (tmp.firstChild) list.appendChild(tmp.firstChild);
+
+  // bind new thinking toggles
+  list.querySelectorAll('.ev-think:not([data-bound])').forEach(el => {
+    el.dataset.bound = '1';
+    el.addEventListener('click', () => toggleThink(el.dataset.uuid, S.activeId));
+  });
+
+  const tc = document.getElementById('tab-content');
+  if (tc) {
+    const near = tc.scrollTop + tc.clientHeight >= tc.scrollHeight - 80;
+    if (near) tc.scrollTop = tc.scrollHeight;
+  }
+}
+
+function patchEventsList() {
+  const list = document.getElementById('evlist');
+  if (!list) return;
+  list.innerHTML = (S.events[S.activeId] || []).map(renderEventHTML).join('');
+  rebindThinkToggles(S.activeId);
+  scrollEventsToBottom();
+}
+
+function patchTerminal() {
+  const term = document.getElementById('term');
+  if (term) term.innerHTML = ansi(S.outputs[S.activeId] || '');
+}
+
+function scrollEventsToBottom() {
+  const tc = document.getElementById('tab-content');
+  if (tc) setTimeout(() => { tc.scrollTop = tc.scrollHeight; }, 40);
+}
+
+function rebindThinkToggles(id) {
+  document.querySelectorAll('.ev-think').forEach(el => {
+    el.addEventListener('click', () => toggleThink(el.dataset.uuid, id));
+  });
+}
+
+function toggleThink(uuid, id) {
+  if (S.expanded.has(uuid)) S.expanded.delete(uuid);
+  else S.expanded.add(uuid);
+  patchEventsList();
+}
+
+// ── ANSI → HTML ────────────────────────────────────────────────────────────
+const FG = {
+  30:'#4d4d4d',31:'#cd3131',32:'#0dbc79',33:'#e5e510',
+  34:'#2472c8',35:'#bc3fbc',36:'#11a8cd',37:'#e5e5e5',
+  90:'#666',91:'#f14c4c',92:'#23d18b',93:'#f5f543',
+  94:'#3b8eea',95:'#d670d6',96:'#29b8db',97:'#f1f1f0',
+};
+
+function ansi(text) {
+  let out = '';
+  let spans = 0;
+  const re = /\x1b\[([0-9;]*)m|(\x1b\[[0-9;]*[A-HJKST])|([^\x1b]+)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m[3] !== undefined) {
+      // text — escape HTML
+      out += m[3].replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    } else if (m[1] !== undefined) {
+      // SGR
+      const codes = m[1] === '' ? [0] : m[1].split(';').map(Number);
+      if (codes[0] === 0 || codes.includes(0)) {
+        while (spans-- > 0) out += '</span>';
+        spans = 0;
+      } else {
+        let style = '';
+        for (const c of codes) {
+          if (FG[c]) style += `color:${FG[c]};`;
+          if (c === 1) style += 'font-weight:bold;';
+          if (c === 2) style += 'opacity:.6;';
+        }
+        if (style) { out += `<span style="${style}">`; spans++; }
+      }
+    }
+    // non-SGR escape sequences (cursor movement etc.) are dropped
+  }
+  while (spans-- > 0) out += '</span>';
+  return out;
+}
+
+// ── Patch helpers (surgical DOM updates) ──────────────────────────────────
+function patchConnDot() {
+  document.querySelectorAll('.cdot').forEach(d => {
+    d.className = `cdot ${cdotClass()}`;
+  });
+}
+
+function cdotClass() {
+  return S.wsState === 'ok' ? 'ok' : S.wsState === 'err' ? 'err' : '';
+}
+
+// ── Utility ────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function shortPath(p) {
+  if (!p) return '';
+  const parts = p.split('/').filter(Boolean);
+  if (parts.length <= 2) return p;
+  return '…/' + parts.slice(-2).join('/');
+}
+
+function statusLabel(s) {
+  const since = s.statusSince ? ' ' + ago(s.statusSince) : '';
+  const labels = {
+    working:           `Working${since}`,
+    waiting_for_input: 'Waiting',
+    needs_permission:  'Needs Permission',
+    plan_mode:         'Plan Ready',
+    idle:              `Idle${since}`,
+    unknown:           'Unknown',
+  };
+  return labels[s.status] || s.status || 'Unknown';
+}
+
+function ago(iso) {
+  const s = Math.floor((Date.now() - new Date(iso)) / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m/60)}h ${m%60}m`;
+}
+
+function navTo(hash) { location.hash = hash; }
+
+function safeParse(s, def) {
+  try { return JSON.parse(s); } catch(_) { return def; }
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+const r = route();
+if (r.page === 'session') { S.activeId = r.id; }
+
+if (S.token) connectWS();
+render();
+
+// Rebind session rows after first render
+if (route().page === 'dashboard') bindSessionRows();
+
+// Tick status labels every 20s while on dashboard
+setInterval(() => {
+  if (route().page === 'dashboard' && S.sessions.length) patchDashboard();
+}, 20000);
+</script>
+</body>
+</html>
