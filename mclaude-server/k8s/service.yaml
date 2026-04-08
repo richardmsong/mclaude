@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mclaude-server
+  namespace: mclaude
+spec:
+  ports:
+    - name: http
+      port: 8377
+      targetPort: 8377
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: mclaude-server
+  namespace: mclaude
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: http
+        port: 8377

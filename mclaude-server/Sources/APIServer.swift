@@ -28,24 +28,111 @@ private func extractWSToken(from request: Request) -> String? {
     return nil
 }
 
-func buildRouter(monitor: TmuxMonitor, broadcaster: WSBroadcaster, jsonlTailer: JSONLTailer? = nil, sessionStore: SessionStore? = nil) -> Router<BasicWebSocketRequestContext> {
+func buildRouter(monitor: TmuxMonitor, broadcaster: WSBroadcaster, jsonlTailer: JSONLTailer? = nil, sessionStore: SessionStore? = nil, k8s: K8sSessionManager? = nil) -> Router<BasicWebSocketRequestContext> {
     let router = Router(context: BasicWebSocketRequestContext.self)
     let capturedMonitor = monitor
     let capturedTailer = jsonlTailer
     let capturedStore = sessionStore
+    let capturedK8s = k8s
 
     // Health check
     router.get("/health") { _, _ in
         return Response(status: .ok, body: .init(byteBuffer: .init(string: "{\"status\":\"ok\"}")))
     }
 
+    // Google OAuth: get auth URL
+    router.get("/auth/google/login") { _, _ in
+        guard let store = capturedStore else {
+            return Response(status: .internalServerError, body: .init(byteBuffer: .init(string: "{\"error\":\"auth not configured\"}")))
+        }
+        let url = await store.googleAuthURL()
+        let payload = ["url": url]
+        let data = try JSONEncoder().encode(payload)
+        return Response(
+            status: .ok,
+            headers: [.contentType: "application/json"],
+            body: .init(byteBuffer: .init(data: data))
+        )
+    }
+
+    // Google OAuth: callback (exchanges code, redirects app with session token)
+    router.get("/auth/google/callback") { request, _ in
+        guard let store = capturedStore else {
+            return Response(status: .internalServerError, body: .init(byteBuffer: .init(string: "Auth not configured")))
+        }
+        // Extract code from query
+        guard let query = request.uri.query else {
+            return Response(status: .badRequest, body: .init(byteBuffer: .init(string: "Missing code")))
+        }
+        var code: String?
+        for param in query.split(separator: "&") {
+            let parts = param.split(separator: "=", maxSplits: 1)
+            if parts.count == 2 && parts[0] == "code" {
+                code = String(parts[1]).removingPercentEncoding
+            }
+        }
+        guard let authCode = code else {
+            return Response(status: .badRequest, body: .init(byteBuffer: .init(string: "Missing code")))
+        }
+
+        // Exchange code for Google identity
+        guard let googleInfo = await store.exchangeGoogleCode(authCode) else {
+            return Response(status: .unauthorized, body: .init(byteBuffer: .init(string: "Google auth failed")))
+        }
+
+        // Create/find user and generate session token
+        let (userId, sessionToken) = await store.authenticateGoogle(
+            googleId: googleInfo.googleId,
+            email: googleInfo.email,
+            name: googleInfo.name
+        )
+
+        print("[auth] Google callback: \(googleInfo.email) -> userId=\(userId)")
+
+        // Redirect to app with session token
+        let redirectURL = "mclaude://auth?token=\(sessionToken)&name=\(googleInfo.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")&email=\(googleInfo.email.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")"
+        return Response(
+            status: .found,
+            headers: [.location: redirectURL]
+        )
+    }
+
+    // Get current user info
+    router.get("/auth/me") { request, _ in
+        guard let store = capturedStore, let token = extractToken(from: request) else {
+            return Response(status: .unauthorized, body: .init(byteBuffer: .init(string: "{\"error\":\"not authenticated\"}")))
+        }
+        let userId = await store.authenticate(token: token)
+        if let user = await store.getUser(userId: userId) {
+            let payload: [String: String?] = ["id": user.id, "name": user.name, "email": user.email]
+            let data = try JSONEncoder().encode(payload)
+            return Response(
+                status: .ok,
+                headers: [.contentType: "application/json"],
+                body: .init(byteBuffer: .init(data: data))
+            )
+        }
+        return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"user not found\"}")))
+    }
+
+    // Auth helper: returns userId or nil (401)
+    func requireAuth(request: Request) async -> String? {
+        guard let store = capturedStore, let token = extractToken(from: request) else { return nil }
+        let userId = await store.authenticateSessionToken(token)
+        return userId
+    }
+
+    let unauthorized = Response(status: .unauthorized, body: .init(byteBuffer: .init(string: "{\"error\":\"authentication required\"}")))
+
     // List all sessions (reads from cache, filtered by user)
     router.get("/sessions") { request, _ in
+        guard let userId = await requireAuth(request: request) else { return unauthorized }
         var sessions = await capturedMonitor.getCachedSessions()
-        if let store = capturedStore, let token = extractToken(from: request) {
-            let userId = await store.authenticate(token: token)
-            sessions = await store.filterSessions(sessions, userId: userId)
+        // Merge K8s sessions
+        if let k8s = capturedK8s {
+            sessions += await k8s.getCachedSessions()
         }
+        sessions = await capturedStore!.filterSessions(sessions, userId: userId)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(sessions)
@@ -61,12 +148,9 @@ func buildRouter(monitor: TmuxMonitor, broadcaster: WSBroadcaster, jsonlTailer: 
         guard let id = context.parameters.get("id") else {
             return Response(status: .badRequest)
         }
-        // Check ownership
-        if let store = capturedStore, let token = extractToken(from: request) {
-            let userId = await store.authenticate(token: token)
-            guard await store.userOwns(sessionId: id, userId: userId) else {
-                return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
-            }
+        guard let userId = await requireAuth(request: request) else { return unauthorized }
+        guard await capturedStore!.userOwns(sessionId: id, userId: userId) else {
+            return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
         }
         let sessions = await capturedMonitor.getCachedSessions()
         guard let session = sessions.first(where: { $0.id == id }) else {
@@ -87,7 +171,16 @@ func buildRouter(monitor: TmuxMonitor, broadcaster: WSBroadcaster, jsonlTailer: 
         guard let id = context.parameters.get("id") else {
             return Response(status: .badRequest)
         }
-        let content = await capturedMonitor.getCachedOutput(id: id) ?? ""
+        guard let userId = await requireAuth(request: request) else { return unauthorized }
+        guard await capturedStore!.userOwns(sessionId: id, userId: userId) else {
+            return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
+        }
+        let content: String
+        if id.hasPrefix("k8s-"), let k8s = capturedK8s {
+            content = await k8s.getCachedOutput(id: id) ?? ""
+        } else {
+            content = await capturedMonitor.getCachedOutput(id: id) ?? ""
+        }
         let payload = ["output": content]
         let data = try JSONEncoder().encode(payload)
         return Response(
@@ -112,20 +205,24 @@ func buildRouter(monitor: TmuxMonitor, broadcaster: WSBroadcaster, jsonlTailer: 
 
     // Create a new session
     router.post("/sessions") { request, context in
+        guard let userId = await requireAuth(request: request) else { return unauthorized }
         let body = try await request.body.collect(upTo: 1_048_576)
         let req = try JSONDecoder().decode(CreateSessionRequest.self, from: body)
 
         // Use token from request body or Authorization header
         let token = req.token ?? extractToken(from: request)
-        let windowId = await capturedMonitor.createSession(cwd: req.cwd, token: token)
 
-        if let windowId {
-            // Track ownership
-            if let store = capturedStore, let token {
-                let userId = await store.authenticate(token: token)
-                await store.setOwner(sessionId: windowId, userId: userId)
-            }
-            let result = "{\"status\":\"created\",\"id\":\"\(windowId)\"}"
+        let sessionId: String?
+        if req.runtime == "k8s", let k8s = capturedK8s {
+            let podName = await k8s.createSession(cwd: req.cwd, token: token)
+            sessionId = podName.map { "k8s-\($0)" }
+        } else {
+            sessionId = await capturedMonitor.createSession(cwd: req.cwd, token: token)
+        }
+
+        if let sessionId {
+            await capturedStore!.setOwner(sessionId: sessionId, userId: userId)
+            let result = "{\"status\":\"created\",\"id\":\"\(sessionId)\"}"
             return Response(
                 status: .ok,
                 headers: [.contentType: "application/json"],
@@ -168,22 +265,29 @@ func buildRouter(monitor: TmuxMonitor, broadcaster: WSBroadcaster, jsonlTailer: 
         guard let id = context.parameters.get("id") else {
             return Response(status: .badRequest)
         }
-        if let store = capturedStore, let token = extractToken(from: request) {
-            let userId = await store.authenticate(token: token)
-            guard await store.userOwns(sessionId: id, userId: userId) else {
-                return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
-            }
-        }
-        guard let session = await capturedMonitor.getSession(id: id) else {
+        guard let userId = await requireAuth(request: request) else { return unauthorized }
+        guard await capturedStore!.userOwns(sessionId: id, userId: userId) else {
             return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
         }
         let body = try await request.body.collect(upTo: 1_048_576)
         let input = try JSONDecoder().decode(SessionInput.self, from: body)
 
-        let window = session.tmuxWindow
-        let sent = await capturedMonitor.sendKeys(window: window, keys: input.text)
-        if input.sendEnter ?? true {
-            _ = await capturedMonitor.sendEnter(window: window)
+        let sent: Bool
+        if id.hasPrefix("k8s-"), let k8s = capturedK8s {
+            let podName = await k8s.podName(from: id)
+            sent = await k8s.sendKeys(podName: podName, keys: input.text)
+            if input.sendEnter ?? true {
+                _ = await k8s.sendEnter(podName: podName)
+            }
+        } else {
+            guard let session = await capturedMonitor.getSession(id: id) else {
+                return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
+            }
+            let window = session.tmuxWindow
+            sent = await capturedMonitor.sendKeys(window: window, keys: input.text)
+            if input.sendEnter ?? true {
+                _ = await capturedMonitor.sendEnter(window: window)
+            }
         }
 
         let result = sent ? "{\"status\":\"sent\"}" : "{\"status\":\"failed\"}"
@@ -199,16 +303,19 @@ func buildRouter(monitor: TmuxMonitor, broadcaster: WSBroadcaster, jsonlTailer: 
         guard let id = context.parameters.get("id") else {
             return Response(status: .badRequest)
         }
-        if let store = capturedStore, let token = extractToken(from: request) {
-            let userId = await store.authenticate(token: token)
-            guard await store.userOwns(sessionId: id, userId: userId) else {
-                return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
-            }
-        }
-        guard let session = await capturedMonitor.getSession(id: id) else {
+        guard let userId = await requireAuth(request: request) else { return unauthorized }
+        guard await capturedStore!.userOwns(sessionId: id, userId: userId) else {
             return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
         }
-        let sent = await capturedMonitor.sendEnter(window: session.tmuxWindow)
+        let sent: Bool
+        if id.hasPrefix("k8s-"), let k8s = capturedK8s {
+            sent = await k8s.sendEnter(podName: await k8s.podName(from: id))
+        } else {
+            guard let session = await capturedMonitor.getSession(id: id) else {
+                return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
+            }
+            sent = await capturedMonitor.sendEnter(window: session.tmuxWindow)
+        }
         let result = sent ? "{\"status\":\"approved\"}" : "{\"status\":\"failed\"}"
         return Response(
             status: sent ? .ok : .internalServerError,
@@ -222,16 +329,19 @@ func buildRouter(monitor: TmuxMonitor, broadcaster: WSBroadcaster, jsonlTailer: 
         guard let id = context.parameters.get("id") else {
             return Response(status: .badRequest)
         }
-        if let store = capturedStore, let token = extractToken(from: request) {
-            let userId = await store.authenticate(token: token)
-            guard await store.userOwns(sessionId: id, userId: userId) else {
-                return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
-            }
-        }
-        guard let session = await capturedMonitor.getSession(id: id) else {
+        guard let userId = await requireAuth(request: request) else { return unauthorized }
+        guard await capturedStore!.userOwns(sessionId: id, userId: userId) else {
             return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
         }
-        let sent = await capturedMonitor.sendKeys(window: session.tmuxWindow, keys: "Escape")
+        let sent: Bool
+        if id.hasPrefix("k8s-"), let k8s = capturedK8s {
+            sent = await k8s.sendKeys(podName: await k8s.podName(from: id), keys: "Escape")
+        } else {
+            guard let session = await capturedMonitor.getSession(id: id) else {
+                return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
+            }
+            sent = await capturedMonitor.sendKeys(window: session.tmuxWindow, keys: "Escape")
+        }
         let result = sent ? "{\"status\":\"cancelled\"}" : "{\"status\":\"failed\"}"
         return Response(
             status: sent ? .ok : .internalServerError,
@@ -245,11 +355,9 @@ func buildRouter(monitor: TmuxMonitor, broadcaster: WSBroadcaster, jsonlTailer: 
         guard let id = context.parameters.get("id") else {
             return Response(status: .badRequest)
         }
-        if let store = capturedStore, let token = extractToken(from: request) {
-            let userId = await store.authenticate(token: token)
-            guard await store.userOwns(sessionId: id, userId: userId) else {
-                return Response(status: .notFound, body: .init(byteBuffer: .init(string: "[]")))
-            }
+        guard let userId = await requireAuth(request: request) else { return unauthorized }
+        guard await capturedStore!.userOwns(sessionId: id, userId: userId) else {
+            return Response(status: .notFound, body: .init(byteBuffer: .init(string: "[]")))
         }
         guard let session = await capturedMonitor.getSession(id: id),
               let tailer = capturedTailer else {
@@ -334,25 +442,25 @@ func buildRouter(monitor: TmuxMonitor, broadcaster: WSBroadcaster, jsonlTailer: 
     router.ws("/ws") { inbound, outbound, context in
         let clientId = UUID()
 
-        // Extract token from query string for per-user filtering
-        var clientUserId: String? = nil
-        if let store = capturedStore, let token = extractWSToken(from: context.request) {
-            clientUserId = await store.authenticate(token: token)
+        // Require auth — reject unauthenticated WebSocket connections
+        guard let store = capturedStore, let token = extractWSToken(from: context.request),
+              let userId = await store.authenticateSessionToken(token) else {
+            print("[WS] Rejected unauthenticated client")
+            try await outbound.write(.text("{\"error\":\"authentication required\"}"))
+            return
         }
 
-        print("[WS] Client connected: \(clientId) userId=\(clientUserId ?? "owner")")
-
-        // If user has a token, filter broadcasts to only their sessions
-        let userId = clientUserId
+        print("[WS] Client connected: \(clientId) userId=\(userId)")
         await capturedBroadcaster.addClient(id: clientId, userId: userId) { message in
             try? await outbound.write(.text(message))
         }
 
         // Send current state immediately on connect (filtered)
         var currentSessions = await capturedMonitor.getCachedSessions()
-        if let store = capturedStore, let userId {
-            currentSessions = await store.filterSessions(currentSessions, userId: userId)
+        if let k8s = capturedK8s {
+            currentSessions += await k8s.getCachedSessions()
         }
+        currentSessions = await store.filterSessions(currentSessions, userId: userId)
         if let sessionsMsg = encodeWSMessage(type: "sessions", data: currentSessions) {
             try? await outbound.write(.text(sessionsMsg))
         }
@@ -374,9 +482,7 @@ func buildRouter(monitor: TmuxMonitor, broadcaster: WSBroadcaster, jsonlTailer: 
                       cmd.type == "load_more",
                       let id = cmd.id else { continue }
                 // Verify ownership for load_more
-                if let store = capturedStore, let userId {
-                    guard await store.userOwns(sessionId: id, userId: userId) else { continue }
-                }
+                guard await store.userOwns(sessionId: id, userId: userId) else { continue }
                 let lines = cmd.lines ?? 160
                 let content = await capturedMonitor.getMoreOutput(id: id, lines: lines) ?? ""
                 let payload = ["id": id, "output": content]

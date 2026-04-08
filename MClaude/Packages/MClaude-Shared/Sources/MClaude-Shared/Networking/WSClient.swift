@@ -122,7 +122,7 @@ public final class WSClient: Sendable {
 
     private func connectAndListen() async throws {
         var components = URLComponents()
-        components.scheme = "ws"
+        components.scheme = "wss"
         components.host = config.host
         components.port = config.port
         components.path = "/ws"
