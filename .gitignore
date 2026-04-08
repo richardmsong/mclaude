@@ -1,0 +1,39 @@
+# Xcode
+build/
+*.xcodeproj
+DerivedData/
+*.xcuserstate
+*.xcuserdatad/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Certificates and secrets
+*.p12
+*.pem
+*.cer
+*.mobileprovision
+*.der
+
+# Pairing files
+pair_*.plist
+
+# macOS
+.DS_Store
+
+# QA screenshots and results
+MClaude/.claude/qa/screenshots/
+MClaude/.claude/qa/results/
+
+# Node modules
+node_modules/
+
+# Build output
+dist/
+
+# Logs
+*.log
+
+# SideStore VPN (subproject)
+sidestore-vpn/

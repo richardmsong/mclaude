@@ -1,0 +1,32 @@
+id: regression-tab-navigation
+name: Tab navigation between Sessions and Settings
+area: settings
+priority: regression
+theory: state-transition
+created: 2026-04-02
+context: "Verify switching between tabs preserves correct screen content"
+
+preconditions:
+  - app_launched
+
+steps:
+  - action: tap_tab
+    target: "Settings"
+    wait: 1
+    assert:
+      - element_exists: "Settings"
+      - element_exists: "SERVER"
+
+  - action: tap_tab
+    target: "Sessions"
+    wait: 1
+    assert:
+      - element_exists: "MClaude"
+      - element_exists: "Add"
+
+  - action: tap_tab
+    target: "Settings"
+    wait: 1
+    assert:
+      - element_exists: "Settings"
+      - element_exists: "Test Connection"

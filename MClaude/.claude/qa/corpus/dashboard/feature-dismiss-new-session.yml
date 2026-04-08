@@ -1,0 +1,24 @@
+id: feature-dismiss-new-session
+name: Cancel dismisses New Session sheet
+area: dashboard
+priority: feature
+theory: state-transition
+created: 2026-04-02
+context: "Tapping Cancel in the New Session sheet should return to the dashboard"
+
+preconditions:
+  - app_launched
+
+steps:
+  - action: tap_element
+    target: "Add"
+    wait: 1
+    assert:
+      - element_exists: "New Session"
+
+  - action: tap_element
+    target: "Cancel"
+    wait: 1
+    assert:
+      - element_exists: "MClaude"
+      - no_element: "New Session"
