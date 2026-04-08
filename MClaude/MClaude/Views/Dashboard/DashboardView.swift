@@ -6,6 +6,7 @@ struct DashboardView: View {
     @State private var showNewSession = false
     @State private var projects: [ProjectInfo] = []
     @State private var isLoadingProjects = false
+    @State private var useTmux = true
 
     var body: some View {
         NavigationStack {
@@ -87,17 +88,29 @@ struct DashboardView: View {
                         description: Text("No directories found in ~/work")
                     )
                 } else {
-                    List(projects) { project in
-                        Button {
-                            createSession(cwd: project.path)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(project.name)
-                                    .font(.body)
-                                    .fontWeight(.medium)
-                                Text(project.path)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                    List {
+                        Section {
+                            Toggle("tmux", isOn: $useTmux)
+                        } header: {
+                            Text("Runtime")
+                        } footer: {
+                            Text(useTmux ? "Runs on the host machine in tmux" : "Runs in a Kubernetes pod")
+                        }
+
+                        Section("Projects") {
+                            ForEach(projects) { project in
+                                Button {
+                                    createSession(cwd: project.path)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(project.name)
+                                            .font(.body)
+                                            .fontWeight(.medium)
+                                        Text(project.path)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
                             }
                         }
                     }
@@ -127,8 +140,9 @@ struct DashboardView: View {
     }
 
     private func createSession(cwd: String) {
+        let runtime = useTmux ? "tmux" : "k8s"
         Task {
-            try? await appState.client.createSession(cwd: cwd)
+            try? await appState.client.createSession(cwd: cwd, runtime: runtime)
             showNewSession = false
         }
     }
