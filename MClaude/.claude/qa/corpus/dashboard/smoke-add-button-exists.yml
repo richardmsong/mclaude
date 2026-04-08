@@ -1,0 +1,15 @@
+id: smoke-add-button-exists
+name: Dashboard has Add button in toolbar
+area: dashboard
+priority: smoke
+theory: smoke
+created: 2026-04-02
+context: "Verify the Add (plus) button is present in the toolbar for creating new sessions"
+
+preconditions:
+  - app_launched
+
+steps:
+  - action: verify_screen
+    assert:
+      - element_exists: "Add"

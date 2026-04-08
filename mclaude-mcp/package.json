@@ -1,0 +1,21 @@
+{
+  "name": "mclaude-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for MClaude - manage Claude Code sessions remotely",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "mclaude-mcp": "src/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0"
+  }
+}

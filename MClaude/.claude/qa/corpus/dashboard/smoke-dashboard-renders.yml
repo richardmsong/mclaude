@@ -1,0 +1,17 @@
+id: smoke-dashboard-renders
+name: Dashboard renders with navigation title
+area: dashboard
+priority: smoke
+theory: smoke
+created: 2026-04-02
+context: "Verify the main dashboard screen renders with MClaude heading and tab bar"
+
+preconditions:
+  - app_launched
+
+steps:
+  - action: verify_screen
+    assert:
+      - element_exists: "MClaude"
+      - element_exists: "Tab Bar"
+      - screen_not_empty

@@ -1,0 +1,18 @@
+id: feature-new-session-sheet
+name: Tapping Add opens New Session sheet
+area: dashboard
+priority: feature
+theory: state-transition
+created: 2026-04-02
+context: "Tapping the Add button should present a sheet with New Session title and Cancel button"
+
+preconditions:
+  - app_launched
+
+steps:
+  - action: tap_element
+    target: "Add"
+    wait: 1
+    assert:
+      - element_exists: "New Session"
+      - element_exists: "Cancel"

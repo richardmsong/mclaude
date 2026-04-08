@@ -1,0 +1,16 @@
+id: smoke-disconnected-state
+name: Dashboard shows disconnected when no server
+area: dashboard
+priority: smoke
+theory: state-transition
+created: 2026-04-02
+context: "When server is unreachable, dashboard shows Disconnected state with error message"
+
+preconditions:
+  - app_launched
+
+steps:
+  - action: verify_screen
+    assert:
+      - element_exists: "Disconnected"
+      - screen_not_empty
