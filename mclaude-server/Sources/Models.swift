@@ -54,15 +54,35 @@ struct ProjectInfo: Codable, Sendable {
 struct CreateSessionRequest: Codable, Sendable {
     let cwd: String
     let token: String?
+    let runtime: String?  // "tmux" (default) or "k8s"
 }
 
 // MARK: - Multi-user
 
 struct MCUser: Codable, Sendable {
-    let id: String
-    let name: String
-    let tokenHash: String
+    let id: String          // stable userId
+    let name: String        // display name (from Google profile)
+    let email: String?      // Google email
+    let googleId: String?   // Google sub claim — stable across token rotations
+    let tokenHash: String?  // legacy: Claude OAuth token hash (deprecated)
     let createdAt: Date
+}
+
+// MARK: - Google OAuth
+
+struct GoogleTokenResponse: Codable {
+    let access_token: String
+    let id_token: String
+    let token_type: String
+    let expires_in: Int?
+    let refresh_token: String?
+}
+
+struct GoogleUserInfo: Codable {
+    let sub: String        // stable Google account ID
+    let email: String
+    let name: String?
+    let picture: String?
 }
 
 // MARK: - Structured session events (from JSONL)

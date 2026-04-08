@@ -4,6 +4,8 @@ struct SettingsView: View {
     @Environment(AppState.self) private var appState
     @State private var isChecking = false
     @State private var connectionResult: Bool?
+    @State private var isSigningIn = false
+    @State private var signInError: String?
 
     var body: some View {
         @Bindable var state = appState
@@ -51,14 +53,61 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    SecureField("Claude Code OAuth Token", text: $state.authToken)
-                        .font(.system(.body, design: .monospaced))
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
+                    if appState.isSignedIn {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(appState.userName.isEmpty ? "Signed In" : appState.userName)
+                                    .font(.headline)
+                                if !appState.userEmail.isEmpty {
+                                    Text(appState.userEmail)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer()
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                        }
+
+                        Button("Sign Out", role: .destructive) {
+                            appState.signOut()
+                        }
+                    } else {
+                        Button {
+                            Task {
+                                isSigningIn = true
+                                signInError = nil
+                                do {
+                                    try await appState.signInWithGoogle()
+                                } catch {
+                                    signInError = error.localizedDescription
+                                }
+                                isSigningIn = false
+                            }
+                        } label: {
+                            HStack {
+                                Image(systemName: "person.badge.key")
+                                Text("Sign in with Google")
+                                Spacer()
+                                if isSigningIn {
+                                    ProgressView()
+                                }
+                            }
+                        }
+                        .disabled(isSigningIn)
+
+                        if let error = signInError {
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                    }
                 } header: {
                     Text("Account")
                 } footer: {
-                    Text("Optional. Run `claude setup-token` to get a token from your Claude Pro/Max subscription. Leave empty to use the server owner's subscription.")
+                    Text(appState.isSignedIn
+                         ? "Sessions are tied to your Google account."
+                         : "Sign in to access your sessions across devices.")
                 }
 
                 Section("About") {

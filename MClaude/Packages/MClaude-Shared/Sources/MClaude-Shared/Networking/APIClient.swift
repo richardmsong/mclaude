@@ -106,13 +106,13 @@ public struct APIClient: Sendable {
         return try decoder.decode([SkillSuggestion].self, from: data)
     }
 
-    public func createSession(cwd: String) async throws {
+    public func createSession(cwd: String, runtime: String = "tmux") async throws {
         let url = config.baseURL.appendingPathComponent("sessions")
         var request = authedRequest(url: url, method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        struct Body: Encodable { let cwd: String }
-        request.httpBody = try JSONEncoder().encode(Body(cwd: cwd))
+        struct Body: Encodable { let cwd: String; let runtime: String }
+        request.httpBody = try JSONEncoder().encode(Body(cwd: cwd, runtime: runtime))
         let (_, _) = try await session.data(for: request)
     }
 

@@ -13,7 +13,7 @@ public struct ServerConfig: Sendable {
 
     public var baseURL: URL {
         var components = URLComponents()
-        components.scheme = "http"
+        components.scheme = "https"
         components.host = host
         components.port = port
         guard let url = components.url else {
@@ -24,7 +24,7 @@ public struct ServerConfig: Sendable {
 
     public func url(path: String) -> URL? {
         var components = URLComponents()
-        components.scheme = "http"
+        components.scheme = "https"
         components.host = host
         components.port = port
         components.path = path

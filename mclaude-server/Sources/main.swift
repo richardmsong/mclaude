@@ -1,6 +1,8 @@
 import Foundation
 import Hummingbird
+import HummingbirdTLS
 import HummingbirdWebSocket
+import NIOSSL
 
 let host = ProcessInfo.processInfo.environment["MCLAUDE_HOST"] ?? "0.0.0.0"
 let port = Int(ProcessInfo.processInfo.environment["MCLAUDE_PORT"] ?? "8377") ?? 8377
@@ -19,6 +21,7 @@ let notifier = SignalNotifier(recipientPhone: signalRecipient)
 let broadcaster = WSBroadcaster()
 let jsonlTailer = JSONLTailer()
 let sessionStore = SessionStore()
+let k8sManager = K8sSessionManager()
 
 // Wire up status change notifications
 await monitor.setOnStatusChange { session, oldStatus, newStatus in
@@ -30,10 +33,12 @@ await monitor.setOnStatusChange { session, oldStatus, newStatus in
 
 // Wire up WebSocket broadcasts (per-user filtered)
 let capturedStore = sessionStore
-await monitor.setOnSessionsUpdated { sessions in
+await monitor.setOnSessionsUpdated { tmuxSessions in
     Task {
+        let k8sSessions = await capturedK8s.getCachedSessions()
+        let allSessions = tmuxSessions + k8sSessions
         await broadcaster.broadcastFiltered { userId in
-            let filtered = await capturedStore.filterSessions(sessions, userId: userId)
+            let filtered = await capturedStore.filterSessions(allSessions, userId: userId)
             return encodeWSMessage(type: "sessions", data: filtered)
         }
     }
@@ -43,6 +48,30 @@ await monitor.setOnOutputChanged { id, content in
     Task {
         await broadcaster.broadcastFiltered { userId in
             // Check if this user owns the session
+            let owns = await capturedStore.userOwns(sessionId: id, userId: userId)
+            guard owns else { return nil }
+            let payload = ["id": id, "output": content]
+            return encodeWSMessage(type: "output", data: payload)
+        }
+    }
+}
+
+// Wire up K8s session broadcasts (per-user filtered)
+let capturedK8s = k8sManager
+await k8sManager.setOnSessionsUpdated { k8sSessions in
+    Task {
+        let tmuxSessions = await monitor.getCachedSessions()
+        let allSessions = tmuxSessions + k8sSessions
+        await broadcaster.broadcastFiltered { userId in
+            let filtered = await capturedStore.filterSessions(allSessions, userId: userId)
+            return encodeWSMessage(type: "sessions", data: filtered)
+        }
+    }
+}
+
+await k8sManager.setOnOutputChanged { id, content in
+    Task {
+        await broadcaster.broadcastFiltered { userId in
             let owns = await capturedStore.userOwns(sessionId: id, userId: userId)
             guard owns else { return nil }
             let payload = ["id": id, "output": content]
@@ -87,24 +116,56 @@ let pollTask = Task {
         for session in sessions {
             await capturedTailer.watchSession(id: session.id, sessionId: session.sessionId, cwd: session.cwd)
         }
+        // Poll K8s sessions
+        _ = await capturedK8s.getSessions()
         try? await Task.sleep(nanoseconds: pollInterval * 1_000_000_000)
     }
 }
 
 // Build single router for HTTP + WebSocket
-let router = buildRouter(monitor: monitor, broadcaster: broadcaster, jsonlTailer: jsonlTailer, sessionStore: sessionStore)
+let router = buildRouter(monitor: monitor, broadcaster: broadcaster, jsonlTailer: jsonlTailer, sessionStore: sessionStore, k8s: k8sManager)
 
-let app = Application(
-    router: router,
-    server: .http1WebSocketUpgrade(webSocketRouter: router),
-    configuration: .init(address: .hostname(host, port: port))
-)
+// Check for TLS certs
+let certsDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("mclaude-certs")
+let certFile = certsDir.appendingPathComponent("home-server.taild44daa.ts.net.crt")
+let keyFile = certsDir.appendingPathComponent("home-server.taild44daa.ts.net.key")
 
-print("mclaude-server listening on \(host):\(port) (HTTP + WebSocket)")
+let useTLS = FileManager.default.fileExists(atPath: certFile.path)
+    && FileManager.default.fileExists(atPath: keyFile.path)
 
-do {
-    try await app.run()
-} catch {
-    print("Server error: \(error)")
-    pollTask.cancel()
+if useTLS {
+    let certData = try Data(contentsOf: certFile)
+    let keyData = try Data(contentsOf: keyFile)
+    let certificate = try NIOSSLCertificate(bytes: [UInt8](certData), format: .pem)
+    let privateKey = try NIOSSLPrivateKey(bytes: [UInt8](keyData), format: .pem)
+    let tlsConfig = TLSConfiguration.makeServerConfiguration(
+        certificateChain: [.certificate(certificate)],
+        privateKey: .privateKey(privateKey)
+    )
+    let app = Application(
+        router: router,
+        server: try .tls(.http1WebSocketUpgrade(webSocketRouter: router), tlsConfiguration: tlsConfig),
+        configuration: .init(address: .hostname(host, port: port))
+    )
+    print("mclaude-server listening on \(host):\(port) (HTTPS + WSS)")
+    do {
+        try await app.run()
+    } catch {
+        print("Server error: \(error)")
+        pollTask.cancel()
+    }
+} else {
+    let app = Application(
+        router: router,
+        server: .http1WebSocketUpgrade(webSocketRouter: router),
+        configuration: .init(address: .hostname(host, port: port))
+    )
+    print("mclaude-server listening on \(host):\(port) (HTTP + WebSocket)")
+    print("  TLS disabled: no certs found at \(certsDir.path)")
+    do {
+        try await app.run()
+    } catch {
+        print("Server error: \(error)")
+        pollTask.cancel()
+    }
 }

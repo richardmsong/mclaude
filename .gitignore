@@ -37,3 +37,4 @@ dist/
 
 # SideStore VPN (subproject)
 sidestore-vpn/
+.google-token.json

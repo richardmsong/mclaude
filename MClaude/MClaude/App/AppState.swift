@@ -1,5 +1,6 @@
 import SwiftUI
 import BackgroundTasks
+import AuthenticationServices
 
 @Observable
 final class AppState {
@@ -13,6 +14,15 @@ final class AppState {
     var authToken: String {
         didSet { UserDefaults.standard.set(authToken, forKey: "authToken"); rebuildClient() }
     }
+
+    // Google SSO state
+    var userName: String {
+        didSet { UserDefaults.standard.set(userName, forKey: "userName") }
+    }
+    var userEmail: String {
+        didSet { UserDefaults.standard.set(userEmail, forKey: "userEmail") }
+    }
+    var isSignedIn: Bool { !authToken.isEmpty }
 
     private(set) var client: APIClient
     private(set) var isConnected: Bool = false
@@ -34,16 +44,71 @@ final class AppState {
 
     init() {
         let host = UserDefaults.standard.string(forKey: "serverHost") ?? "127.0.0.1"
-        let port = UserDefaults.standard.integer(forKey: "serverPort")
+        var port = UserDefaults.standard.integer(forKey: "serverPort")
+        if port == 8080 { port = 8377; UserDefaults.standard.set(port, forKey: "serverPort") }
         let resolvedPort = port > 0 ? port : 8377
         let token = UserDefaults.standard.string(forKey: "authToken") ?? ""
 
         self.serverHost = host
         self.serverPort = resolvedPort
         self.authToken = token
+        self.userName = UserDefaults.standard.string(forKey: "userName") ?? ""
+        self.userEmail = UserDefaults.standard.string(forKey: "userEmail") ?? ""
         let config = ServerConfig(host: host, port: resolvedPort, token: token.isEmpty ? nil : token)
         self.client = APIClient(config: config)
         self.telemetry = TelemetryClient(config: ServerConfig(host: host, port: resolvedPort))
+    }
+
+    // MARK: - Google SSO
+
+    func signInWithGoogle() async throws {
+        // Get Google auth URL from server
+        let config = ServerConfig(host: serverHost, port: serverPort)
+        let url = URL(string: "\(config.baseURL)/auth/google/login")!
+        let (data, _) = try await URLSession.shared.data(from: url)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: String],
+              let authURLString = json["url"],
+              let authURL = URL(string: authURLString) else {
+            throw URLError(.badServerResponse)
+        }
+
+        // Open Google sign-in in browser sheet
+        let callbackURL = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
+            let session = ASWebAuthenticationSession(
+                url: authURL,
+                callbackURLScheme: "mclaude"
+            ) { url, error in
+                if let error { continuation.resume(throwing: error); return }
+                guard let url else { continuation.resume(throwing: URLError(.badURL)); return }
+                continuation.resume(returning: url)
+            }
+            session.prefersEphemeralWebBrowserSession = false
+            session.presentationContextProvider = GoogleSignInPresenter.shared
+            session.start()
+        }
+
+        // Parse the callback URL: mclaude://auth?token=XXX&name=YYY&email=ZZZ
+        guard let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false) else {
+            throw URLError(.badURL)
+        }
+        let items = components.queryItems ?? []
+        let token = items.first { $0.name == "token" }?.value ?? ""
+        let name = items.first { $0.name == "name" }?.value ?? ""
+        let email = items.first { $0.name == "email" }?.value ?? ""
+
+        guard !token.isEmpty else { throw URLError(.userAuthenticationRequired) }
+
+        await MainActor.run {
+            self.authToken = token
+            self.userName = name
+            self.userEmail = email
+        }
+    }
+
+    func signOut() {
+        authToken = ""
+        userName = ""
+        userEmail = ""
     }
 
     func connectWebSocket() {
@@ -224,5 +289,17 @@ final class AppState {
         }
 
         task.expirationHandler = { fetchTask.cancel() }
+    }
+}
+
+// MARK: - ASWebAuthenticationSession presenter
+
+final class GoogleSignInPresenter: NSObject, ASWebAuthenticationPresentationContextProviding, @unchecked Sendable {
+    static let shared = GoogleSignInPresenter()
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first { $0.isKeyWindow } ?? ASPresentationAnchor()
     }
 }
