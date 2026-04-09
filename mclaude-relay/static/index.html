@@ -236,15 +236,6 @@ textarea{resize:none;line-height:1.4}
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .skill-src{font-size:11px;color:var(--text3);flex-shrink:0}
 
-/* ── Scroll-to-top ── */
-.scroll-top{position:fixed;bottom:calc(90px + var(--safe-b));right:calc(16px + var(--safe-r));
-  width:48px;height:48px;border-radius:24px;background:var(--surf2);border:1px solid var(--border);
-  color:var(--text2);font-size:22px;cursor:pointer;display:flex;align-items:center;
-  justify-content:center;box-shadow:0 2px 12px rgba(0,0,0,.5);z-index:40;
-  opacity:0;pointer-events:none;transition:opacity .2s}
-.scroll-top.visible{opacity:1;pointer-events:auto}
-.scroll-top:active{opacity:.6}
-
 /* ── Misc ── */
 .loading{text-align:center;padding:32px;color:var(--text2);font-size:15px}
 ::-webkit-scrollbar{width:3px;height:3px}
@@ -520,16 +511,9 @@ function renderDashboard() {
 </div>
 <div class="content" id="sc">${sessionsHTML()}</div>
 <button class="fab" id="fab">+</button>
-<button class="scroll-top" id="scroll-top" title="Scroll to top">↑</button>
 ${S.modal === 'newSession' ? newSessionHTML() : ''}`;
 
   document.getElementById('fab').addEventListener('click', openNewSession);
-  const sc = document.getElementById('sc');
-  const st = document.getElementById('scroll-top');
-  if (sc && st) {
-    sc.addEventListener('scroll', () => st.classList.toggle('visible', sc.scrollTop > 200), {passive:true});
-    st.addEventListener('click', () => sc.scrollTo({top:0, behavior:'smooth'}));
-  }
   if (S.modal === 'newSession') bindSheetClose();
 }
 
@@ -660,7 +644,6 @@ function renderDetail(id) {
   <div class="content" id="tab-content" style="${S.activeTab==='terminal'?'background:#000;padding:0':''}">
     ${tabContentHTML(id)}
   </div>
-  <button class="scroll-top" id="scroll-top" title="Scroll to top">↑</button>
   <div class="skill-picker" id="skill-picker" style="display:none"></div>
   <div class="ibar">
     <label class="iattach" id="attach-btn" title="Attach screenshot">
@@ -707,13 +690,6 @@ function tabContentHTML(id) {
 
 function bindDetail(id, sess) {
   document.getElementById('back-btn').addEventListener('click', () => navTo(''));
-
-  const tc = document.getElementById('tab-content');
-  const st = document.getElementById('scroll-top');
-  if (tc && st) {
-    tc.addEventListener('scroll', () => st.classList.toggle('visible', tc.scrollTop > 300), {passive:true});
-    st.addEventListener('click', () => tc.scrollTo({top:0, behavior:'smooth'}));
-  }
 
   document.querySelectorAll('.tab').forEach(t => {
     t.addEventListener('click', () => switchTab(t.dataset.tab, id));
