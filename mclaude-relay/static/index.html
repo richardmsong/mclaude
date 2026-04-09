@@ -266,6 +266,7 @@ const S = {
   projects: [],
   skills: [],
   skillsLoaded: false,
+  screenshotCache: new Map(), // path → data URL, for inline rendering
   events: {},         // sessionId → EventObject[]
   outputs: {},        // sessionId → raw terminal string
   expanded: new Set(),// expanded thinking UUIDs
@@ -452,7 +453,17 @@ async function uploadScreenshot(file) {
   const btn = document.getElementById('attach-btn');
   if (btn) btn.classList.add('uploading');
   try {
-    const buf = await file.arrayBuffer();
+    // Read as data URL for local preview cache and as ArrayBuffer for upload
+    const [dataURL, buf] = await Promise.all([
+      new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result);
+        r.onerror = rej;
+        r.readAsDataURL(file);
+      }),
+      file.arrayBuffer(),
+    ]);
+
     const resp = await fetch('/screenshots', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${S.token}` },
@@ -460,17 +471,17 @@ async function uploadScreenshot(file) {
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
-    const field = document.getElementById('ifield');
-    if (field && data.path) {
-      field.value = (field.value ? field.value + ' ' : '') + data.path;
-      autoGrow(field);
-      field.focus();
+
+    if (data.path) {
+      // Cache for inline rendering in the events view
+      S.screenshotCache.set(data.path, dataURL);
+      // Send path as the message text (mclaude-server reads the file)
+      sendInput(S.activeId, data.path);
     }
   } catch(e) {
     alert('Upload failed: ' + e.message);
   } finally {
     if (btn) btn.classList.remove('uploading');
-    // Reset input so the same file can be re-selected
     const fi = document.getElementById('file-input');
     if (fi) fi.value = '';
   }
@@ -901,11 +912,42 @@ function patchSessionHeader() {
 }
 
 // ── Event rendering ────────────────────────────────────────────────────────
+const SCREENSHOT_RE = /\/tmp\/mclaude-screenshots\/[^\s]+\.(?:png|jpg|jpeg|gif|webp)/gi;
+
+function renderUserEvent(text) {
+  // Split text on screenshot paths; render each path as an inline image
+  const parts = [];
+  let last = 0;
+  let m;
+  SCREENSHOT_RE.lastIndex = 0;
+  while ((m = SCREENSHOT_RE.exec(text)) !== null) {
+    if (m.index > last) parts.push({type:'text', v: text.slice(last, m.index).trim()});
+    parts.push({type:'img', path: m[0]});
+    last = m.index + m[0].length;
+  }
+  if (last < text.length && text.slice(last).trim())
+    parts.push({type:'text', v: text.slice(last).trim()});
+
+  const inner = parts.map(p => {
+    if (p.type === 'img') {
+      const src = S.screenshotCache.get(p.path);
+      if (src) {
+        return `<img src="${src}" style="max-width:100%;border-radius:8px;display:block;margin-top:4px" />`;
+      }
+      // Path not in cache (e.g. loaded from history) — show a chip
+      return `<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,.1);border-radius:6px;padding:2px 8px;font-size:13px">📷 photo</span>`;
+    }
+    return p.v ? `<span>${esc(p.v)}</span>` : '';
+  }).join('');
+
+  return `<div class="ev-user">${inner || '📷'}</div>`;
+}
+
 function renderEventHTML(ev) {
   if (!ev) return '';
   switch (ev.type) {
     case 'user':
-      return `<div class="ev-user">${esc(ev.text || '')}</div>`;
+      return renderUserEvent(ev.text || '');
 
     case 'text':
       if (!ev.text) return '';
