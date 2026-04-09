@@ -236,6 +236,17 @@ textarea{resize:none;line-height:1.4}
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .skill-src{font-size:11px;color:var(--text3);flex-shrink:0}
 
+/* ── Push-to-talk ── */
+.ptt{width:48px;height:48px;border-radius:24px;background:var(--surf2);
+  border:1px solid var(--border);color:var(--text2);font-size:22px;
+  cursor:pointer;display:flex;align-items:center;justify-content:center;
+  flex-shrink:0;transition:background .15s,color .15s;user-select:none;
+  -webkit-user-select:none;touch-action:none}
+.ptt:active,.ptt.rec{background:var(--red);color:#fff;border-color:var(--red)}
+.ptt.rec{animation:pttrec 1s ease-in-out infinite}
+@keyframes pttrec{0%,100%{box-shadow:0 0 0 0 rgba(255,69,58,.5)}
+  50%{box-shadow:0 0 0 10px rgba(255,69,58,0)}}
+
 /* ── Misc ── */
 .loading{text-align:center;padding:32px;color:var(--text2);font-size:15px}
 ::-webkit-scrollbar{width:3px;height:3px}
@@ -650,6 +661,7 @@ function renderDetail(id) {
       📷<input type="file" id="file-input" accept="image/*,image/png,image/jpeg,image/gif,image/webp" style="display:none;position:absolute;width:0;height:0;opacity:0">
     </label>
     <textarea class="ifield" id="ifield" rows="1" placeholder="Message… or / for skills"></textarea>
+    <button class="ptt" id="ptt-btn" title="Hold to speak">🎙</button>
     <button class="isend" id="isend">↑</button>
   </div>
 </div>`;
@@ -726,6 +738,10 @@ function bindDetail(id, sess) {
     const f = fileIn.files[0];
     if (f) uploadScreenshot(f);
   });
+
+  // Push-to-talk
+  const pttBtn = document.getElementById('ptt-btn');
+  if (pttBtn) bindPTT(pttBtn, id);
 }
 
 // ── Skills autocomplete ────────────────────────────────────────────────────
@@ -770,6 +786,58 @@ function showSkillPicker(skills, id) {
 function hideSkillPicker() {
   const el = document.getElementById('skill-picker');
   if (el) el.style.display = 'none';
+}
+
+// ── Push-to-talk ───────────────────────────────────────────────────────────
+let pttRecognition = null;
+
+function bindPTT(btn, id) {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    btn.style.display = 'none'; // hide silently if unsupported
+    return;
+  }
+
+  function start() {
+    if (pttRecognition) return;
+    pttRecognition = new SR();
+    pttRecognition.lang = navigator.language || 'en-US';
+    pttRecognition.continuous = false;
+    pttRecognition.interimResults = false;
+
+    pttRecognition.onresult = e => {
+      const text = Array.from(e.results)
+        .map(r => r[0].transcript).join(' ').trim();
+      if (text) sendInput(id, text);
+    };
+
+    pttRecognition.onerror = e => {
+      if (e.error !== 'no-speech' && e.error !== 'aborted')
+        console.warn('PTT error:', e.error);
+    };
+
+    pttRecognition.onend = () => {
+      btn.classList.remove('rec');
+      pttRecognition = null;
+    };
+
+    pttRecognition.start();
+    btn.classList.add('rec');
+  }
+
+  function stop() {
+    if (pttRecognition) pttRecognition.stop();
+  }
+
+  // Touch: hold to record, release to submit
+  btn.addEventListener('touchstart', e => { e.preventDefault(); start(); }, {passive:false});
+  btn.addEventListener('touchend',   e => { e.preventDefault(); stop();  }, {passive:false});
+  btn.addEventListener('touchcancel',e => { e.preventDefault(); stop();  }, {passive:false});
+
+  // Mouse fallback (desktop testing)
+  btn.addEventListener('mousedown', e => { e.preventDefault(); start(); });
+  btn.addEventListener('mouseup',   e => { e.preventDefault(); stop();  });
+  btn.addEventListener('mouseleave',e => { if (pttRecognition) stop();   });
 }
 
 function doSend(id) {
