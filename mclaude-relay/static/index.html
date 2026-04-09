@@ -805,7 +805,12 @@ let pttRecognition = null;
 function bindPTT(btn, id) {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
-    btn.style.display = 'none'; // hide silently if unsupported
+    // Speech API needs HTTPS. Show button but explain on tap.
+    const msg = location.protocol === 'http:'
+      ? 'Push-to-talk requires HTTPS'
+      : 'Speech recognition not supported in this browser';
+    btn.addEventListener('click', () => alert(msg));
+    btn.style.opacity = '0.4';
     return;
   }
 
