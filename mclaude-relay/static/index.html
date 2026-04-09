@@ -214,6 +214,27 @@ textarea{resize:none;line-height:1.4}
   align-items:center;justify-content:center;flex-shrink:0;transition:transform .1s}
 .isend:disabled{background:var(--surf3);color:var(--text3)}
 .isend:active:not(:disabled){transform:scale(.88)}
+.iattach{width:34px;height:34px;border-radius:17px;background:var(--surf2);
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;
+  cursor:pointer;font-size:18px;border:1px solid var(--border);transition:opacity .15s;
+  position:relative}
+.iattach:active{opacity:.7}
+.iattach.uploading{opacity:.5;pointer-events:none}
+.iattach.uploading::after{content:'';position:absolute;inset:3px;border-radius:50%;
+  border:2px solid var(--blue);border-top-color:transparent;
+  animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── Skills picker ── */
+.skill-picker{background:var(--surf);border-top:1px solid var(--border);
+  max-height:200px;overflow-y:auto;flex-shrink:0}
+.skill-row{display:flex;align-items:center;gap:10px;padding:10px 16px;
+  border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
+.skill-row:active{background:var(--surf2)}
+.skill-name{font-size:14px;font-weight:600;color:var(--blue);font-family:'SF Mono',Menlo,monospace}
+.skill-desc{font-size:12px;color:var(--text2);flex:1;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.skill-src{font-size:11px;color:var(--text3);flex-shrink:0}
 
 /* ── Misc ── */
 .loading{text-align:center;padding:32px;color:var(--text2);font-size:15px}
@@ -232,6 +253,8 @@ const S = {
   token: localStorage.getItem('mc_tok') || '',
   sessions: [],
   projects: [],
+  skills: [],
+  skillsLoaded: false,
   events: {},         // sessionId → EventObject[]
   outputs: {},        // sessionId → raw terminal string
   expanded: new Set(),// expanded thinking UUIDs
@@ -400,6 +423,45 @@ async function loadProjects() {
 function requestMoreOutput(id) {
   if (S.ws?.readyState === 1) {
     S.ws.send(JSON.stringify({type: 'load_more', id, lines: 300}));
+  }
+}
+
+async function loadSkills() {
+  if (S.skillsLoaded) return;
+  try {
+    const data = await api('GET', '/skills');
+    S.skills = Array.isArray(data) ? data : [];
+    S.skillsLoaded = true;
+  } catch(e) {
+    S.skills = [];
+  }
+}
+
+async function uploadScreenshot(file) {
+  const btn = document.getElementById('attach-btn');
+  if (btn) btn.classList.add('uploading');
+  try {
+    const buf = await file.arrayBuffer();
+    const resp = await fetch('/screenshots', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${S.token}` },
+      body: buf,
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    const field = document.getElementById('ifield');
+    if (field && data.path) {
+      field.value = (field.value ? field.value + ' ' : '') + data.path;
+      autoGrow(field);
+      field.focus();
+    }
+  } catch(e) {
+    alert('Upload failed: ' + e.message);
+  } finally {
+    if (btn) btn.classList.remove('uploading');
+    // Reset input so the same file can be re-selected
+    const fi = document.getElementById('file-input');
+    if (fi) fi.value = '';
   }
 }
 
@@ -582,8 +644,12 @@ function renderDetail(id) {
   <div class="content" id="tab-content" style="${S.activeTab==='terminal'?'background:#000;padding:0':''}">
     ${tabContentHTML(id)}
   </div>
+  <div class="skill-picker" id="skill-picker" style="display:none"></div>
   <div class="ibar">
-    <textarea class="ifield" id="ifield" rows="1" placeholder="Message…"></textarea>
+    <label class="iattach" id="attach-btn" title="Attach screenshot">
+      📷<input type="file" id="file-input" accept="image/*,image/png,image/jpeg,image/gif,image/webp" style="display:none;position:absolute;width:0;height:0;opacity:0">
+    </label>
+    <textarea class="ifield" id="ifield" rows="1" placeholder="Message… or / for skills"></textarea>
     <button class="isend" id="isend">↑</button>
   </div>
 </div>`;
@@ -642,13 +708,68 @@ function bindDetail(id, sess) {
     el.addEventListener('click', () => toggleThink(el.dataset.uuid, id));
   });
 
-  const field = document.getElementById('ifield');
-  const btn   = document.getElementById('isend');
-  field.addEventListener('input', () => autoGrow(field));
+  const field   = document.getElementById('ifield');
+  const btn     = document.getElementById('isend');
+  const fileIn  = document.getElementById('file-input');
+
+  field.addEventListener('input', () => {
+    autoGrow(field);
+    handleSkillInput(field.value, id);
+  });
   field.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { hideSkillPicker(); return; }
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(id); }
   });
   btn.addEventListener('click', () => doSend(id));
+
+  fileIn.addEventListener('change', () => {
+    const f = fileIn.files[0];
+    if (f) uploadScreenshot(f);
+  });
+}
+
+// ── Skills autocomplete ────────────────────────────────────────────────────
+function handleSkillInput(val, id) {
+  if (!val.startsWith('/')) { hideSkillPicker(); return; }
+  const query = val.slice(1).toLowerCase();
+  loadSkills().then(() => {
+    const matches = S.skills.filter(s =>
+      s.name.toLowerCase().startsWith(query) ||
+      s.name.toLowerCase().includes(query)
+    ).slice(0, 12);
+    showSkillPicker(matches, id);
+  });
+}
+
+function showSkillPicker(skills, id) {
+  const el = document.getElementById('skill-picker');
+  if (!el) return;
+  if (!skills.length) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.innerHTML = skills.map((s, i) =>
+    `<div class="skill-row" data-si="${i}">
+      <span class="skill-name">/${esc(s.name)}</span>
+      <span class="skill-desc">${esc(s.description || '')}</span>
+      <span class="skill-src">${esc(s.source || '')}</span>
+    </div>`
+  ).join('');
+  el.querySelectorAll('.skill-row').forEach(row => {
+    row.addEventListener('click', () => {
+      const s = skills[parseInt(row.dataset.si)];
+      const field = document.getElementById('ifield');
+      if (field && s) {
+        field.value = `/${s.name} `;
+        autoGrow(field);
+        field.focus();
+      }
+      hideSkillPicker();
+    });
+  });
+}
+
+function hideSkillPicker() {
+  const el = document.getElementById('skill-picker');
+  if (el) el.style.display = 'none';
 }
 
 function doSend(id) {
@@ -658,6 +779,7 @@ function doSend(id) {
   if (!t) return;
   f.value = '';
   autoGrow(f);
+  hideSkillPicker();
   sendInput(id, t);
 }
 
