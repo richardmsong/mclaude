@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: relay
-          image: ghcr.io/richardmcsong/mclaude-relay:latest
+          image: ghcr.io/mclaude-project/mclaude-relay:latest
           ports:
             - containerPort: 8080
           env:
