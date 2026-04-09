@@ -1053,6 +1053,21 @@ if (route().page === 'dashboard') bindSessionRows();
 setInterval(() => {
   if (route().page === 'dashboard' && S.sessions.length) patchDashboard();
 }, 20000);
+
+// On returning to foreground (iOS suspends WS when tab is backgrounded):
+// force-reconnect WS and re-fetch active session data so nothing is missed.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  // Force WS reconnect — iOS may have silently killed it
+  if (S.ws) { S.ws.close(); S.ws = null; }
+  if (S.token) connectWS();
+  // Refresh active session data to catch events missed while backgrounded
+  if (S.activeId) {
+    delete S.events[S.activeId];
+    delete S.outputs[S.activeId];
+    ensureSessionData(S.activeId);
+  }
+});
 </script>
 </body>
 </html>
