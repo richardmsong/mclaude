@@ -77,18 +77,16 @@ func NewConnector(relayURL, tunnelToken, mclaudeURL, serviceToken string, tlsSki
 	}
 }
 
-// Run connects to the relay with automatic exponential-backoff reconnect.
+// Run connects to the relay with automatic reconnect.
+// Uses a short fixed delay — the relay is expected to be always available.
 func (c *Connector) Run() {
-	backoff := time.Second
+	const retryDelay = 2 * time.Second
 	for {
 		log.Printf("connecting to relay %s ...", c.relayURL)
 		if err := c.connect(); err != nil {
-			log.Printf("tunnel error: %v — retry in %v", err, backoff)
+			log.Printf("tunnel error: %v — retrying in %v", err, retryDelay)
 		}
-		time.Sleep(backoff)
-		if backoff < 30*time.Second {
-			backoff *= 2
-		}
+		time.Sleep(retryDelay)
 	}
 }
 

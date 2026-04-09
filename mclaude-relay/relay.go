@@ -113,7 +113,38 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 	r.tunnel = conn
 	r.mu.Unlock()
 
+	// Keepalive: ping every 30s so Traefik/intermediaries don't kill idle tunnel.
+	// Reset read deadline on each pong; if no pong in 60s the read below errors.
+	const pingInterval = 30 * time.Second
+	const readDeadline = 60 * time.Second
+
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(readDeadline))
+	})
+	conn.SetReadDeadline(time.Now().Add(readDeadline)) //nolint:errcheck
+
+	pingStop := make(chan struct{})
+	go func() {
+		t := time.NewTicker(pingInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				r.sendMu.Lock()
+				err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
+				r.sendMu.Unlock()
+				if err != nil {
+					return
+				}
+			case <-pingStop:
+				return
+			}
+		}
+	}()
+
 	defer func() {
+		close(pingStop)
+
 		r.mu.Lock()
 		if r.tunnel == conn {
 			r.tunnel = nil
@@ -121,7 +152,7 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 		r.mu.Unlock()
 		log.Println("connector tunnel disconnected")
 
-		// fail all pending HTTP requests
+		// Fail all pending HTTP requests.
 		r.pendingMu.Lock()
 		for id, p := range r.pending {
 			select {
@@ -131,6 +162,17 @@ func (r *Relay) HandleTunnel(w http.ResponseWriter, req *http.Request) {
 			delete(r.pending, id)
 		}
 		r.pendingMu.Unlock()
+
+		// Close all active phone WS connections so they reconnect immediately
+		// instead of hanging indefinitely waiting for tunnel messages.
+		r.wsMu.Lock()
+		for _, client := range r.wsClients {
+			select {
+			case client.ch <- &TunnelMsg{Type: "ws_close"}:
+			default:
+			}
+		}
+		r.wsMu.Unlock()
 	}()
 
 	for {
