@@ -123,6 +123,41 @@ let pollTask = Task {
     }
 }
 
+// Self-health-check: exit if we can't serve requests (launchd will restart us)
+let healthCheckPort = port
+let healthCheckTLS = FileManager.default.fileExists(atPath:
+    FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("mclaude-certs/home-server.taild44daa.ts.net.crt").path)
+let healthTask = Task {
+    // Wait for server to start up
+    try? await Task.sleep(nanoseconds: 10_000_000_000)
+    var consecutiveFailures = 0
+    while !Task.isCancelled {
+        try? await Task.sleep(nanoseconds: 30_000_000_000)
+        let scheme = healthCheckTLS ? "https" : "http"
+        guard let url = URL(string: "\(scheme)://127.0.0.1:\(healthCheckPort)/health") else { continue }
+        do {
+            let config = URLSessionConfiguration.ephemeral
+            config.timeoutIntervalForRequest = 5
+            let session = URLSession(configuration: config)
+            let (_, response) = try await session.data(from: url)
+            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                consecutiveFailures = 0
+            } else {
+                consecutiveFailures += 1
+                print("[health-check] Non-200 response, failure \(consecutiveFailures)/3")
+            }
+        } catch {
+            consecutiveFailures += 1
+            print("[health-check] Failed (\(consecutiveFailures)/3): \(error.localizedDescription)")
+        }
+        if consecutiveFailures >= 3 {
+            print("[health-check] 3 consecutive failures, exiting for launchd restart")
+            exit(1)
+        }
+    }
+}
+
 // Build single router for HTTP + WebSocket
 let router = buildRouter(monitor: monitor, broadcaster: broadcaster, jsonlTailer: jsonlTailer, sessionStore: sessionStore, k8s: k8sManager)
 

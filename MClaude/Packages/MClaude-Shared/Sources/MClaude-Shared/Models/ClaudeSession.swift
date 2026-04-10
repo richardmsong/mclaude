@@ -23,6 +23,7 @@ public struct ClaudeSession: Codable, Identifiable, Sendable {
     public let projectName: String
     public let lastOutput: String
     public let prompt: DetectedPrompt?
+    public let laptop: String?
 
     public var uptime: String {
         let interval = Date().timeIntervalSince(startedAt)
