@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="theme-color" content="#111111" />
@@ -28,6 +28,7 @@
   --safe-r:   env(safe-area-inset-right,  0px);
 }
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html{touch-action:manipulation}
 html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
   font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',system-ui,sans-serif;
   font-size:16px;line-height:1.4;-webkit-text-size-adjust:100%}
@@ -97,6 +98,15 @@ textarea{resize:none;line-height:1.4}
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .schev{color:var(--text3);font-size:18px;line-height:1}
 
+/* ── Tmux session filter ── */
+.tmux-filter{display:flex;gap:6px;padding:8px 16px;overflow-x:auto;flex-shrink:0;
+  border-bottom:1px solid var(--border);background:var(--surf);-webkit-overflow-scrolling:touch}
+.tmux-chip{padding:5px 12px;border-radius:14px;font-size:13px;font-weight:500;
+  background:var(--surf2);color:var(--text2);border:1px solid var(--border);
+  cursor:pointer;white-space:nowrap;transition:all .15s;flex-shrink:0}
+.tmux-chip:active{opacity:.7}
+.tmux-chip.on{background:var(--blue);color:#fff;border-color:var(--blue)}
+
 /* ── Empty state ── */
 .empty{text-align:center;padding:64px 32px;color:var(--text2)}
 .empty h3{color:var(--text);margin-bottom:8px;font-size:18px}
@@ -160,7 +170,9 @@ textarea{resize:none;line-height:1.4}
   white-space:pre-wrap;word-break:break-word;line-height:1.4}
 
 .ev-text{align-self:flex-start;max-width:95%;font-size:15px;line-height:1.55;
-  white-space:pre-wrap;word-break:break-word}
+  word-break:break-word}
+.ev-text ul,.ev-text ol{white-space:normal}
+.ev-text pre{white-space:pre-wrap;word-break:break-all}
 
 .ev-think{align-self:flex-start;max-width:95%;background:var(--surf);
   border-radius:10px;padding:10px 14px;font-size:13px;cursor:pointer;
@@ -183,18 +195,110 @@ textarea{resize:none;line-height:1.4}
   font-size:13px;border:1px solid var(--border);width:100%;max-width:100%}
 .ev-result.err{border-color:rgba(255,69,58,.5)}
 .result-body{padding:8px 12px;background:var(--surf2);font-family:'SF Mono',Menlo,monospace;
-  white-space:pre-wrap;word-break:break-all;max-height:180px;overflow-y:auto;
+  white-space:pre-wrap;word-break:break-all;max-height:90px;overflow-y:hidden;
   font-size:12px;line-height:1.5;color:var(--text)}
 .ev-result.err .result-body{color:var(--red)}
 
+/* ── Inline result within tool tile ── */
+.tool-result-inline{border-top:1px solid var(--border)}
+.tool-result-inline .result-body{max-height:90px;overflow-y:hidden}
+.tool-result-inline.err .result-body{color:var(--red)}
+
 .ev-sys{align-self:center;font-size:11px;color:var(--text3);padding:2px 0;text-align:center}
 
+/* ── Agent group (subagent nesting) ── */
+.ev-agent-group{align-self:flex-start;width:100%;max-width:95%}
+.agent-group-hdr{display:flex;align-items:center;gap:6px;padding:8px 10px;
+  background:rgba(255,159,10,.08);border-radius:8px;cursor:pointer;
+  font-size:13px;transition:background .15s}
+.agent-group-hdr:active{background:rgba(255,159,10,.15)}
+.agent-group-type{font-weight:600;color:var(--orange)}
+.agent-group-desc{font-size:12px;color:var(--text2);flex:1;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.agent-group-badge{font-size:11px;color:var(--text3);flex-shrink:0}
+.agent-group-chev{font-size:10px;color:var(--text3);flex-shrink:0;transition:transform .2s}
+.agent-group-chev.open{transform:rotate(180deg)}
+.agent-group-body{margin-left:8px;padding-left:10px;
+  border-left:2px solid rgba(255,159,10,.3);margin-top:4px}
+.agent-group-body .ev-tool,.agent-group-body .ev-result,.agent-group-body .ev-text,
+.agent-group-body .ev-think,.agent-group-body .ev-sys{font-size:12px}
+
+/* ── Legacy flat subagent (fallback) ── */
 .ev-subagent{align-self:flex-start;width:100%;max-width:95%;background:var(--surf);
   border:1px solid var(--border);border-radius:10px;overflow:hidden}
 .subagent-hdr{padding:8px 12px;display:flex;align-items:center;gap:6px;
   font-size:13px;color:var(--text2);border-bottom:1px solid var(--border)}
 .subagent-type{font-weight:600;color:var(--purple)}
 .subagent-desc{font-size:12px;padding:6px 12px;color:var(--text2);font-style:italic}
+
+/* ── Event detail modal ── */
+.ev-detail-sheet{background:var(--surf);border-radius:16px 16px 0 0;width:100%;
+  max-height:80vh;display:flex;flex-direction:column;padding-bottom:var(--safe-b);
+  animation:slideUp .25s ease-out}
+.ev-detail-hdr{display:flex;align-items:center;padding:16px 20px;
+  border-bottom:1px solid var(--border);flex-shrink:0}
+.ev-detail-title{flex:1;display:flex;align-items:center;gap:8px;font-size:15px;font-weight:600}
+.ev-detail-time{font-size:11px;color:var(--text3)}
+.ev-detail-body{padding:16px 20px;overflow-y:auto;flex:1;font-size:14px;line-height:1.5}
+.ev-detail-body pre{background:var(--surf2);padding:10px 12px;border-radius:8px;
+  font-family:'SF Mono',Menlo,monospace;font-size:12px;line-height:1.5;
+  white-space:pre-wrap;word-break:break-all;overflow-x:auto;color:var(--text)}
+.ev-detail-model{display:inline-block;font-size:11px;color:var(--text2);
+  background:var(--surf2);padding:2px 8px;border-radius:10px;margin-top:4px}
+.ev-detail-field{margin-top:12px}
+.ev-detail-field-label{font-size:11px;font-weight:600;color:var(--text2);
+  text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.ev-clickable{cursor:pointer;transition:opacity .15s}
+.ev-clickable:active{opacity:.7}
+
+/* ── Diff view (Edit tool) ── */
+.diff-view{border-radius:6px;overflow:hidden;border:1px solid var(--border);
+  font-family:'SF Mono',Menlo,monospace;font-size:11px;line-height:1.6}
+.diff-file{padding:4px 10px;font-size:11px;color:var(--text2);
+  border-bottom:1px solid var(--border);background:var(--surf)}
+.diff-line{display:flex;min-height:20px}
+.diff-gutter{width:18px;text-align:center;flex-shrink:0;font-size:10px;
+  padding:0 2px;user-select:none;-webkit-user-select:none}
+.diff-content{flex:1;padding:0 8px;white-space:pre-wrap;word-break:break-all}
+.diff-line.ctx .diff-gutter{color:var(--text3)}
+.diff-line.ctx .diff-content{color:var(--text2)}
+.diff-line.rem{background:rgba(255,69,58,.08)}
+.diff-line.rem .diff-gutter{color:var(--red);background:rgba(255,69,58,.15)}
+.diff-line.rem .diff-content{color:var(--red)}
+.diff-line.add{background:rgba(48,209,88,.08)}
+.diff-line.add .diff-gutter{color:var(--green);background:rgba(48,209,88,.15)}
+.diff-line.add .diff-content{color:var(--green)}
+.diff-hl{border-radius:2px}
+.diff-line.rem .diff-hl{background:rgba(255,69,58,.25)}
+.diff-line.add .diff-hl{background:rgba(48,209,88,.25)}
+
+/* ── AskUserQuestion inline block ── */
+.ev-ask{align-self:flex-start;width:100%;max-width:95%;background:var(--surf);
+  border:1px solid rgba(10,132,255,.3);border-radius:10px;overflow:hidden}
+.ask-hdr{padding:8px 12px;display:flex;align-items:center;gap:6px;
+  font-size:13px;color:var(--blue);border-bottom:1px solid var(--border)}
+.ask-q-group{padding:10px 12px;border-bottom:1px solid var(--border)}
+.ask-q-group:last-child{border-bottom:none}
+.ask-q-header{font-size:12px;font-weight:600;color:var(--text);margin-bottom:4px}
+.ask-q-text{font-size:13px;color:var(--text2);margin-bottom:8px;line-height:1.4}
+.ask-opt{display:flex;align-items:flex-start;gap:8px;padding:8px 10px;
+  border:1px solid var(--border);border-radius:10px;margin-bottom:6px;
+  cursor:pointer;transition:border-color .15s,background .15s}
+.ask-opt:active,.ask-opt.selected{border-color:var(--blue);background:rgba(10,132,255,.08)}
+.ask-opt-radio{width:18px;height:18px;border-radius:9px;border:2px solid var(--text3);
+  flex-shrink:0;display:flex;align-items:center;justify-content:center;margin-top:1px;
+  transition:border-color .15s}
+.ask-opt.selected .ask-opt-radio{border-color:var(--blue)}
+.ask-opt.selected .ask-opt-radio::after{content:'';width:10px;height:10px;
+  border-radius:5px;background:var(--blue)}
+.ask-opt-label{font-size:14px;font-weight:500;color:var(--text)}
+.ask-opt-desc{font-size:12px;color:var(--text2);margin-top:1px}
+.ask-submit{margin:8px 12px 12px;padding:10px;border-radius:8px;background:var(--blue);
+  color:#fff;border:none;font-size:14px;font-weight:600;cursor:pointer;width:calc(100% - 24px);
+  transition:opacity .15s}
+.ask-submit:disabled{background:var(--surf3);color:var(--text3);cursor:default}
+.ask-submit.done{background:var(--green)}
+.ask-submit:active:not(:disabled){opacity:.75}
 
 /* ── Terminal ── */
 .terminal{padding:10px 12px;font-family:'SF Mono',Menlo,'Courier New',monospace;
@@ -247,12 +351,46 @@ textarea{resize:none;line-height:1.4}
 @keyframes pttrec{0%,100%{box-shadow:0 0 0 0 rgba(255,69,58,.5)}
   50%{box-shadow:0 0 0 10px rgba(255,69,58,0)}}
 
+/* ── Settings ── */
+.settings{padding:16px}
+.settings-section{margin-bottom:24px}
+.settings-label{font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;
+  letter-spacing:.5px;margin-bottom:8px;padding:0 4px}
+.settings-card{background:var(--surf);border-radius:10px;overflow:hidden;
+  border:1px solid var(--border)}
+.settings-row{display:flex;align-items:center;padding:12px 16px;
+  border-bottom:1px solid var(--border);gap:10px}
+.settings-row:last-child{border-bottom:none}
+.settings-row-label{flex:1;font-size:15px}
+.settings-row-value{font-size:14px;color:var(--text2)}
+.settings-select{background:var(--surf2);border:1px solid var(--border);border-radius:8px;
+  padding:8px 12px;color:var(--text);font-size:14px;-webkit-appearance:none;appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238e8e93' fill='none' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 10px center;padding-right:28px}
+.settings-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.nav-icon{background:none;border:none;color:var(--text2);font-size:18px;cursor:pointer;
+  padding:4px;display:flex;align-items:center}
+.nav-icon:active{opacity:.6}
+
+/* ── Pending screenshot preview ── */
+.ipreview{display:flex;align-items:center;gap:8px;padding:6px 12px;
+  background:var(--surf);border-top:1px solid var(--border);flex-shrink:0}
+.ipreview img{height:48px;border-radius:6px;object-fit:cover}
+.ipreview-remove{background:rgba(255,69,58,.2);border:none;color:var(--red);
+  width:24px;height:24px;border-radius:12px;font-size:14px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.ipreview-remove:active{background:rgba(255,69,58,.4)}
+
 /* ── Misc ── */
 .loading{text-align:center;padding:32px;color:var(--text2);font-size:15px}
 ::-webkit-scrollbar{width:3px;height:3px}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
 ::-webkit-scrollbar-track{background:transparent}
 </style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.min.css" />
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10/lib/addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11/lib/addon-web-links.min.js"></script>
 </head>
 <body>
 <div id="app"></div>
@@ -267,8 +405,9 @@ const S = {
   skills: [],
   skillsLoaded: false,
   screenshotCache: new Map(), // path → data URL, for inline rendering
-  events: {},         // sessionId → EventObject[]
-  outputs: {},        // sessionId → raw terminal string
+  events: {},         // displayId → EventObject[]
+  sessionIds: {},     // displayId → sessionId (to detect /clear)
+  outputs: {},        // displayId → raw terminal string
   expanded: new Set(),// expanded thinking UUIDs
   activeId: null,
   activeTab: 'events',
@@ -276,19 +415,37 @@ const S = {
   wsState: 'off',     // off | connecting | ok | err
   modal: null,        // null | 'newSession'
   loadingProjects: false,
+  tmuxFilter: null,   // null = default session, 'all' = all, or specific session name
+  laptop: localStorage.getItem('mc_laptop') || null, // null = auto (first/only), or hostname
+  laptops: [],        // list from /laptops endpoint or discovered from sessions
+  pendingImage: null,  // {file: File, dataURL: string} — staged screenshot waiting to be sent
+  fetched: new Set(), // session IDs that have completed initial data fetch
+  ptyWs: null,        // WebSocket for PTY shell
+  ptyTerm: null,      // xterm.js Terminal instance
+  ptyFit: null,       // FitAddon instance
+  ptyResizeObs: null, // ResizeObserver for terminal container
 };
 
 // ── DOM root ───────────────────────────────────────────────────────────────
 const $app = document.getElementById('app');
 
+// Eagerly fetch laptops (no auth required) so Settings shows hosts immediately
+fetch('/laptops').then(r => r.ok ? r.json() : []).then(list => {
+  if (Array.isArray(list)) S.laptops = list.map(l => l.id || l);
+  if (route().page === 'settings') renderSettings();
+  else patchDashboard();
+}).catch(() => {});
+
 // ── Routing ────────────────────────────────────────────────────────────────
 function route() {
   const h = location.hash.slice(1);
+  if (h === 'settings') return { page: 'settings' };
   if (h.startsWith('s/')) return { page: 'session', id: decodeURIComponent(h.slice(2)) };
   return { page: 'dashboard' };
 }
 
 window.addEventListener('hashchange', () => {
+  cleanupPty();
   const r = route();
   if (r.page === 'session') {
     S.activeId = r.id;
@@ -299,6 +456,80 @@ window.addEventListener('hashchange', () => {
   }
   render();
 });
+
+// ── PTY (web shell) ───────────────────────────────────────────────────────
+
+function cleanupPty() {
+  if (S.ptyResizeObs) { S.ptyResizeObs.disconnect(); S.ptyResizeObs = null; }
+  if (S.ptyWs) { S.ptyWs.close(); S.ptyWs = null; }
+  if (S.ptyTerm) { S.ptyTerm.dispose(); S.ptyTerm = null; S.ptyFit = null; }
+}
+
+function connectPty(hostname) {
+  cleanupPty();
+
+  const container = document.getElementById('xterm-container');
+  if (!container) return;
+
+  const term = new Terminal({
+    cursorBlink: true,
+    fontSize: 13,
+    fontFamily: "'SF Mono', Menlo, 'Courier New', monospace",
+    theme: { background: '#000000', foreground: '#ffffff' },
+    scrollback: 5000,
+  });
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  if (typeof WebLinksAddon !== 'undefined') {
+    term.loadAddon(new WebLinksAddon.WebLinksAddon());
+  }
+
+  term.open(container);
+  fitAddon.fit();
+
+  S.ptyTerm = term;
+  S.ptyFit = fitAddon;
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const rows = term.rows, cols = term.cols;
+  let url = `${proto}//${location.host}/ws/pty?token=${encodeURIComponent(S.token)}&rows=${rows}&cols=${cols}`;
+  if (hostname) url += `&laptop=${encodeURIComponent(hostname)}`;
+
+  const ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  S.ptyWs = ws;
+
+  ws.onopen = () => { term.focus(); };
+
+  ws.onmessage = (e) => {
+    if (e.data instanceof ArrayBuffer) {
+      term.write(new Uint8Array(e.data));
+    } else {
+      term.write(e.data);
+    }
+  };
+
+  ws.onclose = () => {
+    term.write('\r\n\x1b[31m[Disconnected]\x1b[0m\r\n');
+  };
+
+  // Terminal input → WebSocket
+  term.onData(data => {
+    if (ws.readyState === 1) ws.send(data);
+  });
+
+  // Handle resize
+  term.onResize(({rows, cols}) => {
+    if (ws.readyState === 1) {
+      ws.send(JSON.stringify({type: 'resize', rows, cols}));
+    }
+  });
+
+  // Container resize → fit → resize event
+  const resizeObs = new ResizeObserver(() => { try { fitAddon.fit(); } catch(_) {} });
+  resizeObs.observe(container);
+  S.ptyResizeObs = resizeObs;
+}
 
 // ── WebSocket ──────────────────────────────────────────────────────────────
 let wsTimer = null;
@@ -312,17 +543,24 @@ function connectWS() {
   patchConnDot();
 
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  S.ws = new WebSocket(`${proto}//${location.host}/ws?token=${encodeURIComponent(S.token)}`);
+  let wsUrl = `${proto}//${location.host}/ws?token=${encodeURIComponent(S.token)}`;
+  if (S.laptop) wsUrl += `&laptop=${encodeURIComponent(S.laptop)}`;
+  S.ws = new WebSocket(wsUrl);
 
   S.ws.onopen = () => {
     S.wsState = 'ok';
     clearTimeout(wsTimer);
     pingTimer = setInterval(() => S.ws?.readyState === 1 && S.ws.send(JSON.stringify({type:'ping'})), 14000);
     patchConnDot();
+    // Fetch connected laptops so hosts with no sessions still appear
+    api('GET', '/laptops').then(list => {
+      if (Array.isArray(list)) S.laptops = list.map(l => l.id || l);
+      patchDashboard();
+    }).catch(() => {});
   };
 
   S.ws.onmessage = e => {
-    try { onWS(JSON.parse(e.data)); } catch(_) {}
+    try { onWS(JSON.parse(e.data)); } catch(err) { console.error('WS parse/handle error:', err, e.data?.slice?.(0,200)); }
   };
 
   S.ws.onerror = () => { S.wsState = 'err'; patchConnDot(); };
@@ -339,7 +577,16 @@ function onWS(msg) {
   const data = typeof msg.data === 'string' ? safeParse(msg.data, msg.data) : msg.data;
 
   if (msg.type === 'sessions') {
-    S.sessions = Array.isArray(data) ? data : [];
+    const incoming = Array.isArray(data) ? data : [];
+    // Detect /clear: if sessionId changed for a known session, wipe its event cache
+    for (const s of incoming) {
+      if (S.sessionIds[s.id] && S.sessionIds[s.id] !== s.sessionId) {
+        delete S.events[s.id];
+        if (S.activeId === s.id && S.activeTab === 'events') patchEventsList();
+      }
+      S.sessionIds[s.id] = s.sessionId;
+    }
+    S.sessions = incoming;
     patchDashboard();
     patchSessionHeader();
 
@@ -360,9 +607,11 @@ function onWS(msg) {
 
 // ── API ────────────────────────────────────────────────────────────────────
 async function api(method, path, body, extraHdrs) {
+  const hdrs = { 'Authorization': `Bearer ${S.token}`, ...extraHdrs };
+  if (S.laptop) hdrs['X-Laptop-ID'] = S.laptop;
   const opts = {
     method,
-    headers: { 'Authorization': `Bearer ${S.token}`, ...extraHdrs },
+    headers: hdrs,
   };
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
@@ -376,26 +625,42 @@ async function api(method, path, body, extraHdrs) {
 }
 
 async function ensureSessionData(id) {
-  if (S.events[id] && S.outputs[id] !== undefined) return;
+  if (S.fetched.has(id)) return;
+  S.fetched.add(id);
   try {
     const [evs, out] = await Promise.all([
       api('GET', `/sessions/${encodeURIComponent(id)}/events`),
       api('GET', `/sessions/${encodeURIComponent(id)}/output`),
     ]);
-    S.events[id] = Array.isArray(evs) ? evs : [];
+    // Merge: API returns history; WS may have pushed newer events during fetch
+    const wsEvents = S.events[id] || [];
+    const historyEvents = Array.isArray(evs) ? evs : [];
+    const historyUUIDs = new Set(historyEvents.map(e => e.uuid));
+    const newFromWs = wsEvents.filter(e => !historyUUIDs.has(e.uuid));
+    S.events[id] = historyEvents.concat(newFromWs);
     S.outputs[id] = (typeof out === 'object' ? out?.output : out) || '';
     if (S.activeId === id) {
       if (S.activeTab === 'events') patchEventsList();
       else patchTerminal();
     }
+    // Restore scroll position after hot reload
+    const saved = sessionStorage.getItem('mc_scroll');
+    if (saved) {
+      sessionStorage.removeItem('mc_scroll');
+      setTimeout(() => {
+        const tc = document.getElementById('tab-content');
+        if (tc) tc.scrollTop = parseInt(saved);
+      }, 100);
+    }
   } catch(e) {
+    S.fetched.delete(id); // allow retry on failure
     console.warn('ensureSessionData:', e);
   }
 }
 
 async function sendInput(id, text) {
-  try { await api('POST', `/sessions/${encodeURIComponent(id)}/input`, {text, sendEnter: true}); }
-  catch(e) { alert('Send failed: ' + e.message); }
+  const resp = await api('POST', `/sessions/${encodeURIComponent(id)}/input`, {text, sendEnter: true});
+  return resp;
 }
 
 async function doApprove(id) {
@@ -449,21 +714,48 @@ async function loadSkills() {
   }
 }
 
-async function uploadScreenshot(file) {
+// Stage a screenshot for preview — actual upload happens on send
+function stageScreenshot(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    S.pendingImage = {file, dataURL: reader.result};
+    renderImagePreview();
+  };
+  reader.readAsDataURL(file);
+  const fi = document.getElementById('file-input');
+  if (fi) fi.value = '';
+}
+
+function renderImagePreview() {
+  let el = document.getElementById('ipreview');
+  if (S.pendingImage) {
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'ipreview';
+      el.id = 'ipreview';
+      const ibar = document.querySelector('.ibar');
+      if (ibar) ibar.parentNode.insertBefore(el, ibar);
+    }
+    el.innerHTML = `<img src="${S.pendingImage.dataURL}"><div style="flex:1;font-size:12px;color:var(--text2)">Screenshot ready</div><button class="ipreview-remove" id="ipreview-rm">✕</button>`;
+    document.getElementById('ipreview-rm').addEventListener('click', clearPendingImage);
+  } else if (el) {
+    el.remove();
+  }
+}
+
+function clearPendingImage() {
+  S.pendingImage = null;
+  renderImagePreview();
+}
+
+// Upload the staged screenshot and send it
+async function uploadAndSendScreenshot(id) {
+  if (!S.pendingImage) return;
+  const {file, dataURL} = S.pendingImage;
   const btn = document.getElementById('attach-btn');
   if (btn) btn.classList.add('uploading');
   try {
-    // Read as data URL for local preview cache and as ArrayBuffer for upload
-    const [dataURL, buf] = await Promise.all([
-      new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = () => res(r.result);
-        r.onerror = rej;
-        r.readAsDataURL(file);
-      }),
-      file.arrayBuffer(),
-    ]);
-
+    const buf = await file.arrayBuffer();
     const resp = await fetch('/screenshots', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${S.token}` },
@@ -471,19 +763,21 @@ async function uploadScreenshot(file) {
     });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
-
     if (data.path) {
-      // Cache for inline rendering in the events view
       S.screenshotCache.set(data.path, dataURL);
-      // Send path as the message text (mclaude-server reads the file)
-      sendInput(S.activeId, data.path);
+      // Combine with any text in the input field
+      const field = document.getElementById('ifield');
+      const text = field?.value?.trim() || '';
+      const msg = text ? data.path + ' ' + text : data.path;
+      sendInput(id, msg);
+      if (field) { field.value = ''; autoGrow(field); }
     }
   } catch(e) {
     alert('Upload failed: ' + e.message);
   } finally {
     if (btn) btn.classList.remove('uploading');
-    const fi = document.getElementById('file-input');
-    if (fi) fi.value = '';
+    S.pendingImage = null;
+    renderImagePreview();
   }
 }
 
@@ -491,7 +785,8 @@ async function uploadScreenshot(file) {
 function render() {
   if (!S.token) { renderAuth(); return; }
   const r = route();
-  if (r.page === 'session') renderDetail(r.id);
+  if (r.page === 'settings') renderSettings();
+  else if (r.page === 'session') renderDetail(r.id);
   else renderDashboard();
 }
 
@@ -526,43 +821,128 @@ function doLogin() {
 // ── Dashboard ──────────────────────────────────────────────────────────────
 function renderDashboard() {
   const attn = S.sessions.filter(s => s.status === 'needs_permission' || s.status === 'plan_mode').length;
+  const tmuxSessions = discoverTmuxSessions();
+  const showFilter = tmuxSessions.length > 1;
+
   $app.innerHTML = `
 <div class="nav">
   <div class="nav-title">MClaude ${attn ? `<span class="badge">${attn}</span>` : ''}</div>
+  <button class="nav-icon" id="settings-btn">⚙</button>
   <div class="cdot ${cdotClass()}" id="cdot"></div>
 </div>
+${showFilter ? tmuxFilterHTML(tmuxSessions) : ''}
 <div class="content" id="sc">${sessionsHTML()}</div>
 <button class="fab" id="fab">+</button>
 ${S.modal === 'newSession' ? newSessionHTML() : ''}`;
 
   document.getElementById('fab').addEventListener('click', openNewSession);
+  document.getElementById('settings-btn').addEventListener('click', () => navTo('settings'));
   if (S.modal === 'newSession') bindSheetClose();
+  bindSessionRows();
+  if (showFilter) bindTmuxFilter();
+}
+
+// ── Tmux session filter ────────────────────────────────────────────────────
+function discoverTmuxSessions() {
+  const names = new Set();
+  for (const s of S.sessions) {
+    if (S.laptop && s.laptop !== S.laptop) continue;
+    if (s.tmuxSession) names.add(s.tmuxSession);
+  }
+  return Array.from(names).sort();
+}
+
+function getDefaultTmuxSession() {
+  // The first session alphabetically, or 'mclaude' if it exists
+  const names = discoverTmuxSessions();
+  if (names.includes('mclaude')) return 'mclaude';
+  return names[0] || null;
+}
+
+function filteredSessions() {
+  let list = S.sessions;
+  // Filter by laptop if one is selected
+  if (S.laptop) list = list.filter(s => s.laptop === S.laptop);
+  if (S.tmuxFilter === 'all') return list;
+  const target = S.tmuxFilter || getDefaultTmuxSession();
+  if (!target) return list;
+  return list.filter(s => s.tmuxSession === target);
+}
+
+function tmuxFilterHTML(tmuxSessions) {
+  const active = S.tmuxFilter || getDefaultTmuxSession();
+  let chips = tmuxSessions.map(name =>
+    `<div class="tmux-chip ${active === name && S.tmuxFilter !== 'all' ? 'on' : ''}" data-tmux="${esc(name)}">${esc(name)}</div>`
+  ).join('');
+  chips += `<div class="tmux-chip ${S.tmuxFilter === 'all' ? 'on' : ''}" data-tmux="all">All</div>`;
+  return `<div class="tmux-filter" id="tmux-filter">${chips}</div>`;
+}
+
+function bindTmuxFilter() {
+  document.querySelectorAll('.tmux-chip').forEach(el => {
+    el.addEventListener('click', () => {
+      const val = el.dataset.tmux;
+      if (val === 'all') {
+        S.tmuxFilter = 'all';
+      } else if (val === getDefaultTmuxSession() && S.tmuxFilter !== 'all') {
+        S.tmuxFilter = null; // back to default
+      } else {
+        S.tmuxFilter = val;
+      }
+      patchDashboard();
+    });
+  });
 }
 
 function sessionsHTML() {
-  if (!S.sessions.length) {
+  const filtered = filteredSessions();
+  if (!filtered.length) {
+    if (S.sessions.length) {
+      return `<div class="empty"><h3>No Sessions</h3><p>No sessions in this tmux group</p></div>`;
+    }
     return `<div class="empty"><h3>No Sessions</h3><p>Tap + to start a Claude session</p></div>`;
   }
-  return `<ul class="slist">${S.sessions.map((s, i) => `
-<li class="srow" data-i="${i}">
+  return `<ul class="slist">${filtered.map(s => {
+    const i = S.sessions.indexOf(s);
+    return `<li class="srow" data-i="${i}">
   <div class="sdot ${s.status || 'unknown'}"></div>
   <div class="sinfo">
     <div class="sname">${esc(s.projectName || s.id)}</div>
     <div class="smeta">${statusLabel(s)} · ${esc(shortPath(s.cwd))}</div>
   </div>
   <div class="schev">›</div>
-</li>`).join('')}</ul>`;
+</li>`;
+  }).join('')}</ul>`;
 }
 
 function patchDashboard() {
   if (route().page !== 'dashboard' || !S.token) return;
+
+  // If filter bar visibility changed, do a full re-render
+  const tmuxSessions = discoverTmuxSessions();
+  const filterEl = document.getElementById('tmux-filter');
+  const needsFilter = tmuxSessions.length > 1;
+  if (needsFilter !== !!filterEl) {
+    renderDashboard();
+    return;
+  }
+
   const sc = document.getElementById('sc');
   if (sc) sc.innerHTML = sessionsHTML();
   const attn = S.sessions.filter(s => s.status === 'needs_permission' || s.status === 'plan_mode').length;
   const t = document.querySelector('.nav-title');
   if (t) t.innerHTML = `MClaude ${attn ? `<span class="badge">${attn}</span>` : ''}`;
+
+  // Update filter chip active states
+  if (filterEl && needsFilter) {
+    const active = S.tmuxFilter || getDefaultTmuxSession();
+    filterEl.innerHTML = tmuxSessions.map(name =>
+      `<div class="tmux-chip ${active === name && S.tmuxFilter !== 'all' ? 'on' : ''}" data-tmux="${esc(name)}">${esc(name)}</div>`
+    ).join('') + `<div class="tmux-chip ${S.tmuxFilter === 'all' ? 'on' : ''}" data-tmux="all">All</div>`;
+    bindTmuxFilter();
+  }
+
   patchConnDot();
-  // rebind row clicks
   bindSessionRows();
 }
 
@@ -592,13 +972,26 @@ function newSessionHTML() {
 
 function projectsHTML() {
   if (S.loadingProjects) return `<div class="loading">Loading projects…</div>`;
-  if (!S.projects.length) return `<div class="loading">No projects found</div>`;
-  return S.projects.map((p, i) =>
-    `<li class="prow" data-pi="${i}"><div class="picon">📁</div><div>
+  // Filter projects by selected laptop
+  let projects = S.projects;
+  if (S.laptop) projects = projects.filter(p => p.laptop === S.laptop);
+  if (!projects.length) return `<div class="loading">No projects found</div>`;
+  // Sort: current session's cwd first, then alphabetically
+  const activeCwd = S.activeId && S.sessions.find(s => s.id === S.activeId)?.cwd;
+  projects = [...projects].sort((a, b) => {
+    if (activeCwd) {
+      if (a.path === activeCwd && b.path !== activeCwd) return -1;
+      if (b.path === activeCwd && a.path !== activeCwd) return 1;
+    }
+    return a.name.localeCompare(b.name);
+  });
+  return projects.map((p) => {
+    const idx = S.projects.indexOf(p);
+    return `<li class="prow" data-pi="${idx}"><div class="picon">📁</div><div>
       <div class="pname">${esc(p.name)}</div>
       <div class="ppath">${esc(p.path)}</div>
-    </div></li>`
-  ).join('');
+    </div></li>`;
+  }).join('');
 }
 
 function patchProjectList() {
@@ -640,6 +1033,109 @@ function closeModal() {
   bindSessionRows();
 }
 
+// ── Settings ──────────────────────────────────────────────────────────────
+function renderSettings() {
+  // Discover laptops from sessions or /laptops endpoint
+  const laptops = discoverLaptops();
+  const currentLaptop = S.laptop || 'all';
+
+  $app.innerHTML = `
+<div class="nav">
+  <button class="nav-back" id="settings-back">‹ Back</button>
+  <div class="nav-title" style="justify-content:center">Settings</div>
+  <div style="width:50px"></div>
+</div>
+<div class="content">
+  <div class="settings">
+    <div class="settings-section">
+      <div class="settings-label">Host</div>
+      <div class="settings-card">
+        <div class="settings-row">
+          <div class="settings-row-label">Active Host</div>
+          <select class="settings-select" id="laptop-select">
+            <option value="all" ${currentLaptop === 'all' ? 'selected' : ''}>All Hosts</option>
+            ${laptops.map(l => `<option value="${esc(l.id)}" ${currentLaptop === l.id ? 'selected' : ''}>${esc(l.id)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-label">Connected Hosts</div>
+      <div class="settings-card">
+        ${laptops.length ? laptops.map(l => `
+        <div class="settings-row">
+          <div class="settings-dot" style="background:var(--green)"></div>
+          <div class="settings-row-label">${esc(l.id)}</div>
+          <div class="settings-row-value">${l.sessions} session${l.sessions !== 1 ? 's' : ''}</div>
+        </div>`).join('') : `
+        <div class="settings-row">
+          <div class="settings-row-label" style="color:var(--text2)">No hosts connected</div>
+        </div>`}
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-label">Connection</div>
+      <div class="settings-card">
+        <div class="settings-row">
+          <div class="settings-row-label">Status</div>
+          <div class="settings-row-value" style="display:flex;align-items:center;gap:6px">
+            <div class="settings-dot" style="background:${S.wsState === 'ok' ? 'var(--green)' : S.wsState === 'err' ? 'var(--red)' : 'var(--text3)'}"></div>
+            ${S.wsState === 'ok' ? 'Connected' : S.wsState === 'err' ? 'Error' : S.wsState === 'connecting' ? 'Connecting...' : 'Disconnected'}
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-label">Sessions</div>
+          <div class="settings-row-value">${S.sessions.length}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-card">
+        <div class="settings-row" id="logout-row" style="justify-content:center;cursor:pointer">
+          <div style="color:var(--red);font-weight:500">Sign Out</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>`;
+
+  document.getElementById('settings-back').addEventListener('click', () => navTo(''));
+  document.getElementById('laptop-select').addEventListener('change', e => {
+    const val = e.target.value;
+    S.laptop = val === 'all' ? null : val;
+    if (S.laptop) localStorage.setItem('mc_laptop', S.laptop);
+    else localStorage.removeItem('mc_laptop');
+    // Reconnect WS to target only the selected laptop
+    if (S.ws) { S.ws.close(); S.ws = null; }
+    connectWS();
+  });
+  document.getElementById('logout-row').addEventListener('click', () => {
+    S.token = '';
+    localStorage.removeItem('mc_tok');
+    localStorage.removeItem('mc_laptop');
+    if (S.ws) S.ws.close();
+    navTo('');
+    render();
+  });
+}
+
+function discoverLaptops() {
+  const map = {};
+  // Include all laptops reported by the relay (even those with no sessions)
+  for (const id of (S.laptops || [])) {
+    map[id] = map[id] || 0;
+  }
+  // Count sessions per laptop
+  for (const s of S.sessions) {
+    const id = s.laptop || 'default';
+    map[id] = (map[id] || 0) + 1;
+  }
+  return Object.entries(map).map(([id, sessions]) => ({id, sessions})).sort((a, b) => a.id.localeCompare(b.id));
+}
+
 // ── Session detail ─────────────────────────────────────────────────────────
 function renderDetail(id) {
   const sess = S.sessions.find(s => s.id === id) || {id, projectName: id, status: 'unknown', cwd: ''};
@@ -650,6 +1146,7 @@ function renderDetail(id) {
   <div class="nav">
     <button class="nav-back" id="back-btn">‹ Back</button>
     <div class="nav-title" style="justify-content:center">${esc(sess.projectName || id)}</div>
+    <button class="nav-icon" id="refresh-btn" title="Refresh events">↻</button>
     <div class="cdot ${cdotClass()}" id="cdot"></div>
   </div>
   <div class="det-meta" id="det-meta">
@@ -667,7 +1164,7 @@ function renderDetail(id) {
     ${tabContentHTML(id)}
   </div>
   <div class="skill-picker" id="skill-picker" style="display:none"></div>
-  <div class="ibar">
+  <div class="ibar" ${S.activeTab==='terminal'?'style="display:none"':''}>
     <label class="iattach" id="attach-btn" title="Attach screenshot">
       📷<input type="file" id="file-input" accept="image/*,image/png,image/jpeg,image/gif,image/webp" style="display:none;position:absolute;width:0;height:0;opacity:0">
     </label>
@@ -701,18 +1198,22 @@ function promptBarHTML(prompt, id) {
 function tabContentHTML(id) {
   if (S.activeTab === 'events') {
     const evs = S.events[id] || [];
-    return `<div class="evlist" id="evlist">${evs.map(renderEventHTML).join('')}</div>`;
+    const grouped = groupEventsForRender(evs);
+    return `<div class="evlist" id="evlist">${grouped.map(renderGroupedItemHTML).join('')}</div>`;
   } else {
-    const out = S.outputs[id] || '';
-    return `<div class="terminal" id="term">${ansi(out)}</div>
-      <div style="padding:8px;text-align:center;background:#000">
-        <button onclick="requestMoreOutput('${esc(id)}')" style="background:none;border:1px solid #333;color:#666;border-radius:6px;padding:4px 12px;font-size:11px;cursor:pointer">Load more output</button>
-      </div>`;
+    return `<div id="xterm-container" style="height:100%;width:100%;background:#000"></div>`;
   }
 }
 
 function bindDetail(id, sess) {
   document.getElementById('back-btn').addEventListener('click', () => navTo(''));
+
+  document.getElementById('refresh-btn').addEventListener('click', () => {
+    S.fetched.delete(id);
+    delete S.events[id];
+    delete S.outputs[id];
+    ensureSessionData(id);
+  });
 
   document.querySelectorAll('.tab').forEach(t => {
     t.addEventListener('click', () => switchTab(t.dataset.tab, id));
@@ -727,13 +1228,21 @@ function bindDetail(id, sess) {
     b.addEventListener('click', () => sendInput(id, b.dataset.n));
   });
 
-  document.querySelectorAll('.ev-think').forEach(el => {
-    el.addEventListener('click', () => toggleThink(el.dataset.uuid, id));
-  });
+  // Bind all event interactions (thinking, detail modal, agent groups, ask questions)
+  const evlist = document.getElementById('evlist');
+  if (evlist) bindEventInteractions(evlist);
 
   const field   = document.getElementById('ifield');
   const btn     = document.getElementById('isend');
   const fileIn  = document.getElementById('file-input');
+
+  // Restore input text after hot reload
+  const savedInput = sessionStorage.getItem('mc_input');
+  if (savedInput && field) {
+    field.value = savedInput;
+    sessionStorage.removeItem('mc_input');
+    autoGrow(field);
+  }
 
   field.addEventListener('input', () => {
     autoGrow(field);
@@ -747,12 +1256,32 @@ function bindDetail(id, sess) {
 
   fileIn.addEventListener('change', () => {
     const f = fileIn.files[0];
-    if (f) uploadScreenshot(f);
+    if (f) stageScreenshot(f);
+  });
+
+  // Paste image from clipboard (cmd+ctrl+shift+4 → paste)
+  field.addEventListener('paste', e => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) stageScreenshot(file);
+        return;
+      }
+    }
   });
 
   // Push-to-talk
   const pttBtn = document.getElementById('ptt-btn');
   if (pttBtn) bindPTT(pttBtn, id);
+
+  // Connect PTY if terminal tab is active on initial render
+  if (S.activeTab === 'terminal') {
+    const hostname = sess?.laptop || S.laptop || (S.laptops[0]?.id || S.laptops[0]) || '';
+    setTimeout(() => connectPty(hostname), 50);
+  }
 }
 
 // ── Skills autocomplete ────────────────────────────────────────────────────
@@ -859,11 +1388,16 @@ function bindPTT(btn, id) {
 function doSend(id) {
   const f = document.getElementById('ifield');
   if (!f) return;
+  hideSkillPicker();
+  // If there's a pending image, upload and send it (with any text)
+  if (S.pendingImage) {
+    uploadAndSendScreenshot(id);
+    return;
+  }
   const t = f.value.trim();
   if (!t) return;
   f.value = '';
   autoGrow(f);
-  hideSkillPicker();
   sendInput(id, t);
 }
 
@@ -874,17 +1408,29 @@ function autoGrow(el) {
 
 function switchTab(tab, id) {
   if (S.activeTab === tab) return;
+  // Clean up PTY when leaving terminal tab
+  if (S.activeTab === 'terminal') cleanupPty();
   S.activeTab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === tab));
   const tc = document.getElementById('tab-content');
   if (tc) {
-    tc.style.background = tab === 'terminal' ? '#000' : '';
-    tc.style.padding = tab === 'terminal' ? '0' : '';
+    const dark = tab === 'terminal';
+    tc.style.background = dark ? '#000' : '';
+    tc.style.padding = dark ? '0' : '';
     tc.innerHTML = tabContentHTML(id);
     if (tab === 'events') {
       setTimeout(scrollEventsToBottom, 30);
-      rebindThinkToggles(id);
+      const evlist = document.getElementById('evlist');
+      if (evlist) bindEventInteractions(evlist);
     }
+    if (tab === 'terminal') {
+      const sess = S.sessions.find(s => s.id === id);
+      const hostname = sess?.laptop || S.laptop || (S.laptops[0]?.id || S.laptops[0]) || '';
+      setTimeout(() => connectPty(hostname), 50);
+    }
+    // Show/hide input bar based on tab
+    const ibar = document.querySelector('.ibar');
+    if (ibar) ibar.style.display = tab === 'terminal' ? 'none' : '';
   }
 }
 
@@ -895,8 +1441,10 @@ function patchSessionHeader() {
 
   const dot = document.getElementById('sstat-dot');
   const lbl = document.getElementById('sstat-lbl');
+  const title = document.querySelector('.nav-title');
   if (dot) dot.className = `sdot ${sess.status || 'unknown'}`;
   if (lbl) lbl.textContent = statusLabel(sess);
+  if (title) title.textContent = sess.projectName || sess.id;
 
   const needsAct = sess.status === 'needs_permission' || sess.status === 'plan_mode';
   const bar = document.getElementById('act-bar');
@@ -914,6 +1462,535 @@ function patchSessionHeader() {
   } else if (!needsAct && bar) {
     bar.remove();
   }
+}
+
+// ── Subagent grouping ──────────────────────────────────────────────────────
+// Groups subagent events and pairs tool_use + tool_result into unified tiles
+function groupEventsForRender(events) {
+  const subagentMap = {};  // parentToolUseId → [events]
+  for (const ev of events) {
+    if (ev.subagentInfo?.parentToolUseId) {
+      const pid = ev.subagentInfo.parentToolUseId;
+      (subagentMap[pid] = subagentMap[pid] || []).push(ev);
+    }
+  }
+
+  // Build tool_use ID → tool_result mapping for pairing
+  const resultMap = {};  // toolUseId → tool_result event
+  for (const ev of events) {
+    if (ev.type === 'tool_result' && ev.toolResults?.length) {
+      for (const r of ev.toolResults) {
+        if (r.toolUseId) resultMap[r.toolUseId] = ev;
+      }
+    }
+  }
+  const pairedResults = new Set(); // track which tool_results are already paired
+
+  const items = [];
+  for (let ei = 0; ei < events.length; ei++) {
+    const ev = events[ei];
+    if (ev.subagentInfo?.parentToolUseId) continue;
+
+    if (ev.type === 'tool_use' && ev.toolUse?.name === 'Agent') {
+      const subs = subagentMap[ev.toolUse?.id] || [];
+      if (subs.length) { items.push({kind:'agentGroup', toolUse:ev, subEvents:subs}); continue; }
+    }
+
+    // Pair tool_use with its result (by ID, or by next adjacent tool_result)
+    if (ev.type === 'tool_use') {
+      let result = ev.toolUse?.id ? resultMap[ev.toolUse.id] : null;
+      // Fallback: look ahead for adjacent tool_result
+      if (!result) {
+        for (let ni = ei + 1; ni < events.length && ni <= ei + 3; ni++) {
+          if (events[ni].type === 'tool_result' && !pairedResults.has(events[ni].uuid)) {
+            result = events[ni]; break;
+          }
+          if (events[ni].type === 'tool_use') break; // stop at next tool_use
+        }
+      }
+      if (result) pairedResults.add(result.uuid);
+      items.push({kind:'toolPair', toolUse:ev, toolResult: result || null});
+      continue;
+    }
+
+    // Skip tool_results that were already paired
+    if (ev.type === 'tool_result' && pairedResults.has(ev.uuid)) continue;
+
+    items.push({kind:'event', ev});
+  }
+  return items;
+}
+
+// ── Event detail modal ─────────────────────────────────────────────────────
+S.detailEvent = null;  // event to show in detail modal
+S.expandedAgents = new Set();
+S.askSelections = {};   // eventUuid → selected option index
+S.askSubmitted = new Set(); // eventUuids that have been submitted
+
+function openEventDetail(ev) {
+  S.detailEvent = ev;
+  renderEventDetailModal();
+}
+
+function closeEventDetail() {
+  S.detailEvent = null;
+  const ov = document.getElementById('ev-detail-overlay');
+  if (ov) ov.remove();
+}
+
+function renderEventDetailModal() {
+  const ev = S.detailEvent;
+  if (!ev) return;
+  // Remove existing
+  const existing = document.getElementById('ev-detail-overlay');
+  if (existing) existing.remove();
+
+  const typeInfo = eventTypeInfo(ev);
+  let bodyHTML = '';
+
+  if (ev.model) bodyHTML += `<div class="ev-detail-model">${esc(ev.model)}</div>`;
+
+  switch (ev.type) {
+    case 'user':
+      bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">Message</div><pre>${esc(ev.text || '')}</pre></div>`;
+      break;
+    case 'text':
+      bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">Response</div><pre>${esc(ev.text || '')}</pre></div>`;
+      break;
+    case 'thinking':
+      bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">Thinking</div><pre>${esc(ev.thinking || '')}</pre></div>`;
+      break;
+    case 'tool_use': {
+      const t = ev.toolUse || {};
+      bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">Tool</div><pre>${esc(t.name || '')}</pre></div>`;
+      if (t.id) bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">ID</div><pre style="font-size:11px">${esc(t.id)}</pre></div>`;
+      const input = t.fullInput ? parseToolJSON(t.fullInput) : null;
+      // Edit — render diff
+      if (t.name === 'Edit' && input && input.old_string != null && input.new_string != null) {
+        if (input.file_path) bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">File</div><pre>${esc(input.file_path)}</pre></div>`;
+        bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">Changes</div>${renderDiffHTML(input.old_string, input.new_string)}</div>`;
+      } else if (t.name === 'Bash' && input?.command) {
+        bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">Command</div><pre>${highlightCommand(input.command)}</pre></div>`;
+      } else {
+        const raw = t.fullInput || t.inputSummary || '';
+        if (raw) {
+          let formatted = raw;
+          try { formatted = JSON.stringify(JSON.parse(raw), null, 2); } catch(_) {}
+          bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">Input</div><pre>${esc(formatted)}</pre></div>`;
+        }
+      }
+      break;
+    }
+    case 'tool_result': {
+      const results = ev.toolResults || [];
+      results.forEach((r, i) => {
+        const label = r.isError ? `Result (error)` : `Result`;
+        bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">${label}</div><pre style="${r.isError?'color:var(--red)':''}">${esc(r.content || '')}</pre></div>`;
+      });
+      break;
+    }
+    case 'system':
+      if (ev.durationMs != null) bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">Duration</div><pre>${(ev.durationMs/1000).toFixed(1)}s</pre></div>`;
+      else bodyHTML += `<pre>${esc(ev.text || 'system')}</pre>`;
+      break;
+  }
+
+  const html = `<div class="overlay" id="ev-detail-overlay">
+    <div class="ev-detail-sheet">
+      <div class="ev-detail-hdr">
+        <div class="ev-detail-title" style="color:${typeInfo.color}">${typeInfo.icon} ${esc(typeInfo.label)}</div>
+        <span class="ev-detail-time">${esc(ev.timestamp || '')}</span>
+        <button class="sheet-close" id="ev-detail-close" style="margin-left:12px">✕</button>
+      </div>
+      <div class="ev-detail-body">${bodyHTML}</div>
+    </div>
+  </div>`;
+
+  document.body.insertAdjacentHTML('beforeend', html);
+  document.getElementById('ev-detail-close').addEventListener('click', closeEventDetail);
+  document.getElementById('ev-detail-overlay').addEventListener('click', e => {
+    if (e.target.id === 'ev-detail-overlay') closeEventDetail();
+  });
+}
+
+function eventTypeInfo(ev) {
+  switch (ev.type) {
+    case 'user': return {icon:'👤', label:'User Message', color:'var(--blue)'};
+    case 'text': return {icon:'💬', label:'Assistant', color:'var(--text)'};
+    case 'thinking': return {icon:'🧠', label:'Thinking', color:'var(--purple)'};
+    case 'tool_use': return {icon:'🛠', label: ev.toolUse?.name || 'Tool Use', color:'var(--orange)'};
+    case 'tool_result': return {icon:'✓', label:'Tool Result', color:'var(--green)'};
+    case 'system': return {icon:'⚙', label:'System', color:'var(--text2)'};
+    case 'compaction': return {icon:'🔄', label:'Compaction', color:'var(--orange)'};
+    default: return {icon:'•', label: ev.type || 'Event', color:'var(--text2)'};
+  }
+}
+
+// ── Tool input parser ──────────────────────────────────────────────────────
+function parseToolJSON(str) {
+  try { return JSON.parse(str); } catch(_) { return null; }
+}
+
+// ── Bash syntax highlighting ──────────────────────────────────────────────
+function highlightBash(cmd) {
+  // Escape HTML first
+  let s = esc(cmd);
+
+  // Strings (double-quoted and single-quoted)
+  s = s.replace(/(&#34;)(.*?)(&#34;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(&#39;)(.*?)(&#39;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+
+  // Comments: # to end of line (but not inside strings — good enough heuristic)
+  s = s.replace(/(^|\n)(#.*)$/gm, '$1<span style="color:#666;font-style:italic">$2</span>');
+
+  // Operators: &&, ||, |, ;, >, >>, <, 2>&1
+  s = s.replace(/(&amp;&amp;|\|\||[|;]|&gt;&gt;|2&gt;&amp;1|&gt;|&lt;)/g, '<span style="color:#ff9f0a">$1</span>');
+
+  // Keywords at word boundaries
+  const kw = ['if','then','else','elif','fi','for','while','do','done','case','esac','in','function','return','exit','export','local','readonly','set','unset','shift','trap','eval','exec','source'];
+  const kwRe = new RegExp('(^|[\\s;|&])(' + kw.join('|') + ')(?=[\\s;|&(]|$)', 'gm');
+  s = s.replace(kwRe, '$1<span style="color:#bf5af2">$2</span>');
+
+  // Common commands (first word on a line or after operator)
+  const cmds = ['cd','ls','cat','echo','grep','find','sed','awk','rm','cp','mv','mkdir','chmod','chown','curl','wget','git','docker','npm','node','go','python3?','pip','make','sudo','ssh','scp','kill','ps','head','tail','wc','sort','uniq','xargs','tee','tr','cut','diff','touch','ln','tar','zip','unzip','mount','df','du','whoami','hostname','env','which','type','command','test','true','false','read','printf','sleep','date','nohup','pkill','pgrep','bash','sh','zsh'];
+  const cmdRe = new RegExp('(^|[\\s;|&(])(' + cmds.join('|') + ')(?=\\s|$|[;|&)])', 'gm');
+  s = s.replace(cmdRe, '$1<span style="color:#0a84ff">$2</span>');
+
+  // Flags: -something --something
+  s = s.replace(/(\s)(--?[\w-]+)/g, '$1<span style="color:#29b8db">$2</span>');
+
+  // Variables: $VAR, ${VAR}
+  s = s.replace(/(\$\{?\w+\}?)/g, '<span style="color:#f5f543">$1</span>');
+
+  return s;
+}
+
+// ── JS syntax highlighting ────────────────────────────────────────────────
+function highlightJS(code) {
+  let s = esc(code);
+
+  // Strings (double, single, backtick)
+  s = s.replace(/(&#34;)(.*?)(&#34;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(&#39;)(.*?)(&#39;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(`)(.*?)(`)/g, '<span style="color:#23d18b">$1$2$3</span>');
+
+  // Comments: // to end of line
+  s = s.replace(/(\/\/.*?)(?=<br>|$)/gm, '<span style="color:#666;font-style:italic">$1</span>');
+
+  // Keywords
+  const kw = ['const','let','var','function','return','if','else','for','while','do','switch','case','break','continue','new','try','catch','finally','throw','class','extends','import','from','export','default','async','await','yield','of','in','typeof','instanceof','void','delete','this','super','null','undefined','true','false'];
+  const kwRe = new RegExp('\\b(' + kw.join('|') + ')\\b', 'g');
+  s = s.replace(kwRe, '<span style="color:#bf5af2">$1</span>');
+
+  // Common globals/builtins
+  const builtins = ['console','require','process','module','exports','JSON','Math','Array','Object','String','Number','RegExp','Error','Promise','setTimeout','setInterval','Buffer','__dirname','__filename','document','window','fs'];
+  const builtinRe = new RegExp('\\b(' + builtins.join('|') + ')\\b', 'g');
+  s = s.replace(builtinRe, '<span style="color:#0a84ff">$1</span>');
+
+  // Methods after dot: .foo(
+  s = s.replace(/\.(\w+)\(/g, '.<span style="color:#f5f543">$1</span>(');
+
+  // Numbers
+  s = s.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:#ff9f0a">$1</span>');
+
+  // Operators
+  s = s.replace(/(===?|!==?|&amp;&amp;|\|\||=&gt;|[+\-*%]=?)/g, '<span style="color:#29b8db">$1</span>');
+
+  return s;
+}
+
+// ── Python syntax highlighting ─────────────────────────────────────────────
+function highlightPython(code) {
+  let s = esc(code);
+  s = s.replace(/(&#34;&#34;&#34;)([\s\S]*?)(&#34;&#34;&#34;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(&#39;&#39;&#39;)([\s\S]*?)(&#39;&#39;&#39;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(&#34;)(.*?)(&#34;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(&#39;)(.*?)(&#39;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(#.*?)(?=<br>|$)/gm, '<span style="color:#666;font-style:italic">$1</span>');
+  const kw = ['def','class','return','if','elif','else','for','while','break','continue','pass','import','from','as','try','except','finally','raise','with','yield','lambda','and','or','not','in','is','True','False','None','async','await','global','nonlocal','del','assert'];
+  s = s.replace(new RegExp('\\b(' + kw.join('|') + ')\\b', 'g'), '<span style="color:#bf5af2">$1</span>');
+  const builtins = ['print','len','range','list','dict','set','tuple','int','str','float','bool','type','isinstance','open','input','map','filter','zip','enumerate','sorted','reversed','any','all','min','max','sum','abs','round','format','super','property','staticmethod','classmethod','self','os','sys','re','json','math'];
+  s = s.replace(new RegExp('\\b(' + builtins.join('|') + ')\\b', 'g'), '<span style="color:#0a84ff">$1</span>');
+  s = s.replace(/\.(\w+)\(/g, '.<span style="color:#f5f543">$1</span>(');
+  s = s.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:#ff9f0a">$1</span>');
+  s = s.replace(/@(\w+)/g, '<span style="color:#29b8db">@$1</span>');
+  return s;
+}
+
+// ── Go syntax highlighting ────────────────────────────────────────────────
+function highlightGo(code) {
+  let s = esc(code);
+  s = s.replace(/(&#34;)(.*?)(&#34;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(`)([\s\S]*?)(`)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(\/\/.*?)(?=<br>|$)/gm, '<span style="color:#666;font-style:italic">$1</span>');
+  const kw = ['func','return','if','else','for','range','switch','case','default','break','continue','go','select','chan','defer','type','struct','interface','map','var','const','package','import','fallthrough','goto','nil','true','false','iota'];
+  s = s.replace(new RegExp('\\b(' + kw.join('|') + ')\\b', 'g'), '<span style="color:#bf5af2">$1</span>');
+  const types = ['string','int','int8','int16','int32','int64','uint','uint8','uint16','uint32','uint64','float32','float64','bool','byte','rune','error','any','comparable'];
+  s = s.replace(new RegExp('\\b(' + types.join('|') + ')\\b', 'g'), '<span style="color:#29b8db">$1</span>');
+  const builtins = ['fmt','log','os','io','net','http','json','strings','strconv','sync','context','time','errors','make','len','cap','append','copy','delete','close','new','panic','recover','print','println'];
+  s = s.replace(new RegExp('\\b(' + builtins.join('|') + ')\\b', 'g'), '<span style="color:#0a84ff">$1</span>');
+  s = s.replace(/\.(\w+)\(/g, '.<span style="color:#f5f543">$1</span>(');
+  s = s.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:#ff9f0a">$1</span>');
+  return s;
+}
+
+// ── Swift syntax highlighting ─────────────────────────────────────────────
+function highlightSwift(code) {
+  let s = esc(code);
+  s = s.replace(/(&#34;)(.*?)(&#34;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(\/\/.*?)(?=<br>|$)/gm, '<span style="color:#666;font-style:italic">$1</span>');
+  const kw = ['func','return','if','else','guard','for','while','repeat','switch','case','default','break','continue','let','var','class','struct','enum','protocol','extension','import','init','deinit','self','Self','super','nil','true','false','try','catch','throw','throws','async','await','actor','some','any','where','in','is','as','typealias','associatedtype','static','override','mutating','nonmutating','lazy','weak','unowned','private','public','internal','fileprivate','open','final','defer','do','inout','subscript','willSet','didSet','get','set'];
+  s = s.replace(new RegExp('\\b(' + kw.join('|') + ')\\b', 'g'), '<span style="color:#bf5af2">$1</span>');
+  const types = ['String','Int','Double','Float','Bool','Array','Dictionary','Set','Optional','Result','Error','Void','Any','AnyObject','Data','URL','Date','UUID','Codable','Sendable','Identifiable'];
+  s = s.replace(new RegExp('\\b(' + types.join('|') + ')\\b', 'g'), '<span style="color:#29b8db">$1</span>');
+  const builtins = ['print','debugPrint','fatalError','precondition','assert','DispatchQueue','Task','MainActor','FileManager','JSONDecoder','JSONEncoder','ProcessInfo'];
+  s = s.replace(new RegExp('\\b(' + builtins.join('|') + ')\\b', 'g'), '<span style="color:#0a84ff">$1</span>');
+  s = s.replace(/\.(\w+)\(/g, '.<span style="color:#f5f543">$1</span>(');
+  s = s.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:#ff9f0a">$1</span>');
+  return s;
+}
+
+// ── Ruby syntax highlighting ──────────────────────────────────────────────
+function highlightRuby(code) {
+  let s = esc(code);
+  s = s.replace(/(&#34;)(.*?)(&#34;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(&#39;)(.*?)(&#39;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(#.*?)(?=<br>|$)/gm, '<span style="color:#666;font-style:italic">$1</span>');
+  const kw = ['def','end','class','module','if','elsif','else','unless','while','until','for','do','begin','rescue','ensure','raise','return','yield','block_given?','then','when','case','break','next','redo','retry','in','and','or','not','self','super','nil','true','false','require','require_relative','include','extend','attr_accessor','attr_reader','attr_writer','puts','print','p','lambda','proc'];
+  s = s.replace(new RegExp('\\b(' + kw.join('|').replace('?', '\\?') + ')\\b', 'g'), '<span style="color:#bf5af2">$1</span>');
+  s = s.replace(/:(\w+)/g, '<span style="color:#29b8db">:$1</span>');
+  s = s.replace(/(@\w+)/g, '<span style="color:#f5f543">$1</span>');
+  s = s.replace(/\.(\w+)/g, '.<span style="color:#f5f543">$1</span>');
+  s = s.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:#ff9f0a">$1</span>');
+  return s;
+}
+
+// Choose highlighter based on command content
+function highlightCommand(cmd) {
+  // node -e "..." — JS
+  const nodeMatch = cmd.match(/^node\s+-e\s+["']\n?([\s\S]*)["']\s*$/);
+  if (nodeMatch) {
+    return '<span style="color:#0a84ff">node</span> <span style="color:#29b8db">-e</span> <span style="color:#23d18b">&quot;</span>\n' + highlightJS(nodeMatch[1]) + '<span style="color:#23d18b">&quot;</span>';
+  }
+  // python/python3 -c "..." — Python
+  const pyMatch = cmd.match(/^python3?\s+-c\s+["']\n?([\s\S]*)["']\s*$/);
+  if (pyMatch) {
+    const pyCmd = cmd.match(/^(python3?)/)[1];
+    return `<span style="color:#0a84ff">${pyCmd}</span> <span style="color:#29b8db">-c</span> <span style="color:#23d18b">&quot;</span>\n` + highlightPython(pyMatch[1]) + '<span style="color:#23d18b">&quot;</span>';
+  }
+  // ruby -e "..." — Ruby
+  const rbMatch = cmd.match(/^ruby\s+-e\s+["']\n?([\s\S]*)["']\s*$/);
+  if (rbMatch) {
+    return '<span style="color:#0a84ff">ruby</span> <span style="color:#29b8db">-e</span> <span style="color:#23d18b">&quot;</span>\n' + highlightRuby(rbMatch[1]) + '<span style="color:#23d18b">&quot;</span>';
+  }
+  // swift -e "..." — Swift
+  const swMatch = cmd.match(/^swift\s+-e\s+["']\n?([\s\S]*)["']\s*$/);
+  if (swMatch) {
+    return '<span style="color:#0a84ff">swift</span> <span style="color:#29b8db">-e</span> <span style="color:#23d18b">&quot;</span>\n' + highlightSwift(swMatch[1]) + '<span style="color:#23d18b">&quot;</span>';
+  }
+  // Detect inline go/swift/python/ruby by shebang or content heuristics
+  // For multi-line heredoc commands with go/python/swift content, use content detection
+  if (/\bfunc\s+\w+\s*\(/.test(cmd) && /\bpackage\s+\w+/.test(cmd)) return highlightGo(cmd);
+  if (/\b(def |class |import |from .* import)/.test(cmd)) return highlightPython(cmd);
+  if (/\b(func |let |var |struct |@State)/.test(cmd) && /\b(Swift|Foundation)\b/.test(cmd)) return highlightSwift(cmd);
+  return highlightBash(cmd);
+}
+
+// ── Unified Diff (GitHub-style, matching iOS) ─────────────────────────────
+
+function computeDiff(oldStr, newStr) {
+  const oldLines = oldStr.split('\n');
+  const newLines = newStr.split('\n');
+  const m = oldLines.length, n = newLines.length;
+
+  // LCS table
+  const dp = Array.from({length: m+1}, () => new Uint16Array(n+1));
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      dp[i][j] = oldLines[i-1] === newLines[j-1] ? dp[i-1][j-1]+1 : Math.max(dp[i-1][j], dp[i][j-1]);
+
+  // Backtrack
+  const raw = []; // {type:'ctx'|'rem'|'add', text}
+  let i = m, j = n;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && oldLines[i-1] === newLines[j-1]) {
+      raw.push({type:'ctx', text:oldLines[i-1]}); i--; j--;
+    } else if (j > 0 && (i === 0 || dp[i][j-1] >= dp[i-1][j])) {
+      raw.push({type:'add', text:newLines[j-1]}); j--;
+    } else {
+      raw.push({type:'rem', text:oldLines[i-1]}); i--;
+    }
+  }
+  raw.reverse();
+
+  // Pair consecutive rem/add runs for char-level diff
+  const result = [];
+  let idx = 0;
+  while (idx < raw.length) {
+    if (raw[idx].type === 'ctx') { result.push(raw[idx]); idx++; continue; }
+    if (raw[idx].type === 'rem') {
+      const removed = [];
+      while (idx < raw.length && raw[idx].type === 'rem') removed.push(raw[idx++].text);
+      const added = [];
+      while (idx < raw.length && raw[idx].type === 'add') added.push(raw[idx++].text);
+      const pairs = Math.max(removed.length, added.length);
+      for (let p = 0; p < pairs; p++) {
+        if (p < removed.length && p < added.length) {
+          const [remHL, addHL] = charDiff(removed[p], added[p]);
+          result.push({type:'rem', text:removed[p], hl:remHL});
+          result.push({type:'add', text:added[p], hl:addHL});
+        } else if (p < removed.length) {
+          result.push({type:'rem', text:removed[p], hl:[]});
+        } else {
+          result.push({type:'add', text:added[p], hl:[]});
+        }
+      }
+      continue;
+    }
+    result.push({...raw[idx], hl:[]}); idx++;
+  }
+  return result;
+}
+
+function charDiff(oldStr, newStr) {
+  const m = oldStr.length, n = newStr.length;
+  if (m * n > 500000) return [[], []]; // skip if too large
+
+  const dp = Array.from({length: m+1}, () => new Uint16Array(n+1));
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      dp[i][j] = oldStr[i-1] === newStr[j-1] ? dp[i-1][j-1]+1 : Math.max(dp[i-1][j], dp[i][j-1]);
+
+  const oldChanged = new Uint8Array(m).fill(1);
+  const newChanged = new Uint8Array(n).fill(1);
+  let ci = m, cj = n;
+  while (ci > 0 && cj > 0) {
+    if (oldStr[ci-1] === newStr[cj-1]) { oldChanged[ci-1]=0; newChanged[cj-1]=0; ci--; cj--; }
+    else if (dp[ci-1][cj] >= dp[ci][cj-1]) ci--;
+    else cj--;
+  }
+
+  function toRanges(changed) {
+    const ranges = [];
+    let start = -1;
+    for (let i = 0; i <= changed.length; i++) {
+      if (i < changed.length && changed[i]) { if (start < 0) start = i; }
+      else { if (start >= 0) { ranges.push([start, i]); start = -1; } }
+    }
+    return ranges;
+  }
+  return [toRanges(oldChanged), toRanges(newChanged)];
+}
+
+function renderDiffHTML(oldStr, newStr, filePath) {
+  const entries = computeDiff(oldStr, newStr);
+  const prefix = {ctx:' ', rem:'−', add:'+'};
+
+  let html = `<div class="diff-view">`;
+  if (filePath) html += `<div class="diff-file">📄 ${esc(filePath)}</div>`;
+
+  for (const entry of entries) {
+    const cls = entry.type;
+    const text = entry.text || '';
+    const hl = entry.hl || [];
+
+    let content;
+    if (hl.length && text) {
+      // Build HTML with highlight spans
+      let parts = [];
+      let last = 0;
+      for (const [s, e] of hl) {
+        if (s > last) parts.push(esc(text.slice(last, s)));
+        parts.push(`<span class="diff-hl">${esc(text.slice(s, e))}</span>`);
+        last = e;
+      }
+      if (last < text.length) parts.push(esc(text.slice(last)));
+      content = parts.join('');
+    } else {
+      content = esc(text) || ' ';
+    }
+
+    html += `<div class="diff-line ${cls}"><div class="diff-gutter">${prefix[cls]}</div><div class="diff-content">${content}</div></div>`;
+  }
+
+  html += `</div>`;
+  return html;
+}
+
+// ── Lightweight Markdown → HTML ────────────────────────────────────────────
+function md(text) {
+  if (!text) return '';
+  // Escape HTML first
+  let s = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  // Fenced code blocks: ```lang\n...\n```
+  s = s.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+    `<pre style="background:var(--surf2);padding:10px 12px;border-radius:8px;font-family:'SF Mono',Menlo,monospace;font-size:12px;line-height:1.5;overflow-x:auto;margin:8px 0">${code.replace(/\n$/, '')}</pre>`);
+
+  // Inline code: `code`
+  s = s.replace(/`([^`\n]+)`/g, '<code style="background:var(--surf2);padding:1px 5px;border-radius:4px;font-family:\'SF Mono\',Menlo,monospace;font-size:13px">$1</code>');
+
+  // Headers: ### h3, ## h2, # h1
+  s = s.replace(/^#### (.+)$/gm, '<div style="font-size:14px;font-weight:600;margin:12px 0 4px">$1</div>');
+  s = s.replace(/^### (.+)$/gm, '<div style="font-size:15px;font-weight:600;margin:14px 0 4px">$1</div>');
+  s = s.replace(/^## (.+)$/gm, '<div style="font-size:16px;font-weight:700;margin:16px 0 6px">$1</div>');
+  s = s.replace(/^# (.+)$/gm, '<div style="font-size:18px;font-weight:700;margin:16px 0 6px">$1</div>');
+
+  // Tables: | col | col | with optional separator row
+  s = s.replace(/(^|\n)(\|.+\|(?:\n\|.+\|)+)/gm, (_, pre, block) => {
+    const rows = block.trim().split('\n');
+    let html = '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch;margin:8px 0;border:1px solid var(--border);border-radius:8px"><table style="border-collapse:collapse;font-size:13px;min-width:100%">';
+    let isHeader = true;
+    for (const row of rows) {
+      // Skip separator rows like |---|---|
+      if (/^\|[\s\-:|]+$/.test(row)) {
+        isHeader = false;
+        continue;
+      }
+      const cells = row.split('|').slice(1, -1).map(c => c.trim());
+      const tag = isHeader ? 'th' : 'td';
+      const style = isHeader
+        ? 'padding:6px 10px;border-bottom:2px solid var(--border);text-align:left;font-weight:600;color:var(--text);white-space:nowrap'
+        : 'padding:6px 10px;border-bottom:1px solid var(--border);color:var(--text2);white-space:nowrap';
+      html += '<tr>' + cells.map(c => `<${tag} style="${style}">${c}</${tag}>`).join('') + '</tr>';
+      if (isHeader) isHeader = false;
+    }
+    html += '</table></div>';
+    return pre + html;
+  });
+
+  // Bold: **text**
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Italic: *text*
+  s = s.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+
+  // Unordered lists: - item (consecutive lines, allow sub-items with 2-space indent)
+  s = s.replace(/(^|\n)((?:- .+\n?)+)/g, (_, pre, block) => {
+    const items = block.trim().split('\n').map(l =>
+      `<li style="margin:2px 0">${l.replace(/^- /, '').replace(/^  - /, '&nbsp;&nbsp;• ')}</li>`
+    ).join('');
+    return `${pre}<ul style="margin:6px 0 6px 16px;list-style:disc;padding-left:4px">${items}</ul>`;
+  });
+
+  // Numbered lists: 1. item — match runs separated by up to one blank line
+  s = s.replace(/(^|\n)(\d+\. .+(?:\n(?:\d+\. .+|\n\d+\. .+|   .+| {2}.+))*)/gm, (_, pre, block) => {
+    const items = block.trim().split(/\n(?=\d+\. )/).map(chunk => {
+      const lines = chunk.split('\n');
+      const first = lines[0].replace(/^\d+\. /, '');
+      const rest = lines.slice(1).map(l => l.replace(/^   |^ {2}/, '')).filter(l => l.trim());
+      const content = rest.length ? first + '<br>' + rest.join('<br>') : first;
+      const num = chunk.match(/^(\d+)\./)?.[1] || '1';
+      return `<li style="margin:2px 0" value="${num}">${content}</li>`;
+    }).join('');
+    return `${pre}<ol style="margin:6px 0 6px 16px;padding-left:4px">${items}</ol>`;
+  });
+
+  // Paragraphs: double newlines
+  s = s.replace(/\n\n+/g, '<div style="height:10px"></div>');
+  // Single newlines → <br>
+  s = s.replace(/\n/g, '<br>');
+
+  return s;
 }
 
 // ── Event rendering ────────────────────────────────────────────────────────
@@ -948,18 +2025,100 @@ function renderUserEvent(text) {
   return `<div class="ev-user">${inner || '📷'}</div>`;
 }
 
+// Render a grouped item (from groupEventsForRender)
+function renderGroupedItemHTML(item) {
+  if (item.kind === 'agentGroup') return renderAgentGroupHTML(item.toolUse, item.subEvents);
+  if (item.kind === 'toolPair') return renderToolPairHTML(item.toolUse, item.toolResult);
+  return renderEventHTML(item.ev);
+}
+
+function renderToolPairHTML(toolUseEv, toolResultEv) {
+  if (!toolResultEv) return renderEventHTML(toolUseEv);
+
+  const t = toolUseEv.toolUse || {};
+  const tuUuid = toolUseEv.uuid || '';
+  const trUuid = toolResultEv.uuid || '';
+  const results = toolResultEv.toolResults || [];
+  const hasErr = results.some(r => r.isError);
+
+  if (!results.length) return renderEventHTML(toolUseEv);
+
+  // Build the tool header + body (input zone)
+  const icon = t.name === '!' ? '⚡' : t.name === 'Agent' ? '🤖' :
+               t.name === 'Bash' ? '💻' : t.name === 'Edit' ? '✏️' :
+               t.name === 'Write' ? '📝' : t.name === 'Read' ? '📄' :
+               t.name === 'Grep' ? '🔍' : t.name === 'Glob' ? '🔍' :
+               t.name.startsWith('/') ? '🔧' : '🛠';
+
+  let inputBody = '';
+  const input = t.fullInput ? parseToolJSON(t.fullInput) : null;
+
+  if (t.name === 'Edit' && input?.file_path) {
+    const shortFile = input.file_path.split('/').slice(-2).join('/');
+    inputBody = `<div class="tool-hdr">${icon} <span class="tool-name">Edit</span> <span style="color:var(--text2);font-size:11px;margin-left:4px">${esc(shortFile)}</span></div>`;
+  } else if (t.name === 'Write' && input?.file_path) {
+    const shortFile = input.file_path.split('/').slice(-2).join('/');
+    const preview = (input.content || '').slice(0, 500);
+    inputBody = `<div class="tool-hdr">${icon} <span class="tool-name">Write</span> <span style="color:var(--text2);font-size:11px;margin-left:4px">${esc(shortFile)}</span></div>` +
+      (preview ? `<div class="tool-body">${esc(preview)}${(input.content||'').length > 500 ? '…' : ''}</div>` : '');
+  } else if (t.name === 'Read' && input?.file_path) {
+    const shortFile = input.file_path.split('/').slice(-2).join('/');
+    let meta = '';
+    if (input.offset) meta += ` L${input.offset}`;
+    if (input.limit) meta += `${input.offset ? '-' : ' L0-'}${(parseInt(input.offset||0)+parseInt(input.limit))}`;
+    inputBody = `<div class="tool-hdr">${icon} <span class="tool-name">Read</span> <span style="color:var(--text2);font-size:11px;margin-left:4px">${esc(shortFile)}${meta}</span></div>`;
+  } else if (t.name === 'Bash' && input?.command) {
+    inputBody = `<div class="tool-hdr">${icon} <span class="tool-name">Bash</span></div><div class="tool-body">${highlightCommand(input.command)}</div>`;
+  } else if ((t.name === 'Grep' || t.name === 'Glob') && input?.pattern) {
+    const path = input.path ? input.path.split('/').slice(-2).join('/') : '';
+    inputBody = `<div class="tool-hdr">${icon} <span class="tool-name">${esc(t.name)}</span> <span style="color:var(--text2);font-size:11px;margin-left:4px">${esc(input.pattern)}${path ? ' in …/' + esc(path) : ''}</span></div>`;
+  } else {
+    const body = t.inputSummary || t.fullInput || '';
+    inputBody = `<div class="tool-hdr">${icon} <span class="tool-name">${esc(t.name)}</span></div>` +
+      (body ? `<div class="tool-body">${esc(body)}</div>` : '');
+  }
+
+  // Build result zone
+  const resultInner = results.map(r =>
+    `<div class="result-body" style="${r.isError?'color:var(--red)':''}">${esc(r.content || '')}</div>`
+  ).join('');
+
+  return `<div class="ev-tool" style="overflow:hidden">
+    <div class="ev-clickable" data-ev-uuid="${esc(tuUuid)}">${inputBody}</div>
+    <div class="tool-result-inline ev-clickable${hasErr?' err':''}" data-ev-uuid="${esc(trUuid)}">${resultInner}</div>
+  </div>`;
+}
+
+function renderAgentGroupHTML(toolUse, subEvents) {
+  const agentId = toolUse.uuid || '';
+  const isExpanded = S.expandedAgents.has(agentId);
+  const agentType = subEvents[0]?.subagentInfo?.agentType || 'Agent';
+  const desc = toolUse.toolUse?.inputSummary || subEvents[0]?.subagentInfo?.description || '';
+
+  return `<div class="ev-agent-group" data-agent-id="${esc(agentId)}">
+    <div class="agent-group-hdr" data-agent-toggle="${esc(agentId)}">
+      🤖 <span class="agent-group-type">Agent</span>
+      <span style="font-size:11px;padding:1px 6px;background:rgba(255,159,10,.15);border-radius:8px;color:var(--orange)">${esc(agentType)}</span>
+      <span class="agent-group-desc">${esc(desc)}</span>
+      <span class="agent-group-badge">${subEvents.length}</span>
+      <span class="agent-group-chev ${isExpanded?'open':''}">▼</span>
+    </div>
+    ${isExpanded ? `<div class="agent-group-body">${subEvents.map(renderEventHTML).join('')}</div>` : ''}
+  </div>`;
+}
+
 function renderEventHTML(ev) {
   if (!ev) return '';
+  const uuid = ev.uuid || Math.random().toString(36).slice(2);
   switch (ev.type) {
     case 'user':
       return renderUserEvent(ev.text || '');
 
     case 'text':
       if (!ev.text) return '';
-      return `<div class="ev-text">${esc(ev.text)}</div>`;
+      return `<div class="ev-text ev-clickable" data-ev-uuid="${esc(uuid)}">${md(ev.text)}</div>`;
 
     case 'thinking': {
-      const uuid = ev.uuid || Math.random().toString(36).slice(2);
       const open = S.expanded.has(uuid);
       return `<div class="ev-think" data-uuid="${uuid}">
         <div class="think-hdr"><span>${open?'▼':'▶'}</span><span>Claude's thinking…</span></div>
@@ -970,11 +2129,18 @@ function renderEventHTML(ev) {
     case 'tool_use': {
       const t = ev.toolUse;
       if (!t) return '';
+
+      // AskUserQuestion — render rich inline block
+      if (t.name === 'AskUserQuestion') return renderAskUserQuestion(ev);
+
       const icon = t.name === '!' ? '⚡' : t.name === 'Agent' ? '🤖' :
-                   t.name === 'Bash' ? '💻' : t.name.startsWith('/') ? '🔧' : '🛠';
+                   t.name === 'Bash' ? '💻' : t.name === 'Edit' ? '✏️' :
+                   t.name === 'Write' ? '📝' : t.name === 'Read' ? '📄' :
+                   t.name === 'Grep' ? '🔍' : t.name === 'Glob' ? '🔍' :
+                   t.name.startsWith('/') ? '🔧' : '🛠';
       const body = t.inputSummary || t.fullInput || '';
 
-      // Subagent block
+      // Flat subagent fallback (when not grouped)
       if (t.name === 'Agent' && ev.subagentInfo) {
         const sa = ev.subagentInfo;
         return `<div class="ev-subagent">
@@ -983,7 +2149,67 @@ function renderEventHTML(ev) {
         </div>`;
       }
 
-      return `<div class="ev-tool">
+      // Edit tool — compact chip (diff shows in detail modal)
+      if (t.name === 'Edit' && t.fullInput) {
+        const input = parseToolJSON(t.fullInput);
+        if (input && input.file_path) {
+          const shortFile = input.file_path.split('/').slice(-2).join('/');
+          return `<div class="ev-tool ev-clickable" data-ev-uuid="${esc(uuid)}">
+            <div class="tool-hdr">${icon} <span class="tool-name">Edit</span> <span style="color:var(--text2);font-size:11px;margin-left:4px">${esc(shortFile)}</span></div>
+          </div>`;
+        }
+      }
+
+      // Write tool — show file path + code preview
+      if (t.name === 'Write' && t.fullInput) {
+        const input = parseToolJSON(t.fullInput);
+        if (input && input.file_path) {
+          const shortFile = input.file_path.split('/').slice(-2).join('/');
+          const preview = (input.content || '').slice(0, 500);
+          return `<div class="ev-tool ev-clickable" data-ev-uuid="${esc(uuid)}">
+            <div class="tool-hdr">${icon} <span class="tool-name">Write</span> <span style="color:var(--text2);font-size:11px;margin-left:4px">${esc(shortFile)}</span></div>
+            ${preview ? `<div class="tool-body">${esc(preview)}${input.content.length > 500 ? '…' : ''}</div>` : ''}
+          </div>`;
+        }
+      }
+
+      // Read tool — show file path
+      if (t.name === 'Read' && t.fullInput) {
+        const input = parseToolJSON(t.fullInput);
+        if (input && input.file_path) {
+          const shortFile = input.file_path.split('/').slice(-2).join('/');
+          let meta = '';
+          if (input.offset) meta += ` L${input.offset}`;
+          if (input.limit) meta += `${input.offset ? '-' : ' L0-'}${(parseInt(input.offset||0)+parseInt(input.limit))}`;
+          return `<div class="ev-tool ev-clickable" data-ev-uuid="${esc(uuid)}">
+            <div class="tool-hdr">${icon} <span class="tool-name">Read</span> <span style="color:var(--text2);font-size:11px;margin-left:4px">${esc(shortFile)}${meta}</span></div>
+          </div>`;
+        }
+      }
+
+      // Bash tool — show command
+      if (t.name === 'Bash' && t.fullInput) {
+        const input = parseToolJSON(t.fullInput);
+        if (input && input.command) {
+          return `<div class="ev-tool ev-clickable" data-ev-uuid="${esc(uuid)}">
+            <div class="tool-hdr">${icon} <span class="tool-name">Bash</span></div>
+            <div class="tool-body">${esc(input.command)}</div>
+          </div>`;
+        }
+      }
+
+      // Grep/Glob — show pattern + path
+      if ((t.name === 'Grep' || t.name === 'Glob') && t.fullInput) {
+        const input = parseToolJSON(t.fullInput);
+        if (input && input.pattern) {
+          const path = input.path ? input.path.split('/').slice(-2).join('/') : '';
+          return `<div class="ev-tool ev-clickable" data-ev-uuid="${esc(uuid)}">
+            <div class="tool-hdr">${icon} <span class="tool-name">${esc(t.name)}</span> <span style="color:var(--text2);font-size:11px;margin-left:4px">${esc(input.pattern)}${path ? ' in …/' + esc(path) : ''}</span></div>
+          </div>`;
+        }
+      }
+
+      return `<div class="ev-tool ev-clickable" data-ev-uuid="${esc(uuid)}">
         <div class="tool-hdr">${icon} <span class="tool-name">${esc(t.name)}</span></div>
         ${body ? `<div class="tool-body">${esc(body)}</div>` : ''}
       </div>`;
@@ -992,7 +2218,7 @@ function renderEventHTML(ev) {
     case 'tool_result': {
       const results = ev.toolResults || [];
       return results.map(r =>
-        `<div class="ev-result ${r.isError?'err':''}">
+        `<div class="ev-result ev-clickable ${r.isError?'err':''}" data-ev-uuid="${esc(uuid)}">
           <div class="result-body">${esc(r.content || '')}</div>
         </div>`
       ).join('');
@@ -1013,39 +2239,161 @@ function renderEventHTML(ev) {
   }
 }
 
+// ── AskUserQuestion inline block ───────────────────────────────────────────
+function renderAskUserQuestion(ev) {
+  const uuid = ev.uuid || '';
+  const submitted = S.askSubmitted.has(uuid);
+  let questions = [];
+  try {
+    const input = ev.toolUse?.fullInput || ev.toolUse?.inputSummary || '';
+    const parsed = JSON.parse(input);
+    questions = parsed.questions || [];
+  } catch(_) { return ''; }
+
+  if (!questions.length) return '';
+
+  let html = `<div class="ev-ask" data-ask-uuid="${esc(uuid)}">
+    <div class="ask-hdr">❓ Question</div>`;
+
+  questions.forEach((q, qi) => {
+    html += `<div class="ask-q-group">`;
+    if (q.header) html += `<div class="ask-q-header">${esc(q.header)}</div>`;
+    if (q.question) html += `<div class="ask-q-text">${esc(q.question)}</div>`;
+    const opts = q.options || [];
+    opts.forEach((o, oi) => {
+      const key = `${uuid}_${qi}`;
+      const selected = S.askSelections[key] === oi;
+      html += `<div class="ask-opt ${selected?'selected':''}" data-ask-key="${esc(key)}" data-ask-oi="${oi}">
+        <div class="ask-opt-radio"></div>
+        <div>
+          <div class="ask-opt-label">${esc(o.label || o)}</div>
+          ${o.description ? `<div class="ask-opt-desc">${esc(o.description)}</div>` : ''}
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
+  });
+
+  html += `<button class="ask-submit ${submitted?'done':''}" data-ask-submit="${esc(uuid)}" ${submitted?'disabled':''}>${submitted?'✓ Submitted':'Submit'}</button>`;
+  html += `</div>`;
+  return html;
+}
+
 function appendEventNode(ev) {
   const list = document.getElementById('evlist');
   if (!list) return;
+
+  // Check if this event belongs to a subagent group that's already rendered
+  if (ev.subagentInfo?.parentToolUseId) {
+    // Re-render to properly group — simpler than surgical insert into group
+    patchEventsList();
+    return;
+  }
+
   const html = renderEventHTML(ev);
   if (!html) return;
+
+  // Check if pinned to bottom BEFORE appending (new content may be taller than threshold)
+  const tc = document.getElementById('tab-content');
+  const wasNearBottom = tc && (tc.scrollTop + tc.clientHeight >= tc.scrollHeight - 80);
+
   const tmp = document.createElement('div');
   tmp.innerHTML = html;
   while (tmp.firstChild) list.appendChild(tmp.firstChild);
 
-  // bind new thinking toggles
-  list.querySelectorAll('.ev-think:not([data-bound])').forEach(el => {
-    el.dataset.bound = '1';
-    el.addEventListener('click', () => toggleThink(el.dataset.uuid, S.activeId));
-  });
+  bindEventInteractions(list);
 
-  const tc = document.getElementById('tab-content');
-  if (tc) {
-    const near = tc.scrollTop + tc.clientHeight >= tc.scrollHeight - 80;
-    if (near) tc.scrollTop = tc.scrollHeight;
-  }
+  if (wasNearBottom && tc) tc.scrollTop = tc.scrollHeight;
 }
 
 function patchEventsList() {
   const list = document.getElementById('evlist');
   if (!list) return;
-  list.innerHTML = (S.events[S.activeId] || []).map(renderEventHTML).join('');
-  rebindThinkToggles(S.activeId);
-  scrollEventsToBottom();
+  const tc = document.getElementById('tab-content');
+  const wasNearBottom = tc && (tc.scrollTop + tc.clientHeight >= tc.scrollHeight - 80);
+  const evs = S.events[S.activeId] || [];
+  const grouped = groupEventsForRender(evs);
+  list.innerHTML = grouped.map(renderGroupedItemHTML).join('');
+  bindEventInteractions(list);
+  if (wasNearBottom) scrollEventsToBottom();
+}
+
+function bindEventInteractions(root) {
+  const id = S.activeId;
+  const evs = S.events[id] || [];
+
+  // Thinking toggles
+  root.querySelectorAll('.ev-think').forEach(el => {
+    el.removeEventListener('click', el._thinkHandler);
+    el._thinkHandler = () => toggleThink(el.dataset.uuid, id);
+    el.addEventListener('click', el._thinkHandler);
+  });
+
+  // Event detail on tap
+  root.querySelectorAll('.ev-clickable').forEach(el => {
+    el.addEventListener('click', () => {
+      const uuid = el.dataset.evUuid;
+      const ev = evs.find(e => e.uuid === uuid);
+      if (ev) openEventDetail(ev);
+    });
+  });
+
+  // Agent group expand/collapse
+  root.querySelectorAll('[data-agent-toggle]').forEach(el => {
+    el.addEventListener('click', () => {
+      const agentId = el.dataset.agentToggle;
+      if (S.expandedAgents.has(agentId)) S.expandedAgents.delete(agentId);
+      else S.expandedAgents.add(agentId);
+      patchEventsList();
+    });
+  });
+
+  // AskUserQuestion option selection
+  root.querySelectorAll('.ask-opt').forEach(el => {
+    el.addEventListener('click', () => {
+      const key = el.dataset.askKey;
+      const oi = parseInt(el.dataset.askOi);
+      S.askSelections[key] = oi;
+      // Re-render the ask block to update selection state
+      patchEventsList();
+    });
+  });
+
+  // AskUserQuestion submit
+  root.querySelectorAll('[data-ask-submit]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const uuid = btn.dataset.askSubmit;
+      if (S.askSubmitted.has(uuid)) return;
+      // Find the event to get question count
+      const ev = evs.find(e => e.uuid === uuid);
+      if (!ev) return;
+      let questions = [];
+      try { questions = JSON.parse(ev.toolUse?.fullInput || '{}').questions || []; } catch(_){}
+      // Disable button while sending
+      btn.disabled = true;
+      btn.textContent = 'Sending…';
+      try {
+        // Send each selected option as numbered input, sequentially
+        for (let qi = 0; qi < questions.length; qi++) {
+          const key = `${uuid}_${qi}`;
+          const sel = S.askSelections[key];
+          if (sel != null) await sendInput(id, String(sel + 1));
+        }
+        // Send Enter to submit
+        await sendInput(id, '');
+        S.askSubmitted.add(uuid);
+      } catch(e) {
+        alert('Send failed: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = 'Submit';
+      }
+      patchEventsList();
+    });
+  });
 }
 
 function patchTerminal() {
-  const term = document.getElementById('term');
-  if (term) term.innerHTML = ansi(S.outputs[S.activeId] || '');
+  // Terminal tab is now a live PTY — no read-only rendering needed
 }
 
 function scrollEventsToBottom() {
@@ -1054,9 +2402,8 @@ function scrollEventsToBottom() {
 }
 
 function rebindThinkToggles(id) {
-  document.querySelectorAll('.ev-think').forEach(el => {
-    el.addEventListener('click', () => toggleThink(el.dataset.uuid, id));
-  });
+  const list = document.getElementById('evlist');
+  if (list) bindEventInteractions(list);
 }
 
 function toggleThink(uuid, id) {
@@ -1156,18 +2503,57 @@ function safeParse(s, def) {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 const r = route();
-if (r.page === 'session') { S.activeId = r.id; }
+if (r.page === 'session') {
+  S.activeId = r.id;
+  S.activeTab = 'events';
+  if (S.token) ensureSessionData(r.id);
+}
 
 if (S.token) connectWS();
 render();
-
-// Rebind session rows after first render
-if (route().page === 'dashboard') bindSessionRows();
 
 // Tick status labels every 20s while on dashboard
 setInterval(() => {
   if (route().page === 'dashboard' && S.sessions.length) patchDashboard();
 }, 20000);
+
+// Prevent iOS Safari double-tap and pinch zoom
+document.addEventListener('gesturestart', e => e.preventDefault());
+document.addEventListener('gesturechange', e => e.preventDefault());
+
+// ── Hot reload (dev mode) ─────────────────────────────────────────────────
+// Polls /__static-version for file changes; auto-reloads when mtime changes.
+// Only active when the endpoint exists (TUNNEL_STATIC + STATIC_DIR on connector).
+(function() {
+  let lastMtime = null;
+  let failed = 0;
+  async function checkVersion() {
+    try {
+      const r = await fetch('/__static-version', {
+        headers: S.token ? {'Authorization': `Bearer ${S.token}`} : {}
+      });
+      if (!r.ok) { failed++; return; }
+      const data = await r.json();
+      if (lastMtime === null) { lastMtime = data.mtime; failed = 0; return; }
+      if (data.mtime !== lastMtime) {
+        // Save state before reload
+        const tc = document.getElementById('tab-content');
+        if (tc) sessionStorage.setItem('mc_scroll', tc.scrollTop);
+        const field = document.getElementById('ifield');
+        if (field && field.value) sessionStorage.setItem('mc_input', field.value);
+        location.reload(); return;
+      }
+      failed = 0;
+    } catch(_) {
+      failed++;
+    }
+  }
+  // Start polling; stop silently after 3 consecutive failures (endpoint doesn't exist)
+  const timer = setInterval(() => {
+    if (failed >= 3) { clearInterval(timer); return; }
+    if (S.token) checkVersion();
+  }, 2000);
+})();
 
 // On returning to foreground (iOS suspends WS when tab is backgrounded):
 // force-reconnect WS and re-fetch active session data so nothing is missed.
@@ -1180,6 +2566,7 @@ document.addEventListener('visibilitychange', () => {
   if (S.activeId) {
     delete S.events[S.activeId];
     delete S.outputs[S.activeId];
+    S.fetched.delete(S.activeId);
     ensureSessionData(S.activeId);
   }
 });

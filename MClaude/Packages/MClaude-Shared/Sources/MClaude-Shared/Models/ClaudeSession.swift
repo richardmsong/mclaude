@@ -17,6 +17,7 @@ public struct ClaudeSession: Codable, Identifiable, Sendable {
     public let cwd: String
     public let startedAt: Date
     public let tmuxWindow: Int
+    public let tmuxSession: String?
     public let status: SessionStatus
     public let statusSince: Date?
     public let projectName: String

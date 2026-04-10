@@ -2,7 +2,9 @@ import Foundation
 
 actor TmuxMonitor {
     private let sessionsDir: String
-    private let tmuxTarget: String
+    private let defaultTmuxSession: String
+    /// All tmux sessions we're monitoring. The default is always included.
+    private var monitoredSessions: Set<String>
     private var previousStatuses: [String: SessionStatus] = [:]
     private var statusTimestamps: [String: Date] = [:]
     private(set) var cachedSessions: [ClaudeSession] = []
@@ -16,10 +18,11 @@ actor TmuxMonitor {
 
     init(
         sessionsDir: String = "\(NSHomeDirectory())/.claude/sessions",
-        tmuxTarget: String = "0"
+        tmuxTarget: String = "mclaude"
     ) {
         self.sessionsDir = sessionsDir
-        self.tmuxTarget = tmuxTarget
+        self.defaultTmuxSession = tmuxTarget
+        self.monitoredSessions = [tmuxTarget]
     }
 
     func setOnStatusChange(_ handler: @escaping @Sendable (ClaudeSession, SessionStatus, SessionStatus) -> Void) {
@@ -34,106 +37,149 @@ actor TmuxMonitor {
         self.onOutputChanged = handler
     }
 
+    /// Discover all existing tmux sessions and add them to the monitored set.
+    private func discoverTmuxSessions() async {
+        let output = await runTmuxOutput(["list-sessions", "-F", "#{session_name}"])
+        for line in output.components(separatedBy: "\n") {
+            let name = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                monitoredSessions.insert(name)
+            }
+        }
+    }
+
+    /// Ensure a tmux session exists, creating it if needed. Adds it to the monitored set.
+    func ensureTmuxSession(_ name: String) async {
+        monitoredSessions.insert(name)
+        let exists = await runTmux(["has-session", "-t", name])
+        if !exists {
+            _ = await runTmux(["new-session", "-d", "-s", name, "-n", "harness"])
+        }
+    }
+
+    /// Build a composite session ID: "tmuxSession:windowIndex"
+    private func compositeId(tmuxSession: String, windowIndex: Int) -> String {
+        if tmuxSession == defaultTmuxSession {
+            return "\(windowIndex)"  // backward compatible for default session
+        }
+        return "\(tmuxSession):\(windowIndex)"
+    }
+
+    /// Parse a composite ID back to (tmuxSession, windowIndex)
+    private func parseId(_ id: String) -> (String, Int)? {
+        if let colonIdx = id.firstIndex(of: ":") {
+            let session = String(id[id.startIndex..<colonIdx])
+            let window = Int(id[id.index(after: colonIdx)...])
+            return window.map { (session, $0) }
+        }
+        // Legacy: plain window index = default session
+        if let window = Int(id) {
+            return (defaultTmuxSession, window)
+        }
+        return nil
+    }
+
     func getSessions(jsonlIdleSince: [String: Date] = [:], jsonlWorking: Set<String> = []) async -> [ClaudeSession] {
-        let windows = await getTmuxWindows()
+        // Auto-discover all tmux sessions so we never miss one after a server restart
+        await discoverTmuxSessions()
+
         let sessionFiles = loadSessionFiles()
+        var allSessions: [ClaudeSession] = []
 
-        // Build list of valid windows with their session files
-        struct WindowInfo {
-            let window: TmuxWindow
-            let sessionFile: ClaudeSessionFile
-        }
-        let validWindows = windows.compactMap { window -> WindowInfo? in
-            guard let pid = window.pid, let sf = sessionFiles[pid] else { return nil }
-            return WindowInfo(window: window, sessionFile: sf)
-        }
+        // Scan all monitored tmux sessions
+        for tmuxSessionName in monitoredSessions {
+            let windows = await getTmuxWindows(in: tmuxSessionName)
 
-        // Capture all panes in parallel (80 lines for broadcast, lightweight)
-        let captures: [(Int, String)] = await withTaskGroup(of: (Int, String).self) { group in
+            struct WindowInfo {
+                let window: TmuxWindow
+                let sessionFile: ClaudeSessionFile
+                let tmuxSession: String
+            }
+            let validWindows = windows.compactMap { window -> WindowInfo? in
+                guard let pid = window.pid, let sf = sessionFiles[pid] else { return nil }
+                return WindowInfo(window: window, sessionFile: sf, tmuxSession: tmuxSessionName)
+            }
+
+            // Capture all panes in parallel
+            let captures: [(Int, String)] = await withTaskGroup(of: (Int, String).self) { group in
+                for info in validWindows {
+                    group.addTask { [self] in
+                        let content = await self.capturePaneContent(tmuxSession: info.tmuxSession, window: info.window.index, lines: 80)
+                        return (info.window.index, content)
+                    }
+                }
+                var results: [(Int, String)] = []
+                for await result in group { results.append(result) }
+                return results
+            }
+            let captureMap = Dictionary(captures, uniquingKeysWith: { _, last in last })
+
             for info in validWindows {
-                group.addTask { [self] in
-                    let content = await self.capturePaneContent(window: info.window.index, lines: 80)
-                    return (info.window.index, content)
+                let paneContent = captureMap[info.window.index] ?? ""
+                var status = detectStatus(from: paneContent)
+                let prompt = detectPrompt(from: paneContent)
+                let projectName = extractProjectName(from: info.sessionFile.cwd)
+                let id = compositeId(tmuxSession: tmuxSessionName, windowIndex: info.window.index)
+
+                if jsonlWorking.contains(id) && status == .idle {
+                    status = .working
                 }
-            }
-            var results: [(Int, String)] = []
-            for await result in group { results.append(result) }
-            return results
-        }
-        let captureMap = Dictionary(captures, uniquingKeysWith: { _, last in last })
 
-        var sessions: [ClaudeSession] = []
-
-        for info in validWindows {
-            let paneContent = captureMap[info.window.index] ?? ""
-            var status = detectStatus(from: paneContent)
-            let prompt = detectPrompt(from: paneContent)
-            let projectName = extractProjectName(from: info.sessionFile.cwd)
-            let id = "\(info.window.index)"
-
-            // JSONL working state is more reliable than pane spinner detection
-            if jsonlWorking.contains(id) && status == .idle {
-                status = .working
-            }
-
-            let previousStatus = previousStatuses[id]
-            if previousStatus != status {
-                statusTimestamps[id] = Date()
-                if let prev = previousStatus {
-                    // Defer onStatusChange until after session is built
+                let previousStatus = previousStatuses[id]
+                if previousStatus != status {
+                    statusTimestamps[id] = Date()
                 }
-            }
-            previousStatuses[id] = status
+                previousStatuses[id] = status
 
-            // For idle sessions, prefer JSONL turn_duration timestamp over in-memory statusTimestamps
-            let effectiveStatusSince: Date?
-            if status == .idle, let jsonlDate = jsonlIdleSince[id] {
-                effectiveStatusSince = jsonlDate
-            } else {
-                effectiveStatusSince = statusTimestamps[id]
-            }
-
-            let session = ClaudeSession(
-                id: id,
-                pid: info.window.pid!,
-                sessionId: info.sessionFile.sessionId,
-                cwd: info.sessionFile.cwd,
-                startedAt: Date(timeIntervalSince1970: info.sessionFile.startedAt / 1000),
-                tmuxWindow: info.window.index,
-                status: status,
-                statusSince: effectiveStatusSince,
-                projectName: projectName,
-                lastOutput: "",
-                prompt: prompt
-            )
-
-            if previousStatus != status {
-                if let prev = previousStatus {
-                    onStatusChange?(session, prev, status)
+                let effectiveStatusSince: Date?
+                if status == .idle, let jsonlDate = jsonlIdleSince[id] {
+                    effectiveStatusSince = jsonlDate
+                } else {
+                    effectiveStatusSince = statusTimestamps[id]
                 }
-            }
 
-            sessions.append(session)
+                let session = ClaudeSession(
+                    id: id,
+                    pid: info.window.pid!,
+                    sessionId: info.sessionFile.sessionId,
+                    cwd: info.sessionFile.cwd,
+                    startedAt: Date(timeIntervalSince1970: info.sessionFile.startedAt / 1000),
+                    tmuxWindow: info.window.index,
+                    tmuxSession: tmuxSessionName,
+                    windowName: info.window.name,
+                    status: status,
+                    statusSince: effectiveStatusSince,
+                    projectName: projectName,
+                    lastOutput: "",
+                    prompt: prompt
+                )
 
-            // Check output change using same capture (no second tmux call)
-            let hash = String(paneContent.hashValue)
-            if outputCache[id] != hash {
-                outputCache[id] = hash
-                outputContent[id] = paneContent
-                onOutputChanged?(id, paneContent)
+                if previousStatus != status {
+                    if let prev = previousStatus {
+                        onStatusChange?(session, prev, status)
+                    }
+                }
+
+                allSessions.append(session)
+
+                let hash = String(paneContent.hashValue)
+                if outputCache[id] != hash {
+                    outputCache[id] = hash
+                    outputContent[id] = paneContent
+                    onOutputChanged?(id, paneContent)
+                }
             }
         }
 
-        // Only broadcast sessions if they changed (compare ids + statuses)
-        let sessionsHash = sessions.map { "\($0.id):\($0.status.rawValue):\($0.prompt?.question ?? "")" }.joined().hashValue
+        let sessionsHash = allSessions.map { "\($0.id):\($0.status.rawValue):\($0.prompt?.question ?? "")" }.joined().hashValue
         let oldHash = cachedSessionsHash
-        cachedSessions = sessions
+        cachedSessions = allSessions
         cachedSessionsHash = sessionsHash
         if sessionsHash != oldHash {
-            onSessionsUpdated?(sessions)
+            onSessionsUpdated?(allSessions)
         }
 
-        return sessions
+        return allSessions
     }
 
     func getCachedSessions() -> [ClaudeSession] {
@@ -145,12 +191,11 @@ actor TmuxMonitor {
     }
 
     func getMoreOutput(id: String, lines: Int) async -> String? {
-        guard let session = cachedSessions.first(where: { $0.id == id }) else { return nil }
-        return await capturePaneContent(window: session.tmuxWindow, lines: lines)
+        guard let (tmuxSession, window) = parseId(id) else { return nil }
+        return await capturePaneContent(tmuxSession: tmuxSession, window: window, lines: lines)
     }
 
     func getSession(id: String) async -> ClaudeSession? {
-        // Try cache first
         if let cached = cachedSessions.first(where: { $0.id == id }) {
             return cached
         }
@@ -159,70 +204,96 @@ actor TmuxMonitor {
     }
 
     func getPaneContent(window: Int, lines: Int = 200) async -> String {
-        return await capturePaneContent(window: window, lines: lines)
+        return await capturePaneContent(tmuxSession: defaultTmuxSession, window: window, lines: lines)
     }
 
     func sendKeys(window: Int, keys: String) async -> Bool {
-        return await runTmux(["send-keys", "-t", "\(tmuxTarget):\(window)", keys])
+        return await runTmux(["send-keys", "-t", "\(defaultTmuxSession):\(window)", keys])
+    }
+
+    func sendKeysToSession(id: String, keys: String) async -> Bool {
+        guard let (tmuxSession, window) = parseId(id) else { return false }
+        return await runTmux(["send-keys", "-t", "\(tmuxSession):\(window)", keys])
     }
 
     func sendEnter(window: Int) async -> Bool {
-        return await runTmux(["send-keys", "-t", "\(tmuxTarget):\(window)", "Enter"])
+        return await runTmux(["send-keys", "-t", "\(defaultTmuxSession):\(window)", "Enter"])
     }
 
-    func createSession(cwd: String, token: String? = nil) async -> String? {
-        // Run claude directly as the window command — window auto-closes when claude exits
-        let projectName = (cwd as NSString).lastPathComponent
-        var args = ["new-window", "-t", "\(tmuxTarget):", "-n", projectName, "-c", cwd]
+    func sendEnterToSession(id: String) async -> Bool {
+        guard let (tmuxSession, window) = parseId(id) else { return false }
+        return await runTmux(["send-keys", "-t", "\(tmuxSession):\(window)", "Enter"])
+    }
 
-        // Set CLAUDE_CODE_OAUTH_TOKEN env var for per-user auth
+    func createSession(cwd: String, token: String? = nil, tmuxSession: String? = nil, windowName: String? = nil) async -> String? {
+        let targetSession = tmuxSession ?? defaultTmuxSession
+
+        // Ensure the target tmux session exists
+        await ensureTmuxSession(targetSession)
+
+        let name = windowName ?? (cwd as NSString).lastPathComponent
+        var args = ["new-window", "-t", "\(targetSession):", "-n", name, "-c", cwd]
+
         if let token {
             args += ["-e", "CLAUDE_CODE_OAUTH_TOKEN=\(token)"]
         }
 
-        args += ["-P", "-F", "#{window_index}",
-                 "claude", "--dangerously-skip-permissions"]
+        // Resolve claude binary from PATH
+        let whichResult = await shellExec("/usr/bin/which", args: ["claude"])
+        let resolved = whichResult.1.trimmingCharacters(in: .whitespacesAndNewlines)
+        let claudePath: String
+        if !resolved.isEmpty {
+            claudePath = resolved
+        } else {
+            let candidates = ["/opt/homebrew/bin/claude", "/usr/local/bin/claude", "\(NSHomeDirectory())/.local/bin/claude"]
+            claudePath = candidates.first { FileManager.default.fileExists(atPath: $0) } ?? "claude"
+        }
+        args += ["-P", "-F", "#{window_index}", claudePath, "--dangerously-skip-permissions"]
 
         let output = await runTmuxOutput(args)
         let windowIndex = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard Int(windowIndex) != nil else { return nil }
-        return windowIndex
+        guard let idx = Int(windowIndex) else { return nil }
+        return compositeId(tmuxSession: targetSession, windowIndex: idx)
+    }
+
+    /// Get the list of monitored tmux sessions
+    func getMonitoredSessions() -> [String] {
+        return Array(monitoredSessions).sorted()
     }
 
     // MARK: - Private
 
     private struct TmuxWindow {
         let index: Int
+        let name: String
         let pid: Int?
         let command: String
         let path: String
     }
 
-    private func getTmuxWindows() async -> [TmuxWindow] {
+    private func getTmuxWindows(in tmuxSession: String) async -> [TmuxWindow] {
         let output = await runTmuxOutput([
-            "list-panes", "-s", "-t", tmuxTarget,
-            "-F", "#{window_index} #{pane_pid} #{pane_current_command} #{pane_current_path}"
+            "list-panes", "-s", "-t", tmuxSession,
+            "-F", "#{window_index} #{window_name} #{pane_pid} #{pane_current_command} #{pane_current_path}"
         ])
 
-        // Build maps: PPID -> claude PID, and claude PID set (for direct-run detection)
         let (claudeByParent, claudePids) = await getClaudeProcessMap()
 
         return output.components(separatedBy: "\n").compactMap { line in
-            let parts = line.split(separator: " ", maxSplits: 3).map(String.init)
-            guard parts.count >= 3 else { return nil }
-            let panePid = Int(parts[1]) ?? 0
-            // Check if claude is a child of the pane shell, or IS the pane process directly
+            let parts = line.split(separator: " ", maxSplits: 4).map(String.init)
+            guard parts.count >= 4 else { return nil }
+            let panePid = Int(parts[2]) ?? 0
             let claudePid = claudeByParent[panePid] ?? (claudePids.contains(panePid) ? panePid : nil)
             return TmuxWindow(
                 index: Int(parts[0]) ?? 0,
+                name: parts[1],
                 pid: claudePid,
-                command: parts[2],
-                path: parts.count > 3 ? parts[3] : ""
+                command: parts[3],
+                path: parts.count > 4 ? parts[4] : ""
             )
         }
     }
 
-    /// Scans all running claude processes and returns (PPID -> claude PID map, set of all claude PIDs)
     private func getClaudeProcessMap() async -> (byParent: [Int: Int], pids: Set<Int>) {
         let output = await Shell.exec("/bin/ps", arguments: ["-eo", "pid,ppid,args"])
 
@@ -232,7 +303,6 @@ actor TmuxMonitor {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             let parts = trimmed.split(separator: " ", maxSplits: 2).map(String.init)
             guard parts.count >= 3 else { continue }
-            // Match lines where the command is the claude binary (not claude-*, mclaude, etc.)
             let args = parts[2]
             let cmd = (args as NSString).lastPathComponent
             let cmdName = cmd.split(separator: " ", maxSplits: 1).first.map(String.init) ?? cmd
@@ -260,16 +330,14 @@ actor TmuxMonitor {
         return result
     }
 
-    private func capturePaneContent(window: Int, lines: Int = 200) async -> String {
+    private func capturePaneContent(tmuxSession: String, window: Int, lines: Int = 200) async -> String {
         return await runTmuxOutput([
-            "capture-pane", "-t", "\(tmuxTarget):\(window)", "-p", "-e",
+            "capture-pane", "-t", "\(tmuxSession):\(window)", "-p", "-e",
             "-S", "-\(lines)"
         ])
     }
 
-    /// Strip ANSI escape sequences from text
     private func stripANSI(_ text: String) -> String {
-        // Matches ESC[ ... m (SGR), ESC[ ... letter (CSI), and OSC sequences
         guard let regex = try? NSRegularExpression(pattern: "\u{1b}\\[[0-9;]*[a-zA-Z]|\u{1b}\\][^\u{07}]*\u{07}", options: []) else {
             return text
         }
@@ -280,22 +348,18 @@ actor TmuxMonitor {
         let lines = content.components(separatedBy: "\n")
         let cleaned = lines.map { stripANSI($0) }
 
-        // Look for a question line starting with "?" in the last 20 lines
         let tail = Array(cleaned.suffix(20))
         guard let questionIdx = tail.lastIndex(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("?") }) else {
             return nil
         }
 
         let questionLine = tail[questionIdx].trimmingCharacters(in: .whitespaces)
-        // Strip leading "? " prefix
         let question = String(questionLine.dropFirst(1)).trimmingCharacters(in: .whitespaces)
         guard !question.isEmpty else { return nil }
 
-        // Collect numbered options after the question line
         var options: [String] = []
         for i in (questionIdx + 1)..<tail.count {
             let line = tail[i].trimmingCharacters(in: .whitespaces)
-            // Match lines like "1. Option A" or with leading marker (arrow/highlight)
             if let match = line.range(of: #"^\d+\.\s+"#, options: .regularExpression) {
                 let optionText = String(line[match.upperBound...])
                 options.append(optionText)
@@ -316,22 +380,17 @@ actor TmuxMonitor {
         let lines = content.components(separatedBy: "\n")
         let rawTail = lines.suffix(20).joined(separator: "\n")
         let cleanTail = stripANSI(rawTail)
-        // Check the very last few lines for the idle prompt — this is definitive
         let bottomClean = stripANSI(lines.suffix(5).joined(separator: "\n"))
 
-        // If the input prompt is visible at the bottom, Claude is idle
-        // (regardless of spinner colors in scrollback above)
         let idlePrompts = ["bypass permissions", "shift+tab to cycle", "tab to cycle"]
         let isAtPrompt = idlePrompts.contains { bottomClean.contains($0) }
 
-        // Check for plan mode
         if cleanTail.contains("plan and is ready to execute") ||
            cleanTail.contains("Plan is ready") ||
            cleanTail.contains("execute this plan") {
             return .planMode
         }
 
-        // Check for permission prompts
         if cleanTail.contains("Do you want to") ||
            cleanTail.contains("Allow this") ||
            cleanTail.contains("Approve?") ||
@@ -340,8 +399,6 @@ actor TmuxMonitor {
             return .needsPermission
         }
 
-        // Detect working BEFORE idle check — spinner colors appear even when
-        // the status bar (which contains "bypass permissions") is visible
         let spinnerColors = ["174", "216", "180", "210"]
         for color in spinnerColors {
             if rawTail.contains("\u{1b}[38;5;\(color)m") {
@@ -349,7 +406,6 @@ actor TmuxMonitor {
             }
         }
 
-        // Fallback: check for working indicator text patterns in clean output
         let workingPatterns = ["Running…", "Ideating…", "Caramelizing…", "Thinking…",
                                "Brewing…", "Generating…", "Analyzing…", "Processing…",
                                "Compacting conversation"]
@@ -359,12 +415,10 @@ actor TmuxMonitor {
             }
         }
 
-        // If at the prompt and no working indicators, it's idle
         if isAtPrompt {
             return .idle
         }
 
-        // No prompt, no spinner — likely working (output streaming)
         return .working
     }
 
@@ -381,7 +435,6 @@ actor TmuxMonitor {
         return await shellExec("/opt/homebrew/bin/tmux", args: args).1
     }
 
-    /// Runs a process off the actor's thread to avoid blocking
     private nonisolated func shellExec(_ path: String, args: [String]) async -> (Bool, String) {
         await withCheckedContinuation { continuation in
             DispatchQueue.global().async {
@@ -394,7 +447,6 @@ actor TmuxMonitor {
 
 // Helper to run a process and capture output
 enum Shell {
-    /// Synchronous process execution — must be called off the main/actor thread
     static func syncExec(_ path: String, arguments: [String]) -> (Bool, String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
@@ -410,7 +462,6 @@ enum Shell {
             return (false, "")
         }
 
-        // Read ALL data before waitUntilExit to avoid pipe buffer deadlock
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()

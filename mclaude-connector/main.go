@@ -8,14 +8,18 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 )
 
@@ -33,6 +37,24 @@ type TunnelMsg struct {
 	Binary  bool                `json:"binary,omitempty"`
 	Code    int                 `json:"code,omitempty"`
 	Reason  string              `json:"reason,omitempty"`
+	Rows    int                 `json:"rows,omitempty"`
+	Cols    int                 `json:"cols,omitempty"`
+}
+
+// API prefixes that should always be proxied to mclaude-server.
+var apiPrefixes = []string{
+	"/sessions", "/projects", "/skills",
+	"/screenshots", "/files", "/telemetry",
+	"/auth/", "/ws", "/tunnel", "/health",
+}
+
+func isAPIPath(path string) bool {
+	for _, prefix := range apiPrefixes {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") || strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // Connector maintains a persistent tunnel WebSocket to the relay and proxies
@@ -42,6 +64,8 @@ type Connector struct {
 	tunnelToken   string
 	mclaudeURL    string
 	serviceToken  string
+	staticDir     string // local directory for static files (empty = proxy all to mclaude-server)
+	hostname      string // short hostname sent to relay for multi-laptop identification
 	tlsSkipVerify bool
 
 	sendMu  sync.Mutex
@@ -51,21 +75,32 @@ type Connector struct {
 	wsMu    sync.Mutex
 	wsConns map[string]*websocket.Conn
 
+	ptyMu       sync.Mutex
+	ptySessions map[string]*ptyEntry
+
 	httpClient *http.Client
 	wsDialer   *websocket.Dialer
 
 	sendSeq atomic.Uint64
 }
 
-func NewConnector(relayURL, tunnelToken, mclaudeURL, serviceToken string, tlsSkipVerify bool) *Connector {
+type ptyEntry struct {
+	ptmx *os.File
+	cmd  *exec.Cmd
+}
+
+func NewConnector(relayURL, tunnelToken, mclaudeURL, serviceToken, staticDir, hostname string, tlsSkipVerify bool) *Connector {
 	tlsCfg := &tls.Config{InsecureSkipVerify: tlsSkipVerify} //nolint:gosec
 	return &Connector{
 		relayURL:      relayURL,
 		tunnelToken:   tunnelToken,
 		mclaudeURL:    mclaudeURL,
 		serviceToken:  serviceToken,
+		staticDir:     staticDir,
+		hostname:      hostname,
 		tlsSkipVerify: tlsSkipVerify,
 		wsConns:       make(map[string]*websocket.Conn),
+		ptySessions:   make(map[string]*ptyEntry),
 		httpClient: &http.Client{
 			Timeout:   25 * time.Second,
 			Transport: &http.Transport{TLSClientConfig: tlsCfg},
@@ -105,6 +140,7 @@ func (c *Connector) connect() error {
 
 	hdr := http.Header{}
 	hdr.Set("Authorization", "Bearer "+c.tunnelToken)
+	hdr.Set("X-Hostname", c.hostname)
 
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), hdr)
 	if err != nil {
@@ -130,6 +166,15 @@ func (c *Connector) connect() error {
 			delete(c.wsConns, id)
 		}
 		c.wsMu.Unlock()
+
+		// close all PTY sessions
+		c.ptyMu.Lock()
+		for id, entry := range c.ptySessions {
+			entry.ptmx.Close()
+			entry.cmd.Process.Kill()
+			delete(c.ptySessions, id)
+		}
+		c.ptyMu.Unlock()
 	}()
 
 	log.Println("tunnel connected")
@@ -170,12 +215,30 @@ func (c *Connector) handle(msg *TunnelMsg) {
 		c.handleWSMessage(msg)
 	case "ws_close":
 		c.handleWSClose(msg)
+	case "pty_connect":
+		c.handlePtyConnect(msg)
+	case "pty_data":
+		c.handlePtyData(msg)
+	case "pty_resize":
+		c.handlePtyResize(msg)
+	case "pty_close":
+		c.handlePtyClose(msg)
 	}
 }
 
 // ── HTTP proxy ─────────────────────────────────────────────────────────────
 
 func (c *Connector) handleHTTP(msg *TunnelMsg) {
+	// Serve static files from local disk when configured and path is non-API
+	if c.staticDir != "" && !isAPIPath(msg.Path) {
+		if msg.Path == "/__static-version" {
+			c.serveStaticVersion(msg)
+			return
+		}
+		c.serveStaticFile(msg)
+		return
+	}
+
 	rawURL := strings.TrimSuffix(c.mclaudeURL, "/") + msg.Path
 	if msg.Query != "" {
 		rawURL += "?" + msg.Query
@@ -230,6 +293,68 @@ func (c *Connector) handleHTTP(msg *TunnelMsg) {
 		Status:  resp.StatusCode,
 		Headers: respHeaders,
 		Body:    base64.StdEncoding.EncodeToString(body),
+	})
+}
+
+// serveStaticFile reads a file from the local static directory and sends it
+// back through the tunnel. Enables editing files locally and refreshing the
+// remote browser without redeploying anything.
+func (c *Connector) serveStaticFile(msg *TunnelMsg) {
+	path := msg.Path
+	if path == "" || path == "/" {
+		path = "/index.html"
+	}
+
+	// Sanitise: clean the path, ensure it stays under staticDir
+	cleaned := filepath.Clean(path)
+	if strings.Contains(cleaned, "..") {
+		c.sendErrorResp(msg.ID, http.StatusForbidden, "invalid path")
+		return
+	}
+
+	filePath := filepath.Join(c.staticDir, cleaned)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		c.sendErrorResp(msg.ID, http.StatusNotFound, "not found")
+		return
+	}
+
+	ct := mime.TypeByExtension(filepath.Ext(filePath))
+	if ct == "" {
+		ct = http.DetectContentType(data)
+	}
+
+	c.send(&TunnelMsg{ //nolint:errcheck
+		Type:   "http_response",
+		ID:     msg.ID,
+		Status: http.StatusOK,
+		Headers: map[string][]string{
+			"content-type":  {ct},
+			"cache-control": {"no-cache, no-store, must-revalidate"},
+		},
+		Body: base64.StdEncoding.EncodeToString(data),
+	})
+}
+
+// serveStaticVersion returns the mtime of index.html so the web app can
+// detect changes and auto-reload.
+func (c *Connector) serveStaticVersion(msg *TunnelMsg) {
+	indexPath := filepath.Join(c.staticDir, "index.html")
+	info, err := os.Stat(indexPath)
+	if err != nil {
+		c.sendErrorResp(msg.ID, http.StatusNotFound, "index.html not found")
+		return
+	}
+	body := fmt.Sprintf(`{"mtime":%d}`, info.ModTime().UnixMilli())
+	c.send(&TunnelMsg{ //nolint:errcheck
+		Type:   "http_response",
+		ID:     msg.ID,
+		Status: http.StatusOK,
+		Headers: map[string][]string{
+			"content-type":  {"application/json"},
+			"cache-control": {"no-cache, no-store"},
+		},
+		Body: base64.StdEncoding.EncodeToString([]byte(body)),
 	})
 }
 
@@ -337,6 +462,98 @@ func (c *Connector) notifyWSClose(id string, code int, reason string) {
 	c.send(&TunnelMsg{Type: "ws_close", ID: id, Code: code, Reason: reason}) //nolint:errcheck
 }
 
+// ── PTY bridge ────────────────────────────────────────────────────────────
+
+func (c *Connector) handlePtyConnect(msg *TunnelMsg) {
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/bash"
+	}
+
+	cmd := exec.Command(shell)
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		c.send(&TunnelMsg{Type: "pty_close", ID: msg.ID, Reason: err.Error()}) //nolint:errcheck
+		return
+	}
+
+	if msg.Rows > 0 && msg.Cols > 0 {
+		pty.Setsize(ptmx, &pty.Winsize{Rows: uint16(msg.Rows), Cols: uint16(msg.Cols)}) //nolint:errcheck
+	}
+
+	c.ptyMu.Lock()
+	c.ptySessions[msg.ID] = &ptyEntry{ptmx: ptmx, cmd: cmd}
+	c.ptyMu.Unlock()
+
+	log.Printf("pty session started: %s (shell=%s)", msg.ID, shell)
+
+	// Read PTY output → tunnel
+	go func() {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := ptmx.Read(buf)
+			if n > 0 {
+				c.send(&TunnelMsg{ //nolint:errcheck
+					Type: "pty_data",
+					ID:   msg.ID,
+					Data: base64.StdEncoding.EncodeToString(buf[:n]),
+				})
+			}
+			if err != nil {
+				break
+			}
+		}
+		cmd.Wait() //nolint:errcheck
+		c.ptyMu.Lock()
+		delete(c.ptySessions, msg.ID)
+		c.ptyMu.Unlock()
+		c.send(&TunnelMsg{Type: "pty_close", ID: msg.ID, Reason: "exited"}) //nolint:errcheck
+		log.Printf("pty session ended: %s", msg.ID)
+	}()
+}
+
+func (c *Connector) handlePtyData(msg *TunnelMsg) {
+	c.ptyMu.Lock()
+	entry, ok := c.ptySessions[msg.ID]
+	c.ptyMu.Unlock()
+	if !ok {
+		return
+	}
+	data, err := base64.StdEncoding.DecodeString(msg.Data)
+	if err != nil {
+		return
+	}
+	entry.ptmx.Write(data) //nolint:errcheck
+}
+
+func (c *Connector) handlePtyResize(msg *TunnelMsg) {
+	c.ptyMu.Lock()
+	entry, ok := c.ptySessions[msg.ID]
+	c.ptyMu.Unlock()
+	if !ok {
+		return
+	}
+	if msg.Rows > 0 && msg.Cols > 0 {
+		pty.Setsize(entry.ptmx, &pty.Winsize{Rows: uint16(msg.Rows), Cols: uint16(msg.Cols)}) //nolint:errcheck
+	}
+}
+
+func (c *Connector) handlePtyClose(msg *TunnelMsg) {
+	c.ptyMu.Lock()
+	entry, ok := c.ptySessions[msg.ID]
+	if ok {
+		delete(c.ptySessions, msg.ID)
+	}
+	c.ptyMu.Unlock()
+	if ok {
+		entry.ptmx.Close()
+		entry.cmd.Process.Kill()
+		log.Printf("pty session closed: %s", msg.ID)
+	}
+}
+
 // ── Entry point ────────────────────────────────────────────────────────────
 
 func main() {
@@ -355,11 +572,31 @@ func main() {
 	if mclaudeURL == "" {
 		mclaudeURL = "http://localhost:8377"
 	}
+	staticDir := os.Getenv("STATIC_DIR")
+
+	// Hostname for multi-laptop identification.
+	// Defaults to short hostname (before first dot). Override with CONNECTOR_NAME.
+	hostname := os.Getenv("CONNECTOR_NAME")
+	if hostname == "" {
+		h, err := os.Hostname()
+		if err != nil {
+			h = "unknown"
+		}
+		if idx := strings.Index(h, "."); idx > 0 {
+			h = h[:idx]
+		}
+		hostname = h
+	}
+
 	if tlsSkipVerify {
 		log.Println("TLS verification disabled for mclaude-server (TLS_SKIP_VERIFY=true)")
 	}
 
-	log.Printf("mclaude-connector starting  relay=%s  mclaude=%s", relayURL, mclaudeURL)
-	conn := NewConnector(relayURL, tunnelToken, mclaudeURL, serviceToken, tlsSkipVerify)
+	if staticDir != "" {
+		log.Printf("Serving static files from local disk: %s", staticDir)
+	}
+
+	log.Printf("mclaude-connector starting  relay=%s  mclaude=%s  hostname=%s", relayURL, mclaudeURL, hostname)
+	conn := NewConnector(relayURL, tunnelToken, mclaudeURL, serviceToken, staticDir, hostname, tlsSkipVerify)
 	conn.Run()
 }

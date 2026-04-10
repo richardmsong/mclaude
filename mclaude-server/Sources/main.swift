@@ -16,7 +16,8 @@ print("  Host: \(host)")
 print("  Port: \(port)")
 print("  Poll interval: \(pollInterval)s")
 
-let monitor = TmuxMonitor()
+let tmuxTarget = ProcessInfo.processInfo.environment["MCLAUDE_TMUX_TARGET"] ?? "mclaude"
+let monitor = TmuxMonitor(tmuxTarget: tmuxTarget)
 let notifier = SignalNotifier(recipientPhone: signalRecipient)
 let broadcaster = WSBroadcaster()
 let jsonlTailer = JSONLTailer()
