@@ -90,10 +90,10 @@ struct SessionDetailView: View {
                     Task { await viewModel.send(client: appState.client, id: sessionId) }
                 },
                 onPhoto: { data in
-                    Task { await viewModel.sendScreenshot(client: appState.client, id: sessionId, imageData: data) }
+                    Task { await viewModel.sendScreenshot(client: appState.client, id: sessionId, laptop: session?.laptop, imageData: data) }
                 },
                 onFile: { data, filename in
-                    Task { await viewModel.sendFile(client: appState.client, id: sessionId, data: data, filename: filename) }
+                    Task { await viewModel.sendFile(client: appState.client, id: sessionId, laptop: session?.laptop, data: data, filename: filename) }
                 },
                 onVoiceSend: { transcript in
                     Task { await viewModel.sendVoice(client: appState.client, id: sessionId, text: transcript) }

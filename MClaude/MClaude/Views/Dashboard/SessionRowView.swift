@@ -35,6 +35,17 @@ struct SessionRowView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
+                    if let laptop = session.laptop {
+                        Text(laptop)
+                            .font(.caption2)
+                            .fontWeight(.medium)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(.tint.opacity(0.12))
+                            .foregroundStyle(.tint)
+                            .clipShape(Capsule())
+                    }
+
                     Text(session.cwd)
                         .font(.caption)
                         .foregroundStyle(.secondary)

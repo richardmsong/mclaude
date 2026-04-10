@@ -77,10 +77,11 @@ public struct APIClient: Sendable {
         let (_, _) = try await session.data(for: request)
     }
 
-    public func uploadScreenshot(imageData: Data) async throws -> String {
+    public func uploadScreenshot(imageData: Data, laptop: String? = nil) async throws -> String {
         let url = config.baseURL.appendingPathComponent("screenshots")
         var request = authedRequest(url: url, method: "POST")
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        if let laptop { request.setValue(laptop, forHTTPHeaderField: "X-Laptop-ID") }
         request.httpBody = imageData
         request.timeoutInterval = 30
         let (data, _) = try await session.data(for: request)
@@ -88,11 +89,12 @@ public struct APIClient: Sendable {
         return payload["path"] ?? ""
     }
 
-    public func uploadFile(data: Data, filename: String) async throws -> String {
+    public func uploadFile(data: Data, filename: String, laptop: String? = nil) async throws -> String {
         let url = config.baseURL.appendingPathComponent("files")
         var request = authedRequest(url: url, method: "POST")
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         request.setValue(filename, forHTTPHeaderField: "X-Filename")
+        if let laptop { request.setValue(laptop, forHTTPHeaderField: "X-Laptop-ID") }
         request.httpBody = data
         request.timeoutInterval = 60
         let (responseData, _) = try await session.data(for: request)

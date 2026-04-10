@@ -851,7 +851,7 @@ func (r *Relay) HandleClientWS(w http.ResponseWriter, req *http.Request) {
 		})
 	}
 
-	// phone → relay → all tunnels
+	// phone → relay → tunnel(s)
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
@@ -860,8 +860,41 @@ func (r *Relay) HandleClientWS(w http.ResponseWriter, req *http.Request) {
 			if err != nil {
 				break
 			}
+
+			// For load_more commands, route to the specific tunnel that owns
+			// the session and unprefix the session ID before forwarding.
+			if msgType == websocket.TextMessage {
+				var cmd struct {
+					Type  string `json:"type"`
+					ID    string `json:"id"`
+					Lines int    `json:"lines"`
+				}
+				if json.Unmarshal(data, &cmd) == nil && cmd.Type == "load_more" && cmd.ID != "" {
+					hostname, realID := parsePrefixedID(cmd.ID)
+					client.tunnelIDsMu.Lock()
+					tunnelWsID, ok := client.tunnelIDs[hostname]
+					client.tunnelIDsMu.Unlock()
+					if ok {
+						if t := r.getTunnel(hostname); t != nil {
+							rewritten, _ := json.Marshal(map[string]interface{}{
+								"type":  "load_more",
+								"id":    realID,
+								"lines": cmd.Lines,
+							})
+							t.send(&TunnelMsg{ //nolint:errcheck
+								Type:   "ws_message",
+								ID:     tunnelWsID,
+								Data:   base64.StdEncoding.EncodeToString(rewritten),
+								Binary: false,
+							})
+						}
+					}
+					continue
+				}
+			}
+
 			encoded := base64.StdEncoding.EncodeToString(data)
-			// Forward to all tunnels
+			// Forward all other messages to all tunnels
 			client.tunnelIDsMu.Lock()
 			for hostname, tunnelWsID := range client.tunnelIDs {
 				if t := r.getTunnel(hostname); t != nil {
