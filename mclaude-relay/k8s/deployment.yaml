@@ -33,6 +33,10 @@ spec:
                 secretKeyRef:
                   name: mclaude-relay-secrets
                   key: WEB_TOKEN
+            - name: TUNNEL_STATIC
+              value: "true"
+            - name: TUNNEL_STATIC_HOST
+              value: "VGW232GG6F"
           resources:
             requests:
               cpu: 50m

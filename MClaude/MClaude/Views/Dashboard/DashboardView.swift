@@ -7,6 +7,7 @@ struct DashboardView: View {
     @State private var projects: [ProjectInfo] = []
     @State private var isLoadingProjects = false
     @State private var useTmux = true
+    @State private var tmuxFilter: String? = nil  // nil = default, "all" = all, or specific name
 
     var body: some View {
         NavigationStack {
@@ -39,6 +40,9 @@ struct DashboardView: View {
                             .padding(.vertical, 6)
                             .background(.ultraThinMaterial)
                         }
+                        if tmuxSessions.count > 1 {
+                            tmuxFilterBar
+                        }
                         sessionList
                     }
                 }
@@ -65,8 +69,63 @@ struct DashboardView: View {
         }
     }
 
+    private var tmuxSessions: [String] {
+        let names = Set(appState.sessions.compactMap { $0.tmuxSession })
+        return names.sorted()
+    }
+
+    private var defaultTmuxSession: String {
+        let names = tmuxSessions
+        if names.contains("mclaude") { return "mclaude" }
+        return names.first ?? "mclaude"
+    }
+
+    private var filteredSessions: [ClaudeSession] {
+        if tmuxFilter == "all" { return appState.sessions }
+        let target = tmuxFilter ?? defaultTmuxSession
+        return appState.sessions.filter { ($0.tmuxSession ?? defaultTmuxSession) == target }
+    }
+
+    private var tmuxFilterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(tmuxSessions, id: \.self) { name in
+                    let isActive = tmuxFilter != "all" && (tmuxFilter ?? defaultTmuxSession) == name
+                    Button {
+                        tmuxFilter = name == defaultTmuxSession && tmuxFilter == nil ? nil : name
+                    } label: {
+                        Text(name)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(isActive ? Color.accentColor : Color(.systemGray5))
+                            .foregroundStyle(isActive ? .white : .secondary)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+                Button {
+                    tmuxFilter = "all"
+                } label: {
+                    Text("All")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(tmuxFilter == "all" ? Color.accentColor : Color(.systemGray5))
+                        .foregroundStyle(tmuxFilter == "all" ? .white : .secondary)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
+    }
+
     private var sessionList: some View {
-        List(appState.sessions) { session in
+        List(filteredSessions) { session in
             NavigationLink(value: session.id) {
                 SessionRowView(session: session)
             }
