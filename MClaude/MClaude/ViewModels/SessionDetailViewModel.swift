@@ -150,11 +150,11 @@ final class SessionDetailViewModel {
         isSending = false
     }
 
-    func sendScreenshot(client: APIClient, id: String, imageData: Data) async {
+    func sendScreenshot(client: APIClient, id: String, laptop: String? = nil, imageData: Data) async {
         isSending = true
         actionError = nil
         do {
-            let path = try await client.uploadScreenshot(imageData: imageData)
+            let path = try await client.uploadScreenshot(imageData: imageData, laptop: laptop)
             try await client.sendInput(id: id, text: path, sendEnter: true)
         } catch {
             actionError = "Screenshot upload failed"
@@ -162,11 +162,11 @@ final class SessionDetailViewModel {
         isSending = false
     }
 
-    func sendFile(client: APIClient, id: String, data: Data, filename: String) async {
+    func sendFile(client: APIClient, id: String, laptop: String? = nil, data: Data, filename: String) async {
         isSending = true
         actionError = nil
         do {
-            let path = try await client.uploadFile(data: data, filename: filename)
+            let path = try await client.uploadFile(data: data, filename: filename, laptop: laptop)
             try await client.sendInput(id: id, text: path, sendEnter: true)
         } catch {
             actionError = "File upload failed"
