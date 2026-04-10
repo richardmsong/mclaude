@@ -38,3 +38,10 @@ dist/
 # SideStore VPN (subproject)
 sidestore-vpn/
 .google-token.json
+.mclaude-env
+
+# Binary artifacts
+mclaude-connector/mclaude-connector
+mclaude-relay/relay-linux
+mclaude-relay/mclaude-relay
+mclaude-relay/mclaude-connector

@@ -21,6 +21,8 @@ struct ClaudeSession: Codable, Sendable {
     let cwd: String
     let startedAt: Date
     let tmuxWindow: Int
+    let tmuxSession: String  // which tmux session this window lives in
+    let windowName: String   // tmux window name (custom label or cwd basename)
     let status: SessionStatus
     let statusSince: Date?
     let projectName: String
@@ -54,7 +56,9 @@ struct ProjectInfo: Codable, Sendable {
 struct CreateSessionRequest: Codable, Sendable {
     let cwd: String
     let token: String?
-    let runtime: String?  // "tmux" (default) or "k8s"
+    let runtime: String?      // "tmux" (default) or "k8s"
+    let tmuxSession: String?  // target tmux session name (default: server's configured session)
+    let windowName: String?   // custom tmux window name (default: cwd basename)
 }
 
 // MARK: - Multi-user

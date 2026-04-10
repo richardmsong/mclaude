@@ -2,7 +2,7 @@ package main
 
 import (
 	"embed"
-	"fmt"
+	"encoding/json"
 	"io/fs"
 	"log"
 	"net/http"
@@ -40,13 +40,40 @@ func main() {
 		log.Fatal("TUNNEL_TOKEN and WEB_TOKEN env vars are required")
 	}
 
+	tunnelStatic := os.Getenv("TUNNEL_STATIC") == "1" || os.Getenv("TUNNEL_STATIC") == "true"
+	tunnelStaticHost := os.Getenv("TUNNEL_STATIC_HOST") // which laptop serves static files
+
 	relay := NewRelay(tunnelToken, webToken)
 
-	subFS, err := fs.Sub(staticFiles, "static")
-	if err != nil {
-		log.Fatalf("static fs: %v", err)
+	// Static file serving strategy:
+	// 1. TUNNEL_STATIC=true → relay proxies static requests through tunnel to connector
+	//    TUNNEL_STATIC_HOST pins to a specific laptop (default: any available)
+	// 2. STATIC_DIR or ./static on disk → serve from disk (hot-reload on VM)
+	// 3. Fallback → serve from embedded binary
+	var fileServer http.Handler
+	if tunnelStatic {
+		if tunnelStaticHost != "" {
+			log.Printf("Static files will be served via tunnel from host: %s", tunnelStaticHost)
+		} else {
+			log.Printf("Static files will be served via tunnel (any host)")
+		}
+	} else {
+		staticDir := os.Getenv("STATIC_DIR")
+		if staticDir == "" {
+			staticDir = "static"
+		}
+		if info, err := os.Stat(staticDir); err == nil && info.IsDir() {
+			log.Printf("Serving static files from disk: %s (hot-reload enabled)", staticDir)
+			fileServer = http.FileServer(http.Dir(staticDir))
+		} else {
+			log.Printf("Serving static files from embedded binary")
+			subFS, err := fs.Sub(staticFiles, "static")
+			if err != nil {
+				log.Fatalf("static fs: %v", err)
+			}
+			fileServer = http.FileServer(http.FS(subFS))
+		}
 	}
-	fileServer := http.FileServer(http.FS(subFS))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +83,7 @@ func main() {
 		if r.Method == http.MethodOptions {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Filename")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Filename, X-Laptop-ID")
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -67,23 +94,44 @@ func main() {
 			return
 		}
 
+		// PTY WebSocket endpoint — browser shell connects here
+		if path == "/ws/pty" {
+			relay.HandlePtyWS(w, r)
+			return
+		}
+
 		// WebSocket endpoint — phone/browser connects here
 		if path == "/ws" {
 			relay.HandleClientWS(w, r)
 			return
 		}
 
-		// Relay-native health (no auth, no proxy)
+		// Health endpoint (no auth)
 		if path == "/health" {
-			relay.mu.RLock()
-			connected := relay.tunnel != nil
-			relay.mu.RUnlock()
-			status := "disconnected"
-			if connected {
-				status = "connected"
-			}
+			laptops := relay.ConnectedLaptops()
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"status":"ok","tunnel":"%s"}`, status)
+			data := map[string]interface{}{
+				"status":  "ok",
+				"tunnels": len(laptops),
+				"laptops": laptops,
+			}
+			json.NewEncoder(w).Encode(data) //nolint:errcheck
+			return
+		}
+
+		// Laptops endpoint (no auth)
+		if path == "/laptops" {
+			laptops := relay.ConnectedLaptops()
+			w.Header().Set("Content-Type", "application/json")
+			type laptopInfo struct {
+				ID        string `json:"id"`
+				Connected bool   `json:"connected"`
+			}
+			result := make([]laptopInfo, len(laptops))
+			for i, l := range laptops {
+				result[i] = laptopInfo{ID: l, Connected: true}
+			}
+			json.NewEncoder(w).Encode(result) //nolint:errcheck
 			return
 		}
 
@@ -93,8 +141,16 @@ func main() {
 			return
 		}
 
-		// Static web app
-		fileServer.ServeHTTP(w, r)
+		// Static web app — either tunnel to connector or serve locally
+		if tunnelStatic {
+			host := tunnelStaticHost
+			if host == "" {
+				host = "default"
+			}
+			relay.HandleTunnelStatic(w, r, host)
+		} else {
+			fileServer.ServeHTTP(w, r)
+		}
 	})
 
 	log.Printf("mclaude-relay listening on :%s", port)

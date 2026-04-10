@@ -257,7 +257,7 @@ actor K8sSessionManager {
                 if let prev = previousStatus {
                     let session = ClaudeSession(
                         id: id, pid: 0, sessionId: podName, cwd: "/workspace",
-                        startedAt: parseISO8601(createdAt), tmuxWindow: 0,
+                        startedAt: parseISO8601(createdAt), tmuxWindow: 0, tmuxSession: "k8s", windowName: project,
                         status: status, statusSince: statusTimestamps[id],
                         projectName: project, lastOutput: "", prompt: nil
                     )
@@ -268,7 +268,7 @@ actor K8sSessionManager {
 
             let session = ClaudeSession(
                 id: id, pid: 0, sessionId: podName, cwd: "/workspace",
-                startedAt: parseISO8601(createdAt), tmuxWindow: 0,
+                startedAt: parseISO8601(createdAt), tmuxWindow: 0, tmuxSession: "k8s", windowName: project,
                 status: status, statusSince: statusTimestamps[id],
                 projectName: project, lastOutput: "", prompt: nil
             )
