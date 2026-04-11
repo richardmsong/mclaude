@@ -488,7 +488,7 @@ func (c *Connector) handlePtyConnect(msg *TunnelMsg) {
 		}
 		cmd = exec.Command(shell)
 	}
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "GLAMOUR_STYLE=dark")
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
