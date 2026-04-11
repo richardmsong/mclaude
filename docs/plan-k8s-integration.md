@@ -515,6 +515,23 @@ DELETE /scim/v2/Users/{id}     IdP deprovisions user → delete namespace
 GET    /scim/v2/Users          IdP syncs user list
 ```
 
+**Break-glass admin (not exposed via nginx)**
+
+HTTP endpoints that mirror the NATS project API. Used only when NATS is down — normal operation goes through NATS request/reply. Access via `kubectl port-forward`:
+
+```bash
+kubectl port-forward -n mclaude-system deploy/mclaude-control-plane 9090:9090
+```
+
+```
+POST   /admin/projects           create project Deployment + PVC (same as NATS projects.create)
+DELETE /admin/projects/{id}      delete project
+GET    /admin/projects           list projects for user (reads Postgres, not NATS KV)
+POST   /admin/sessions/{id}/stop kill session (sends SIGTERM to pod)
+```
+
+These endpoints bind to a separate port (`:9090`) that is never referenced in the nginx config. No ingress rule, no external exposure. Authenticated via a static bearer token in a K8s Secret (`mclaude-admin-token` in `mclaude-system`), independent of NATS JWTs.
+
 ### User provisioning flow
 
 ```
@@ -524,7 +541,7 @@ GET    /scim/v2/Users          IdP syncs user list
 4. kubectl create namespace mclaude-{userId}
 5. kubectl apply ServiceAccount, Role, RoleBinding in namespace
 6. Store NATS creds in K8s Secret user-secrets in namespace
-7. Publish mclaude.admin.users.created to NATS
+7. Publish mclaude.admin.users.created to NATS  ← fire-and-forget, non-fatal
 ```
 
 ### Project provisioning flow
@@ -991,10 +1008,12 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /ready  # checks Postgres + NATS connections
+    path: /ready  # checks Postgres connection only — NATS outage must not mark pod unready
     port: 8080
   periodSeconds: 10
 ```
+
+`/health` (liveness) never checks NATS — the pod must stay alive and port-forwardable even when NATS is down, so the break-glass admin port (`:9090`) remains reachable.
 
 **NATS pod:** use the official NATS Helm chart — includes probes by default.
 
