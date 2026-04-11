@@ -156,11 +156,15 @@ enum JSONLParser {
 
     static func parseAssistantEvent(json: [String: Any], uuid: String, timestamp: String) -> SessionEvent? {
         guard let message = json["message"] as? [String: Any],
-              let contentArray = message["content"] as? [[String: Any]],
-              let firstBlock = contentArray.first,
-              let blockType = firstBlock["type"] as? String else { return nil }
+              let contentArray = message["content"] as? [[String: Any]] else { return nil }
 
         let model = message["model"] as? String
+
+        // Prioritize tool_use blocks (e.g. AskUserQuestion may follow a text block)
+        let toolBlock = contentArray.first(where: { $0["type"] as? String == "tool_use" })
+        let firstBlock = toolBlock ?? contentArray.first
+        guard let firstBlock = firstBlock,
+              let blockType = firstBlock["type"] as? String else { return nil }
 
         switch blockType {
         case "thinking":

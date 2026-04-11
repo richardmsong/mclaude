@@ -37,15 +37,18 @@ actor TmuxMonitor {
         self.onOutputChanged = handler
     }
 
-    /// Discover all existing tmux sessions and add them to the monitored set.
+    /// Sync monitoredSessions to only include sessions that actually exist in tmux.
+    /// Removes stale entries (avoids tmux falling back to the attached session for missing names).
     private func discoverTmuxSessions() async {
         let output = await runTmuxOutput(["list-sessions", "-F", "#{session_name}"])
-        for line in output.components(separatedBy: "\n") {
+        let existing = Set(output.components(separatedBy: "\n").compactMap { line -> String? in
             let name = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !name.isEmpty {
-                monitoredSessions.insert(name)
-            }
-        }
+            return name.isEmpty ? nil : name
+        })
+        // Add newly discovered sessions
+        for name in existing { monitoredSessions.insert(name) }
+        // Remove sessions that no longer exist (prevents tmux fallback to attached session)
+        monitoredSessions = monitoredSessions.filter { existing.contains($0) }
     }
 
     /// Ensure a tmux session exists, creating it if needed. Adds it to the monitored set.

@@ -1,220 +1,672 @@
-# K8s Integration Plan
+# mclaude Platform Architecture
 
-## Context
+## Overview
 
-mclaude already has a `K8sSessionManager` that creates pods and sends input via `kubectl exec`. This plan completes the integration using a **pod-per-project** model: one pod per git repo runs tmux, and each Claude Code session is a tmux window inside it. Multiple branches are handled via git worktrees within the same pod. Sessions share a filesystem naturally — enabling monorepo multi-session, agent-agent via filesystem, and shared Docker. On pod restart, a session manifest on the PVC lets the entrypoint relaunch all windows with `claude --resume`.
+Two services + infrastructure. The relay, connector, server, and controller collapse into simpler, well-scoped components. The session agent communicates with Claude Code via the structured stream-json protocol (the same protocol used by VS Code and JetBrains IDE extensions), eliminating tmux, JSONL tailing, and screen scraping entirely.
 
-Each user gets their own namespace (`mclaude-{userId}`) with a **per-namespace mclaude-server** Deployment that connects to the relay via WebSocket tunnel. A **mclaude-controller** in the system namespace handles provisioning (namespaces, RBAC, server Deployments). The relay is a network proxy only — no cluster management.
+| Component | Language | Role |
+|-----------|----------|------|
+| `mclaude-session-agent` | Go | Spawns headless Claude Code processes, routes stream-json events to/from NATS. Same binary on laptop and in K8s pod. |
+| `mclaude-user-management` | Go | Identity + K8s provisioning. Auth, SSO, SCIM, namespaces, project Deployments. |
+| `mclaude-cli` | Go | Debug attach tool. Thin text REPL over unix socket to session agent. |
+| NATS JetStream | — | Event bus, state (KV), routing between all components and clients. |
+| Postgres | — | Users table only. Lives in `mclaude-system`. |
+| nginx ingress | — | Dumb reverse proxy. No routing logic, no auth. |
+| SPA | TypeScript | Web client. Mobile browser first. |
 
-### Anthropic API Access
+**Gone:**
 
-In environments where cluster egress to `api.anthropic.com` is blocked (corporate firewalls), an HTTP CONNECT proxy (e.g., Squid) is required. All project pods set `HTTPS_PROXY` to route Anthropic API calls through the proxy.
-
-```
-HTTPS_PROXY=http://{proxy-host}:{proxy-port}
-```
-
-Claude Code (Go HTTP client) respects `HTTPS_PROXY` natively. The proxy should whitelist only `api.anthropic.com` via ACL (e.g., Squid `dstdomain`). See Step 0 for recommended Squid setup.
-
-**Proxy URL is configurable** — injected via env var on the project Deployment, not hardcoded. Environments without egress restrictions omit the proxy entirely.
+| Old component | Replaced by |
+|---------------|-------------|
+| `mclaude-relay` | nginx ingress |
+| `mclaude-connector` | session agent connects to NATS directly |
+| `mclaude-server` | collapsed into session agent |
+| `mclaude-controller` | merged into user-management |
+| Per-namespace Postgres | central Postgres (users only) + NATS KV (state) |
+| Per-namespace mclaude-server | session agent runs inside each project pod |
+| tmux | Claude Code runs headless via `--print --output-format stream-json` |
+| JSONL tailing | stream-json stdout provides real-time events |
+| Screen scraping / capture-pane | `session_state_changed` events + `control_request` protocol |
+| Protobuf event schema | Claude Code's stream-json IS the canonical event schema |
 
 ---
 
 ## Architecture
 
-### 3-Tier Storage
+```
+                    nginx ingress (mclaude-system)
+                    /auth  /api  /scim → user-management
+                    /nats             → NATS WebSocket proxy
+                    /*                → SPA static files
+                           │
+           ┌───────────────┼───────────────┐
+           ▼               ▼               ▼
+   user-management       NATS            SPA
+   (Postgres)       (JetStream + KV)
+                          │
+          ┌───────────────┼───────────────┐
+          ▼               ▼               ▼
+   session-agent    session-agent   session-agent
+   (K8s pod)        (K8s pod)       (laptop daemon)
+     │                │                │
+     ▼                ▼                ▼
+   claude             claude           claude
+   (headless          (headless        (headless
+    stream-json)       stream-json)     stream-json)
+```
 
-| Tier | Scope | K8s Resource | Contents |
-|------|-------|-------------|----------|
-| **User** | Per namespace (`mclaude-{userId}`) | ConfigMap + Secret + Postgres | `CLAUDE.md`, `settings.json`, skills, commands, MCP config, credentials, session/event metadata |
-| **Project** | Per project PVC | PVC (RWO) | Bare git repo, worktrees, JSONL files, shared memory |
-| **Session** | Per tmux window | Row in Postgres `sessions` table | Metadata in DB, JSONL files on project PVC |
-| **Home** | Per pod (emptyDir) | emptyDir | Seeded from Secret + ConfigMap on boot. Writable, ephemeral. Not shared across project pods. |
+Clients (browser, laptop agent) connect to NATS via `/nats` WebSocket proxy through nginx. K8s session agents connect to NATS directly (in-cluster). NATS subject-based permissions enforce tenant isolation — users can only pub/sub on `mclaude.{userId}.>`.
 
-JSONL lives on the project PVC, not ephemeral storage, so it survives pod restarts and `claude --resume` works.
+### Claude Code Integration
 
-### Home Directory (ephemeral emptyDir)
+The session agent spawns Claude Code headless:
 
-`$HOME` is an emptyDir — fresh on every pod start, writable, not persisted, not shared across project pods. This is by design: credentials belong in K8s Secrets (encrypted at rest, K8s RBAC-scoped), not on any persistent storage that's browsable at the infrastructure layer.
+```bash
+claude --print --verbose \
+  --output-format stream-json \
+  --input-format stream-json \
+  --session-id {sessionId}
+```
 
-**On boot**, the entrypoint seeds `$HOME` from:
+For session resume after pod restart:
 
-- K8s Secret: SSH keys, OAuth tokens, PATs, `.netrc`, any user-defined credential files
-- ConfigMap: `settings.json`, `CLAUDE.md`, commands, skills (non-sensitive Claude config)
+```bash
+claude --print --verbose \
+  --output-format stream-json \
+  --input-format stream-json \
+  --resume {sessionId}
+```
 
-**During the session**, agents can write anything to `$HOME` — install tools, update PATH, write credentials. Other sessions in the same pod see changes immediately (shared emptyDir). But changes are lost on pod restart.
+Claude Code still writes JSONL internally (its own persistence for `--resume`). The session agent never reads JSONL.
 
-**Persisting user config changes**: config-sync sidecar watches `~/.claude/settings.json` and `CLAUDE.md` for changes, patches the ConfigMap. These survive pod restarts via re-seeding.
+### Stream-JSON Protocol
 
-**Persisting new credentials**: user adds them via the secrets management UI. The UI patches the K8s Secret, next pod start picks them up. Credential changes made by agents during a session (e.g., `gh auth login`) are ephemeral — they work for the life of the pod but are not automatically persisted.
+**Output (stdout)** — Claude Code emits NDJSON events:
 
-**Tradeoff**: `$HOME` is not shared across project pods. An agent installing a tool in project A won't be visible in project B. This is accepted — cross-project home sharing requires a shared filesystem (Azure Files), which exposes secrets at the Azure RBAC layer.
+```json
+{"type": "system", "subtype": "init", "skills": [...], "tools": [...], "agents": [...], "model": "..."}
+{"type": "system", "subtype": "session_state_changed", "state": "idle"}
+{"type": "system", "subtype": "session_state_changed", "state": "running"}
+{"type": "system", "subtype": "session_state_changed", "state": "requires_action"}
+{"type": "assistant", "content": [...], "model": "...", "usage": {...}}
+{"type": "user", "message": {...}}
+{"type": "control_request", "request_id": "abc", "request": {"subtype": "can_use_tool", "tool_name": "Bash", ...}}
+{"type": "result", "subtype": "success", "usage": {...}, "duration_ms": 1234}
+```
 
-### CLAUDE.md Tiers
+**Input (stdin)** — session agent writes:
 
-Claude Code has a native managed policy location for organization-wide instructions: `/etc/claude-code/CLAUDE.md` on Linux. This is the highest priority tier — loaded before everything else, cannot be excluded by users.
+```json
+{"type": "user", "message": {"role": "user", "content": "fix the bug"}}
+{"type": "user", "message": {"role": "user", "content": "/commit -m 'Fix bug'"}}
+{"type": "control_response", "response": {"subtype": "success", "request_id": "abc", "response": {"behavior": "allow"}}}
+{"type": "control_request", "request": {"subtype": "interrupt"}}
+{"type": "control_request", "request": {"subtype": "reload_plugins"}}
+```
 
-| Tier | Location | Controlled by | Persisted how | Can user override? |
-|------|----------|--------------|--------------|-------------------|
-| **Global (managed policy)** | `/etc/claude-code/CLAUDE.md` | mclaude platform | Baked into session image (or mounted from `mclaude-system` ConfigMap) | No |
-| **User** | `~/.claude/CLAUDE.md` | Individual user | ConfigMap via config-sync sidecar | Yes |
-| **Project** | `{worktree}/CLAUDE.md` | Repo (committed) | Git | Yes |
+Skills work via plain text `/commit` messages in user content. Capabilities are queryable at runtime via `reload_plugins` control request.
 
-Claude Code also supports `~/.claude/rules/*.md` for modular user-level rules, and `{repo}/.claude/rules/*.md` for project-level rules. These are additive.
+---
 
-**Global CLAUDE.md contents** (platform conventions):
+## NATS Subject Structure
+
+### API (request/reply)
+
+```
+mclaude.{userId}.{projectId}.api.sessions.create
+mclaude.{userId}.{projectId}.api.sessions.delete
+mclaude.{userId}.{projectId}.api.sessions.input
+mclaude.{userId}.{projectId}.api.sessions.control    → permission responses, interrupts
+mclaude.{userId}.{projectId}.api.sessions.restart
+mclaude.{userId}.api.projects.create    → user-management
+mclaude.{userId}.api.projects.delete    → user-management
+mclaude.{userId}.api.projects.list      → user-management
+```
+
+### Events (JetStream, append-only)
+
+```
+mclaude.{userId}.{projectId}.events.{sessionId}       → Claude Code stream-json events
+mclaude.{userId}.{projectId}.lifecycle.{sessionId}     → session agent lifecycle events
+```
+
+`events` carries raw stream-json objects from Claude Code stdout, wrapped in a thin envelope with sessionId and userId. `lifecycle` carries session agent's own events (created, stopped, resumed, debug attached/detached).
+
+Separate subjects so clients can subscribe to one or both. Stream-json events are high-volume; lifecycle events are low-volume state transitions.
+
+Stream `MCLAUDE_EVENTS` captures all `mclaude.*.*.events.*` subjects. Retained 30 days.
+Stream `MCLAUDE_LIFECYCLE` captures all `mclaude.*.*.lifecycle.*` subjects. Retained 30 days.
+
+### State (KV)
+
+```
+KV bucket: mclaude-sessions
+  key: {userId}/{projectId}/{sessionId}  → Session JSON (see below)
+
+KV bucket: mclaude-projects
+  key: {userId}/{projectId}              → Project JSON (see below)
+```
+
+Watching a KV key gives real-time state updates to any subscriber. Clients watch their own user's keys.
+
+---
+
+## NATS Authentication
+
+**Operator**: platform root NKey — generated once at install, held by user-management.
+
+**Login flow**:
+
+```
+1. Client POST /auth/login → user-management
+2. Validate credentials against Postgres
+3. Issue NATS User JWT scoped to mclaude.{userId}.>
+4. Return { natsUrl, jwt, nkeySeed } to client
+5. Client connects to wss://mclaude.example.com/nats using JWT
+6. NATS broker validates JWT, enforces subject permissions
+```
+
+**Per-user JWT** (8h expiry, re-issued on refresh):
+
+```json
+{
+  "nats": {
+    "pub": { "allow": ["mclaude.{userId}.>", "_INBOX.>"] },
+    "sub": { "allow": ["mclaude.{userId}.>", "_INBOX.>"] },
+    "expires": 28800
+  }
+}
+```
+
+**Per-session-agent credentials** (provisioned by user-management, long-lived):
+
+```json
+{
+  "nats": {
+    "pub": { "allow": ["mclaude.{userId}.>"] },
+    "sub": { "allow": ["mclaude.{userId}.>"] }
+  }
+}
+```
+
+Enforced at the NATS broker. A client with alice's JWT cannot subscribe to `mclaude.bob.>` — the broker rejects it cryptographically. No application-level auth checks needed in pub/sub paths.
+
+`_INBOX.>` permission is required on all clients for NATS request/reply responses.
+
+---
+
+## mclaude-session-agent
+
+Single Go binary. Runs as a container inside each K8s project pod, or as a standalone daemon on a laptop. Identical code path — the only difference is how it connects to NATS.
+
+### What it does
+
+- Subscribes to `mclaude.{userId}.{projectId}.api.>` — handles session CRUD, input, and control messages
+- Spawns Claude Code as child processes with `--print --verbose --output-format stream-json --input-format stream-json`
+- Routes stdout JSON events → NATS JetStream (with thin envelope: sessionId, userId, timestamp)
+- Routes NATS input/control messages → Claude stdin
+- Filters noise from stdout (keep_alive, internal hooks) before publishing
+- Tracks session state from `session_state_changed` events, writes to NATS KV
+- Caches capabilities from `init` event (skills, tools, agents, model)
+- Exposes unix socket for `mclaude-cli` debug attach
+- On startup, reads NATS KV for existing sessions → relaunches with `--resume`
+
+No tmux. No JSONL tailing. No screen scraping. No HTTP server.
+
+### Core loop (simplified)
+
+```go
+cmd := exec.Command("claude",
+    "--print", "--verbose",
+    "--output-format", "stream-json",
+    "--input-format", "stream-json",
+    "--session-id", sessionID)
+
+stdin, _ := cmd.StdinPipe()
+stdout, _ := cmd.StdoutPipe()
+
+// stdout → NATS
+go func() {
+    scanner := bufio.NewScanner(stdout)
+    for scanner.Scan() {
+        line := scanner.Bytes()
+        event := parseEventType(line) // quick JSON field check
+        if event == "keep_alive" { continue }
+        if event == "session_state_changed" { updateKV(line) }
+        nats.Publish("session."+id+".events", envelope(line))
+    }
+}()
+
+// NATS → stdin
+go func() {
+    sub := nats.Subscribe("session."+id+".input")
+    for msg := range sub.Chan() {
+        stdin.Write(msg.Data)
+        stdin.Write([]byte("\n"))
+    }
+}()
+```
+
+### Session operations
+
+| NATS subject | Action |
+|--------------|--------|
+| `…api.sessions.create` | `exec.Command("claude", "--print", "--verbose", "--output-format", "stream-json", "--input-format", "stream-json", "--session-id", id, "-w", cwd)` |
+| `…api.sessions.delete` | Send interrupt control request → wait for exit → kill if timeout |
+| `…api.sessions.input` | Write user message JSON to stdin pipe |
+| `…api.sessions.control` | Write control_response JSON to stdin pipe (permission approvals, interrupts, model changes) |
+| `…api.sessions.restart` | Kill process → relaunch with `--resume {sessionId}` |
+
+### Startup / recovery
+
+```
+1. Read NATS KV for all sessions with this projectId
+2. For each session with a sessionId:
+   claude --print --verbose --output-format stream-json --input-format stream-json --resume {sessionId}
+3. Begin NATS subscriptions
+4. Begin reading stdout from all child processes
+```
+
+No HTTP polling. No dependency on another service being up. Session state is in NATS KV — always available.
+
+### Debug attach (mclaude-cli)
+
+Session agent exposes a unix socket per session at `/tmp/mclaude-session-{id}.sock`. The `mclaude-cli` tool connects and provides a text REPL:
+
+```bash
+$ mclaude-cli attach abc-123
+[session abc-123, state: idle]
+> fix the failing tests
+[state: running]
+[assistant: I'll look at the test failures...]
+[tool_use: Bash "npm test"]
+[control_request: Allow Bash "npm test"? (y/n)] y
+[tool_result: 3 tests passing, 1 failing...]
+[assistant: The issue is in...]
+> /commit -m "Fix test"
+[skill expanding...]
+```
+
+Text REPL wraps input as stream-json user messages, displays assistant text, prompts on control_requests. ~150 lines of Go.
+
+For K8s: `kubectl exec -it pod -- mclaude-cli attach {sessionId}`
+
+### Laptop mode
+
+On a laptop, the agent runs as a daemon (launchd on macOS, systemd on Linux):
+
+- Connects to NATS via `wss://mclaude.example.com/nats` (outbound, works behind NAT/firewall)
+- Uses `mclaude.{userId}.laptop.{hostname}.api.>` subjects
+- Spawns Claude Code as child processes (same as K8s mode)
+- NATS JWT issued by user-management on first setup, stored in `~/.config/mclaude/creds`
+
+The browser connects to the same NATS and subscribes to `mclaude.{userId}.laptop.{hostname}.events.>` — same flow as K8s sessions.
+
+### Worktrees
+
+Branch slugification: `feature/auth` → `feature-auth` (replace `/` and non-alphanumeric with `-`, lowercase).
+
+On session create:
+1. Compute `branchSlug = slugify(branch)`
+2. `git -C /data/repo worktree add /data/worktrees/{branchSlug} {branch}`
+3. Set cwd to `/data/worktrees/{branchSlug}/{cwd}`
+4. Write to NATS KV with `branch` (raw) and `worktree` (slug)
+
+On session delete:
+1. Send interrupt → wait for Claude exit
+2. If no other sessions use this worktree: `git -C /data/repo worktree remove /data/worktrees/{branchSlug}`
+3. Delete from NATS KV
+
+---
+
+## Event Schema
+
+Claude Code's stream-json protocol is the canonical event schema. No protobuf translation layer. Events flow from Claude Code → NATS → clients unchanged.
+
+The session agent adds a thin envelope for NATS routing:
+
+```json
+{
+  "sessionId": "abc-123",
+  "userId": "alice",
+  "projectId": "proj-1",
+  "ts": "2026-04-11T10:00:00Z",
+  "event": { ... raw stream-json object ... }
+}
+```
+
+### Session state (NATS KV)
+
+```json
+{
+  "id": "abc-123",
+  "projectId": "proj-1",
+  "branch": "feature/auth",
+  "worktree": "feature-auth",
+  "cwd": "/data/worktrees/feature-auth",
+  "name": "Fix auth bug",
+  "state": "idle",
+  "stateSince": "2026-04-11T10:00:00Z",
+  "createdAt": "2026-04-11T09:00:00Z",
+  "model": "claude-sonnet-4-6",
+  "capabilities": {
+    "skills": ["commit", "review-pr", "init"],
+    "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
+    "agents": ["general-purpose", "Explore", "Plan"]
+  },
+  "pendingControl": null
+}
+```
+
+`state` maps directly from stream-json `session_state_changed` events: `"idle"`, `"running"`, `"requires_action"`.
+
+`pendingControl` is set when a `control_request` is received and cleared when the `control_response` is sent. Clients use this to show permission prompts.
+
+`capabilities` is populated from the `init` event on session start and refreshed via `reload_plugins`.
+
+### Project state (NATS KV)
+
+```json
+{
+  "id": "proj-1",
+  "name": "mclaude",
+  "gitUrl": "git@github.com:org/mclaude.git",
+  "status": "running",
+  "sessionCount": 2,
+  "worktrees": ["main", "feature-auth"],
+  "createdAt": "2026-04-01T00:00:00Z",
+  "lastActiveAt": "2026-04-11T10:00:00Z"
+}
+```
+
+### Session agent lifecycle events
+
+Published on `mclaude.{userId}.{projectId}.lifecycle.{sessionId}` — separate from the stream-json event stream:
+
+```json
+{"type": "session_created", "sessionId": "abc-123", "ts": "..."}
+{"type": "session_stopped", "sessionId": "abc-123", "exitCode": 0, "ts": "..."}
+{"type": "session_resumed", "sessionId": "abc-123", "ts": "..."}
+{"type": "debug_attached", "sessionId": "abc-123", "ts": "..."}
+{"type": "debug_detached", "sessionId": "abc-123", "ts": "..."}
+```
+
+Clients subscribe to lifecycle for session list updates (new sessions appearing, sessions dying). Subscribe to events for the active conversation view. Keeps the high-volume Claude output separate from low-volume state transitions.
+
+---
+
+## mclaude-user-management
+
+Single Go service in `mclaude-system`. ClusterRole for K8s provisioning. Owns Postgres. Issues NATS JWTs.
+
+### Endpoints
+
+**Auth**
+
+```
+POST /auth/login                local credentials → NATS JWT + nkey seed
+POST /auth/refresh              refresh NATS JWT
+GET  /auth/sso/{provider}       initiate SSO (Entra, Okta)
+GET  /auth/sso/{provider}/cb    SSO callback → NATS JWT
+```
+
+**Users (admin)**
+
+```
+POST   /users         create user + provision K8s namespace
+GET    /users         list users
+DELETE /users/{id}    deprovision user + delete namespace
+```
+
+**Projects**
+
+```
+POST   /api/projects           create project Deployment + PVC
+DELETE /api/projects/{id}      delete project (PVC retained unless ?purge=true)
+GET    /api/projects           list projects for user (reads NATS KV)
+GET    /api/projects/{id}      get project status (reads NATS KV)
+```
+
+**SCIM 2.0** (enterprise IdP provisioning)
+
+```
+POST   /scim/v2/Users          IdP provisions user → create + provision namespace
+PUT    /scim/v2/Users/{id}     IdP updates user
+DELETE /scim/v2/Users/{id}     IdP deprovisions user → delete namespace
+GET    /scim/v2/Users          IdP syncs user list
+```
+
+### User provisioning flow
+
+```
+1. User created (local POST /users, SSO first login, or SCIM push)
+2. INSERT into Postgres users table
+3. Generate NATS NKey credentials for session agent
+4. kubectl create namespace mclaude-{userId}
+5. kubectl apply ServiceAccount, Role, RoleBinding in namespace
+6. Store NATS creds in K8s Secret user-secrets in namespace
+7. Publish mclaude.admin.users.created to NATS
+```
+
+### Project provisioning flow
+
+```
+1. Client publishes mclaude.{userId}.api.projects.create
+2. user-management receives via NATS request/reply
+3. kubectl apply Deployment + PVC in mclaude-{userId}
+4. Write Project JSON to NATS KV mclaude-projects/{userId}/{projectId}
+5. Reply with projectId
+6. Pod starts, session-agent connects to NATS, begins subscriptions
+```
+
+### Postgres schema
+
+```sql
+CREATE TABLE users (
+    id            TEXT PRIMARY KEY,
+    display_name  TEXT NOT NULL,
+    email         TEXT UNIQUE,
+    password_hash TEXT,              -- null for SSO-only users
+    google_id     TEXT UNIQUE,
+    created_at    TIMESTAMPTZ DEFAULT now(),
+    last_login_at TIMESTAMPTZ
+);
+
+CREATE TABLE nats_credentials (
+    user_id    TEXT REFERENCES users(id) ON DELETE CASCADE,
+    nkey_seed  TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+```
+
+Schema migrations managed by dbmate init container on user-management Deployment.
+
+---
+
+## Pod Structure (one per project)
+
+```
+Pod: project-{projectId}            namespace: mclaude-{userId}
+├── container: session-agent
+│   image: mclaude-session-agent:{version}
+│   ├── project PVC      → /data/              (RW) repo, worktrees, shared-memory
+│   ├── nix-store PVC    → /nix/               (RWX) shared Nix store (per-namespace)
+│   ├── claude-home      → ~/.claude/           (RW) emptyDir, ephemeral
+│   ├── user-config      → ~/.claude-seed/      (RO) ConfigMap seed
+│   └── user-secrets     → ~/.user-secrets/     (RO) Secret
+├── container: config-sync
+│   image: mclaude-config-sync:{version}
+│   watches ~/.claude/ → patches user-config ConfigMap on change
+└── container: dockerd-rootless     (optional — per-project flag)
+    image: docker:dind-rootless
+    # Validate rootless Docker works on target AKS nodes before enabling.
+    # Default: disabled.
+```
+
+`/data/` layout:
+
+```
+/data/
+  repo/             bare git repo
+  worktrees/
+    main/
+    feature-auth/
+  shared-memory/    auto-memory symlinked across all worktrees
+  projects/         symlinked to ~/.claude/projects/ (JSONL history — Claude's own, for --resume)
+```
+
+---
+
+## 3-Tier Storage
+
+| Tier | Scope | Storage | Contents |
+|------|-------|---------|----------|
+| **User** | Per namespace | ConfigMap + Secret | CLAUDE.md, settings.json, skills, commands, credentials |
+| **Project** | Per project | PVC (RWO, managed-csi-premium) | Bare git repo, worktrees, JSONL (Claude's own persistence), shared memory |
+| **Session** | Per session | NATS KV | id, branch, worktree, cwd, state, capabilities, pendingControl |
+| **Home** | Per pod | emptyDir | Seeded from ConfigMap + Secret on boot. Ephemeral. |
+
+---
+
+## Home Directory + Config Sync
+
+`$HOME` is an emptyDir — fresh on every pod start, writable, not persisted. Credentials belong in K8s Secrets, not on browsable storage.
+
+**On boot**, entrypoint seeds `$HOME` from:
+- K8s Secret: SSH keys, OAuth token, `.gitconfig`
+- ConfigMap: `settings.json`, `CLAUDE.md`, commands, skills
+
+**config-sync sidecar** watches `~/.claude/settings.json` and `CLAUDE.md` for writes via inotify. On change, patches the `user-config` ConfigMap. Survives pod restarts via re-seeding.
+
+`mclaude-config-sync` is a **dedicated image** with inotify-tools, kubectl, and jq pre-installed. Do not use runtime `apk add` — it fails in air-gapped environments.
+
+---
+
+## Managed Platform Config
+
+Global CLAUDE.md at `/etc/claude-code/CLAUDE.md` — loaded before all user config, cannot be excluded.
 
 ```markdown
 # MClaude Platform
 
 ## Environment
-You are running in a Kubernetes pod. Key paths:
-- `/data/repo/` — bare git repo (shared across worktrees)
-- `/data/worktrees/{branch}/` — git worktrees (one per branch)
-- `/data/shared-memory/` — auto-memory shared across all worktrees
+You are running in a Kubernetes pod.
+- `/data/repo/` — bare git repo
+- `/data/worktrees/{branch}/` — git worktrees
+- `/data/shared-memory/` — auto-memory shared across worktrees
 - `$HOME` is ephemeral — rebuilt on every pod restart
 
-## Shell Conventions
-- Never write secrets directly to `~/.zshrc` — it is synced to a ConfigMap.
-- Use `~/.zshrc.local` for session-scoped shell additions (ephemeral).
-- Secrets are available as env vars via `~/.env.secrets` (sourced by .zshrc).
-- To add a persistent secret, ask the user to add it via the secrets UI or OpenBao.
-
-## Credentials
-- Do not hardcode tokens, passwords, or keys in any persisted file
-  (CLAUDE.md, settings.json, .zshrc).
-- Credentials in `$HOME` are ephemeral — they work for this session
-  but are lost on pod restart.
-
 ## Git
-- Worktrees are managed by the platform. To work on a new branch,
-  ask the user to create a new session — do not use `git checkout`
-  or `git switch` (these are blocked by platform hooks).
-- The bare repo is at `/data/repo/`. Do not modify it directly.
-- Push/pull works normally within a worktree.
+Branch switching is managed by the platform. Do not use `git checkout` or `git switch`.
+The bare repo is at `/data/repo/`. Do not modify it directly.
 
 ## Tool Installation
-- Use `pkg install <package>` to install tools.
-- Do not use `apt install` or `apt-get` — they are not available.
-- Tools are cached and shared across all project pods automatically.
-- Installed tools persist across pod restarts.
+Use `pkg install <package>`. Do not use `apt install` or `apt-get`.
+Tools are cached in the shared Nix store and persist across pod restarts.
+
+## Shell
+- `~/.zshrc.local` for ephemeral shell additions (not synced)
+- `~/.env.secrets` for credentials (sourced by .zshrc, written by entrypoint)
+- Do not write secrets to `~/.zshrc` — it syncs to ConfigMap
 
 ## Docker
-- Docker is available via the dockerd-rootless sidecar.
-- `DOCKER_HOST` is pre-configured.
+Docker is available via `DOCKER_HOST` if enabled for this project.
 ```
 
-**Platform hooks** (enforced via `/etc/claude-code/settings.json`, cannot be overridden):
-
-Claude Code hooks intercept Bash commands at execution time — both agent-initiated and user `!` commands. This is stricter than CLAUDE.md instructions, which agents can ignore.
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hook": "/etc/claude-code/hooks/guard.sh"
-      }
-    ]
-  }
-}
-```
-
-**Guard script** (`/etc/claude-code/hooks/guard.sh`, baked into session image):
+Platform hooks enforce constraints at execution time:
 
 ```bash
 #!/bin/bash
+# /etc/claude-code/hooks/guard.sh
 COMMAND=$(cat | jq -r '.input.command // empty')
 
-# Block git branch switching (platform manages worktrees)
 if echo "$COMMAND" | grep -qE '^\s*git\s+(checkout|switch)\s'; then
-    echo "BLOCK: Branch switching is managed by the platform. Create a new session for a different branch." >&2
+    echo "BLOCK: Branch switching is managed by the platform." >&2
     exit 2
 fi
-
-# Block real apt (use pkg shim)
 if echo "$COMMAND" | grep -qE '(^|\s|/)(apt-get|apt)\s+install'; then
     echo "BLOCK: Use 'pkg install <package>' instead." >&2
     exit 2
 fi
-
-# Block modifying managed platform config
 if echo "$COMMAND" | grep -qE '/etc/claude-code/'; then
     echo "BLOCK: Managed platform config cannot be modified." >&2
     exit 2
 fi
-
-# Block nuking critical paths
 if echo "$COMMAND" | grep -qE 'rm\s+(-rf|-fr)\s+/(data/repo|nix|etc)\b'; then
     echo "BLOCK: Cannot delete platform-managed directories." >&2
     exit 2
 fi
-
 exit 0
 ```
 
-The CLAUDE.md explains *why* (so agents understand and don't try workarounds). The hooks *enforce* it. Two layers.
+---
 
-**Updating the global CLAUDE.md**: either rebuild the session image (for baked-in changes) or mount it from a ConfigMap in `mclaude-system` namespace (for dynamic updates without image rebuilds). The ConfigMap approach is preferred — the controller applies it during provisioning, and platform admins can update it cluster-wide.
+## Tool Installation (Nix)
 
-### Tool Installation (Nix + shared store)
-
-The session image ships with Nix (single-user mode, ~100MB). `apt` and `brew` are shimmed to Nix so agents can use familiar commands. The Nix store (`/nix/`) lives on a shared Azure Files volume (RWX, standard tier) — install a tool in any project pod and it's immediately available in all pods.
-
-**Three volumes per project pod**:
-
-| Mount | Storage | Contains | Sensitive? |
-|-------|---------|----------|-----------|
-| `$HOME` | emptyDir | Dotfiles, credentials | Yes — ephemeral, protected |
-| `/data/` | project PVC (RWO, `managed-csi-premium`) | Code, worktrees, memory | No |
-| `/nix/` | Azure Files (RWX, `azurefile-csi`) | Package binaries, Nix store | No — public packages only |
-
-**Nix store PVC** (one per namespace, shared across all project pods):
-
-```yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: nix-store
-  namespace: mclaude-{userId}
-spec:
-  accessModes: [ReadWriteMany]
-  storageClassName: azurefile-csi
-  resources:
-    requests:
-      storage: 20Gi
-```
-
-**Shims** (in session image at `/usr/local/bin/`):
+Nix store (`/nix/`) lives on an Azure Files PVC (RWX) — one per namespace, shared across all project pods. Install a tool in any pod and it's immediately available in all pods for that user.
 
 ```bash
-#!/bin/bash
-# /usr/local/bin/apt — shim that redirects to nix
+# /usr/local/bin/pkg — shim
 if [ "$1" = "install" ]; then
-    shift; for pkg in "$@"; do nix profile install "nixpkgs#$pkg"; done
+    shift; for p in "$@"; do nix profile install "nixpkgs#$p"; done
 elif [ "$1" = "remove" ]; then
-    shift; for pkg in "$@"; do nix profile remove "nixpkgs#$pkg"; done
-else
-    echo "apt is shimmed to nix. Use: apt install <package>"
+    shift; for p in "$@"; do nix profile remove "$p"; done
 fi
 ```
 
-Users who want devbox, mise, or any other tool manager can install it via Nix: `nix profile install nixpkgs#devbox`. The platform doesn't opinionate beyond providing Nix as the foundation.
+`apt` and `brew` are shimmed to `pkg`. Users who want devbox, mise, etc. install via `pkg install devbox`.
 
-### Projects, Worktrees, and Sessions
+---
 
-| Concept | What it is | K8s resource | Shared across sessions? |
-|---------|-----------|-------------|------------------------|
-| **Project** | A git repo | Deployment + PVC | Yes — bare repo, Docker, auto-memory |
-| **Worktree** | A branch checkout | Directory on PVC | Only sessions on the same branch |
-| **Session** | A Claude Code process | tmux window | Shares worktree + project memory |
-
-**Default flow**: each new session gets its own worktree (new branch checkout = isolation). Option to join an existing worktree for collaboration (e.g. monorepo multi-agent on the same branch).
-
-**Auto-memory sharing**: Claude Code keys auto-memory by working directory (`~/.claude/projects/{encoded-cwd}/memory/`). Different worktrees have different cwds, so they'd get separate memories by default. Since project-level memories (feedback, context, references) should be shared across all branches, a background process in the entrypoint symlinks each worktree's memory directory to a single shared location on the PVC:
+## Entrypoint (session-agent container)
 
 ```bash
+#!/bin/bash
+set -e
+
+# Consume secrets
+[ -f "/home/node/.user-secrets/id_rsa" ] && {
+    mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+    cp /home/node/.user-secrets/id_rsa "$HOME/.ssh/id_rsa"
+    chmod 600 "$HOME/.ssh/id_rsa"
+    ssh-keyscan github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
+}
+[ -f "/home/node/.user-secrets/.gitconfig" ] && \
+    cp /home/node/.user-secrets/.gitconfig "$HOME/.gitconfig"
+[ -f "/home/node/.user-secrets/oauth-token" ] && \
+    export CLAUDE_CODE_OAUTH_TOKEN=$(cat /home/node/.user-secrets/oauth-token)
+
+# Seed user config (emptyDir is fresh each boot — always copy)
+for f in CLAUDE.md settings.json; do
+    [ -f "/home/node/.claude-seed/$f" ] && \
+        cp "/home/node/.claude-seed/$f" "$HOME/.claude/$f"
+done
+for d in commands skills; do
+    [ -d "/home/node/.claude-seed/$d" ] && \
+        cp -r "/home/node/.claude-seed/$d" "$HOME/.claude/$d"
+done
+
+# Link JSONL history to PVC (Claude's own persistence for --resume)
+mkdir -p /data/projects
+ln -sf /data/projects "$HOME/.claude/projects"
+
+# Skip onboarding
+echo '{"hasCompletedOnboarding":true,"bypassPermissions":true}' > "$HOME/.claude.json"
+
+# Git setup (bare repo — worktrees created by session agent)
+if [ -n "$GIT_URL" ]; then
+    if [ ! -d "/data/repo/HEAD" ]; then
+        git clone --bare "$GIT_URL" /data/repo || {
+            echo "[entrypoint] Git clone failed — exiting for restart"
+            exit 1
+        }
+    else
+        git -C /data/repo fetch --all --prune || true
+    fi
+    mkdir -p /data/worktrees
+fi
+
+# Shared memory — symlink each worktree's memory dir to /data/shared-memory/
 mkdir -p /data/shared-memory
 (while true; do
     for dir in "$HOME/.claude/projects"/*/; do
@@ -225,444 +677,253 @@ mkdir -p /data/shared-memory
     done
     sleep 5
 done) &
+
+# Wait for dockerd if enabled
+[ "${DOCKER_ENABLED}" = "true" ] && \
+    while [ ! -S /var/run/docker.sock ]; do sleep 0.5; done
+
+# Hand off to session agent — no tmux, spawns Claude as child processes
+exec session-agent \
+    --nats-url    "${NATS_URL}" \
+    --nats-creds  "/home/node/.user-secrets/nats-creds" \
+    --user-id     "${USER_ID}" \
+    --project-id  "${PROJECT_ID}" \
+    --data-dir    /data \
+    --mode        k8s
 ```
 
-Concurrent memory writes are rare (once per conversation at most). Worst case is a lost index line in MEMORY.md — the memory file itself still exists on disk.
+The `session-agent` binary handles everything after setup: NATS subscription, session recovery from KV, Claude process management, event routing.
 
-**Non-git projects**: not every project needs a repo. "Empty project" creates a PVC with no git setup — scratch space, prototyping, non-code work.
-
-**Runtime differences**:
-
-| Runtime | Structure | Primary action | Worktree isolation? |
-|---------|-----------|---------------|-------------------|
-| **K8s** | Project cards → sessions (with branch labels) | "New session" (creates worktree + session) | Yes — each session gets its own worktree by default |
-| **Laptop/VM** | Flat session list | "New session" (tmux window) | Same — worktrees work on VMs too |
-
-Worktrees work identically on both runtimes. The only K8s-specific concept is the project pod lifecycle (idle teardown, PVC persistence). On a laptop, the "project" is just a directory.
-
-**New session dialog (same on K8s and VM)**:
-
-```
-┌─────────────────────────────────────────┐
-│  New session                            │
-│                                         │
-│  Project: [myapp ▾]  or  [Clone repo]   │
-│                           [Empty project]│
-│                                         │
-│  Branch:  [feature/auth ▾] [new branch] │
-│  Path:    [/] (optional subdirectory)   │
-│                                         │
-│  ☐ Join existing worktree               │
-│    (share files with other sessions     │
-│     on this branch)                     │
-│                                         │
-│  [Create]                               │
-└─────────────────────────────────────────┘
-```
-
-"Clone repo" accepts any git URL, or if connected to GHES, offers search/autocomplete. "Join existing worktree" is unchecked by default — checking it adds the session to an existing worktree instead of creating a new one. This is the advanced flow for multi-agent collaboration on the same branch.
-
-**API**:
-
-- `POST /projects` with `{"gitUrl": "...", "name": "myapp"}` → creates project Deployment + PVC, returns `projectId`
-- `GET /projects` → lists projects (pod status, session count, worktrees)
-- `DELETE /projects/:id` → scales Deployment to 0 (PVC retained unless `?purge=true`)
-- `POST /sessions` with `{"projectId": "myapp", "branch": "main", "cwd": "/", "joinWorktree": false}` → creates worktree + session (or joins existing worktree if `joinWorktree: true`)
-- `DELETE /sessions/:id` → kills session, cleans up worktree if no other sessions use it
-- `POST /sessions/:id/restart` → kills + relaunches with `--resume`
-
-**UI layout**:
-
-- Main view: project cards, each showing its sessions grouped by branch
-- **"New session"** is the primary action — prominent button, top of the page. If no projects exist, prompts to create one first.
-- Each project card shows sessions inline with branch labels
-- Project `···` menu: delete project, view PVC usage
-- Session `···` menu: restart session, delete session
-
-### Pod Structure (one per project)
-
-```
-Pod: project-{projectId}-xxxxx        namespace: mclaude-{userId}
-├── container: tmux-host
-│   ├── project PVC           → /data/                         (RW) bare repo, worktrees, JSONL
-│   ├── nix-store PVC         → /nix/                          (RWX) shared Nix package store
-│   ├── claude-home emptyDir  → /home/node/.claude/             (RW) writable user config
-│   ├── user-config ConfigMap → /home/node/.claude-seed/        (RO) initial seed only
-│   ├── user-secrets Secret   → /home/node/.user-secrets/       (RO)
-│   └── docker-sock emptyDir  → /var/run/                       (shares docker.sock)
-├── container: jsonl-tailer         (sidecar)
-│   └── project PVC           → /data/                         (RO) tails JSONL, inserts into Postgres
-├── container: config-sync          (sidecar)
-│   ├── claude-home emptyDir  → /claude-home/                   (RW) watches for changes
-│   └── user-config ConfigMap → /claude-seed/                   (RO) sync target
-└── container: dockerd-rootless
-    └── docker-sock emptyDir  → /var/run/
-```
-
-`/data/` layout:
-
-```
-/data/
-  repo/                ← bare git repo (shared across all worktrees)
-  worktrees/
-    main/              ← git worktree for main
-    feature-auth/      ← git worktree for feature/auth
-    fix-login/         ← git worktree for fix/login
-  shared-memory/       ← auto-memory shared across all worktrees (via symlink)
-  projects/            ← symlinked to ~/.claude/projects/ (JSONL history per worktree)
-```
-
-### Sessions (tmux windows)
-
-Each session = one tmux window. mclaude-server manages them via `kubectl exec {pod} -n mclaude-{userId} -- tmux ...`:
-
-| Operation | Command |
-|-----------|---------|
-| Create | `tmux new-window -c {cwd} -n {sessionId} "claude --dangerously-skip-permissions"` |
-| Delete | `tmux kill-window -t {sessionId}` |
-| Send input | `tmux send-keys -t {sessionId} {text} Enter` |
-| Capture output | `tmux capture-pane -t {sessionId} -p` |
-| List | `tmux list-windows -F "#{window_name} #{window_index}"` |
-
-This is identical to `TmuxMonitor` — just prefixed with `kubectl exec {pod} -n {namespace} --`.
-
-### Session State (Postgres)
-
-Session state lives in the namespace Postgres instance (see schema below). No more `sessions.json` on each PVC. The server writes to the `sessions` table on every create/delete, and the jsonl-tailer writes `conversation_id` once it discovers the JSONL filename.
-
-On pod restart, the entrypoint queries the server API (which reads from Postgres) to get the session list for this project, then relaunches each with `--resume {conversationId}`.
-
-### JSONL Streaming (jsonl-tailer sidecar → Postgres → server via LISTEN/NOTIFY)
-
-Each project pod includes a **jsonl-tailer** sidecar that watches JSONL files on the PVC and inserts events into the namespace Postgres instance. The server receives events in real-time via Postgres `LISTEN/NOTIFY` — no custom WebSocket protocol, no polling, and events are persisted + queryable.
-
-**jsonl-tailer sidecar**:
-
-- Mounts the project PVC at `/data/` (read-only)
-- Watches `/data/projects/` for new JSONL files via `inotifywait` (new sessions create new files)
-- `tail -F` each active JSONL file, inserts each line into Postgres: `INSERT INTO events (session_id, project_id, data) VALUES (...)`
-- Connects to `postgres.mclaude-{userId}.svc.cluster.local:5432`
-- Also extracts `conversationId` from JSONL filename and writes it to the `sessions` table
-
-**Postgres trigger** (fires on every event insert):
-
-```sql
-CREATE OR REPLACE FUNCTION notify_new_event() RETURNS trigger AS $$
-BEGIN
-    PERFORM pg_notify('new_event', json_build_object(
-        'session_id', NEW.session_id,
-        'id', NEW.id
-    )::text);
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER event_inserted
-    AFTER INSERT ON events
-    FOR EACH ROW EXECUTE FUNCTION notify_new_event();
-```
-
-**Per-namespace server**:
-
-- Holds a persistent Postgres connection with `LISTEN new_event`
-- On notification: fetches the new event row, parses with `JSONLParser.parseEvent(line:)`, fires `onEvent?(sessionId, event)` → broadcasts to web clients
-- Tracks `sessionWorking`, `lastTurnEndTimestamp` per session
-
-**`GET /sessions/:id/events`**: just a SQL query — `SELECT * FROM events WHERE session_id = ? ORDER BY id DESC LIMIT 200`. No in-memory accumulation, survives server restarts.
-
-**Latency**: JSONL write → inotify (~1ms) → INSERT (~1-2ms) → trigger + NOTIFY (~0.1ms) → server LISTEN receives (~0.1ms) → broadcast. Total ~2-3ms, same as the WebSocket approach but with persistence and queryability for free.
-
-### Namespace Postgres
-
-Each user namespace runs a single `postgres:17-alpine` instance. Lightweight (128 MB memory limit, 1Gi PVC), shared by the server and all project pod sidecars.
-
-**Deployment**:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: postgres
-  namespace: mclaude-{userId}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: postgres
-  template:
-    metadata:
-      labels:
-        app: postgres
-    spec:
-      containers:
-        - name: postgres
-          image: postgres:17-alpine
-          env:
-            - name: POSTGRES_DB
-              value: mclaude
-            - name: POSTGRES_USER
-              value: mclaude
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: user-secrets
-                  key: postgres-password
-          volumeMounts:
-            - name: pgdata
-              mountPath: /var/lib/postgresql/data
-          resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 500m
-              memory: 128Mi
-      volumes:
-        - name: pgdata
-          persistentVolumeClaim:
-            claimName: postgres-data
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  name: postgres
-  namespace: mclaude-{userId}
-spec:
-  selector:
-    app: postgres
-  ports:
-    - port: 5432
-      targetPort: 5432
+
+## Web SPA / Client
+
+Mobile browser first — enterprise constraint requires the client to work in a mobile browser (native apps cannot reach the VPN).
+
+- **iOS Safari, Android Chrome** — primary
+- **Desktop browser** — same SPA
+- No iOS app, no Electron, no Flutter (deferred)
+
+**Framework**: TBD — React, Solid, or Svelte. Must be decided before Phase 4.
+
+**PTT**: WebSpeech API. On iOS Safari this calls `SFSpeechRecognizer` natively — same quality as a native iOS app. On Android Chrome, Google's speech recognition. Requires HTTPS + mic permission.
+
+**Real-time events**: client connects to NATS via `/nats` WebSocket proxy. Subscribes directly to `mclaude.{userId}.>.events.>`. Events are raw stream-json from Claude Code — the client renders them directly.
+
+**Rendering**: the SPA consumes stream-json event types:
+- `assistant` → markdown text
+- `tool_use` → collapsible block with tool name and input
+- `control_request` → approve/deny buttons
+- `system.session_state_changed` → status indicator
+- `system.init` → populate skills picker, tool list
+- `result` → turn complete, show usage/cost
+
+**State**: client watches NATS KV buckets `mclaude-sessions` and `mclaude-projects` for live updates.
+
+**Event replay**: on reconnect or tab foreground, client sends last seen JetStream sequence. No stale cache — client always knows its position in the stream.
+
+**Skills picker**: populated from the `init` event's `skills` array (cached in NATS KV session state). Refreshed via `reload_plugins` when skills change mid-session.
+
+**Background reconnect** (mobile browser):
+```js
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  // iOS silently kills NATS WebSocket when tab backgrounds
+  nc.reconnect();
+  // Re-watch KV to catch missed state updates
+  kv.watch(`{userId}/>`);
+});
+```
+
 ---
+
+## nginx Ingress
+
+```nginx
+location /nats {
+    proxy_pass         http://nats.mclaude-system:8080;
+    proxy_http_version 1.1;
+    proxy_set_header   Upgrade    $http_upgrade;
+    proxy_set_header   Connection "upgrade";
+    proxy_read_timeout 3600s;
+}
+location /auth { proxy_pass http://mclaude-user-management:8080; }
+location /api  { proxy_pass http://mclaude-user-management:8080; }
+location /scim { proxy_pass http://mclaude-user-management:8080; }
+location /     { proxy_pass http://mclaude-spa:80; }
+```
+
+No auth logic. No routing decisions. Bytes in, bytes out.
+
+---
+
+## Image Build Pipeline
+
+All images tagged with semver. Never `:latest` in production. Push to main → build → push to Artifactory with git SHA + semver tag. Semver bump triggers promotion.
+
+| Image | Contents |
+|-------|----------|
+| `mclaude-session-agent:{v}` | session-agent binary, mclaude-cli binary, Claude CLI, git, Nix, zsh, pkg shim, guard hooks |
+| `mclaude-user-management:{v}` | user-management binary, kubectl, dbmate |
+| `mclaude-config-sync:{v}` | inotify-tools, kubectl, jq — pre-installed, no runtime package installs |
+
+Note: tmux is no longer in the session-agent image.
+
+---
+
+## Health Probes
+
+All pods have liveness + readiness probes. Kubernetes restarts on failure.
+
+**session-agent pod:**
+```yaml
+livenessProbe:
+  exec:
+    command: ["session-agent", "--health"]  # checks process alive + NATS connection
+  initialDelaySeconds: 10
+  periodSeconds: 30
+
+readinessProbe:
+  exec:
+    command: ["session-agent", "--ready"]  # checks NATS connected + can spawn claude
+  initialDelaySeconds: 5
+  periodSeconds: 10
+```
+
+**user-management pod:**
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+  periodSeconds: 15
+
+readinessProbe:
+  httpGet:
+    path: /ready  # checks Postgres + NATS connections
+    port: 8080
+  periodSeconds: 10
+```
+
+**NATS pod:** use the official NATS Helm chart — includes probes by default.
+
+---
+
+## Reliability
+
+**Postgres unavailability** (user-management): retry with exponential backoff. Login endpoints return 503 while Postgres is unreachable. NATS JWTs already issued remain valid.
+
+**NATS unavailability** (session-agent): buffer state changes in memory, flush on reconnect. Claude processes continue running — sessions are not affected by NATS downtime. Stdout events are buffered and published when connection restores.
+
+**Pod restart** (session-agent): on startup, read NATS KV for existing sessions, relaunch with `--resume`. Claude Code reads its own JSONL from PVC to restore conversation context. No dependency on any other service being up.
+
+**Claude process crash**: session-agent detects child process exit, publishes lifecycle event, updates NATS KV state. Auto-restart with `--resume` if exit was unexpected (non-zero, no interrupt signal).
+
+**Git clone failure**: entrypoint exits non-zero. Deployment restart policy retries. user-management polls pod status and reflects `PROJECT_STATUS_FAILED` in NATS KV. Client shows error.
+
+**Image tagging**: semver. A bad image push does not auto-deploy. Rollback is `kubectl set image` to previous semver tag.
+
+---
+
+## Observability
+
+OTEL stack is already on the cluster. All components export to it.
+
+**Metrics** (Prometheus/OTEL):
+- Per-user: active sessions, events/sec, project count
+- NATS: message rate, stream lag, KV operations
+- user-management: auth latency, provisioning latency, SCIM sync rate
+- Session agent: Claude process count, restart count, event throughput
+
+**Logging**: structured JSON to stdout. Labels: `userId`, `projectId`, `sessionId`.
+
+**FinOps**:
+- Compute cost per user: CPU/memory × time
+- Storage per user: PVC GiB
+- Alert on idle PVCs (no sessions for >7 days, PVC still allocated)
+
+**Cost estimate per user** (2 active projects):
+
+| Resource | Monthly cost |
+|----------|-------------|
+| Project pod ×2 (350m CPU, 900Mi) | ~$12 |
+| Project PVC ×2 (20Gi premium) | ~$6 |
+| Nix store PVC (20Gi Azure Files) | ~$1.20 |
+| NATS share (per-user estimate) | ~$1 |
+| Postgres share (per-user estimate) | ~$0.50 |
+| **Total** | **~$21/month** |
+
+---
+
+## Artifactory / Registry Configuration
+
+Enterprise deployments pull all images and packages through Artifactory. Session-agent reads a `registry-mirrors` ConfigMap published by the platform and runs hook scripts to configure each package manager.
+
+```json
+// mirrors.json key in ConfigMap
+[
+  {
+    "origin": "https://registry.npmjs.org",
+    "mirror": "https://npm.artifactory.example.com/",
+    "type": "npm",
+    "auth": { "secretRef": { "name": "artifactory-creds", "key": "token" } }
+  }
+]
+```
+
+Hook scripts in `/etc/mclaude/hooks.d/` read `mirrors.json` and write tool-specific config on pod start. On personal laptop, env vars are empty → hooks skip → public defaults used.
+
+---
+
+## Kubernetes Resources
+
+### User namespace (applied by user-management on provisioning)
+
+```yaml
+# Namespace
 apiVersion: v1
-kind: PersistentVolumeClaim
+kind: Namespace
 metadata:
-  name: postgres-data
-  namespace: mclaude-{userId}
-spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: managed-csi-premium
-  resources:
-    requests:
-      storage: 1Gi
-```
-
-**Schema**:
-
-```sql
-CREATE TABLE projects (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    git_url TEXT,
-    created_at TIMESTAMPTZ DEFAULT now(),
-    last_active_at TIMESTAMPTZ DEFAULT now()
-);
-
-CREATE TABLE sessions (
-    id TEXT PRIMARY KEY,
-    project_id TEXT REFERENCES projects(id),
-    worktree TEXT NOT NULL,
-    cwd TEXT NOT NULL,
-    name TEXT,
-    conversation_id TEXT,
-    created_at TIMESTAMPTZ DEFAULT now()
-);
-
-CREATE TABLE events (
-    id BIGSERIAL PRIMARY KEY,
-    session_id TEXT REFERENCES sessions(id),
-    project_id TEXT REFERENCES projects(id),
-    data JSONB NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT now()
-);
-
-CREATE INDEX idx_events_session ON events(session_id, id DESC);
-```
-
-This replaces:
-
-- `sessions.json` on each project PVC → `sessions` table
-- In-memory event accumulation on server → `events` table
-- Server recovery dance → `SELECT * FROM sessions`
-- JSONL offset tracking → `SELECT MAX(id) FROM events WHERE session_id = ?`
-
-### Database Migrations
-
-Schema changes are managed by an **init container** on the server Deployment that runs before the server starts. Uses [dbmate](https://github.com/amacneil/dbmate) — a standalone migration tool (single binary, no runtime deps).
-
-**Init container** (on server Deployment):
-
-```yaml
-initContainers:
-  - name: migrate
-    image: ghcr.io/amacneil/dbmate:latest
-    command: ["dbmate", "--url", "$(DATABASE_URL)", "--migrations-dir", "/migrations", "up"]
-    env:
-      - name: DATABASE_URL
-        value: "postgres://mclaude:$(POSTGRES_PASSWORD)@postgres:5432/mclaude?sslmode=disable"
-      - name: POSTGRES_PASSWORD
-        valueFrom:
-          secretKeyRef:
-            name: user-secrets
-            key: postgres-password
-    volumeMounts:
-      - name: migrations
-        mountPath: /migrations
-volumes:
-  - name: migrations
-    configMap:
-      name: db-migrations
-```
-
-**Migration files** (stored in a ConfigMap applied by the controller, or baked into the server image):
-
-```
-mclaude-server/migrations/
-  001_initial_schema.sql        ← projects, sessions, events tables + trigger
-  002_add_event_retention.sql   ← retention policy, auto-cleanup old events
-  003_add_worktree_index.sql    ← future schema changes
-```
-
-Each migration is idempotent — dbmate tracks applied migrations in a `schema_migrations` table. The init container runs on every server pod start, applies any pending migrations, then exits. If no new migrations, it's a no-op (~100ms).
-
-**How schema updates ship**:
-
-1. Developer adds a new migration file (e.g., `004_add_column.sql`)
-2. Controller updates the `db-migrations` ConfigMap (or new server image is deployed)
-3. Server pod restarts (rolling update) → init container runs → migration applied → server starts with new schema
-
-**First-time provisioning**: the controller creates the `db-migrations` ConfigMap as part of namespace setup. On the server's first start, the init container creates all tables from scratch (migration 001).
-
-### User-Level Config (writable emptyDir + config-sync sidecar)
-
-ConfigMap `user-config` in `mclaude-{userId}` namespace stores the **seed** values:
-
-- `CLAUDE.md`
-- `settings.json`
-- `commands/` entries (as individual keys)
-- `skills/` entries
-- MCP server config (embedded in `settings.json`)
-
-Mounted read-only at `/home/node/.claude-seed/` — used only to populate `~/.claude/` on pod start.
-
-The actual `~/.claude/` is an **emptyDir** (`claude-home`) shared between `tmux-host` and the `config-sync` sidecar. Since emptyDir is ephemeral, the entrypoint copies from the seed on every pod start (not just first boot). This makes it writable — `claude mcp add --scope user`, manual edits to `settings.json`, etc. all work exactly like local.
-
-**Seed flow** (entrypoint, every pod start):
-
-```bash
-# Copy from ConfigMap seed (emptyDir is fresh each boot)
-for f in CLAUDE.md settings.json; do
-    [ -f "/home/node/.claude-seed/$f" ] && \
-        cp "/home/node/.claude-seed/$f" "$HOME/.claude/$f"
-done
-for d in commands skills; do
-    [ -d "/home/node/.claude-seed/$d" ] && \
-        cp -r "/home/node/.claude-seed/$d" "$HOME/.claude/$d"
-done
-```
-
-**Sync flow** (`config-sync` sidecar):
-
-- Watches `~/.claude/settings.json`, `CLAUDE.md`, etc. for writes via `inotifywait`
-- On change, patches the `user-config` ConfigMap in the pod's namespace via `kubectl`
-- The sidecar needs a ServiceAccount with RBAC to patch ConfigMaps in its own namespace
-
-**Cross-pod propagation + session restart** (per-namespace server):
-
-When user-scope config changes (e.g. `claude mcp add`, skill update), ALL sessions across ALL project pods need to restart to pick up the change. MCP servers are started at conversation startup, so a running Claude process won't see new MCP config without a restart.
-
-The per-namespace server handles this:
-
-1. Server watches the `user-config` ConfigMap via K8s API watch
-2. On change, for each running project pod:
-   - `kubectl exec {pod} -- cp /home/node/.claude-seed/* /home/node/.claude/` (re-seed emptyDir from the now-updated ConfigMap mount — kubelet refreshes ConfigMap mounts within ~60s, but the server can also `kubectl exec` to write the new content directly for immediate propagation)
-   - Restart all sessions in that pod via existing `restartSession` (kill tmux window + relaunch with `--resume`)
-3. Web UI receives a notification: "User settings changed, restarting sessions..." — sessions resume their conversations with fresh config
-
-This means the config-sync sidecar is responsible for **outbound** sync (local change → ConfigMap), and the server is responsible for **inbound** sync (ConfigMap change → all pods + session restarts).
-
-### System Components
-
-Three components run in `mclaude-system` namespace or cluster-wide:
-
-| Component | Where | Role | RBAC |
-|-----------|-------|------|------|
-| **mclaude-relay** | `mclaude-system` | Network proxy. Routes WebSocket/HTTP between web clients and per-namespace servers. No cluster management. | None (or minimal — just its own namespace) |
-| **mclaude-controller** | `mclaude-system` | Provisions user namespaces, RBAC, Secrets, ConfigMaps, server Deployments. Manages lifecycle of per-namespace resources. | ClusterRole: create/delete namespaces, Deployments, Roles, RoleBindings, ServiceAccounts, Secrets, ConfigMaps |
-| **Per-namespace server** | `mclaude-{userId}` | Manages project Deployments, sessions, worktrees, JSONL polling within its namespace. Connects to relay via tunnel. | Namespace Role: pods, pods/exec, Deployments, PVCs, ConfigMaps |
-
-**Provisioning flow** (first-time user):
-
-1. User requests a K8s session via web UI → relay has no tunnel for this user
-2. Relay calls controller: `POST /provision/{userId}` with user credentials (oauth token, SSH key, git config)
-3. Controller creates namespace `mclaude-{userId}`
-4. Controller applies: Secret (`user-secrets`), ConfigMap (`user-config`), ServiceAccount, Role, RoleBinding, Postgres Deployment, nix-store PVC, server Deployment
-5. Server pod starts, connects to relay via WebSocket tunnel as `k8s~{userId}`
-6. Relay detects new tunnel, forwards the original session request to the server
-7. Server creates the project Deployment + PVC + worktree + session
-
-**Subsequent requests**: relay already has a tunnel for the user, routes directly to server. No controller involvement.
-
-### Per-Namespace Server
-
-Each user namespace runs its own mclaude-server as a Deployment (1 replica). It uses the same binary as the laptop server — the only difference is it connects to the relay identified as `k8s~{userId}` instead of a laptop hostname, and manages project pods in its own namespace via kubectl exec.
-
-**Connection to relay**: on startup, the server connects to the relay's `/tunnel` endpoint with `X-Hostname: k8s~{userId}`. The relay sees it as another tunnel alongside any laptop tunnels. The `k8s~` prefix distinguishes it from laptop connections. Web clients select a runtime (laptop or K8s) and the relay routes accordingly.
-
-**Server Deployment**:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
+  name: mclaude-{userId}
+---
+# ServiceAccount for project pods
+apiVersion: v1
+kind: ServiceAccount
 metadata:
-  name: mclaude-server
+  name: mclaude-sa
   namespace: mclaude-{userId}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: mclaude-server
-  template:
-    metadata:
-      labels:
-        app: mclaude-server
-    spec:
-      serviceAccountName: mclaude-sa
-      containers:
-        - name: server
-          image: ghcr.io/mclaude-project/mclaude-server:latest
-          env:
-            - name: RELAY_URL
-              value: "wss://mclaude-relay.mclaude-system.svc.cluster.local/tunnel"
-            - name: TUNNEL_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: user-secrets
-                  key: tunnel-token
-            - name: NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: USER_ID
-              value: "{userId}"
-          resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 500m
-              memory: 256Mi
+---
+# Role: project pods only need to read their own namespace secrets/configmaps
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mclaude-role
+  namespace: mclaude-{userId}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["user-config"]
+    verbs: ["get", "watch", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["user-secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mclaude-role
+  namespace: mclaude-{userId}
+subjects:
+  - kind: ServiceAccount
+    name: mclaude-sa
+roleRef:
+  kind: Role
+  name: mclaude-role
+  apiGroup: rbac.authorization.k8s.io
 ```
 
-### Pod Creation and Lifecycle (Deployments)
-
-Both the per-namespace server and project pods use **Deployments** (not bare Pods). This gives:
-
-- Auto-restart on crash (Kubernetes recreates the pod)
-- Rolling updates when the container image changes
-- Scale to 0 for idle teardown, scale to 1 to resume
-
-**Project Deployment** (created by per-namespace server):
+### Project Deployment (applied by user-management)
 
 ```yaml
 apiVersion: apps/v1
@@ -680,16 +941,11 @@ spec:
       app: mclaude-project
       project: "{projectId}"
   template:
-    metadata:
-      labels:
-        app: mclaude-project
-        project: "{projectId}"
     spec:
       serviceAccountName: mclaude-sa
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
-        runAsGroup: 1000
         fsGroup: 1000
       volumes:
         - name: project-data
@@ -706,13 +962,20 @@ spec:
         - name: nix-store
           persistentVolumeClaim:
             claimName: nix-store
-        - name: docker-sock
-          emptyDir: {}
       containers:
-        - name: tmux-host
-          image: ghcr.io/mclaude-project/mclaude-session:latest
-          securityContext:
-            allowPrivilegeEscalation: false
+        - name: session-agent
+          image: mclaude-session-agent:{version}
+          env:
+            - name: GIT_URL
+              value: "{gitUrl}"
+            - name: USER_ID
+              value: "{userId}"
+            - name: PROJECT_ID
+              value: "{projectId}"
+            - name: NATS_URL
+              value: "nats://nats.mclaude-system:4222"
+            - name: HTTPS_PROXY
+              value: "{proxyUrl}"   # omit if no egress restriction
           volumeMounts:
             - name: project-data
               mountPath: /data
@@ -726,21 +989,6 @@ spec:
             - name: user-secrets
               mountPath: /home/node/.user-secrets
               readOnly: true
-            - name: docker-sock
-              mountPath: /var/run
-          env:
-            - name: GIT_URL
-              value: "{gitUrl}"
-            - name: DOCKER_HOST
-              value: "unix:///var/run/docker.sock"
-            - name: HTTPS_PROXY
-              value: "{proxyUrl}"       # omit if no proxy needed
-            - name: https_proxy
-              value: "{proxyUrl}"
-            - name: NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
           resources:
             requests:
               cpu: 200m
@@ -748,16 +996,27 @@ spec:
             limits:
               cpu: 4000m
               memory: 8Gi
+          livenessProbe:
+            exec:
+              command: ["session-agent", "--health"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command: ["session-agent", "--ready"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
         - name: config-sync
-          image: bitnami/kubectl:latest
+          image: mclaude-config-sync:{version}
+          # Dedicated image — inotify-tools + kubectl + jq pre-installed.
+          # Never use runtime apk installs (fails in air-gapped environments).
           command: ["/bin/sh", "-c"]
           args:
             - |
-              apk add --no-cache inotify-tools jq 2>/dev/null || true
               echo "[config-sync] Watching /claude-home/ for changes..."
               while true; do
                 inotifywait -qq -r -e close_write /claude-home/ 2>/dev/null || sleep 30
-                sleep 1  # debounce rapid writes
+                sleep 1
                 PATCH="{\"data\":{"
                 SEP=""
                 for f in settings.json CLAUDE.md; do
@@ -768,8 +1027,7 @@ spec:
                 done
                 PATCH="${PATCH}}}"
                 kubectl patch configmap user-config -n "$NAMESPACE" -p "$PATCH" 2>/dev/null && \
-                  echo "[config-sync] Synced to ConfigMap" || \
-                  echo "[config-sync] Sync failed (will retry)"
+                  echo "[config-sync] Synced" || echo "[config-sync] Sync failed (will retry)"
               done
           env:
             - name: NAMESPACE
@@ -787,48 +1045,10 @@ spec:
             limits:
               cpu: 100m
               memory: 64Mi
-        - name: jsonl-tailer
-          image: ghcr.io/mclaude-project/mclaude-jsonl-tailer:latest
-          volumeMounts:
-            - name: project-data
-              mountPath: /data
-              readOnly: true
-          env:
-            - name: POSTGRES_URL
-              value: "postgres://mclaude:$(POSTGRES_PASSWORD)@postgres:5432/mclaude"
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: user-secrets
-                  key: postgres-password
-            - name: PROJECT_ID
-              value: "{projectId}"
-          resources:
-            requests:
-              cpu: 10m
-              memory: 32Mi
-            limits:
-              cpu: 100m
-              memory: 64Mi
-        - name: dockerd-rootless
-          image: docker:dind-rootless
-          securityContext:
-            allowPrivilegeEscalation: false
-          volumeMounts:
-            - name: docker-sock
-              mountPath: /var/run
-          resources:
-            requests:
-              cpu: 100m
-              memory: 256Mi
-            limits:
-              cpu: 2000m
-              memory: 4Gi
-```
-
-**Project PVC** (`project-{projectId}`, RWO, `managed-csi-premium`):
-
-```yaml
+        # dockerd-rootless is optional — enabled per-project via DOCKER_ENABLED env var.
+        # Omit this container for projects that don't need Docker.
+        # Validate rootless Docker works on target AKS nodes before enabling.
+---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -842,549 +1062,23 @@ spec:
       storage: 20Gi
 ```
 
-**Lifecycle operations** (per-namespace server manages these):
-
-| Operation | How |
-|-----------|-----|
-| Create project | `kubectl apply` Deployment + PVC. Wait for pod Running. |
-| Idle teardown | `kubectl scale deployment project-{id} --replicas=0`. PVC persists. |
-| Resume from idle | `kubectl scale deployment project-{id} --replicas=1`. Pod starts, mounts existing PVC. |
-| Delete project | `kubectl delete deployment project-{id}`. PVC retained unless `?purge=true`. |
-| Image update | `kubectl set image deployment/project-{id} tmux-host=new-image`. Rolling update. |
-
-### Server Restart Recovery
-
-The per-namespace server only needs to recover its own state. On startup:
-
-1. **Query Postgres**: `SELECT * FROM sessions JOIN projects ON ...` → gives all session state, conversation IDs, worktrees
-2. **Verify pods**: for each project with sessions, confirm the Deployment's pod is Running
-3. **Resume LISTEN**: open persistent connection with `LISTEN new_event` — events start flowing immediately
-4. **Start ConfigMap watch** on `user-config` — triggers cross-pod config propagation + session restarts on change
-
-No recovery dance. No kubectl exec enumeration. No re-parsing JSONL from offset 0. Postgres has everything.
-
-### Project Pod Lifecycle
-
-Project pods are long-lived — they persist as long as there are active sessions. When the last session in a project is deleted:
-
-1. `deleteSession` removes the tmux window and updates the manifest
-2. If the deleted session was the last one using a worktree, clean up the worktree: `git -C /data/repo worktree remove /data/worktrees/{branch}`
-3. Server starts an **idle timer** (configurable, default 30 minutes) for the project Deployment
-4. If no new session is created before the timer fires, scale to 0: `kubectl scale deployment project-{projectId} --replicas=0`
-5. The PVC is **not** deleted — it retains the bare repo, worktrees, JSONL history, and shared memory. Next session creation scales back to 1.
-
-This keeps costs down (no idle pods burning CPU/memory) while preserving all project state. The PVC is the durable unit; the pod is ephemeral.
-
-**Server idle**: if all project Deployments are scaled to 0 and no sessions remain, the server itself could idle-timeout (scale its own Deployment to 0 via the controller). The relay detects the tunnel disconnect. Next time the user creates a session, the relay calls the controller to scale the server back up.
-
-State for idle tracking:
-
-```swift
-private var projectIdleTimers: [String: Task<Void, Never>] = [:]  // key: projectId
-```
-
-`createSession` cancels any pending idle timer for the project. `deleteSession` starts one if the project has zero remaining tmux windows.
-
----
-
-## Critical Files
-
-- `mclaude-server/Sources/K8sSessionManager.swift` — manages project Deployments + tmux sessions (namespace-local only)
-- `mclaude-server/Sources/APIServer.swift` — project CRUD, session CRUD (delete, restart), endpoints
-- `mclaude-server/Sources/main.swift` — wire K8s onEvent callback, tunnel connection to relay
-- `mclaude-controller/` — new component: provisions namespaces, RBAC, server Deployments. ClusterRole.
-- `mclaude-relay/` — network proxy only (no provisioning). Calls controller for new user bootstrap.
-- `mclaude-session/entrypoint.sh` — manifest read, worktree re-creation, session relaunch, config seed, memory-sharing loop
-- `mclaude-session/Dockerfile` — session image: claude CLI, tmux, git, jq, inotify-tools
-- `mclaude-jsonl-tailer/` — sidecar: tails JSONL files, pushes to server via WebSocket
-
----
-
-## Implementation Steps
-
-### Step 0: Set Up HTTPS Proxy (if needed)
-
-If the cluster cannot reach `api.anthropic.com` directly, deploy a Squid HTTP CONNECT proxy on a machine with egress access. Squid is production-grade, available in most Linux distro repos, with built-in systemd support and host whitelisting.
-
-```bash
-# Install
-sudo dnf install -y squid   # or apt-get install squid
-
-# Configure — whitelist only api.anthropic.com
-sudo tee /etc/squid/squid.conf << 'EOF'
-acl allowed_dst dstdomain api.anthropic.com
-acl CONNECT method CONNECT
-http_access allow CONNECT allowed_dst
-http_access deny all
-http_port 3128
-EOF
-
-sudo systemctl enable --now squid
-```
-
-All other CONNECT requests are denied. Squid handles logging (`/var/log/squid/access.log`), graceful restarts, and connection management.
-
-Verify from the cluster: `curl -x http://{proxy-host}:3128 https://api.anthropic.com/api/hello`
-
-**Skip this step** if the cluster has direct egress to `api.anthropic.com`.
-
----
-
-### Step 1: Project Deployment + TmuxMonitor Adapter
-
-**K8sSessionManager.swift** — replace pod-per-session with project Deployments:
-
-`ensureProjectDeployment(projectId:, gitUrl:) async -> String`:
-
-- Check if Deployment `project-{projectId}` already exists in this namespace
-- If not, create PVC + Deployment (manifests above)
-- If scaled to 0 (idle), scale back to 1
-- Wait for pod to be Running (poll `kubectl get pods -l project={projectId}`)
-- Return pod name
-
-All session operations become kubectl exec tmux commands (see table above). Track `podName` and `windowName` per session id.
-
----
-
-### Step 2: Project + Session CRUD
-
-**createProject(gitUrl:, name:) async -> String?**:
-
-1. Generate `projectId` from name (slugified) or auto-generate
-2. Create PVC `project-{projectId}`
-3. Create project Deployment (passes `GIT_URL` env var)
-4. Wait for pod Running
-5. Return `projectId`
-
-**createSession(projectId:, branch:, cwd:, name:, joinWorktree:) async -> String?**:
-
-1. Ensure project Deployment is scaled to 1 and pod is Running
-2. Resolve worktree:
-   - If `joinWorktree` and a worktree for `branch` already exists → use it
-   - Otherwise → `kubectl exec {pod} -- git -C /data/repo worktree add /data/worktrees/{branch-slug} {branch}`
-3. Set session cwd to `/data/worktrees/{branch-slug}/{cwd}`
-4. Generate `sessionId = "k8s-\(UUID())"`
-5. `kubectl exec {pod} -- tmux new-window -c {cwd} -n {sessionId} "claude --dangerously-skip-permissions"`
-6. `INSERT INTO sessions (id, project_id, worktree, cwd, name) VALUES (...)`
-7. Return sessionId
-
-**deleteSession(id:) async -> Bool**:
-
-1. `kubectl exec {pod} -- tmux kill-window -t {sessionId}`
-2. `DELETE FROM sessions WHERE id = ?`
-3. If this was the last session using its worktree, clean up: `git -C /data/repo worktree remove /data/worktrees/{branch-slug}`
-4. If project has zero remaining sessions, start idle timer
-
-**restartSession(id:) async -> Bool**:
-
-1. `SELECT conversation_id, cwd FROM sessions WHERE id = ?`
-2. `kubectl exec {pod} -- tmux kill-window -t {sessionId}`
-3. `kubectl exec {pod} -- tmux new-window -c {cwd} -n {sessionId} "claude --dangerously-skip-permissions --resume {conversationId}"`
-
-This gives a fresh Claude Code process (re-reads `settings.json`, starts new MCP servers) but resumes the exact conversation. Useful for picking up config changes or recovering hung sessions.
-
-**APIServer.swift** — new endpoints:
-
-| Method | Path | Action |
-|--------|------|--------|
-| `POST` | `/projects` | Create project (gitUrl, name) → returns projectId |
-| `GET` | `/projects` | List projects (pod status, session count, worktrees) |
-| `DELETE` | `/projects/:id` | Scale to 0 (PVC retained unless `?purge=true`) |
-| `POST` | `/sessions` | Create session (projectId, branch, cwd, joinWorktree) → creates worktree + session |
-| `DELETE` | `/sessions/:id` | Kill tmux window, clean up worktree if last session |
-| `POST` | `/sessions/:id/restart` | Kill + relaunch with `--resume` |
-
-**Web UI** (described in "New session dialog" above):
-
-- Main view: project cards, each showing sessions with branch labels
-- **"New session"** is the primary action — creates worktree + session in one step
-- **"Join existing worktree"** checkbox for the multi-agent collaboration case
-- Project `···` menu: delete project
-- Session `···` menu: restart session, delete session
-
----
-
-### Step 3: JSONL Streaming + Event Broadcast
-
-**jsonl-tailer sidecar** (runs in each project pod):
-
-- Watches `/data/projects/` for new JSONL files via `inotifywait`
-- Tails each active JSONL file, inserts each line into Postgres `events` table
-- Maps JSONL files to session IDs by querying `sessions` table (or by matching encoded-cwd paths)
-- Extracts `conversationId` from JSONL filename and updates `sessions.conversation_id`
-
-**Server LISTEN handler**:
-
-- On startup, opens persistent Postgres connection with `LISTEN new_event`
-- On notification: fetches the new event row, parses with `JSONLParser.parseEvent(line:)`
-- Fires `onEvent?(sessionId, event)` → broadcasts to web clients
-- Tracks `sessionWorking`, `lastTurnEndTimestamp` per session in memory (fast path for status checks)
-
-```swift
-// Server connects to Postgres and listens
-let pgConn = try await PostgresConnection.connect(to: postgresURL)
-try await pgConn.query("LISTEN new_event")
-
-// On each notification:
-for try await notification in pgConn.notifications {
-    let payload = try JSONDecoder().decode(EventNotification.self, from: notification.payload)
-    let event = try await fetchAndParse(eventId: payload.id)
-    onEvent?(payload.sessionId, event)
-}
-```
-
-**`GET /sessions/:id/events`**: `SELECT data FROM events WHERE session_id = ? ORDER BY id DESC LIMIT 200`. Persisted, survives server restarts, no in-memory accumulation needed.
-
----
-
-### Step 4: entrypoint.sh
-
-```bash
-#!/bin/bash
-set -e
-
-# Consume user secrets
-if [ -f "/home/node/.user-secrets/id_rsa" ]; then
-    mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
-    cp /home/node/.user-secrets/id_rsa "$HOME/.ssh/id_rsa"
-    chmod 600 "$HOME/.ssh/id_rsa"
-    ssh-keyscan github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
-fi
-[ -f "/home/node/.user-secrets/.gitconfig" ] && \
-    cp /home/node/.user-secrets/.gitconfig "$HOME/.gitconfig"
-[ -f "/home/node/.user-secrets/oauth-token" ] && \
-    export CLAUDE_CODE_OAUTH_TOKEN=$(cat /home/node/.user-secrets/oauth-token)
-
-# Seed user-level Claude config from ConfigMap (copy, not symlink — keeps ~/.claude writable)
-# emptyDir is fresh each boot, so always copy from seed
-for f in CLAUDE.md settings.json; do
-    [ -f "/home/node/.claude-seed/$f" ] && \
-        cp "/home/node/.claude-seed/$f" "$HOME/.claude/$f"
-done
-for d in commands skills; do
-    [ -d "/home/node/.claude-seed/$d" ] && \
-        cp -r "/home/node/.claude-seed/$d" "$HOME/.claude/$d"
-done
-
-# Link JSONL projects dir to PVC (history persists across restarts)
-mkdir -p /data/projects
-ln -sf /data/projects "$HOME/.claude/projects"
-
-# Skip onboarding
-echo '{"hasCompletedOnboarding":true,"bypassPermissions":true}' > "$HOME/.claude.json"
-
-# Git setup (bare repo only — worktrees are created by the server per session)
-if [ -n "$GIT_URL" ]; then
-    if [ ! -d "/data/repo/HEAD" ]; then
-        git clone --bare "$GIT_URL" /data/repo
-    else
-        git -C /data/repo fetch --all --prune || true
-    fi
-    mkdir -p /data/worktrees
-fi
-
-# Shared memory across worktrees — symlink each worktree's memory dir to /data/shared-memory/
-mkdir -p /data/shared-memory
-(while true; do
-    for dir in "$HOME/.claude/projects"/*/; do
-        [ -d "$dir" ] && [ ! -L "${dir}memory" ] && {
-            rm -rf "${dir}memory"
-            ln -s /data/shared-memory "${dir}memory"
-            echo "[memory-sync] Linked ${dir}memory → /data/shared-memory/"
-        }
-    done
-    sleep 5
-done) &
-
-# Wait for dockerd
-while [ ! -S /var/run/docker.sock ]; do sleep 0.5; done
-
-# Start tmux server
-tmux new-session -d -s main -x 220 -y 50 2>/dev/null || true
-
-# Relaunch sessions (query server API, which reads from Postgres)
-echo "[entrypoint] Querying server for sessions to relaunch..."
-RETRIES=0
-while [ $RETRIES -lt 30 ]; do
-    SESSIONS=$(curl -sf "http://mclaude-server:8377/internal/sessions?projectId=$PROJECT_ID" 2>/dev/null) && break
-    RETRIES=$((RETRIES + 1))
-    sleep 2
-done
-
-if [ -n "$SESSIONS" ] && [ "$SESSIONS" != "[]" ]; then
-    # Re-create worktrees (they persist on PVC, but re-add if pruned)
-    echo "$SESSIONS" | jq -r '.[].worktree' | sort -u | while IFS= read -r wt; do
-        [ -z "$wt" ] && continue
-        if [ ! -d "/data/worktrees/$wt/.git" ]; then
-            git -C /data/repo worktree add "/data/worktrees/$wt" "$wt" 2>/dev/null || true
-            echo "[entrypoint] Re-created worktree $wt"
-        fi
-    done
-
-    # Relaunch sessions
-    echo "$SESSIONS" | jq -c '.[]' | while IFS= read -r session; do
-        SESSION_ID=$(echo "$session" | jq -r '.id')
-        SESSION_CWD=$(echo "$session" | jq -r '.cwd')
-        CONVERSATION_ID=$(echo "$session" | jq -r '.conversation_id // empty')
-        if [ -n "$CONVERSATION_ID" ]; then
-            RESUME_FLAG="--resume $CONVERSATION_ID"
-        else
-            RESUME_FLAG="--continue"
-        fi
-        tmux new-window -t main -c "$SESSION_CWD" -n "$SESSION_ID" \
-            "claude --dangerously-skip-permissions $RESUME_FLAG" 2>/dev/null || true
-        echo "[entrypoint] Relaunched $SESSION_ID in $SESSION_CWD (conversation: ${CONVERSATION_ID:-unknown})"
-    done
-fi
-
-# Keep alive: exit when tmux server exits (triggers restart via Deployment)
-tmux wait-for -L main_done 2>/dev/null || while tmux has-session -t main 2>/dev/null; do
-    sleep 10
-done
-```
-
----
-
-### Step 5: User Resources (Namespace + Secret + ConfigMap + RBAC)
-
-Applied by the **mclaude-controller** during provisioning.
-
-**ensureUserNamespace(userId:)** — `kubectl apply` namespace `mclaude-{userId}`.
-
-**ensureUserResources(userId:, oauthToken:, sshKey:, gitConfig:)** — idempotent `kubectl apply`:
+### Nix store PVC (one per namespace)
 
 ```yaml
-# Secret: user-secrets
 apiVersion: v1
-kind: Secret
+kind: PersistentVolumeClaim
 metadata:
-  name: user-secrets
-  namespace: mclaude-{userId}
-stringData:
-  oauth-token: "{oauthToken}"
-  tunnel-token: "{tunnelToken}"
-  postgres-password: "{generated}"
-  id_rsa: "{sshKey}"
-  .gitconfig: "{gitConfig}"
----
-# ConfigMap: user-config (seed — config-sync sidecar keeps it updated)
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: user-config
-  namespace: mclaude-{userId}
-data:
-  CLAUDE.md: "{contents of host ~/.claude/CLAUDE.md}"
-  settings.json: "{contents of host ~/.claude/settings.json}"
-  # commands and skills entries added as individual keys
----
-# ServiceAccount for server + project pods
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: mclaude-sa
-  namespace: mclaude-{userId}
----
-# Role: server + config-sync need namespace-local access
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: mclaude-role
-  namespace: mclaude-{userId}
-rules:
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    resourceNames: ["user-config"]
-    verbs: ["get", "watch", "patch"]
-  - apiGroups: [""]
-    resources: ["pods", "pods/exec"]
-    verbs: ["get", "list", "create", "delete"]
-  - apiGroups: [""]
-    resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "create", "delete"]
-  - apiGroups: ["apps"]
-    resources: ["deployments", "deployments/scale"]
-    verbs: ["get", "list", "create", "update", "patch", "delete"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: mclaude-role
-  namespace: mclaude-{userId}
-subjects:
-  - kind: ServiceAccount
-    name: mclaude-sa
-roleRef:
-  kind: Role
-  name: mclaude-role
-  apiGroup: rbac.authorization.k8s.io
----
-# Service: project pod entrypoints call server internal API for session recovery
-apiVersion: v1
-kind: Service
-metadata:
-  name: mclaude-server
+  name: nix-store
   namespace: mclaude-{userId}
 spec:
-  selector:
-    app: mclaude-server
-  ports:
-    - port: 8377
-      targetPort: 8377
+  accessModes: [ReadWriteMany]
+  storageClassName: azurefile-csi
+  resources:
+    requests:
+      storage: 20Gi
 ```
 
-### Step 6: mclaude-controller
-
-A Deployment in `mclaude-system` namespace. Exposes a ClusterIP Service for internal API calls.
-
-**Endpoints**:
-
-| Method | Path | Action |
-|--------|------|--------|
-| `POST` | `/provision/{userId}` | Create namespace + apply all user resources + deploy server |
-| `POST` | `/scale/{userId}/server` | Scale server Deployment (0 or 1) |
-| `DELETE` | `/namespace/{userId}` | Tear down entire namespace (destructive) |
-| `GET` | `/status/{userId}` | Check if namespace + server exist and are healthy |
-
-**ClusterRole** (applied at install time):
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: mclaude-controller
-rules:
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["get", "list", "create", "delete"]
-  - apiGroups: [""]
-    resources: ["secrets", "configmaps", "serviceaccounts"]
-    verbs: ["get", "list", "create", "update", "delete"]
-  - apiGroups: ["apps"]
-    resources: ["deployments", "deployments/scale"]
-    verbs: ["get", "list", "create", "update", "patch", "delete"]
-  - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["roles", "rolebindings"]
-    verbs: ["get", "list", "create", "update", "delete"]
-```
-
----
-
-## Implementation Order
-
-**Phase 1 — Foundation:**
-
-1. **Step 0** — set up HTTPS proxy if cluster egress is blocked (unblocks all K8s work)
-2. **Auth** — local user system (JWT), login endpoint on controller
-3. **Step 6** — mclaude-controller (provisioning service in mclaude-system, ClusterRole, NetworkPolicies)
-4. **Step 5** — user resource manifests (namespace, Secret, ConfigMap, SA, Role, RoleBinding, Postgres, nix-store PVC, server Deployment)
-5. **Postgres + migrations** — namespace Postgres Deployment, dbmate init container, initial schema
-
-**Phase 2 — Core:**
-6. **Step 4** — session image (Dockerfile with Claude CLI, Nix, tmux, git, jq, zsh, pkg shim, guard hooks, managed CLAUDE.md at `/etc/claude-code/`)
-7. **Entrypoint** — config seed, `--resume` support, memory-sharing loop, platform + user hooks, registry mirror config
-8. **Server tunnel** — server connects to relay as `k8s~{userId}`, relay routes to it
-9. **Step 1** — project Deployment + TmuxMonitor adapter + config-sync sidecar + jsonl-tailer sidecar
-10. **Step 2** — createProject / createSession (with worktree creation) / deleteSession (with worktree cleanup) / restartSession
-
-**Phase 3 — Streaming + Lifecycle:**
-11. **Step 3** — jsonl-tailer (INSERT into Postgres) + server LISTEN/NOTIFY handler + event broadcast
-12. **Server recovery** — query Postgres on startup, resume LISTEN, ConfigMap watch
-13. **Project + server lifecycle** — idle timers, scale to 0/1, web UI `···` overflow menu (restart, delete)
-14. **Event retention** — archive job (session end → blob storage), Postgres pruning, pg_dump CronJob
-
-**Phase 4 — Hardening:**
-15. **Observability** — OTEL metrics/logs export, FinOps dashboard
-16. **Registry mirrors** — consume `registry-mirrors` ConfigMap, renderers in session image
-17. **Network policies** — deny cross-namespace, allow mclaude-system
-18. **Write future plans** — all 8 plans in acceptance criteria
-
----
-
-## Authentication
-
-Local users for now. Entra (Azure AD) SSO is the target but requires corporate Entra admin approval (blocked).
-
-**Local user system**:
-
-- Controller manages a `users` table (or ConfigMap) with userId, password hash, display name
-- Web UI has a login page — username/password → controller issues a JWT
-- JWT included in WebSocket connection to relay and all API calls
-- Relay validates JWT, extracts userId, routes to the right namespace
-
-**Future**: swap local auth for Entra OIDC. The JWT claims stay the same — just the issuer changes. All downstream components (relay routing, controller provisioning, namespace naming) key off userId regardless of auth backend.
-
-## Observability
-
-OTEL stack is already on the cluster. All components export to it.
-
-**Metrics** (Prometheus/OTEL):
-
-- Per-namespace: active sessions, events/sec, Postgres connections, PVC usage %
-- Per-project: pod status, session count, worktree count
-- System: relay tunnel count, controller provisioning latency, Squid proxy request rate
-- FinOps: compute cost per user (CPU/memory request × time), storage cost per user (PVC GiB)
-
-**Logging** (OTEL/Loki):
-
-- All containers log to stdout → collected by cluster-level log agent
-- Structured JSON logs with `namespace`, `projectId`, `sessionId` labels
-- Entrypoint logs prefixed with `[entrypoint]`, `[memory-sync]`, etc. (already in the plan)
-
-**FinOps monitoring (day 1)**:
-
-- Dashboard per user: compute hours, storage GiB, estimated monthly cost
-- Alert when a user exceeds a cost threshold
-- Idle project detection — flag projects with no sessions for >7 days but PVC still allocated
-
-**Cost estimate per user** (2 active projects):
-
-| Resource | Spec | Monthly cost |
-|----------|------|-------------|
-| Server pod | 50m CPU, 64Mi | ~$2 |
-| Postgres pod | 50m CPU, 64Mi + 1Gi PVC | ~$3 |
-| Project pod ×2 | 350m CPU, 900Mi each | ~$12 |
-| Project PVC ×2 | 20Gi managed-csi-premium each | ~$6 |
-| Nix store | 20Gi azurefile-csi | ~$1.20 |
-| Blob storage (events) | ~1Gi long-term | ~$0.02 |
-| **Total** | | **~$24/month** |
-
-## Event Retention (two-tier storage)
-
-Postgres is a **hot cache** for recent events. Azure Blob Storage is **cold storage** for long-term retention (7 year policy).
-
-**Hot tier (Postgres)**: events from active and recently-active sessions. Fast queries for the web UI (`GET /sessions/:id/events`). Retained for 30 days or until session is explicitly archived.
-
-**Cold tier (Azure Blob Storage)**: when a session ends (user deletes it or it's idle for >24h), all its events are batch-exported to blob storage as a gzipped JSONL file, then pruned from Postgres.
-
-```
-Blob path: mclaude/{userId}/{projectId}/{sessionId}/events.jsonl.gz
-```
-
-**Historical queries**: `GET /sessions/:id/events?source=archive` → server fetches from blob, decompresses, returns. Slower (~500ms) but works for reviewing past conversations.
-
-**Retention policy**: 7 years in blob storage (Azure lifecycle management policy). Postgres events auto-pruned after 30 days by a server-side cron job:
-
-```sql
-DELETE FROM events
-WHERE session_id NOT IN (SELECT id FROM sessions)
-   OR created_at < now() - interval '30 days';
-```
-
-**Server-side archive job** (runs on session delete or idle timeout):
-
-```swift
-func archiveSession(id: String) async {
-    let events = try await db.query("SELECT data FROM events WHERE session_id = $1 ORDER BY id", [id])
-    let gzipped = gzip(events.map { $0.data.jsonString }.joined(separator: "\n"))
-    try await blobStorage.upload(path: "\(userId)/\(projectId)/\(id)/events.jsonl.gz", data: gzipped)
-    try await db.query("DELETE FROM events WHERE session_id = $1", [id])
-}
-```
-
-## Network Policies
-
-Restrict cross-namespace traffic. Pods in `mclaude-alice` should not reach Postgres in `mclaude-bob`.
+### Network policy
 
 ```yaml
 apiVersion: networking.k8s.io/v1
@@ -1397,240 +1091,193 @@ spec:
   policyTypes: [Ingress]
   ingress:
     - from:
-        - podSelector: {}          # allow within namespace
+        - podSelector: {}
     - from:
         - namespaceSelector:
             matchLabels:
-              name: mclaude-system  # allow from relay/controller
+              name: mclaude-system
 ```
 
-Applied by the controller during provisioning.
+---
 
-## Image Build Pipeline
-
-All images are open source. CI/CD via GitHub Actions (on GHES).
-
-**Images**:
-
-| Image | Repo | Contents |
-|-------|------|----------|
-| `mclaude-session` | `mclaude/session` | Claude Code CLI, Nix, tmux, git, jq, zsh, `pkg` shim, guard hooks |
-| `mclaude-server` | `mclaude/server` | Swift binary, kubectl |
-| `mclaude-jsonl-tailer` | `mclaude/jsonl-tailer` | Lightweight Go/Python binary, Postgres client, inotify |
-| `mclaude-controller` | `mclaude/controller` | Go/Python binary, kubectl, dbmate |
-
-**Build triggers**: push to main → build → push to internal container registry (Artifactory). Tagged releases for production.
-
-## Web UI
-
-The current relay serves a single `index.html`. The K8s integration requires: project cards, session wizard, overflow menus, secrets management, onboarding flow, FinOps dashboard. This is beyond what a single HTML file can support.
-
-**Decision needed**: refactor the relay's static frontend into a proper SPA. Framework TBD (React, Solid, Svelte). The relay continues to serve the built static assets — no separate frontend deployment. This is a separate task from the K8s backend work.
-
-## Postgres Backup
-
-Regular `pg_dump` via a CronJob in each user namespace:
+## user-management ClusterRole
 
 ```yaml
-apiVersion: batch/v1
-kind: CronJob
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
 metadata:
-  name: pg-backup
-  namespace: mclaude-{userId}
-spec:
-  schedule: "0 2 * * *"   # daily at 2am
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          containers:
-            - name: backup
-              image: postgres:17-alpine
-              command: ["/bin/sh", "-c"]
-              args:
-                - pg_dump -h postgres -U mclaude mclaude | gzip > /backup/mclaude-$(date +%Y%m%d).sql.gz
-              env:
-                - name: PGPASSWORD
-                  valueFrom:
-                    secretKeyRef:
-                      name: user-secrets
-                      key: postgres-password
-              volumeMounts:
-                - name: backup
-                  mountPath: /backup
-          volumes:
-            - name: backup
-              persistentVolumeClaim:
-                claimName: postgres-backup
-          restartPolicy: OnFailure
+  name: mclaude-user-management
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets", "configmaps", "serviceaccounts", "persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "delete"]
 ```
 
-Backups retained for 30 days. Upload to blob storage for longer retention.
+---
 
-## Open Questions
+## HTTPS Proxy (if cluster egress is blocked)
 
-- **`hostUsers: false` on AKS**: omitted from pod manifests for now. Needs a test pod to confirm it works on this cluster before adding it.
-- **Config change notification UX**: when user config changes trigger session restarts, should the UI ask for confirmation first (user might be mid-conversation) or restart automatically with a toast notification? Leaning toward auto-restart with notification since `--resume` preserves the conversation.
-- **Secrets management UI**: users need a web UI to add/update/remove credential files in the K8s Secret. Values never displayed, just names + update/delete actions.
-- **PVC resize**: 20Gi default. Large repos may need more. `managed-csi-premium` supports online expansion — add a monitoring alert or admin endpoint.
-- **GHES search in "Clone repo" dialog**: server calls GHES API using SSH key or a separate PAT from user-secrets. Details TBD.
-- **OpenBao seed scripts**: community repo for tool-specific credential seed scripts. Contract: read from Bao, write to `$HOME`, exit 0 if secret missing.
-- **Web UI framework**: React vs Solid vs Svelte for the SPA refactor. Separate design task.
-
-### Artifactory / Registry Configuration
-
-Enterprise deployments pull all dependencies through Artifactory — Docker base images, npm packages, pip, Go modules, Nix packages, etc. This must be configurable so the same images work on both personal laptop (public registries) and enterprise (Artifactory mirrors).
-
-**Build-time**: Docker build args for base image registry:
-
-```dockerfile
-ARG BASE_REGISTRY=docker.io
-FROM ${BASE_REGISTRY}/library/node:20-slim
-```
-
-**Runtime**: entrypoint runs **platform hooks** that configure each package manager's registry. Hooks read from env vars injected via a `registry-config` ConfigMap in `mclaude-system`. On personal laptop, env vars are empty → hooks skip → tools use public defaults.
-
-Entrypoint hook order:
-
-1. `/etc/mclaude/hooks.d/*.sh` — platform hooks (registry config, same for all users)
-2. User hooks (OpenBao seed scripts, user-specific credentials)
-
-**Registry ConfigMap contract**: mclaude consumes a `registry-mirrors` ConfigMap published by a controller in `t1v0-infra`. The schema is defined here — mclaude is the consumer and needs these fields for its renderers to work.
-
-**Expected schema** (`mirrors.json` key in ConfigMap):
-
-```json
-[
-  {
-    "origin": "https://registry.npmjs.org",
-    "mirror": "https://npm.artifactory.example.com/",
-    "type": "npm",
-    "auth": {
-      "secretRef": {"name": "artifactory-creds", "key": "token"}
-    },
-    "tls": {
-      "caBundle": "corporate-ca"
-    },
-    "scopes": ["@myorg"]
-  },
-  {
-    "origin": "https://pypi.org/simple/",
-    "mirror": "https://pypi.artifactory.example.com/simple/",
-    "type": "pypi",
-    "auth": {
-      "secretRef": {"name": "artifactory-creds", "key": "token"}
-    }
-  }
-]
-```
-
-Auth is just a K8s Secret reference. How the Secret is populated (static PAT, token exchanger, operator, imagePullSecret) is outside mclaude's scope — that's t1v0-infra infrastructure. mclaude renderers just read the Secret.
-
-| Field | Required | Used by renderer to |
-|-------|----------|-------------------|
-| `origin` | Yes | Match against the tool's default registry URL |
-| `mirror` | Yes | Substitute into tool config |
-| `type` | Yes | Select which renderer to invoke (`npm` → write `.npmrc`, `pypi` → write `pip.conf`, etc.) |
-| `auth.secretRef` | No | K8s Secret name + key containing the credential. How the Secret is populated is infra's concern (token exchanger, operator, manual). |
-| `tls.caBundle` | No | Configure custom CA for tools that need explicit cert config |
-| `tls.insecure` | No (default: `false`) | Skip TLS verification (adds `strict-ssl=false` in npm, `trusted-host` in pip, etc.) |
-| `scopes` | No | npm/cargo scoped registries — apply mirror only to specific package scopes |
-
-Renderers are in the session image at `/etc/mclaude/hooks.d/`. Each reads `mirrors.json`, filters by `type`, and writes the tool-specific config. Example npm renderer:
+If the cluster cannot reach `api.anthropic.com` directly:
 
 ```bash
-#!/bin/bash
-# /etc/mclaude/hooks.d/npm-registry.sh
-MIRRORS_FILE="/etc/mclaude/mirrors.json"
-[ ! -f "$MIRRORS_FILE" ] && exit 0
-
-jq -c '.[] | select(.type == "npm")' "$MIRRORS_FILE" | while IFS= read -r entry; do
-    MIRROR=$(echo "$entry" | jq -r '.mirror')
-    INSECURE=$(echo "$entry" | jq -r '.tls.insecure // false')
-    SECRET_NAME=$(echo "$entry" | jq -r '.auth.secretRef.name // empty')
-    SECRET_KEY=$(echo "$entry" | jq -r '.auth.secretRef.key // empty')
-
-    echo "registry=$MIRROR" >> "$HOME/.npmrc"
-    [ "$INSECURE" = "true" ] && echo "strict-ssl=false" >> "$HOME/.npmrc"
-
-    # Auth: read token from K8s Secret if configured
-    SECRET_KEY=$(echo "$entry" | jq -r '.auth.secretRef.key // empty')
-    if [ -n "$SECRET_KEY" ]; then
-        TOKEN=$(cat "/etc/mclaude/secrets/$SECRET_KEY" 2>/dev/null)
-        [ -n "$TOKEN" ] && echo "//${MIRROR#https://}:_authToken=$TOKEN" >> "$HOME/.npmrc"
-    fi
-
-    # Scoped registries
-    for scope in $(echo "$entry" | jq -r '.scopes[]? // empty'); do
-        echo "$scope:registry=$MIRROR" >> "$HOME/.npmrc"
-    done
-done
+sudo dnf install -y squid
+sudo tee /etc/squid/squid.conf << 'EOF'
+acl allowed_dst dstdomain api.anthropic.com
+acl CONNECT method CONNECT
+http_access allow CONNECT allowed_dst
+http_access deny all
+http_port 3128
+EOF
+sudo systemctl enable --now squid
 ```
 
-See `t1v0-infra/docs/plan-registry-mirror-controller.md` for the producer side (Artifactory API discovery, ConfigMap generation, reconciliation).
+All project pods set `HTTPS_PROXY` env var. Claude Code respects it natively. Omit the env var for environments with direct egress.
 
-Each platform hook is a small script:
+---
 
-```bash
-#!/bin/bash
-# /etc/mclaude/hooks.d/npm-registry.sh
-[ -z "$NPM_REGISTRY" ] && exit 0
-echo "registry=$NPM_REGISTRY" >> "$HOME/.npmrc"
-```
+## Implementation Order
 
-Platform hooks are baked into the session image or mounted from a ConfigMap. Adding a new tool = adding a 3-line hook script.
+**Phase 1 — Infrastructure:**
+1. NATS cluster (3-node StatefulSet in `mclaude-system`, JetStream enabled, NATS Helm chart)
+2. Postgres in `mclaude-system` (users table only, dbmate migrations)
+3. nginx ingress with routing rules
+
+**Phase 2 — mclaude-user-management:**
+4. Local auth — login, NATS JWT issuance, NATS Operator + Account setup
+5. User CRUD + K8s namespace provisioning
+6. Project Deployment + PVC provisioning
+7. SSO — Entra/Okta OIDC
+8. SCIM 2.0
+
+**Phase 3 — mclaude-session-agent:**
+9. Build session image (Dockerfile: Claude CLI, git, Nix, guard hooks — no tmux)
+10. Claude process management (spawn headless, stdin/stdout pipes, lifecycle tracking)
+11. NATS subscription + event routing (stdout → JetStream, NATS → stdin)
+12. NATS KV state management (from session_state_changed events)
+13. Session recovery on pod restart (read KV → relaunch with --resume)
+14. Debug attach unix socket + mclaude-cli
+15. Laptop mode (standalone daemon, same binary)
+
+**Phase 4 — Web SPA:**
+16. Framework decision (React / Solid / Svelte)
+17. Auth flow — login → NATS JWT
+18. NATS direct subscription — stream-json events + KV state watches
+19. Stream-json renderer (assistant text, tool use, control requests, thinking)
+20. Skills picker (from init event capabilities)
+21. PTT — WebSpeech API
+
+**Phase 5 — Hardening:**
+22. Semver CI/CD pipeline (GitHub Actions on GHES)
+23. Network policies
+24. Registry mirrors (Artifactory hooks in session image)
+25. Observability — OTEL export, FinOps dashboard
+26. `hostUsers: false` — validate on AKS nodes, add to pod spec if confirmed
 
 ---
 
 ## Verification
 
-**Project lifecycle:**
-
-1. `POST /projects` with `{"gitUrl":"...","name":"myapp"}` → project Deployment + PVC created, bare repo cloned
-2. `GET /projects` → lists project with status Running, 0 sessions
-
-**Session + worktree lifecycle:**
-3. `POST /sessions` with `{"projectId":"myapp","branch":"main"}` → worktree created at `/data/worktrees/main/`, tmux window opened
-4. Send a message → web app Events tab shows live events
-5. `POST /sessions` with `{"projectId":"myapp","branch":"feature/auth"}` → second worktree, second session, different branch
-6. `POST /sessions/{id}/restart` → tmux window killed + relaunched with `--resume`, events continue appending
-7. `DELETE /sessions/{id}` → tmux window killed, worktree cleaned up if last session on that branch
-
-**Shared worktree (multi-agent collaboration):**
-8. `POST /sessions` with `{"projectId":"myapp","branch":"main","joinWorktree":true}` → joins existing `main` worktree, both sessions share files
-
-**Memory sharing:**
-9. Claude learns feedback in session on `main` → memory saved to `/data/shared-memory/`
-10. Create new session on `feature/auth` → same feedback is available (symlinked memory dir)
-
-**User config:**
-11. `claude mcp add --scope user` inside a session → config-sync patches ConfigMap within seconds
-
-**Resilience:**
-12. `kubectl delete pod project-myapp-xxxxx` → Deployment recreates pod, worktrees re-created, sessions relaunch with `--resume {conversationId}`
-13. Restart mclaude-server pod → `recover()` rebuilds all session state, web clients reconnect seamlessly
-14. Delete all sessions in a project → Deployment scales to 0 after 30min idle, PVC persists
-15. Create a new session for the same project after idle → Deployment scales to 1, mounts existing PVC
-
 **Provisioning:**
-16. First-time user → relay calls controller `/provision/{userId}` → namespace, RBAC, server Deployment created → server connects via tunnel
-17. Server idle timeout → controller scales server to 0. Next request → controller scales back to 1.
+1. `POST /users` → namespace, RBAC, NATS credentials created
+2. `POST /api/projects` → Deployment + PVC in user namespace, Project in NATS KV
+3. SCIM push from IdP → user provisioned automatically
+
+**Session lifecycle:**
+4. `mclaude.{userId}.{projectId}.api.sessions.create` → Claude process spawned, Session in NATS KV, `init` event received
+5. Send input via NATS → appears as user message in stream-json output
+6. `session_state_changed` events flow through NATS → client updates status
+7. `control_request` for tool approval → client shows approve/deny → `control_response` sent → tool executes
+8. Kill project pod → Deployment restarts, session-agent reads KV, relaunches with `--resume`, conversation restored
+9. Delete session → Claude process interrupted and exited, worktree cleaned up if last session on branch
+
+**Skills:**
+10. Send `/commit -m "test"` as user message → skill expands, tool permissions flow through control protocol
+11. Send `reload_plugins` control request → response includes updated skills list
+
+**Multi-session:**
+12. Two sessions on same branch with `joinWorktree: true` → share `/data/worktrees/{slug}/`
+13. Claude learns feedback in session A → memory at `/data/shared-memory/` → available in session B on different branch
+
+**Security:**
+14. User alice's JWT → cannot subscribe to `mclaude.bob.>` (NATS broker rejects)
+15. User alice's JWT → can subscribe to `mclaude.alice.>` (allowed)
+
+**Debug:**
+16. `kubectl exec -it pod -- mclaude-cli attach {sessionId}` → interactive text REPL, can send messages and approve tools
+17. `mclaude-cli` detach → session continues, lifecycle event published
+
+**Laptop:**
+18. Laptop session-agent connects via `/nats` proxy, same event flow as K8s
+19. Browser subscribes to laptop session events directly via NATS
+
+**Reliability:**
+20. NATS connection drops → session-agent buffers, reconnects, flushes
+21. Claude process crashes → session-agent detects, publishes lifecycle event, auto-restarts with --resume
+22. Bad image deployed → semver rollback with `kubectl set image`
+
+---
+
+## Critical Files
+
+```
+mclaude-session-agent/
+  main.go               NATS subscriber, Claude process manager, event router
+  session.go            Claude process lifecycle (spawn, stdin/stdout pipes, restart)
+  router.go             Stream-json event routing (stdout → NATS, NATS → stdin)
+  state.go              NATS KV state tracking (from session_state_changed events)
+  debug.go              Unix socket for mclaude-cli attach
+  entrypoint.sh         Pod startup script
+  Dockerfile
+
+mclaude-cli/
+  main.go               Debug attach REPL — connects to session agent unix socket
+
+mclaude-user-management/
+  main.go               Auth, user CRUD, K8s provisioning
+  auth.go               Login, JWT issuance, SSO, SCIM
+  provisioner.go        Namespace + Deployment + PVC management
+  migrations/           dbmate SQL files
+  Dockerfile
+```
+
+---
+
+## Open Questions
+
+- **Web UI framework**: React vs Solid vs Svelte. Must be decided before Phase 4.
+- **Idle scale-to-zero**: deferred. Project pods stay running when idle. Relay replaced by nginx so the original tunnel wake-up problem is gone — revisit with NATS request/reply as the wake mechanism.
+- **Config change UX**: auto-restart sessions on user config change, or prompt? Leaning toward auto-restart with toast (--resume preserves conversation).
+- **PVC resize**: 20Gi default. `managed-csi-premium` supports online expansion — add monitoring alert.
+- **GHES repo browser**: search/autocomplete in "Clone repo" dialog. Details TBD.
+- **OpenBao**: credential seed scripts for tool-specific secrets. Community repo contract: read from Bao, write to `$HOME`, exit 0 if missing.
+- **`hostUsers: false` on AKS**: omitted from pod manifests — needs test pod to confirm.
+- **Stream-json protocol stability**: Claude Code's stream-json is used by IDE extensions — likely stable, but monitor for breaking changes across Claude Code versions. Pin Claude CLI version in session-agent image.
+- **Concurrent stdin writes**: multiple NATS messages arriving simultaneously need serialized writes to Claude stdin. Session agent must serialize stdin writes (mutex or channel).
 
 ---
 
 ## Acceptance Criteria
 
-This plan is complete when all verification steps pass AND the following future work plans have been written (as separate `docs/plan-*.md` files in the repo):
+Complete when all verification steps pass AND these future plans are written:
 
-| Future plan | Scope | Why it's separate |
-|------------|-------|-------------------|
-| `plan-entra-sso.md` | Replace local user auth with Entra OIDC | Blocked on corporate Entra admin approval |
-| `plan-web-ui-refactor.md` | SPA refactor of relay frontend (framework selection, component design, routing) | Design task — needs its own wireframes and tech decisions |
-| `plan-openbao-integration.md` | OpenBao deployment, Kubernetes auth, seed script framework, community repo | Separate infra + developer experience workstream |
-| `plan-secrets-management-ui.md` | Web UI for managing K8s Secret entries (add/update/remove credentials) | Part of the web UI refactor but scoped independently |
-| `plan-laptop-worktrees.md` | Worktree-per-session support on laptop/VM runtime (TmuxMonitor changes, new session dialog) | Parity feature, separate from K8s work |
-| `plan-finops-dashboard.md` | Per-user cost tracking dashboard, idle resource alerts, budget thresholds | Depends on OTEL stack + web UI refactor |
-| `plan-ghes-repo-browser.md` | GHES API integration for "Clone repo" search/autocomplete in new session dialog | UX feature, needs GHES API exploration |
-| `t1v0-infra: plan-registry-mirror-controller.md` | Controller that discovers Artifactory remote repos and publishes a `registry-mirrors` ConfigMap for cluster-wide consumption | Platform concern, lives in t1v0-infra, not mclaude |
-
-Each plan follows the same format as this one: context, architecture, implementation steps, verification criteria. Writing these plans is a deliverable of this project, not a "nice to have."
+| Plan | Scope |
+|------|-------|
+| `plan-web-ui-refactor.md` | SPA framework decision, component design, stream-json renderer |
+| `plan-entra-sso.md` | Entra OIDC integration (blocked on corporate Entra admin approval) |
+| `plan-openbao-integration.md` | OpenBao deployment, K8s auth, seed script framework |
+| `plan-laptop-worktrees.md` | Worktree-per-session on laptop (parity with K8s) |
+| `plan-finops-dashboard.md` | Per-user cost tracking, idle resource alerts |
+| `plan-idle-scaledown.md` | Project pod idle scale-to-zero design (NATS request/reply wake mechanism) |
+| `plan-ghes-repo-browser.md` | GHES API integration for Clone repo dialog |

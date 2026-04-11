@@ -15,8 +15,8 @@ targets:
     info:
       path: MClaude/Info.plist
       properties:
-        CFBundleShortVersionString: "2.25.1"
-        CFBundleVersion: "83"
+        CFBundleShortVersionString: "2.26.0"
+        CFBundleVersion: "84"
         UILaunchScreen: {}
         NSSpeechRecognitionUsageDescription: "MClaude uses speech recognition to let you dictate input to Claude Code sessions."
         NSMicrophoneUsageDescription: "MClaude needs microphone access for voice input to Claude Code sessions."

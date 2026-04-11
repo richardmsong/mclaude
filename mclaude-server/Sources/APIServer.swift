@@ -122,7 +122,7 @@ func buildRouter(monitor: TmuxMonitor, broadcaster: WSBroadcaster, jsonlTailer: 
             return await capturedStore?.ownerUserId ?? "owner"
         }
         guard let store = capturedStore else { return "owner" }
-        let userId = await store.authenticateSessionToken(token)
+        let userId = await store.authenticate(token: token)
         return userId
     }
 
