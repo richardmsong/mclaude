@@ -762,34 +762,30 @@ Where `<platform>` is `web`, `cli`, or `ios`. The skill:
 5. **Pick next category** — select the next category of missing features (Auth → Project → Conversation → etc.)
 6. **Implement the category** — implement features in the category, following the architecture doc
 7. **Verify** — run the build (`npm run build`, `go build`, `xcodebuild`). If it breaks, fix it.
-8. **Commit** — one commit per category, descriptive message referencing feature IDs
+8. **Commit and push** — one commit per category, push to the branch. This is the checkpoint.
 9. **Re-audit and loop** — go back to step 3. Repeat until the audit returns zero missing features, then open a PR.
 
-#### The session doesn't decide when to stop
+#### Convergence on a branch
 
-It doesn't. It keeps going — audit, implement category, commit, audit, implement category, commit — until either the audit comes back clean (done) or the session dies (compaction, crash, pod restart, context limit).
-
-**Commits are the checkpoints, not session boundaries.** Every committed category is saved to the branch regardless of what happens to the session. If the session dies after committing Auth and Project but mid-way through Conversation:
-
-1. Auth and Project commits are on the branch
-2. Partial Conversation changes are lost (uncommitted)
-3. GHA re-triggers → new session → audits the branch → finds Auth ✓, Project ✓, Conversation missing → picks up Conversation from scratch
-
-The re-audit makes this self-healing. No coordination between sessions. No state to carry over. The branch is the state.
+The feature list is a spec. The skill only moves the codebase closer to the spec — it can't move it further away (the build check and re-audit prevent regressions). So no matter how many times you run it, no matter how many sessions die and restart, the branch converges monotonically toward feature-complete.
 
 ```
-Session 1: Auth ✓ → Project ✓ → Conversation ✓ → [dies during Permissions]
-  (3 commits on branch, Permissions changes lost)
-Session 2: audits branch → Auth ✓, Project ✓, Conversation ✓ → Permissions ✓ → Skills ✓ → Model ✓ → Terminal ✓ → Voice ✓ → System ✓ → audit clean → opens PR
+Session 1: audit → Auth ✓ → Project ✓ → Conversation ✓ → [dies]
+  (3 commits pushed to branch)
+Session 2: audit → Auth ✓ Project ✓ Conversation ✓ → Permissions ✓ → Skills ✓ → [dies]
+  (2 more commits pushed)
+Session 3: audit → all above ✓ → Model ✓ → Terminal ✓ → Voice ✓ → System ✓ → audit clean → opens PR
 ```
 
-For incremental changes (feature list adds C12), a single session handles it in minutes — audit finds one missing feature, implements it, commits, audit clean, PR.
+No coordination between sessions. No merge step in between. Each session pulls the branch, re-audits, implements the next missing category, pushes. The branch is the accumulator.
 
-**Verification**: build check after each category. This isn't UI testing — it's "does it compile." UI correctness is validated during PR review or by Playwright tests if they exist.
+This means greenfield is just "keep spawning sessions on this branch until the PR opens." You can do it manually (`/implement-features web` a few times) or let the GHA loop handle it. Either way, you're reviewing the final PR, not babysitting the process.
+
+**Verification**: build check after each category. Not UI testing — "does it compile." UI correctness is validated during PR review or by Playwright tests if they exist.
 
 #### Trigger: Feature List Changes
 
-When `docs/feature-list.md` is updated (new feature, changed description, updated support matrix), a GitHub Action spins up N mclaude sessions in parallel:
+When `docs/feature-list.md` is updated, a GitHub Action spins up N mclaude sessions (one per platform) on a `feature-sync` branch:
 
 ```yaml
 # .github/workflows/implement-features.yml
@@ -816,15 +812,14 @@ jobs:
         run: |
           SESSION=$(curl -s -X POST "$MCLAUDE_API/sessions" \
             -H "Authorization: Bearer $MCLAUDE_TOKEN" \
-            -d '{"projectId": "${{ matrix.platform }}-client", "branch": "feature-sync/${{ github.sha }}"}' \
+            -d '{"projectId": "${{ matrix.platform }}-client", "branch": "feature-sync/${{ matrix.platform }}"}' \
             | jq -r '.sessionId')
 
           curl -s -X POST "$MCLAUDE_API/sessions/$SESSION/input" \
             -H "Authorization: Bearer $MCLAUDE_TOKEN" \
             -d '{"text": "/implement-features ${{ matrix.platform }}"}'
 
-          # Wait for idle — skill opens PR when done (or when session dies,
-          # commits on branch are preserved, re-trigger picks up the rest)
+          # Wait for idle — session loops internally until audit is clean or it dies
           while true; do
             STATE=$(curl -s "$MCLAUDE_API/sessions/$SESSION" \
               -H "Authorization: Bearer $MCLAUDE_TOKEN" \
@@ -832,27 +827,35 @@ jobs:
             [ "$STATE" = "idle" ] && break
             sleep 30
           done
+
+          # If session died before audit was clean, re-trigger
+          # (next session picks up from last push on the branch)
+          MISSING=$(curl -s "$MCLAUDE_API/sessions/$SESSION/audit" \
+            -H "Authorization: Bearer $MCLAUDE_TOKEN" \
+            | jq -r '.missingCount')
+          if [ "$MISSING" -gt 0 ]; then
+            gh workflow run implement-features.yml -f platform=${{ matrix.platform }}
+          fi
 ```
 
-The skill itself handles the loop (audit → implement → commit → audit → ...). If the session dies mid-loop, the commits are on the branch. Re-trigger the workflow (`workflow_dispatch`) to spawn a new session that picks up where the branch left off.
+The GHA loop is the outer retry. The skill is the inner loop. Between them, the branch converges to feature-complete without human intervention.
 
 #### Manual Use
 
 ```
-/implement-features web                    # audit + implement missing features
+/implement-features web                    # audit + implement until clean
 /implement-features web --audit-only       # just the gap report, no changes
 /implement-features web --category auth    # implement only the Auth category
 ```
 
 #### Why This Works
 
-- **Codebase is the state** — no session memory needed. Every invocation re-audits from scratch. Compaction, session death, pod restart — doesn't matter. The code tells the agent what's done.
-- **Feature list is the contract** — same IDs, same descriptions, same support matrix for all platforms. Updating one document drives all implementations.
-- **Architecture doc is the spec** — exact interfaces, protocol messages, accumulation algorithm. The agent doesn't have to guess how to implement a feature.
-- **Support matrix scopes the work** — the agent knows which features apply to which platform and skips the rest.
-- **Categories are natural batch boundaries** — Auth is ~4 features, Conversation is ~11. Each category fits comfortably in one context window. The skill implements one category, commits, re-audits, moves on.
-- **Loop until clean** — GHA re-triggers until the audit returns zero missing features. Greenfield goes from zero to feature-complete without human intervention. You review the PRs, not the process.
-- **N platforms, N sessions, N PRs** — each platform gets its own branch and PR. Review independently, merge independently. A feature list change that adds C12 produces 3 PRs.
+- **Monotonic convergence** — the feature list is the spec, the skill only adds what's missing, the build check prevents regressions. Each session moves the branch strictly closer to the target. Can't diverge.
+- **Branch is the accumulator** — commits are pushed, not held in session state. Sessions are disposable. Die and restart as many times as needed.
+- **Feature list is the contract** — same IDs, same descriptions, same support matrix for all platforms. Update one document, all platforms converge.
+- **Architecture doc is the spec** — exact interfaces, protocol messages, accumulation algorithm. The agent doesn't guess.
+- **Categories are natural batch boundaries** — Auth is ~4 features, Conversation is ~11. Each fits in one context window.
+- **N platforms, N branches** — each platform converges independently. Review the final PR when it opens.
 
 ### Testing
 
