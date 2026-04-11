@@ -110,7 +110,7 @@ Future: Figma designs linked per feature.
 | Platform | Below `minClientVersion` |
 |----------|--------------------------|
 | Web SPA | Force `location.reload()` — new content-hashed assets load automatically. If version still below minimum after reload (shouldn't happen), show blocking "server is updating, please wait" screen. |
-| iOS | Blocking screen: "Update required — open TestFlight to update mclaude." No partial functionality. |
+| iOS | Blocking screen: "Update required — open the App Store to update mclaude." No partial functionality. |
 | mclaude-cli | Print `mclaude: server requires client version ≥ {min}, you have {current}. Run: brew upgrade mclaude` and exit 1. |
 
 `minClientVersion` is set in control-plane config and returned on the auth login response and on a `GET /version` endpoint (no auth required). Clients check it on startup and on every reconnect. When a breaking mclaude version ships, bump `minClientVersion` in the control-plane deployment.
