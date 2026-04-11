@@ -379,6 +379,193 @@ func buildRouter(monitor: TmuxMonitor, broadcaster: WSBroadcaster, jsonlTailer: 
         )
     }
 
+    // Get the most recent plan file content for a session
+    router.get("/sessions/:id/plan") { request, context in
+        guard let id = context.parameters.get("id") else {
+            return Response(status: .badRequest)
+        }
+        guard let userId = await requireAuth(request: request) else { return unauthorized }
+        if userId != "owner" {
+            guard await capturedStore!.userOwns(sessionId: id, userId: userId) else {
+                return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
+            }
+        }
+        guard let session = await capturedMonitor.getSession(id: id) else {
+            return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
+        }
+        let plansDir = "\(session.cwd)/.claude/plans"
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: plansDir),
+              let files = try? fm.contentsOfDirectory(atPath: plansDir) else {
+            return Response(status: .ok, headers: [.contentType: "application/json"],
+                            body: .init(byteBuffer: .init(string: "{\"plan\":null}")))
+        }
+        let mdFiles = files.filter { $0.hasSuffix(".md") }
+        guard !mdFiles.isEmpty else {
+            return Response(status: .ok, headers: [.contentType: "application/json"],
+                            body: .init(byteBuffer: .init(string: "{\"plan\":null}")))
+        }
+        var newest: (path: String, date: Date)? = nil
+        for file in mdFiles {
+            let fullPath = "\(plansDir)/\(file)"
+            if let attrs = try? fm.attributesOfItem(atPath: fullPath),
+               let mod = attrs[.modificationDate] as? Date {
+                if newest == nil || mod > newest!.date {
+                    newest = (fullPath, mod)
+                }
+            }
+        }
+        guard let best = newest, let content = try? String(contentsOfFile: best.path, encoding: .utf8) else {
+            return Response(status: .ok, headers: [.contentType: "application/json"],
+                            body: .init(byteBuffer: .init(string: "{\"plan\":null}")))
+        }
+        let fileName = (best.path as NSString).lastPathComponent
+        struct PlanResponse: Codable { let plan: String; let fileName: String }
+        let resp = PlanResponse(plan: content, fileName: fileName)
+        let data = try JSONEncoder().encode(resp)
+        return Response(status: .ok, headers: [.contentType: "application/json"],
+                        body: .init(byteBuffer: .init(data: data)))
+    }
+
+    // Token usage timeline across all sessions (for usage dashboard)
+    router.get("/usage/timeline") { request, context in
+        guard let userId = await requireAuth(request: request) else { return unauthorized }
+
+        var hours = 24
+        if let q = request.uri.query {
+            for param in q.split(separator: "&") {
+                let parts = param.split(separator: "=", maxSplits: 1)
+                if parts.count == 2 && parts[0] == "hours", let h = Int(parts[1]) {
+                    hours = min(max(h, 1), 720)
+                }
+            }
+        }
+
+        let cutoff = Date().addingTimeInterval(-Double(hours) * 3600)
+        let projectsDir = "\(NSHomeDirectory())/.claude/projects"
+        let fm = FileManager.default
+
+        struct DataPoint: Encodable {
+            let ts: String
+            let input: Int
+            let output: Int
+            let cacheRead: Int
+            let cacheCreate: Int
+            let model: String
+        }
+
+        var points: [DataPoint] = []
+
+        let isoFull = ISO8601DateFormatter()
+        isoFull.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoBasic = ISO8601DateFormatter()
+        isoBasic.formatOptions = [.withInternetDateTime]
+
+        func parseDate(_ s: String) -> Date? {
+            return isoFull.date(from: s) ?? isoBasic.date(from: s)
+        }
+
+        func scanJSONL(path: String) {
+            guard let data = fm.contents(atPath: path),
+                  let content = String(data: data, encoding: .utf8) else { return }
+            for line in content.components(separatedBy: "\n") where !line.isEmpty {
+                guard let ld = line.data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: ld) as? [String: Any],
+                      json["type"] as? String == "assistant",
+                      let tsStr = json["timestamp"] as? String,
+                      let date = parseDate(tsStr), date >= cutoff,
+                      let message = json["message"] as? [String: Any],
+                      let usage = message["usage"] as? [String: Any] else { continue }
+                points.append(DataPoint(
+                    ts: tsStr,
+                    input: usage["input_tokens"] as? Int ?? 0,
+                    output: usage["output_tokens"] as? Int ?? 0,
+                    cacheRead: usage["cache_read_input_tokens"] as? Int ?? 0,
+                    cacheCreate: usage["cache_creation_input_tokens"] as? Int ?? 0,
+                    model: message["model"] as? String ?? ""
+                ))
+            }
+        }
+
+        // Scan all project JSONL dirs — any authenticated user can see their full usage history
+        if let projectDirs = try? fm.contentsOfDirectory(atPath: projectsDir) {
+            for dir in projectDirs {
+                let dirPath = "\(projectsDir)/\(dir)"
+                if let files = try? fm.contentsOfDirectory(atPath: dirPath) {
+                    for file in files where file.hasSuffix(".jsonl") {
+                        scanJSONL(path: "\(dirPath)/\(file)")
+                    }
+                }
+            }
+        }
+
+        points.sort { $0.ts < $1.ts }
+        struct TimelineResponse: Encodable { let points: [DataPoint] }
+        let respData = try JSONEncoder().encode(TimelineResponse(points: points))
+        return Response(status: .ok, headers: [.contentType: "application/json"],
+                        body: .init(byteBuffer: .init(data: respData)))
+    }
+
+    // Get aggregated token usage for a session (scans JSONL for message.usage fields)
+    router.get("/sessions/:id/usage") { request, context in
+        guard let id = context.parameters.get("id") else {
+            return Response(status: .badRequest)
+        }
+        guard let userId = await requireAuth(request: request) else { return unauthorized }
+        if userId != "owner" {
+            guard await capturedStore!.userOwns(sessionId: id, userId: userId) else {
+                return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
+            }
+        }
+        guard let session = await capturedMonitor.getSession(id: id) else {
+            return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
+        }
+
+        let projectsDir = "\(NSHomeDirectory())/.claude/projects"
+        let encodedPath = session.cwd.replacingOccurrences(of: "/", with: "-")
+        let jsonlPath = "\(projectsDir)/\(encodedPath)/\(session.sessionId).jsonl"
+
+        var inputTokens = 0, outputTokens = 0, cacheCreationTokens = 0, cacheReadTokens = 0
+        var turnCount = 0
+        var lastModel = ""
+
+        if let data = FileManager.default.contents(atPath: jsonlPath),
+           let content = String(data: data, encoding: .utf8) {
+            for line in content.components(separatedBy: "\n") where !line.isEmpty {
+                guard let lineData = line.data(using: .utf8),
+                      let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                      json["type"] as? String == "assistant",
+                      let message = json["message"] as? [String: Any],
+                      let usage = message["usage"] as? [String: Any] else { continue }
+                inputTokens += usage["input_tokens"] as? Int ?? 0
+                outputTokens += usage["output_tokens"] as? Int ?? 0
+                cacheCreationTokens += usage["cache_creation_input_tokens"] as? Int ?? 0
+                cacheReadTokens += usage["cache_read_input_tokens"] as? Int ?? 0
+                turnCount += 1
+                if let model = message["model"] as? String, !model.isEmpty {
+                    lastModel = model
+                }
+            }
+        }
+
+        struct UsageResponse: Codable {
+            let inputTokens: Int
+            let outputTokens: Int
+            let cacheCreationTokens: Int
+            let cacheReadTokens: Int
+            let turnCount: Int
+            let model: String
+        }
+        let resp = UsageResponse(
+            inputTokens: inputTokens, outputTokens: outputTokens,
+            cacheCreationTokens: cacheCreationTokens, cacheReadTokens: cacheReadTokens,
+            turnCount: turnCount, model: lastModel
+        )
+        let respData = try JSONEncoder().encode(resp)
+        return Response(status: .ok, headers: [.contentType: "application/json"],
+                        body: .init(byteBuffer: .init(data: respData)))
+    }
+
     // Get recent structured events for a session
     router.get("/sessions/:id/events") { request, context in
         guard let id = context.parameters.get("id") else {
