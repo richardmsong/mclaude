@@ -759,32 +759,33 @@ Where `<platform>` is `web`, `cli`, or `ios`. The skill:
 2. **Identify platform root** — `mclaude-web/`, `mclaude-cli/`, `mclaude-ios/` (configurable)
 3. **Audit** — scan the platform codebase, classify each applicable feature as `implemented`, `partial`, or `missing`
 4. **Output gap report** — ordered by dependency (A1 before P1, C1 before C2), with specific files to create/modify
-5. **Pick next batch** — select the next category of missing features (Auth → Project → Conversation → etc.)
-6. **Implement the batch** — implement features in the batch, following the architecture doc
-7. **Verify** — run type checker / linter / build after each feature. Re-audit to confirm completeness.
-8. **Commit the batch** — one commit per category, descriptive message referencing feature IDs
-9. **Loop or stop** — if more missing features remain, start the next batch. If context is getting heavy, open a PR with what's done so far and note remaining work in the PR description.
+5. **Pick next category** — select the next category of missing features (Auth → Project → Conversation → etc.)
+6. **Implement the category** — implement features in the category, following the architecture doc
+7. **Verify** — run the build (`npm run build`, `go build`, `xcodebuild`). If it breaks, fix it.
+8. **Commit** — one commit per category, descriptive message referencing feature IDs
+9. **Re-audit and loop** — go back to step 3. Repeat until the audit returns zero missing features, then open a PR.
 
-#### Greenfield vs. Incremental
+#### The session doesn't decide when to stop
 
-**Incremental** (feature list adds C12): single session, single batch, single PR. Fast — the audit finds one missing feature and implements it. No babysitting.
+It doesn't. It keeps going — audit, implement category, commit, audit, implement category, commit — until either the audit comes back clean (done) or the session dies (compaction, crash, pod restart, context limit).
 
-**Greenfield** (new platform from zero): the skill is designed to survive this without babysitting, but it works in batches rather than one giant pass:
+**Commits are the checkpoints, not session boundaries.** Every committed category is saved to the branch regardless of what happens to the session. If the session dies after committing Auth and Project but mid-way through Conversation:
 
-1. Each **category** (Auth, Conversation, Terminal, etc.) is one batch. The skill implements a full category, commits, then moves to the next.
-2. After each batch, the skill **re-reads the feature list and re-audits** from scratch. This is the key — it doesn't rely on conversation history to know what's done. It looks at the code. Compaction can't break this.
-3. If context gets heavy (many compactions, degrading quality), the skill **stops, opens a PR with completed categories, and notes which categories remain**. The next `/implement-features` invocation picks up exactly where it left off because the audit sees what's already implemented.
-4. The GHA trigger can be configured to **re-run until the audit comes back clean** — a loop of sessions, each doing a few categories, until feature-complete.
+1. Auth and Project commits are on the branch
+2. Partial Conversation changes are lost (uncommitted)
+3. GHA re-triggers → new session → audits the branch → finds Auth ✓, Project ✓, Conversation missing → picks up Conversation from scratch
+
+The re-audit makes this self-healing. No coordination between sessions. No state to carry over. The branch is the state.
 
 ```
-Session 1: Auth (A1-A4) + Project (P1-P6) + Conversation (C1-C11) → PR #1
-Session 2: picks up from audit → Permissions (R1-R2) + Skills (S1-S2) + Model (M1-M4) → PR #2
-Session 3: picks up from audit → Terminal (T1-T3) + Voice (V1) + System (X1-X3) → PR #3
+Session 1: Auth ✓ → Project ✓ → Conversation ✓ → [dies during Permissions]
+  (3 commits on branch, Permissions changes lost)
+Session 2: audits branch → Auth ✓, Project ✓, Conversation ✓ → Permissions ✓ → Skills ✓ → Model ✓ → Terminal ✓ → Voice ✓ → System ✓ → audit clean → opens PR
 ```
 
-Each session is independent. No state carried between sessions — the codebase IS the state. Merge PR #1, session 2 audits the merged code, implements the next batch. Fully unattended.
+For incremental changes (feature list adds C12), a single session handles it in minutes — audit finds one missing feature, implements it, commits, audit clean, PR.
 
-**Verification**: each batch runs the build (`npm run build`, `go build`, `xcodebuild`). If the build breaks, the skill fixes it before moving on. This isn't UI testing — it's "does it compile." UI correctness is validated during PR review (or by Playwright tests if they exist).
+**Verification**: build check after each category. This isn't UI testing — it's "does it compile." UI correctness is validated during PR review or by Playwright tests if they exist.
 
 #### Trigger: Feature List Changes
 
@@ -800,7 +801,7 @@ on:
   workflow_dispatch:
     inputs:
       platform:
-        description: 'Single platform to run (blank = all)'
+        description: 'Single platform (blank = all)'
         required: false
 
 jobs:
@@ -813,18 +814,17 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run /implement-features
         run: |
-          # Create a session on a feature-sync branch
           SESSION=$(curl -s -X POST "$MCLAUDE_API/sessions" \
             -H "Authorization: Bearer $MCLAUDE_TOKEN" \
             -d '{"projectId": "${{ matrix.platform }}-client", "branch": "feature-sync/${{ github.sha }}"}' \
             | jq -r '.sessionId')
 
-          # Run the skill
           curl -s -X POST "$MCLAUDE_API/sessions/$SESSION/input" \
             -H "Authorization: Bearer $MCLAUDE_TOKEN" \
             -d '{"text": "/implement-features ${{ matrix.platform }}"}'
 
-          # Wait for session to go idle
+          # Wait for idle — skill opens PR when done (or when session dies,
+          # commits on branch are preserved, re-trigger picks up the rest)
           while true; do
             STATE=$(curl -s "$MCLAUDE_API/sessions/$SESSION" \
               -H "Authorization: Bearer $MCLAUDE_TOKEN" \
@@ -832,31 +832,9 @@ jobs:
             [ "$STATE" = "idle" ] && break
             sleep 30
           done
-
-      - name: Check if more work remains
-        id: audit
-        run: |
-          # Run audit-only to see if the platform is feature-complete
-          # (The skill outputs a JSON gap report when --audit-only)
-          SESSION=$(curl -s -X POST "$MCLAUDE_API/sessions" \
-            -H "Authorization: Bearer $MCLAUDE_TOKEN" \
-            -d '{"projectId": "${{ matrix.platform }}-client", "branch": "feature-sync/${{ github.sha }}"}' \
-            | jq -r '.sessionId')
-          curl -s -X POST "$MCLAUDE_API/sessions/$SESSION/input" \
-            -H "Authorization: Bearer $MCLAUDE_TOKEN" \
-            -d '{"text": "/implement-features ${{ matrix.platform }} --audit-only"}'
-          # ... parse gap report, set output if incomplete
-          echo "complete=false" >> $GITHUB_OUTPUT
-
-      - name: Re-trigger if incomplete
-        if: steps.audit.outputs.complete == 'false'
-        run: |
-          # Dispatch another run — next session picks up where this one left off
-          gh workflow run implement-features.yml \
-            -f platform=${{ matrix.platform }}
 ```
 
-Each platform runs independently. If a session finishes a batch but more categories remain, it opens a PR with what's done and re-triggers. The next session audits the merged code and implements the next batch. Loops until the audit comes back clean.
+The skill itself handles the loop (audit → implement → commit → audit → ...). If the session dies mid-loop, the commits are on the branch. Re-trigger the workflow (`workflow_dispatch`) to spawn a new session that picks up where the branch left off.
 
 #### Manual Use
 
