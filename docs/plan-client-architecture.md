@@ -745,35 +745,90 @@ mclaude-cli/
 
 ### Development Harness
 
-An agentic harness that drives development across all client platforms. Instead of manually tracking what's done and what's missing, the harness reads the canonical [Client Feature List](feature-list.md), audits the current client codebase, and produces a prioritized gap analysis.
+A `/implement-features` skill that audits a client codebase against the [Client Feature List](feature-list.md) and implements missing features. Designed to run as N parallel mclaude sessions — one per platform — triggered automatically when the feature list changes.
 
-**How it works:**
-
-1. **Read the feature list** — parse `feature-list.md` for all feature IDs, descriptions, and the platform support matrix
-2. **Audit the codebase** — scan the client source for evidence of each feature (components, store methods, NATS subscriptions, event handlers, UI elements)
-3. **Classify each feature** — `implemented`, `partial`, `missing`, `not-applicable` (per the support matrix)
-4. **Output a gap report** — ordered by dependency (e.g., A1 before P1, C1 before C2), with specific guidance for each missing/partial feature: which files to create/modify, which view models to wire up, which protocol messages to handle
-
-**Usage:** point Claude at any client directory and say "implement the feature list":
+#### The Skill
 
 ```
-You are building the mclaude web SPA (or mclaude-cli, or iOS app).
-
-1. Read docs/feature-list.md for the canonical feature list and platform support matrix.
-2. Read docs/plan-client-architecture.md for the layered architecture, protocol contract,
-   conversation model accumulation algorithm, and cache handling.
-3. Audit the current codebase against the feature list.
-4. For each missing or partial feature, implement it following the architecture doc.
-5. After each feature, re-audit to confirm it's complete before moving to the next.
+/implement-features <platform>
 ```
 
-This works because:
-- The feature list is the single source of truth — same IDs across all platforms
-- The architecture doc specifies exact interfaces, protocol messages, and accumulation logic
-- The support matrix tells the agent which features apply to which platform
-- The agent can verify its own work by re-auditing after each feature
+Where `<platform>` is `web`, `cli`, or `ios`. The skill:
 
-The harness is not a separate tool — it's a prompt pattern that leverages the feature list and architecture doc as machine-readable specs. Any Claude session (mclaude itself, Claude Code, or a CI agent) can run it.
+1. **Read specs** — `docs/feature-list.md` (features + support matrix) and `docs/plan-client-architecture.md` (architecture, protocol, accumulation logic, cache handling)
+2. **Identify platform root** — `mclaude-web/`, `mclaude-cli/`, `mclaude-ios/` (configurable)
+3. **Audit** — scan the platform codebase, classify each applicable feature as `implemented`, `partial`, or `missing`
+4. **Output gap report** — ordered by dependency (A1 before P1, C1 before C2), with specific files to create/modify
+5. **Implement** — for each missing/partial feature, implement it following the architecture doc
+6. **Re-audit** — after each feature, re-scan to confirm completeness before moving to the next
+7. **Open PR** — one PR per platform with the gap report as the PR description
+
+#### Trigger: Feature List Changes
+
+When `docs/feature-list.md` is updated (new feature, changed description, updated support matrix), a GitHub Action spins up N mclaude sessions in parallel:
+
+```yaml
+# .github/workflows/implement-features.yml
+name: Implement Feature List Changes
+on:
+  push:
+    paths: ['docs/feature-list.md']
+    branches: [main]
+
+jobs:
+  implement:
+    strategy:
+      matrix:
+        platform: [web, cli, ios]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create mclaude session
+        run: |
+          # Create a session targeting this platform's project
+          SESSION=$(curl -s -X POST "$MCLAUDE_API/sessions" \
+            -H "Authorization: Bearer $MCLAUDE_TOKEN" \
+            -d '{"projectId": "${{ matrix.platform }}-client", "branch": "feature-sync/${{ github.sha }}"}' \
+            | jq -r '.sessionId')
+
+          # Send the skill invocation as the first message
+          curl -s -X POST "$MCLAUDE_API/sessions/$SESSION/input" \
+            -H "Authorization: Bearer $MCLAUDE_TOKEN" \
+            -d '{"text": "/implement-features ${{ matrix.platform }}"}'
+
+          # Poll until session is idle (skill complete)
+          while true; do
+            STATE=$(curl -s "$MCLAUDE_API/sessions/$SESSION" \
+              -H "Authorization: Bearer $MCLAUDE_TOKEN" \
+              | jq -r '.state')
+            [ "$STATE" = "idle" ] && break
+            sleep 30
+          done
+```
+
+This creates 3 parallel sessions, each on its own branch, each running the same skill with a different platform argument. Each session opens a PR when done.
+
+#### Manual Use
+
+Also works interactively in any mclaude session:
+
+```
+/implement-features web
+```
+
+Or to just get the audit without implementing:
+
+```
+/implement-features web --audit-only
+```
+
+#### Why This Works
+
+- **Feature list is the contract** — same IDs, same descriptions, same support matrix for all platforms. Updating one document drives all implementations.
+- **Architecture doc is the spec** — exact interfaces, protocol messages, accumulation algorithm. The agent doesn't have to guess how to implement a feature.
+- **Support matrix scopes the work** — the agent knows which features apply to which platform and skips the rest.
+- **Re-audit after each feature** — catches regressions and ensures partial implementations get completed.
+- **N sessions, N PRs** — each platform gets its own branch and PR. Review independently, merge independently. A feature list change that adds C12 produces 3 PRs: one for web, one for CLI, one for iOS.
 
 ### Testing
 
