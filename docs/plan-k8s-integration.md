@@ -279,6 +279,7 @@ go func() {
             case "session_state_changed": updateKV(line)
             case "control_request": updatePendingControl(line)
             case "result": accumulateUsage(line)
+            case "clear", "compact_boundary": updateReplayFromSeq(line, jetStreamSeq)
             }
         }
     }
@@ -431,7 +432,8 @@ Events are published as raw stream-json bytes — no envelope. The NATS subject 
     "cacheReadTokens": 8000,
     "cacheWriteTokens": 4500,
     "costUsd": 0.042
-  }
+  },
+  "replayFromSeq": 1042
 }
 ```
 
@@ -440,6 +442,8 @@ Events are published as raw stream-json bytes — no envelope. The NATS subject 
 `pendingControl` is set when a `control_request` is received and cleared when the `control_response` is sent. Clients use this to show permission prompts.
 
 `capabilities` is populated from the `init` event on session start. Refreshed when `reload_plugins` control request response is received. Client reads from KV — one read, no stream replay needed for the skills picker.
+
+`replayFromSeq` is the JetStream sequence number from which clients should start replaying events. Updated by the session agent on `/clear` (conversation reset) and compaction (context compacted). Clients read this before subscribing — avoids replaying thousands of now-irrelevant events from before the clear/compaction boundary. If null/absent, replay from the beginning.
 
 ### Project state (NATS KV)
 
@@ -825,7 +829,7 @@ Mobile browser first — enterprise constraint requires the client to work in a 
 
 **State**: client watches NATS KV buckets `mclaude-sessions` and `mclaude-projects` for live updates.
 
-**Event replay**: on reconnect or tab foreground, client sends last seen JetStream sequence. No stale cache — client always knows its position in the stream.
+**Event replay**: on reconnect or tab foreground, client re-subscribes from `max(lastSeenSeq + 1, replayFromSeq)`. On fresh load, reads `replayFromSeq` from session KV and subscribes from there — avoids replaying events from before the last `/clear` or compaction. No stale cache — client always knows its position in the stream.
 
 **Skills picker**: populated from the `init` event's `skills` array (cached in NATS KV session state). Refreshed via `reload_plugins` when skills change mid-session.
 
