@@ -127,7 +127,7 @@ When Claude spawns a subagent (Explore, Plan, etc.), the subagent's events appea
 {"type": "user", "message": {"content": [{"type": "tool_result", ...}]}, "parent_tool_use_id": "tu_1"}
 ```
 
-The SPA uses `parent_tool_use_id` to render subagent events nested under the parent Agent tool block. Events with `parent_tool_use_id: null` are top-level.
+The SPA uses `parent_tool_use_id` to render subagent events nested under the parent Agent tool block. Events with `parent_tool_use_id: null` are top-level. The session agent publishes all events verbatim regardless of nesting depth — `parent_tool_use_id` is valid at any depth (Agent → Agent → Agent). Rendering strategy for deep nesting is deferred to `plan-web-ui-refactor.md`.
 
 ---
 
@@ -170,9 +170,23 @@ KV bucket: mclaude-sessions
 
 KV bucket: mclaude-projects
   key: {userId}/{projectId}              → Project JSON (see below)
+
+KV bucket: mclaude-heartbeats
+  key: {userId}/{projectId}             → {"ts": "..."}
+
+KV bucket: mclaude-laptops
+  key: {userId}/{hostname}              → {"machineId": "...", "ts": "..."}
 ```
 
 Watching a KV key gives real-time state updates to any subscriber. Clients watch their own user's keys.
+
+**Bucket initialization**: control-plane creates all four buckets idempotently on startup (`nats.KeyValueStoreOrCreate`). Session agents and launchers do not create buckets — they fail fast if a bucket doesn't exist (indicates control-plane hasn't started yet).
+
+**Entry lifetime**:
+- `mclaude-sessions`: deleted by session agent on normal session delete. Orphaned entries (ungraceful shutdown) are swept by the daily JSONL cleanup job — any KV entry whose sessionId has no corresponding JSONL file on PVC older than 7 days is purged.
+- `mclaude-projects`: deleted by control-plane on project delete.
+- `mclaude-heartbeats`: TTL 90s on the KV entry itself (NATS KV native TTL). Expires automatically if agent stops writing.
+- `mclaude-laptops`: TTL 24h. Launcher refreshes on startup and every 12h.
 
 ---
 
@@ -381,6 +395,10 @@ On a laptop, **one session-agent per project** — same scoping as K8s. A lightw
 - NATS JWT issued by control-plane on first setup, stored in `~/.config/mclaude/creds` (shared by all agents)
 - Launcher monitors child agents, restarts on crash
 
+**Hostname collision**: on startup, launcher checks NATS KV for an existing `mclaude-laptops/{userId}/{hostname}` entry. If one exists with a different machine ID, launcher exits with an error: `hostname "{hostname}" is already registered to another machine — set a unique hostname with: mclaude config hostname <name>`. If the entry matches this machine ID (e.g. crash recovery), launcher proceeds normally and overwrites the entry.
+
+**JWT refresh**: launcher runs a background goroutine that decodes the `exp` claim from `~/.config/mclaude/creds` every 60s. When TTL falls below 15 minutes, it calls `POST /auth/refresh` and writes the new credential file. All child session-agents share the same file and reload it on their next NATS reconnect. If refresh fails (network down, server error), launcher retries with exponential backoff and logs a warning — child agents continue with the existing JWT until it expires, then reconnect with whatever credential is current.
+
 The browser connects to the same NATS and subscribes to `mclaude.{userId}.laptop.{hostname}.events.>` — same flow as K8s sessions.
 
 ### Worktrees
@@ -395,7 +413,7 @@ On session create:
 
 On session delete:
 1. Send interrupt → wait for Claude exit
-2. If no other sessions use this worktree: `git -C /data/repo worktree remove /data/worktrees/{branchSlug}`
+2. Scan KV bucket for all sessions in this projectId — if no other session has the same `worktree` slug: `git -C /data/repo worktree remove /data/worktrees/{branchSlug}`
 3. Delete from NATS KV
 
 ---
@@ -425,7 +443,7 @@ Events are published as raw stream-json bytes — no envelope. The NATS subject 
     "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
     "agents": ["general-purpose", "Explore", "Plan"]
   },
-  "pendingControl": null,
+  "pendingControls": {},
   "usage": {
     "inputTokens": 12500,
     "outputTokens": 3200,
@@ -439,7 +457,7 @@ Events are published as raw stream-json bytes — no envelope. The NATS subject 
 
 `state` maps directly from stream-json `session_state_changed` events: `"idle"`, `"running"`, `"requires_action"`.
 
-`pendingControl` is set when a `control_request` is received and cleared when the `control_response` is sent. Clients use this to show permission prompts.
+`pendingControls` is a map of `request_id → control_request` — all unanswered permission prompts for this session. The session agent adds an entry when a `control_request` is received and removes it when the `control_response` is sent. Claude Code may emit multiple simultaneous `control_request` events (parallel tool calls) — the agent forwards all of them to NATS immediately and updates KV for each. The client renders all pending prompts simultaneously. No timeout — a prompt stays open until answered, regardless of how long that takes.
 
 `capabilities` is populated from the `init` event on session start. Refreshed when `reload_plugins` control request response is received. Client reads from KV — one read, no stream replay needed for the skills picker.
 
@@ -548,6 +566,18 @@ These endpoints bind to a separate port (`:9090`) that is never referenced in th
 7. Publish mclaude.admin.users.created to NATS  ← fire-and-forget, non-fatal
 ```
 
+### User deprovision flow
+
+```
+1. DELETE /users/{id} (or SCIM DELETE)
+2. Revoke user's NATS JWT: add user NKey to account JWT revocations, push updated account JWT to NATS server
+3. NATS broker terminates all active connections for that user immediately
+4. DELETE from Postgres users table (cascades to nats_credentials)
+5. kubectl delete namespace mclaude-{userId}  ← deletes all pods, PVCs, secrets
+```
+
+JWT revocation is NATS-native: control-plane holds the account NKey and can push a signed revocation to the NATS server at any time. Existing connections are dropped within one server tick. No 8h window.
+
 ### Project provisioning flow
 
 ```
@@ -623,7 +653,7 @@ Pod: project-{projectId}            namespace: mclaude-{userId}
 |------|-------|---------|----------|
 | **User** | Per namespace | ConfigMap + Secret | CLAUDE.md, settings.json, skills, commands, credentials |
 | **Project** | Per project | PVC (RWO, managed-csi-premium) | Bare git repo, worktrees, JSONL (Claude's own persistence), shared memory |
-| **Session** | Per session | NATS KV | id, branch, worktree, cwd, state, capabilities, pendingControl |
+| **Session** | Per session | NATS KV | id, branch, worktree, cwd, state, capabilities, pendingControls |
 | **Home** | Per pod | emptyDir | Seeded from ConfigMap + Secret on boot. Ephemeral. |
 
 ---
@@ -750,7 +780,16 @@ done
 mkdir -p /data/projects
 ln -sf /data/projects "$HOME/.claude/projects"
 
-# Skip onboarding
+# Verify Claude version matches pinned version (prevent silent breakage from manual claude update)
+EXPECTED_CLAUDE_VERSION="${CLAUDE_VERSION:?CLAUDE_VERSION env var not set}"
+ACTUAL_CLAUDE_VERSION=$(claude --version 2>/dev/null | awk '{print $NF}')
+if [ "$ACTUAL_CLAUDE_VERSION" != "$EXPECTED_CLAUDE_VERSION" ]; then
+    echo "[entrypoint] Claude version mismatch: expected $EXPECTED_CLAUDE_VERSION, got $ACTUAL_CLAUDE_VERSION — exiting"
+    exit 1
+fi
+
+# Skip onboarding. bypassPermissions disables Claude Code's built-in permission dialogs —
+# guard hooks (platform-level enforcement) are the permission layer in pods, not Claude Code's UI prompts.
 echo '{"hasCompletedOnboarding":true,"bypassPermissions":true}' > "$HOME/.claude.json"
 
 # Git setup (bare repo — worktrees created by session agent)
@@ -829,7 +868,9 @@ Mobile browser first — enterprise constraint requires the client to work in a 
 
 **State**: client watches NATS KV buckets `mclaude-sessions` and `mclaude-projects` for live updates.
 
-**Event replay**: on reconnect or tab foreground, client re-subscribes from `max(lastSeenSeq + 1, replayFromSeq)`. On fresh load, reads `replayFromSeq` from session KV and subscribes from there — avoids replaying events from before the last `/clear` or compaction. No stale cache — client always knows its position in the stream.
+**Event replay**: on reconnect or tab foreground, client re-subscribes from `max(lastSeenSeq + 1, replayFromSeq)`. On fresh load, reads `replayFromSeq` from session KV and subscribes from there — avoids replaying events from before the last `/clear` or compaction. No stale cache ��� client always knows its position in the stream.
+
+**Deduplication**: delivery is at-least-once — a session agent reconnecting to NATS after an outage may re-publish events the client already received. Client must deduplicate by JetStream sequence number: skip any event whose sequence number is ≤ `lastSeenSeq`.
 
 **Skills picker**: populated from the `init` event's `skills` array (cached in NATS KV session state). Refreshed via `reload_plugins` when skills change mid-session.
 
@@ -897,6 +938,8 @@ mclaude.{userId}.{projectId}.terminal.{termId}.input     → raw keyboard input 
 ```
 
 These are **not** JetStream — raw terminal I/O is ephemeral, no replay needed. Use core NATS pub/sub for low latency.
+
+**Message size**: the read buffer is 4096 bytes, so each NATS pub is at most 4KB — nowhere near the 8MB `max_payload` limit. High-throughput output (e.g. `cat bigfile`) produces many small messages; since the subject is ephemeral (not persisted), this is fine.
 
 The web SPA renders terminal sessions with **xterm.js**:
 - Subscribes to `.terminal.{termId}.output` → feeds bytes to xterm.js
@@ -1027,13 +1070,13 @@ readinessProbe:
 
 **Postgres unavailability** (control-plane): retry with exponential backoff. Login endpoints return 503 while Postgres is unreachable. NATS JWTs already issued remain valid.
 
-**NATS unavailability** (session-agent): buffer state changes in memory, flush on reconnect. Claude processes continue running — sessions are not affected by NATS downtime. Stdout events are buffered and published when connection restores.
+**NATS unavailability** (session-agent): buffer state changes in memory, flush on reconnect. Claude processes continue running — sessions are not affected by NATS downtime. Stdout events are buffered and published when connection restores. Delivery is **at-least-once** — events published just before disconnect may be re-published on reconnect (JetStream re-delivery from last ack). Clients deduplicate by JetStream sequence number.
 
 **Pod restart — graceful** (session-agent): graceful shutdown runs (see above). On startup, read NATS KV for existing sessions, relaunch with `--resume`. Claude Code reads its own JSONL from PVC to restore conversation context. No dependency on any other service being up.
 
 **Pod restart — ungraceful** (SIGKILL, node failure, OOM): graceful shutdown does NOT run. Stale state left behind:
 - NATS KV session entries still show old state (e.g. `running`)
-- `pendingControl` may reference a stale permission prompt
+- `pendingControls` may contain stale permission prompts
 - No `session_stopped` lifecycle events published
 - Buffered but unpublished events lost
 - Terminal (PTY) sessions are gone (ephemeral, no recovery)
@@ -1043,13 +1086,15 @@ Recovery sequence on startup after ungraceful termination:
 
 ```
 1. Read KV for all sessions with this projectId
-2. Set all session KV entries to state: "restarting", clear pendingControl
+2. Set all session KV entries to state: "restarting", clear pendingControls
 3. Publish session_restarting lifecycle events
 4. For each session: claude --resume {sessionId}
 5. On init event received: update KV with fresh state from Claude
 6. Publish session_resumed lifecycle events
 7. Sessions that fail to start within 30s: mark state: "failed", publish session_failed
 ```
+
+Clearing `pendingControl` in step 2 is safe: on `--resume`, Claude Code sees the interrupted tool call in its conversation history and re-emits the `control_request` naturally. The client receives a fresh prompt and responds normally.
 
 This is the same sequence as a graceful restart — the agent doesn't distinguish between the two. It always re-derives state from Claude Code on startup.
 
@@ -1548,7 +1593,7 @@ mclaude-control-plane/
 - **OpenBao**: credential seed scripts for tool-specific secrets. Community repo contract: read from Bao, write to `$HOME`, exit 0 if missing.
 - **`hostUsers: false` on AKS**: omitted from pod manifests — needs test pod to confirm.
 - **Bash stdout streaming**: `tool_progress` events only include elapsed time, not stdout. If Claude Code adds real-time tool output events in the future, the architecture supports them immediately. Monitor Claude Code changelogs.
-- **OAuth token refresh in pods**: Claude Code's OAuth token may expire during long sessions. Entrypoint sets `CLAUDE_CODE_OAUTH_TOKEN` from Secret, but long-running sessions may need a refresh mechanism. Consider `apiKeyHelper` script that reads from a refreshable source.
+- **OAuth token refresh in pods**: Claude Code's OAuth token may expire during long sessions. Entrypoint sets `CLAUDE_CODE_OAUTH_TOKEN` from Secret, but long-running sessions may need a refresh mechanism. Consider `apiKeyHelper` script that reads from a refreshable source. Long-term: enterprise SSO users on a paid Anthropic plan may be able to have OAuth tokens managed directly via the Anthropic API, eliminating this problem entirely — revisit when that capability exists.
 
 ---
 
