@@ -59,12 +59,13 @@ Clients (browser, laptop agent) connect to NATS via `/nats` WebSocket proxy thro
 
 ### Claude Code Integration
 
-The session agent spawns Claude Code headless:
+The session agent spawns Claude Code headless with `--bare` (skips hooks, LSP, memory walk, keychain — hermetic container mode):
 
 ```bash
 claude --print --verbose \
   --output-format stream-json \
   --input-format stream-json \
+  --include-partial-messages \
   --session-id {sessionId}
 ```
 
@@ -74,10 +75,15 @@ For session resume after pod restart:
 claude --print --verbose \
   --output-format stream-json \
   --input-format stream-json \
+  --include-partial-messages \
   --resume {sessionId}
 ```
 
+`--print` disables the interactive TUI and trust dialog. Auth is handled via `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` env vars — no keychain needed. Hooks, LSP, auto-memory, and plugin discovery all run normally (needed for guard hooks, code intelligence, and CLAUDE.md discovery). `--include-partial-messages` enables token-by-token streaming of Claude's text (see Terminal section).
+
 Claude Code still writes JSONL internally (its own persistence for `--resume`). The session agent never reads JSONL.
+
+**Claude CLI installation**: npm package — `npm install -g @anthropic-ai/claude-code@{pinned-version}` in the session-agent Dockerfile. Pin version to avoid breaking changes.
 
 ### Stream-JSON Protocol
 
@@ -89,8 +95,10 @@ Claude Code still writes JSONL internally (its own persistence for `--resume`). 
 {"type": "system", "subtype": "session_state_changed", "state": "running"}
 {"type": "system", "subtype": "session_state_changed", "state": "requires_action"}
 {"type": "assistant", "content": [...], "model": "...", "usage": {...}}
+{"type": "stream_event", "event": {"type": "content_block_delta", ...}}
 {"type": "user", "message": {...}}
 {"type": "control_request", "request_id": "abc", "request": {"subtype": "can_use_tool", "tool_name": "Bash", ...}}
+{"type": "tool_progress", "tool_use_id": "...", "tool_name": "Bash", "elapsed_time_seconds": 30}
 {"type": "result", "subtype": "success", "usage": {...}, "duration_ms": 1234}
 ```
 
@@ -99,12 +107,27 @@ Claude Code still writes JSONL internally (its own persistence for `--resume`). 
 ```json
 {"type": "user", "message": {"role": "user", "content": "fix the bug"}}
 {"type": "user", "message": {"role": "user", "content": "/commit -m 'Fix bug'"}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "What's in this image?"}, {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBOR..."}}]}}
 {"type": "control_response", "response": {"subtype": "success", "request_id": "abc", "response": {"behavior": "allow"}}}
 {"type": "control_request", "request": {"subtype": "interrupt"}}
 {"type": "control_request", "request": {"subtype": "reload_plugins"}}
+{"type": "control_request", "request": {"subtype": "set_model", "model": "claude-opus-4-6"}}
 ```
 
-Skills work via plain text `/commit` messages in user content. Capabilities are queryable at runtime via `reload_plugins` control request.
+Skills work via plain text `/commit` messages in user content. Capabilities are queryable at runtime via `reload_plugins` control request. Images/files sent via standard Anthropic content arrays with base64-encoded data.
+
+### Subagent Events
+
+When Claude spawns a subagent (Explore, Plan, etc.), the subagent's events appear **flat** on the parent's stdout — not nested. Each event carries `parent_tool_use_id` linking it to the Agent tool_use that spawned it:
+
+```json
+{"type": "assistant", "content": [{"type": "tool_use", "id": "tu_1", "name": "Agent", ...}]}
+{"type": "assistant", "content": [...], "parent_tool_use_id": "tu_1"}
+{"type": "assistant", "content": [{"type": "tool_use", "name": "Grep", ...}], "parent_tool_use_id": "tu_1"}
+{"type": "user", "message": {"content": [{"type": "tool_result", ...}]}, "parent_tool_use_id": "tu_1"}
+```
+
+The SPA uses `parent_tool_use_id` to render subagent events nested under the parent Agent tool block. Events with `parent_tool_use_id: null` are top-level.
 
 ---
 
@@ -136,6 +159,8 @@ Separate subjects so clients can subscribe to one or both. Stream-json events ar
 
 Stream `MCLAUDE_EVENTS` captures all `mclaude.*.*.events.*` subjects. Retained 30 days.
 Stream `MCLAUDE_LIFECYCLE` captures all `mclaude.*.*.lifecycle.*` subjects. Retained 30 days.
+
+**NATS message size**: default limit is 1MB. Large tool results (file reads, big diffs) can exceed this. Set `max_payload: 8388608` (8MB) in NATS server config. If a single event still exceeds 8MB, the session agent truncates the `content` field and sets a `truncated: true` flag — the full content is in Claude's JSONL if needed.
 
 ### State (KV)
 
@@ -193,6 +218,8 @@ Enforced at the NATS broker. A client with alice's JWT cannot subscribe to `mcla
 
 `_INBOX.>` permission is required on all clients for NATS request/reply responses.
 
+**JWT refresh**: browser JWTs expire after 8h. The SPA sets a timer at 7h to call `POST /auth/refresh` proactively. On success, it reconnects NATS with the new JWT seamlessly. On failure (session expired, SSO revoked), the SPA redirects to login. The NATS client library (`nats.ws`) supports `reconnect` with updated credentials without dropping subscriptions.
+
 ---
 
 ## mclaude-session-agent
@@ -220,32 +247,76 @@ cmd := exec.Command("claude",
     "--print", "--verbose",
     "--output-format", "stream-json",
     "--input-format", "stream-json",
+    "--include-partial-messages",
     "--session-id", sessionID)
 
 stdin, _ := cmd.StdinPipe()
 stdout, _ := cmd.StdoutPipe()
 
+// Stdin serialization — multiple NATS messages must not interleave JSON lines.
+// All writes go through a channel; a single goroutine drains it to the pipe.
+stdinCh := make(chan []byte, 64)
+go func() {
+    for msg := range stdinCh {
+        stdin.Write(msg)
+        stdin.Write([]byte("\n"))
+    }
+}()
+
 // stdout → NATS
 go func() {
     scanner := bufio.NewScanner(stdout)
+    scanner.Buffer(make([]byte, 0), 16*1024*1024) // 16MB buffer for large events
     for scanner.Scan() {
         line := scanner.Bytes()
         event := parseEventType(line) // quick JSON field check
         if event == "keep_alive" { continue }
         if event == "session_state_changed" { updateKV(line) }
+        if event == "control_request" { updatePendingControl(line) }
         nats.Publish("session."+id+".events", envelope(line))
     }
 }()
 
-// NATS → stdin
+// NATS → stdin (via serialization channel)
 go func() {
     sub := nats.Subscribe("session."+id+".input")
     for msg := range sub.Chan() {
-        stdin.Write(msg.Data)
-        stdin.Write([]byte("\n"))
+        stdinCh <- msg.Data
     }
 }()
 ```
+
+### Permission handling
+
+`control_request` events (subtype `can_use_tool`) are always emitted on stdout regardless of permission mode. The session agent publishes them to NATS. The client (SPA, mclaude-cli) responds with a `control_response` via the `.api.sessions.control` subject. The session agent routes it to stdin.
+
+For auto-approve workflows (CI, batch jobs), the session agent can be configured with a permission policy that auto-responds to `control_request` events without forwarding to NATS:
+
+```yaml
+# session-agent config
+permissionPolicy: "auto"  # auto-approve all tools
+# permissionPolicy: "managed"  # forward to client (default)
+# permissionPolicy: "allowlist"  # auto-approve listed tools, forward rest
+# allowedTools: ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+```
+
+### Graceful shutdown
+
+On SIGTERM (pod termination):
+
+```
+1. Stop accepting new sessions
+2. For each active Claude process:
+   a. Send {"type": "control_request", "request": {"subtype": "interrupt"}} to stdin
+   b. Wait up to 10s for process exit
+   c. SIGKILL if still running
+3. Flush buffered events to NATS
+4. Publish lifecycle events (session_stopped for each session)
+5. Close NATS connection
+6. Exit 0
+```
+
+Set `terminationGracePeriodSeconds: 30` in pod spec to give enough time.
 
 ### Session operations
 
@@ -293,12 +364,13 @@ For K8s: `kubectl exec -it pod -- mclaude-cli attach {sessionId}`
 
 ### Laptop mode
 
-On a laptop, the agent runs as a daemon (launchd on macOS, systemd on Linux):
+On a laptop, **one session-agent daemon per machine** (not per project). It manages all projects/sessions on that laptop:
 
 - Connects to NATS via `wss://mclaude.example.com/nats` (outbound, works behind NAT/firewall)
-- Uses `mclaude.{userId}.laptop.{hostname}.api.>` subjects
-- Spawns Claude Code as child processes (same as K8s mode)
+- Subscribes to `mclaude.{userId}.laptop.{hostname}.api.>` — handles all projects
+- Each session is a separate Claude child process with its own cwd
 - NATS JWT issued by user-management on first setup, stored in `~/.config/mclaude/creds`
+- Runs as launchd service (macOS) or systemd service (Linux)
 
 The browser connects to the same NATS and subscribes to `mclaude.{userId}.laptop.{hostname}.events.>` — same flow as K8s sessions.
 
@@ -354,7 +426,14 @@ The session agent adds a thin envelope for NATS routing:
     "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
     "agents": ["general-purpose", "Explore", "Plan"]
   },
-  "pendingControl": null
+  "pendingControl": null,
+  "usage": {
+    "inputTokens": 12500,
+    "outputTokens": 3200,
+    "cacheReadTokens": 8000,
+    "cacheWriteTokens": 4500,
+    "costUsd": 0.042
+  }
 }
 ```
 
@@ -711,12 +790,21 @@ Mobile browser first — enterprise constraint requires the client to work in a 
 **Real-time events**: client connects to NATS via `/nats` WebSocket proxy. Subscribes directly to `mclaude.{userId}.>.events.>`. Events are raw stream-json from Claude Code — the client renders them directly.
 
 **Rendering**: the SPA consumes stream-json event types:
-- `assistant` → markdown text
-- `tool_use` → collapsible block with tool name and input
-- `control_request` → approve/deny buttons
-- `system.session_state_changed` → status indicator
-- `system.init` → populate skills picker, tool list
+- `stream_event` (content_block_delta) → live streaming text as Claude types (token-by-token)
+- `assistant` → complete message (final, replaces streamed deltas)
+- `tool_use` → collapsible block with tool name and input summary
+- `tool_progress` → elapsed time indicator on running tools ("Bash running… 30s")
+- `control_request` → approve/deny buttons (permission prompt)
+- `system.session_state_changed` → status indicator (idle/running/requires_action)
+- `system.init` → populate skills picker, tool list, model info
 - `result` → turn complete, show usage/cost
+- Events with `parent_tool_use_id` → render nested under parent Agent block
+
+**Model/effort switching**: SPA can send `set_model` and `set_max_thinking_tokens` control requests mid-session. Model picker in session header reads available models from `init` event.
+
+**Cost tracking**: `result` events include `usage` (input/output tokens, cache read/write, cost). Session agent accumulates these in NATS KV session state. SPA shows per-session and per-project cost in the UI.
+
+**File/image uploads**: SPA sends images as base64 in the user message content array: `[{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "..."}}]`. Max ~20MB per image (Anthropic API limit). Screenshots from clipboard paste supported.
 
 **State**: client watches NATS KV buckets `mclaude-sessions` and `mclaude-projects` for live updates.
 
@@ -734,6 +822,65 @@ document.addEventListener('visibilitychange', () => {
   kv.watch(`{userId}/>`);
 });
 ```
+
+---
+
+## Terminal Access
+
+### Interactive shell on the pod
+
+With tmux gone, users still need a way to get an interactive shell on the pod for debugging, inspecting state, running manual commands, etc.
+
+The session-agent container includes a full shell environment (zsh, git, Nix tools). Users access it via:
+
+```bash
+kubectl exec -it project-{projectId} -n mclaude-{userId} -c session-agent -- /bin/zsh
+```
+
+This gives a full interactive shell in the same filesystem as the Claude processes. Users can:
+- Inspect `/data/worktrees/` and git state
+- Run manual commands (`npm test`, `git log`, `ls`)
+- Check `~/.claude/` for session files
+- Use `mclaude-cli attach {sessionId}` to interact with a Claude session
+- Tail logs: `mclaude-cli logs {sessionId}` (streams raw stream-json events)
+
+The shell session is independent of Claude processes — `kubectl exec` creates a new process in the container, it doesn't attach to any existing Claude session. Claude processes continue running undisturbed.
+
+For the web SPA, a web terminal (xterm.js) could be added later that `exec`s into the pod via the K8s API. Deferred — `kubectl exec` from a local terminal is sufficient for now.
+
+### Real-time Claude Output
+
+In headless stream-json mode, there is no terminal showing Claude's TUI. The implications:
+
+### What streams in real-time
+
+| Event type | Latency | Content |
+|-----------|---------|---------|
+| `stream_event` (content_block_delta) | Token-by-token | Claude's text as it types — live streaming |
+| `tool_use` | Instant | Tool name + input (shows immediately when Claude decides to use a tool) |
+| `tool_progress` | Periodic (~5s) | Elapsed time only ("Bash running… 30s") — **no stdout** |
+| `tool_result` | After completion | Full stdout/stderr from Bash, file contents from Read, etc. |
+| `control_request` | Instant | Permission prompt (approve/deny) |
+| `session_state_changed` | Instant | State transitions |
+
+### The gap: long-running Bash commands
+
+When Claude runs a 5-minute build, the user sees:
+1. `tool_use: Bash "npm run build"` — instant
+2. `tool_progress: elapsed 5s… 10s… 30s…` — heartbeats, no output
+3. `tool_result: <full build output>` — after 5 minutes
+
+The build output appears all at once, not streaming. This matches Claude Code's TUI behavior (the TUI also shows a spinner during Bash execution, not live output). But it's a worse UX than a raw terminal.
+
+### Mitigations
+
+**For the SPA**: show an animated elapsed-time indicator from `tool_progress` events. When `tool_result` arrives, render the full output with syntax highlighting. For very long outputs, render collapsed with expand-on-click.
+
+**For mclaude-cli (debug attach)**: same behavior — show elapsed time, then full output. Users who need live streaming can `kubectl exec` into the pod and run commands directly (the session agent doesn't prevent this — it just won't see that activity).
+
+**Future**: if Claude Code adds stdout streaming to `tool_progress` events (or a new `tool_output` event type), the architecture supports it immediately — it's just another JSON event on stdout that flows through NATS to the client. No architectural change needed.
+
+**Context usage**: the `get_context_usage` control request returns current context window utilization. The SPA can poll this periodically and show a context meter (useful for long sessions approaching the limit).
 
 ---
 
@@ -822,6 +969,45 @@ readinessProbe:
 **Git clone failure**: entrypoint exits non-zero. Deployment restart policy retries. user-management polls pod status and reflects `PROJECT_STATUS_FAILED` in NATS KV. Client shows error.
 
 **Image tagging**: semver. A bad image push does not auto-deploy. Rollback is `kubectl set image` to previous semver tag.
+
+**JSONL cleanup**: Claude Code accumulates JSONL files on the project PVC (`/data/projects/`). The session agent runs a daily cleanup job: delete JSONL files older than 90 days, delete session files for sessions not in NATS KV. Monitor PVC usage and alert at 80% capacity.
+
+**Claude Code version pinning**: pin `@anthropic-ai/claude-code@{version}` in the session-agent Dockerfile. Test stream-json protocol compatibility before upgrading. The protocol is used by IDE extensions (VS Code, JetBrains) so it's likely stable, but breaking changes are possible across major versions.
+
+---
+
+## Testing
+
+### Local development
+
+k3d cluster with NATS, Postgres, nginx. Session agent runs locally against the k3d NATS. Claude Code runs on the dev machine (not in k3d — needs API key). Test the full event flow: spawn session → send input → receive events.
+
+### Integration tests (CI)
+
+```
+1. Deploy NATS + Postgres to test namespace
+2. Deploy user-management, create test user + project
+3. Deploy session-agent with mock Claude process
+   (mock: reads stdin JSON, emits canned stream-json events on stdout)
+4. Run test suite:
+   - Session CRUD (create, list, delete via NATS)
+   - Event routing (mock emits events → verify they arrive on NATS subject)
+   - Permission flow (mock emits control_request → test client responds → verify control_response reaches mock stdin)
+   - State tracking (mock emits session_state_changed → verify NATS KV updated)
+   - Recovery (kill mock process → verify session-agent restarts it)
+   - Lifecycle events (verify created/stopped events on lifecycle subject)
+5. Teardown
+```
+
+The mock Claude process is a ~50-line Go program that replays a canned stream-json transcript. This tests the session agent without needing a real Claude API key.
+
+### E2E tests
+
+Full stack with real Claude Code (requires API key, run manually or in a gated CI stage):
+- Create session → send "echo hello" → verify tool_use + control_request + tool_result events
+- Resume session → verify conversation context restored
+- Skills: send "/commit" → verify skill expansion
+- Concurrent sessions on same project
 
 ---
 
@@ -1263,8 +1449,8 @@ mclaude-user-management/
 - **GHES repo browser**: search/autocomplete in "Clone repo" dialog. Details TBD.
 - **OpenBao**: credential seed scripts for tool-specific secrets. Community repo contract: read from Bao, write to `$HOME`, exit 0 if missing.
 - **`hostUsers: false` on AKS**: omitted from pod manifests — needs test pod to confirm.
-- **Stream-json protocol stability**: Claude Code's stream-json is used by IDE extensions — likely stable, but monitor for breaking changes across Claude Code versions. Pin Claude CLI version in session-agent image.
-- **Concurrent stdin writes**: multiple NATS messages arriving simultaneously need serialized writes to Claude stdin. Session agent must serialize stdin writes (mutex or channel).
+- **Bash stdout streaming**: `tool_progress` events only include elapsed time, not stdout. If Claude Code adds real-time tool output events in the future, the architecture supports them immediately. Monitor Claude Code changelogs.
+- **OAuth token refresh in pods**: Claude Code's OAuth token may expire during long sessions. Entrypoint sets `CLAUDE_CODE_OAUTH_TOKEN` from Secret, but long-running sessions may need a refresh mechanism. Consider `apiKeyHelper` script that reads from a refreshable source.
 
 ---
 
