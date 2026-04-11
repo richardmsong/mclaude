@@ -133,7 +133,7 @@ SessionState {
   stateSince: timestamp
   model: string
   capabilities: { skills: string[], tools: string[], agents: string[] }
-  pendingControl: ControlRequest | null
+  pendingControls: Record<string, ControlRequest>  // map of requestId → ControlRequest
   usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd }
   replayFromSeq: number | null     // JetStream seq — start replay here, not 0
 }
@@ -249,6 +249,7 @@ Responsibilities:
 - Tracks `lastSequence` for replay on reconnect
 - On reconnect: re-subscribes from `max(lastSequence + 1, replayFromSeq)`, no data loss
 - On fresh load: reads `replayFromSeq` from SessionStore KV — skips events before last clear/compaction
+- **Deduplication**: delivery is at-least-once — session agent may re-publish events after a NATS reconnect. Skip any event whose JetStream sequence number is ≤ `lastSequence`
 
 ### LifecycleStore
 
