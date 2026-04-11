@@ -135,6 +135,7 @@ SessionState {
   capabilities: { skills: string[], tools: string[], agents: string[] }
   pendingControl: ControlRequest | null
   usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd }
+  replayFromSeq: number | null     // JetStream seq — start replay here, not 0
 }
 ```
 
@@ -155,7 +156,8 @@ EventStore(natsClient, userId, projectId, sessionId)
   conversation: ConversationModel
   
   // Subscribe and begin accumulating
-  start(fromSequence?: number)
+  // Reads replayFromSeq from SessionStore KV, subscribes from there (not 0)
+  start(replayFromSeq?: number)
   stop()
   
   // Get last sequence for replay on reconnect
@@ -242,8 +244,11 @@ Responsibilities:
   - `tool_result` → attaches to matching `ToolUseBlock` by toolUseId
   - `control_request` → creates `ControlRequestBlock` with status `pending`
   - Events with `parent_tool_use_id` → nested under the parent `ToolUseBlock`'s turn
+- On `clear` event: resets `ConversationModel` (empty turns), updates local `replayFromSeq`
+- On `compact_boundary` event: resets `ConversationModel`, adds a `CompactionBlock` with the summary
 - Tracks `lastSequence` for replay on reconnect
-- On reconnect: re-subscribes from `lastSequence + 1`, no data loss
+- On reconnect: re-subscribes from `max(lastSequence + 1, replayFromSeq)`, no data loss
+- On fresh load: reads `replayFromSeq` from SessionStore KV — skips events before last clear/compaction
 
 ### LifecycleStore
 
@@ -581,7 +586,7 @@ All clients implement the same reconnection logic:
 3. AuthStore: check JWT expiry
    a. If expired: call refresh() → reconnect with new JWT
    b. If refresh fails: status = expired → show login
-4. EventStore: re-subscribe from lastSequence + 1 (JetStream replay)
+4. EventStore: re-subscribe from max(lastSequence + 1, replayFromSeq) (JetStream replay)
 5. SessionStore: re-watch KV (catches any missed state changes)
 6. HeartbeatMonitor: resume health checks
 7. TerminalVM: terminal sessions are dead — prompt user to reopen
@@ -605,6 +610,15 @@ The core logic every client implements for building the conversation from events
 ```
 on event:
   switch event.type:
+    case "clear":
+      → reset ConversationModel (turns = [])
+      → update replayFromSeq to this event's JetStream sequence
+    
+    case "compact_boundary":
+      → reset ConversationModel (turns = [])
+      → add CompactionBlock with summary text
+      → update replayFromSeq to this event's JetStream sequence
+    
     case "system" where subtype == "init":
       → cache capabilities (skills, tools, agents, model)
     
@@ -647,6 +661,59 @@ on event:
 ```
 
 This logic is identical across all clients. The platform layer just renders the resulting `ConversationModel`.
+
+---
+
+## Cache Handling
+
+Several caches exist in the system. Each has different staleness characteristics and invalidation mechanisms.
+
+### NATS KV (server-side materialized state)
+
+Session state, capabilities, usage, pending control requests. Write-through — the session agent updates KV on every relevant event, so KV is always current while the agent is alive.
+
+**Goes stale when**: session agent crashes (KV retains last written value).
+**Invalidated by**: heartbeat staleness detection (>60s without heartbeat). Recovery sequence rewrites all KV entries from fresh Claude Code state.
+
+### ConversationModel (client-side in-memory accumulation)
+
+Built by replaying JetStream events from `replayFromSeq` and accumulating into typed turns/blocks.
+
+**Goes stale when**: NATS disconnects (network, JWT expiry, tab backgrounded on mobile).
+**Invalidated by**: re-subscribe from `max(lastSequence + 1, replayFromSeq)` on reconnect. JetStream guarantees gap-free replay.
+
+**Reset events**:
+- **`/clear`**: user resets the conversation. Session agent publishes `clear` event, updates `replayFromSeq` in KV to the clear event's JetStream sequence. Client resets `ConversationModel` to empty.
+- **Compaction**: Claude Code compacts its context. Session agent publishes `compact_boundary` event, updates `replayFromSeq`. Client resets `ConversationModel` and shows a compaction summary. Events before the boundary are still in JetStream but no longer represent the active conversation.
+- **Session resume after crash**: `init` event re-emitted. Old events before the crash are still in JetStream. `replayFromSeq` is updated on resume to avoid re-rendering stale pre-crash state.
+
+`replayFromSeq` is the key mechanism: clients read it from session KV before subscribing. On fresh load, this skips potentially thousands of irrelevant events. On reconnect mid-session, the client uses `max(lastSequence + 1, replayFromSeq)` — whichever is further ahead.
+
+### Capabilities cache (client-side, from KV)
+
+Skills, tools, agents, model — populated from the `capabilities` field in session KV (which the session agent populates from the `init` event).
+
+**Goes stale when**: user installs a new MCP server, adds a custom skill, or modifies plugin config mid-session.
+**Invalidated by**: `reload_plugins` control request → Claude Code re-emits capabilities → session agent updates KV → client gets KV watch notification. This is a **manual** bust — there is no automatic detection that capabilities have changed. The skills picker should expose a refresh button.
+
+### SessionStore (client-side mirror of KV)
+
+In-memory mirror of NATS KV, kept in sync via KV watch.
+
+**Goes stale when**: missed KV updates during NATS disconnect.
+**Invalidated by**: re-watch on reconnect. KV watch delivers the latest value immediately on (re-)subscribe — no replay needed.
+
+### JWT
+
+Cached in-memory with decoded expiry.
+
+**Invalidated by**: periodic check (60s interval). When TTL falls below the configured threshold, `AuthStore` calls refresh. On failure, status becomes `expired` and upper layers show login.
+
+### SPA static assets
+
+Standard browser HTTP cache for JS/CSS bundles.
+
+**Invalidated by**: content-hash filenames from the build tool (e.g., `main.a3f2b1.js`). No manual busting needed.
 
 ---
 
