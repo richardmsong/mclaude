@@ -7,7 +7,7 @@ Two services + infrastructure. The relay, connector, server, and controller coll
 | Component | Language | Role |
 |-----------|----------|------|
 | `mclaude-session-agent` | Go | Spawns headless Claude Code processes, routes stream-json events to/from NATS. Same binary on laptop and in K8s pod. |
-| `mclaude-user-management` | Go | Identity + K8s provisioning. Auth, SSO, SCIM, namespaces, project Deployments. |
+| `mclaude-control-plane` | Go | Platform control plane. Auth, SSO, SCIM, user/project provisioning, K8s namespace + Deployment management, NATS JWT issuance. |
 | `mclaude-cli` | Go | Debug attach tool. Thin text REPL over unix socket to session agent. |
 | NATS JetStream | — | Event bus, state (KV), routing between all components and clients. |
 | Postgres | — | Users table only. Lives in `mclaude-system`. |
@@ -21,7 +21,7 @@ Two services + infrastructure. The relay, connector, server, and controller coll
 | `mclaude-relay` | nginx ingress |
 | `mclaude-connector` | session agent connects to NATS directly |
 | `mclaude-server` | collapsed into session agent |
-| `mclaude-controller` | merged into user-management |
+| `mclaude-controller` | merged into control-plane |
 | Per-namespace Postgres | central Postgres (users only) + NATS KV (state) |
 | Per-namespace mclaude-server | session agent runs inside each project pod |
 | tmux | Claude Code runs headless via `--print --output-format stream-json` |
@@ -35,13 +35,13 @@ Two services + infrastructure. The relay, connector, server, and controller coll
 
 ```
                     nginx ingress (mclaude-system)
-                    /auth  /api  /scim → user-management
+                    /auth  /api  /scim → control-plane
                     /nats             → NATS WebSocket proxy
                     /*                → SPA static files
                            │
            ┌───────────────┼───────────────┐
            ▼               ▼               ▼
-   user-management       NATS            SPA
+   control-plane       NATS            SPA
    (Postgres)       (JetStream + KV)
                           │
           ┌───────────────┼───────────────┐
@@ -141,9 +141,9 @@ mclaude.{userId}.{projectId}.api.sessions.delete
 mclaude.{userId}.{projectId}.api.sessions.input
 mclaude.{userId}.{projectId}.api.sessions.control    → permission responses, interrupts
 mclaude.{userId}.{projectId}.api.sessions.restart
-mclaude.{userId}.api.projects.create    → user-management
-mclaude.{userId}.api.projects.delete    → user-management
-mclaude.{userId}.api.projects.list      → user-management
+mclaude.{userId}.api.projects.create    → control-plane
+mclaude.{userId}.api.projects.delete    → control-plane
+mclaude.{userId}.api.projects.list      → control-plane
 ```
 
 ### Events (JetStream, append-only)
@@ -178,12 +178,12 @@ Watching a KV key gives real-time state updates to any subscriber. Clients watch
 
 ## NATS Authentication
 
-**Operator**: platform root NKey — generated once at install, held by user-management.
+**Operator**: platform root NKey — generated once at install, held by control-plane.
 
 **Login flow**:
 
 ```
-1. Client POST /auth/login → user-management
+1. Client POST /auth/login → control-plane
 2. Validate credentials against Postgres
 3. Issue NATS User JWT scoped to mclaude.{userId}.>
 4. Return { natsUrl, jwt, nkeySeed } to client
@@ -203,7 +203,7 @@ Watching a KV key gives real-time state updates to any subscriber. Clients watch
 }
 ```
 
-**Per-session-agent credentials** (provisioned by user-management, long-lived):
+**Per-session-agent credentials** (provisioned by control-plane, long-lived):
 
 ```json
 {
@@ -218,7 +218,7 @@ Enforced at the NATS broker. A client with alice's JWT cannot subscribe to `mcla
 
 `_INBOX.>` permission is required on all clients for NATS request/reply responses.
 
-**JWT refresh**: the SPA decodes the JWT `exp` claim and checks remaining TTL periodically (every 60s). When TTL falls below a refresh threshold, it calls `POST /auth/refresh`. On success, reconnects NATS with the new JWT seamlessly. On failure (session expired, SSO revoked), redirects to login. The NATS client library (`nats.ws`) supports `reconnect` with updated credentials without dropping subscriptions. JWT expiry duration and refresh threshold are configurable in user-management (env vars `JWT_EXPIRY_SECONDS` default 28800, `JWT_REFRESH_THRESHOLD_SECONDS` default 900) — enterprise deployments may require shorter session lifetimes.
+**JWT refresh**: the SPA decodes the JWT `exp` claim and checks remaining TTL periodically (every 60s). When TTL falls below a refresh threshold, it calls `POST /auth/refresh`. On success, reconnects NATS with the new JWT seamlessly. On failure (session expired, SSO revoked), redirects to login. The NATS client library (`nats.ws`) supports `reconnect` with updated credentials without dropping subscriptions. JWT expiry duration and refresh threshold are configurable in control-plane (env vars `JWT_EXPIRY_SECONDS` default 28800, `JWT_REFRESH_THRESHOLD_SECONDS` default 900) — enterprise deployments may require shorter session lifetimes.
 
 ---
 
@@ -377,7 +377,7 @@ On a laptop, **one session-agent per project** — same scoping as K8s. A lightw
 - On `projects.create` NATS message (or `mclaude start <project>` CLI), launcher spawns a session-agent for that project
 - Each session-agent connects to NATS via `wss://mclaude.example.com/nats` (outbound, works behind NAT/firewall)
 - Each subscribes to `mclaude.{userId}.laptop.{hostname}.{projectId}.api.>` — same scoping as K8s
-- NATS JWT issued by user-management on first setup, stored in `~/.config/mclaude/creds` (shared by all agents)
+- NATS JWT issued by control-plane on first setup, stored in `~/.config/mclaude/creds` (shared by all agents)
 - Launcher monitors child agents, restarts on crash
 
 The browser connects to the same NATS and subscribes to `mclaude.{userId}.laptop.{hostname}.events.>` — same flow as K8s sessions.
@@ -474,9 +474,9 @@ Clients subscribe to lifecycle for session list updates (new sessions appearing,
 
 ---
 
-## mclaude-user-management
+## mclaude-control-plane
 
-Single Go service in `mclaude-system`. ClusterRole for K8s provisioning. Owns Postgres. Issues NATS JWTs.
+Single Go service in `mclaude-system`. The platform control plane — owns user identity, K8s resource provisioning, and NATS credential management. ClusterRole for cross-namespace operations. Owns Postgres (users only). Issues NATS JWTs.
 
 ### Endpoints
 
@@ -531,7 +531,7 @@ GET    /scim/v2/Users          IdP syncs user list
 
 ```
 1. Client publishes mclaude.{userId}.api.projects.create
-2. user-management receives via NATS request/reply
+2. control-plane receives via NATS request/reply
 3. kubectl apply Deployment + PVC in mclaude-{userId}
 4. Write Project JSON to NATS KV mclaude-projects/{userId}/{projectId}
 5. Reply with projectId
@@ -558,7 +558,7 @@ CREATE TABLE nats_credentials (
 );
 ```
 
-Schema migrations managed by dbmate init container on user-management Deployment.
+Schema migrations managed by dbmate init container on control-plane Deployment.
 
 ---
 
@@ -938,9 +938,9 @@ location /nats {
     proxy_set_header   Connection "upgrade";
     proxy_read_timeout 3600s;
 }
-location /auth { proxy_pass http://mclaude-user-management:8080; }
-location /api  { proxy_pass http://mclaude-user-management:8080; }
-location /scim { proxy_pass http://mclaude-user-management:8080; }
+location /auth { proxy_pass http://mclaude-control-plane:8080; }
+location /api  { proxy_pass http://mclaude-control-plane:8080; }
+location /scim { proxy_pass http://mclaude-control-plane:8080; }
 location /     { proxy_pass http://mclaude-spa:80; }
 ```
 
@@ -955,7 +955,7 @@ All images tagged with semver. Never `:latest` in production. Push to main → b
 | Image | Contents |
 |-------|----------|
 | `mclaude-session-agent:{v}` | session-agent binary, mclaude-cli binary, Claude CLI, git, Nix, zsh, pkg shim, guard hooks |
-| `mclaude-user-management:{v}` | user-management binary, kubectl, dbmate |
+| `mclaude-control-plane:{v}` | control-plane binary, kubectl, dbmate |
 | `mclaude-config-sync:{v}` | inotify-tools, kubectl, jq — pre-installed, no runtime package installs |
 
 Note: tmux is no longer in the session-agent image.
@@ -981,7 +981,7 @@ readinessProbe:
   periodSeconds: 10
 ```
 
-**user-management pod:**
+**control-plane pod:**
 ```yaml
 livenessProbe:
   httpGet:
@@ -1002,7 +1002,7 @@ readinessProbe:
 
 ## Reliability
 
-**Postgres unavailability** (user-management): retry with exponential backoff. Login endpoints return 503 while Postgres is unreachable. NATS JWTs already issued remain valid.
+**Postgres unavailability** (control-plane): retry with exponential backoff. Login endpoints return 503 while Postgres is unreachable. NATS JWTs already issued remain valid.
 
 **NATS unavailability** (session-agent): buffer state changes in memory, flush on reconnect. Claude processes continue running — sessions are not affected by NATS downtime. Stdout events are buffered and published when connection restores.
 
@@ -1041,7 +1041,7 @@ Clients check `now - lastHeartbeat > 60s` → agent is dead or unreachable, show
 
 **Claude process crash**: session-agent detects child process exit, publishes lifecycle event, updates NATS KV state. Auto-restart with `--resume` if exit was unexpected (non-zero, no interrupt signal).
 
-**Git clone failure**: entrypoint exits non-zero. Deployment restart policy retries. user-management polls pod status and reflects `PROJECT_STATUS_FAILED` in NATS KV. Client shows error.
+**Git clone failure**: entrypoint exits non-zero. Deployment restart policy retries. control-plane polls pod status and reflects `PROJECT_STATUS_FAILED` in NATS KV. Client shows error.
 
 **Image tagging**: semver. A bad image push does not auto-deploy. Rollback is `kubectl set image` to previous semver tag.
 
@@ -1061,7 +1061,7 @@ k3d cluster with NATS, Postgres, nginx. Session agent runs locally against the k
 
 ```
 1. Deploy NATS + Postgres to test namespace
-2. Deploy user-management, create test user + project
+2. Deploy control-plane, create test user + project
 3. Deploy session-agent with mock Claude process
    (mock: reads stdin JSON, emits canned stream-json events on stdout)
 4. Run test suite:
@@ -1093,7 +1093,7 @@ OTEL stack is already on the cluster. All components export to it.
 **Metrics** (Prometheus/OTEL):
 - Per-user: active sessions, events/sec, project count
 - NATS: message rate, stream lag, KV operations
-- user-management: auth latency, provisioning latency, SCIM sync rate
+- control-plane: auth latency, provisioning latency, SCIM sync rate
 - Session agent: Claude process count, restart count, event throughput
 
 **Logging**: structured JSON to stdout. Labels: `userId`, `projectId`, `sessionId`.
@@ -1138,7 +1138,7 @@ Hook scripts in `/etc/mclaude/hooks.d/` read `mirrors.json` and write tool-speci
 
 ## Kubernetes Resources
 
-### User namespace (applied by user-management on provisioning)
+### User namespace (applied by control-plane on provisioning)
 
 ```yaml
 # Namespace
@@ -1184,7 +1184,7 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ```
 
-### Project Deployment (applied by user-management)
+### Project Deployment (applied by control-plane)
 
 ```yaml
 apiVersion: apps/v1
@@ -1361,13 +1361,13 @@ spec:
 
 ---
 
-## user-management ClusterRole
+## control-plane ClusterRole
 
 ```yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: mclaude-user-management
+  name: mclaude-control-plane
 rules:
   - apiGroups: [""]
     resources: ["namespaces"]
@@ -1415,7 +1415,7 @@ All project pods set `HTTPS_PROXY` env var. Claude Code respects it natively. Om
 2. Postgres in `mclaude-system` (users table only, dbmate migrations)
 3. nginx ingress with routing rules
 
-**Phase 2 — mclaude-user-management:**
+**Phase 2 — mclaude-control-plane:**
 4. Local auth — login, NATS JWT issuance, NATS Operator + Account setup
 5. User CRUD + K8s namespace provisioning
 6. Project Deployment + PVC provisioning
@@ -1505,7 +1505,7 @@ mclaude-session-agent/
 mclaude-cli/
   main.go               Debug attach REPL — connects to session agent unix socket
 
-mclaude-user-management/
+mclaude-control-plane/
   main.go               Auth, user CRUD, K8s provisioning
   auth.go               Login, JWT issuance, SSO, SCIM
   provisioner.go        Namespace + Deployment + PVC management
