@@ -405,11 +405,33 @@ The browser connects to the same NATS and subscribes to `mclaude.{userId}.laptop
 
 Branch slugification: `feature/auth` → `feature-auth` (replace `/` and non-alphanumeric with `-`, lowercase).
 
+Session create request payload:
+```json
+{
+  "branch": "feature/auth",
+  "cwd": "packages/api",
+  "name": "optional display name",
+  "joinWorktree": false
+}
+```
+
+`joinWorktree` controls behaviour when a worktree for the branch already exists (git only allows one worktree per branch):
+
+| `joinWorktree` | Worktree exists? | Behaviour |
+|----------------|-----------------|-----------|
+| `false` (default) | No | Create worktree, spawn Claude |
+| `false` (default) | Yes | **Error**: "branch already has an active session — set joinWorktree: true to share the worktree" |
+| `true` | No | Create worktree, spawn Claude (same as default) |
+| `true` | Yes | Skip `git worktree add`, reuse `/data/worktrees/{branchSlug}`, spawn Claude |
+
 On session create:
 1. Compute `branchSlug = slugify(branch)`
-2. `git -C /data/repo worktree add /data/worktrees/{branchSlug} {branch}`
-3. Set cwd to `/data/worktrees/{branchSlug}/{cwd}`
-4. Write to NATS KV with `branch` (raw) and `worktree` (slug)
+2. Scan KV for any session in this projectId with the same `worktree` slug
+3. If found and `joinWorktree: false` → reply with error
+4. If found and `joinWorktree: true` → skip to step 6
+5. If not found → `git -C /data/repo worktree add /data/worktrees/{branchSlug} {branch}`
+6. Set cwd to `/data/worktrees/{branchSlug}/{cwd}`
+7. Write to NATS KV with `branch` (raw), `worktree` (slug), `joinWorktree` (bool)
 
 On session delete:
 1. Send interrupt → wait for Claude exit
@@ -1558,6 +1580,8 @@ mclaude-session-agent/
   session.go            Claude process lifecycle (spawn, stdin/stdout pipes, restart)
   router.go             Stream-json event routing (stdout → NATS, NATS → stdin)
   state.go              NATS KV state tracking (from session_state_changed events)
+  terminal.go           PTY session management (creack/pty, raw I/O via core NATS)
+  worktree.go           Git worktree create/join/remove, branch slugification
   debug.go              Unix socket for mclaude-cli attach
   entrypoint.sh         Pod startup script
   Dockerfile
@@ -1635,7 +1659,8 @@ Complete when all verification steps pass AND these future plans are written:
 
 | Plan | Scope |
 |------|-------|
-| `plan-web-ui-refactor.md` | SPA framework decision, component design, stream-json renderer |
+| `plan-client-architecture.md` | ✅ Done — layered architecture, stores, view models, protocol contract, accumulation algorithm, feature list |
+| `docs/feature-list.md` | ✅ Done — canonical feature list with platform support matrix |
 | `plan-entra-sso.md` | Entra OIDC integration (blocked on corporate Entra admin approval) |
 | `plan-openbao-integration.md` | OpenBao deployment, K8s auth, seed script framework |
 | `plan-laptop-worktrees.md` | Worktree-per-session on laptop (parity with K8s) |
