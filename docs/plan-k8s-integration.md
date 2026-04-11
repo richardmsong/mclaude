@@ -83,7 +83,7 @@ claude --print --verbose \
 
 Claude Code still writes JSONL internally (its own persistence for `--resume`). The session agent never reads JSONL.
 
-**Claude CLI installation**: native binary via `claude install --version {pinned-version}` in the session-agent Dockerfile. No Node.js/npm dependency required. Pin version to avoid breaking changes.
+**Claude CLI installation**: native binary via `claude install --version {pinned-version}` in the session-agent Dockerfile. No Node.js/npm dependency required. Version is pinned — updates go through `/upgrade-claude` (see below).
 
 ### Stream-JSON Protocol
 
@@ -779,14 +779,6 @@ done
 # Link JSONL history to PVC (Claude's own persistence for --resume)
 mkdir -p /data/projects
 ln -sf /data/projects "$HOME/.claude/projects"
-
-# Verify Claude version matches pinned version (prevent silent breakage from manual claude update)
-EXPECTED_CLAUDE_VERSION="${CLAUDE_VERSION:?CLAUDE_VERSION env var not set}"
-ACTUAL_CLAUDE_VERSION=$(claude --version 2>/dev/null | awk '{print $NF}')
-if [ "$ACTUAL_CLAUDE_VERSION" != "$EXPECTED_CLAUDE_VERSION" ]; then
-    echo "[entrypoint] Claude version mismatch: expected $EXPECTED_CLAUDE_VERSION, got $ACTUAL_CLAUDE_VERSION — exiting"
-    exit 1
-fi
 
 # Skip onboarding. bypassPermissions disables Claude Code's built-in permission dialogs —
 # guard hooks (platform-level enforcement) are the permission layer in pods, not Claude Code's UI prompts.
@@ -1580,6 +1572,46 @@ mclaude-control-plane/
   migrations/           dbmate SQL files
   Dockerfile
 ```
+
+---
+
+## `/upgrade-claude` Skill
+
+Manages Claude Code version upgrades. Never update the pin manually — always go through this skill.
+
+```
+/upgrade-claude [--version <target>]
+```
+
+Without `--version`, targets the latest published release. With `--version`, targets a specific version.
+
+### What it does
+
+```
+1. Fetch changelog between current pinned version and target version
+   (github.com/anthropics/claude-code releases — or npm changelog)
+2. Read current plan docs and session-agent source to understand what protocol
+   features and CLI flags we depend on
+3. Analyze changelog for:
+   - Breaking changes to stream-json event types, subtypes, or field names
+   - Removed or renamed CLI flags (--print, --output-format, --input-format,
+     --include-partial-messages, --resume, --session-id, --bare)
+   - Changes to control_request/control_response protocol
+   - Changes to permission model or hook behavior
+4. If breaking changes found:
+   - Surface a detailed impact report: what breaks, what needs updating
+   - Propose patches to session-agent, client-architecture, and plan docs
+   - Require explicit approval before proceeding
+5. If no breaking changes (or after approval):
+   - Update pinned version in session-agent Dockerfile
+   - Update pinned version in plan docs
+   - Commit and push on a branch: upgrade/claude-{version}
+   - Open a PR with the changelog analysis as the PR body
+6. After PR merges: existing pods continue running old version until redeployed
+   (kubectl rollout restart deployment -n mclaude-{userId})
+```
+
+The skill is the gatekeeper. A Claude Code release is never deployed to pods until this skill has reviewed it and a human has approved the PR.
 
 ---
 
