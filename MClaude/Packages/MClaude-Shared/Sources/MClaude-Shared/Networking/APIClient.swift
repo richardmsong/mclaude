@@ -118,6 +118,17 @@ public struct APIClient: Sendable {
         let (_, _) = try await session.data(for: request)
     }
 
+    public struct PlanResponse: Codable, Sendable {
+        public let plan: String?
+        public let fileName: String?
+    }
+
+    public func fetchPlan(id: String) async throws -> PlanResponse {
+        let url = config.baseURL.appendingPathComponent("sessions/\(id)/plan")
+        let (data, _) = try await authedData(from: url)
+        return try decoder.decode(PlanResponse.self, from: data)
+    }
+
     public func fetchEvents(id: String) async throws -> [SessionEvent] {
         let url = config.baseURL.appendingPathComponent("sessions/\(id)/events")
         let (data, _) = try await authedData(from: url)
