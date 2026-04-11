@@ -745,41 +745,35 @@ mclaude-cli/
 
 ### Development Harness
 
-All clients share the same protocol (NATS subjects, KV schema, stream-json events, input message formats). A purpose-built harness simulates the server side so any client can be developed and tested without a real cluster, session agent, or Claude process running.
+An agentic harness that drives development across all client platforms. Instead of manually tracking what's done and what's missing, the harness reads the canonical [Client Feature List](feature-list.md), audits the current client codebase, and produces a prioritized gap analysis.
 
-The harness is a standalone process (or library) that:
-- **Runs an embedded NATS server** (nats-server can be embedded in Go) with JetStream and KV enabled
-- **Replays recorded sessions** — feed a captured stream-json recording into JetStream on the correct subjects. Develop the full conversation UI against real data without spending API tokens.
-- **Simulates live interaction** — accepts input messages on `.api.sessions.input`, responds with canned or scripted stream-json events (typing delay, tool use, permission prompts). Tests the full send → stream → render loop.
-- **Simulates state transitions** — writes to KV (session state, capabilities, heartbeats) on a schedule or in response to triggers. Tests the SessionStore/HeartbeatMonitor path.
-- **Simulates failure modes** — drops NATS connection, expires JWT, stops heartbeats, sends clear/compaction events. Tests reconnection (X2), cache reset (X1), and staleness detection (P6).
-- **Simulates terminal** — echoes input back on `.terminal.{termId}.output` for basic terminal UI development.
+**How it works:**
+
+1. **Read the feature list** — parse `feature-list.md` for all feature IDs, descriptions, and the platform support matrix
+2. **Audit the codebase** — scan the client source for evidence of each feature (components, store methods, NATS subscriptions, event handlers, UI elements)
+3. **Classify each feature** — `implemented`, `partial`, `missing`, `not-applicable` (per the support matrix)
+4. **Output a gap report** — ordered by dependency (e.g., A1 before P1, C1 before C2), with specific guidance for each missing/partial feature: which files to create/modify, which view models to wire up, which protocol messages to handle
+
+**Usage:** point Claude at any client directory and say "implement the feature list":
 
 ```
-mclaude-harness/
-  main.go                   CLI entry point
-  harness.go                Embedded NATS server + scenario runner
-  scenarios/
-    basic-conversation.json   Recorded stream-json session
-    permission-flow.json      Tool approval sequence
-    subagent-nesting.json     Agent with nested subagents
-    compaction.json           Mid-session compaction
-    disconnect.json           Connection drop + reconnect
+You are building the mclaude web SPA (or mclaude-cli, or iOS app).
+
+1. Read docs/feature-list.md for the canonical feature list and platform support matrix.
+2. Read docs/plan-client-architecture.md for the layered architecture, protocol contract,
+   conversation model accumulation algorithm, and cache handling.
+3. Audit the current codebase against the feature list.
+4. For each missing or partial feature, implement it following the architecture doc.
+5. After each feature, re-audit to confirm it's complete before moving to the next.
 ```
 
-Usage:
-```bash
-# Start harness on default NATS port, replay a recorded session
-mclaude-harness --scenario basic-conversation.json
+This works because:
+- The feature list is the single source of truth — same IDs across all platforms
+- The architecture doc specifies exact interfaces, protocol messages, and accumulation logic
+- The support matrix tells the agent which features apply to which platform
+- The agent can verify its own work by re-auditing after each feature
 
-# Interactive mode — accepts typed input, responds with scripted events
-mclaude-harness --interactive
-
-# Chaos mode — randomly drops connections, expires JWTs, kills heartbeats
-mclaude-harness --chaos
-```
-
-Every client connects to the harness the same way it connects to production — same NATSClient, same subjects, same KV buckets. The harness is the single development dependency for all platforms.
+The harness is not a separate tool — it's a prompt pattern that leverages the feature list and architecture doc as machine-readable specs. Any Claude session (mclaude itself, Claude Code, or a CI agent) can run it.
 
 ### Testing
 
@@ -788,7 +782,5 @@ Store and View Model layers are testable without any platform dependencies:
 - Feed mock KV updates into SessionStore → assert SessionState
 - Call ConversationVM.sendMessage() → assert correct NATS publish call
 - Simulate JWT expiry → assert AuthStore triggers refresh
-
-The harness also serves as an integration test backend — run Playwright against the SPA pointed at the harness, or run mclaude-cli against it in a CI pipeline.
 
 Platform layer tested via browser automation (Playwright) or visual snapshot tests.
