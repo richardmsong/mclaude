@@ -127,7 +127,7 @@ When Claude spawns a subagent (Explore, Plan, etc.), the subagent's events appea
 {"type": "user", "message": {"content": [{"type": "tool_result", ...}]}, "parent_tool_use_id": "tu_1"}
 ```
 
-The SPA uses `parent_tool_use_id` to render subagent events nested under the parent Agent tool block. Events with `parent_tool_use_id: null` are top-level. The session agent publishes all events verbatim regardless of nesting depth — `parent_tool_use_id` is valid at any depth (Agent → Agent → Agent). Rendering strategy for deep nesting is deferred to `plan-web-ui-refactor.md`.
+The SPA uses `parent_tool_use_id` to render subagent events nested under the parent Agent tool block. Events with `parent_tool_use_id: null` are top-level. The session agent publishes all events verbatim regardless of nesting depth — `parent_tool_use_id` is valid at any depth (Agent → Agent → Agent). Rendering strategy for deep nesting is deferred to `plan-client-architecture.md`.
 
 ---
 
