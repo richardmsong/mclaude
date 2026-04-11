@@ -83,7 +83,7 @@ claude --print --verbose \
 
 Claude Code still writes JSONL internally (its own persistence for `--resume`). The session agent never reads JSONL.
 
-**Claude CLI installation**: npm package — `npm install -g @anthropic-ai/claude-code@{pinned-version}` in the session-agent Dockerfile. Pin version to avoid breaking changes.
+**Claude CLI installation**: native binary via `claude install --version {pinned-version}` in the session-agent Dockerfile. No Node.js/npm dependency required. Pin version to avoid breaking changes.
 
 ### Stream-JSON Protocol
 
@@ -153,7 +153,7 @@ mclaude.{userId}.{projectId}.events.{sessionId}       → Claude Code stream-jso
 mclaude.{userId}.{projectId}.lifecycle.{sessionId}     → session agent lifecycle events
 ```
 
-`events` carries raw stream-json objects from Claude Code stdout, wrapped in a thin envelope with sessionId and userId. `lifecycle` carries session agent's own events (created, stopped, resumed, debug attached/detached).
+`events` carries raw stream-json objects from Claude Code stdout — no envelope, the subject encodes the routing metadata. `lifecycle` carries session agent's own events (created, stopped, resumed, debug attached/detached).
 
 Separate subjects so clients can subscribe to one or both. Stream-json events are high-volume; lifecycle events are low-volume state transitions.
 
@@ -218,7 +218,7 @@ Enforced at the NATS broker. A client with alice's JWT cannot subscribe to `mcla
 
 `_INBOX.>` permission is required on all clients for NATS request/reply responses.
 
-**JWT refresh**: browser JWTs expire after 8h. The SPA sets a timer at 7h to call `POST /auth/refresh` proactively. On success, it reconnects NATS with the new JWT seamlessly. On failure (session expired, SSO revoked), the SPA redirects to login. The NATS client library (`nats.ws`) supports `reconnect` with updated credentials without dropping subscriptions.
+**JWT refresh**: the SPA decodes the JWT `exp` claim and checks remaining TTL periodically (every 60s). When TTL falls below a refresh threshold, it calls `POST /auth/refresh`. On success, reconnects NATS with the new JWT seamlessly. On failure (session expired, SSO revoked), redirects to login. The NATS client library (`nats.ws`) supports `reconnect` with updated credentials without dropping subscriptions. JWT expiry duration and refresh threshold are configurable in user-management (env vars `JWT_EXPIRY_SECONDS` default 28800, `JWT_REFRESH_THRESHOLD_SECONDS` default 900) — enterprise deployments may require shorter session lifetimes.
 
 ---
 
@@ -230,12 +230,14 @@ Single Go binary. Runs as a container inside each K8s project pod, or as a stand
 
 - Subscribes to `mclaude.{userId}.{projectId}.api.>` — handles session CRUD, input, and control messages
 - Spawns Claude Code as child processes with `--print --verbose --output-format stream-json --input-format stream-json`
-- Routes stdout JSON events → NATS JetStream (with thin envelope: sessionId, userId, timestamp)
+- Routes stdout JSON events → NATS JetStream (raw, no envelope — subject encodes userId/projectId/sessionId)
 - Routes NATS input/control messages → Claude stdin
-- Filters noise from stdout (keep_alive, internal hooks) before publishing
+- Publishes all stdout events to NATS unfiltered — clients decide what to render
 - Tracks session state from `session_state_changed` events, writes to NATS KV
-- Caches capabilities from `init` event (skills, tools, agents, model)
+- Caches capabilities from `init` event (skills, tools, agents, model) in NATS KV, refreshes on `reload_plugins`
+- Spawns terminal (PTY) sessions via `creack/pty`, routes raw I/O through NATS
 - Exposes unix socket for `mclaude-cli` debug attach
+- Writes heartbeat to NATS KV every 30s (staleness detection for clients)
 - On startup, reads NATS KV for existing sessions → relaunches with `--resume`
 
 No tmux. No JSONL tailing. No screen scraping. No HTTP server.
@@ -269,11 +271,16 @@ go func() {
     scanner.Buffer(make([]byte, 0), 16*1024*1024) // 16MB buffer for large events
     for scanner.Scan() {
         line := scanner.Bytes()
-        event := parseEventType(line) // quick JSON field check
-        if event == "keep_alive" { continue }
-        if event == "session_state_changed" { updateKV(line) }
-        if event == "control_request" { updatePendingControl(line) }
-        nats.Publish("session."+id+".events", envelope(line))
+        // Passthrough — publish all events, clients decide what to render
+        nats.Publish("session."+id+".events", line)
+        // Side effects: update local state from specific event types
+        if eventType := parseEventType(line); eventType != "" {
+            switch eventType {
+            case "session_state_changed": updateKV(line)
+            case "control_request": updatePendingControl(line)
+            case "result": accumulateUsage(line)
+            }
+        }
     }
 }()
 
@@ -364,13 +371,14 @@ For K8s: `kubectl exec -it pod -- mclaude-cli attach {sessionId}`
 
 ### Laptop mode
 
-On a laptop, **one session-agent daemon per machine** (not per project). It manages all projects/sessions on that laptop:
+On a laptop, **one session-agent per project** — same scoping as K8s. A lightweight launcher manages the per-project agents:
 
-- Connects to NATS via `wss://mclaude.example.com/nats` (outbound, works behind NAT/firewall)
-- Subscribes to `mclaude.{userId}.laptop.{hostname}.api.>` — handles all projects
-- Each session is a separate Claude child process with its own cwd
-- NATS JWT issued by user-management on first setup, stored in `~/.config/mclaude/creds`
-- Runs as launchd service (macOS) or systemd service (Linux)
+- `mclaude-launcher` runs as a launchd/systemd daemon
+- On `projects.create` NATS message (or `mclaude start <project>` CLI), launcher spawns a session-agent for that project
+- Each session-agent connects to NATS via `wss://mclaude.example.com/nats` (outbound, works behind NAT/firewall)
+- Each subscribes to `mclaude.{userId}.laptop.{hostname}.{projectId}.api.>` — same scoping as K8s
+- NATS JWT issued by user-management on first setup, stored in `~/.config/mclaude/creds` (shared by all agents)
+- Launcher monitors child agents, restarts on crash
 
 The browser connects to the same NATS and subscribes to `mclaude.{userId}.laptop.{hostname}.events.>` — same flow as K8s sessions.
 
@@ -395,17 +403,7 @@ On session delete:
 
 Claude Code's stream-json protocol is the canonical event schema. No protobuf translation layer. Events flow from Claude Code → NATS → clients unchanged.
 
-The session agent adds a thin envelope for NATS routing:
-
-```json
-{
-  "sessionId": "abc-123",
-  "userId": "alice",
-  "projectId": "proj-1",
-  "ts": "2026-04-11T10:00:00Z",
-  "event": { ... raw stream-json object ... }
-}
-```
+Events are published as raw stream-json bytes — no envelope. The NATS subject (`mclaude.{userId}.{projectId}.events.{sessionId}`) encodes all routing metadata. JetStream adds its own timestamp. Clients parse the raw stream-json directly.
 
 ### Session state (NATS KV)
 
@@ -441,7 +439,7 @@ The session agent adds a thin envelope for NATS routing:
 
 `pendingControl` is set when a `control_request` is received and cleared when the `control_response` is sent. Clients use this to show permission prompts.
 
-`capabilities` is populated from the `init` event on session start and refreshed via `reload_plugins`.
+`capabilities` is populated from the `init` event on session start. Refreshed when `reload_plugins` control request response is received. Client reads from KV — one read, no stream replay needed for the skills picker.
 
 ### Project state (NATS KV)
 
@@ -465,7 +463,9 @@ Published on `mclaude.{userId}.{projectId}.lifecycle.{sessionId}` — separate f
 ```json
 {"type": "session_created", "sessionId": "abc-123", "ts": "..."}
 {"type": "session_stopped", "sessionId": "abc-123", "exitCode": 0, "ts": "..."}
+{"type": "session_restarting", "sessionId": "abc-123", "ts": "..."}
 {"type": "session_resumed", "sessionId": "abc-123", "ts": "..."}
+{"type": "session_failed", "sessionId": "abc-123", "error": "...", "ts": "..."}
 {"type": "debug_attached", "sessionId": "abc-123", "ts": "..."}
 {"type": "debug_detached", "sessionId": "abc-123", "ts": "..."}
 ```
@@ -827,26 +827,70 @@ document.addEventListener('visibilitychange', () => {
 
 ## Terminal Access
 
-### Interactive shell on the pod
+### Interactive terminal (PTY) sessions
 
-With tmux gone, users still need a way to get an interactive shell on the pod for debugging, inspecting state, running manual commands, etc.
+The session agent manages two types of sessions:
 
-The session-agent container includes a full shell environment (zsh, git, Nix tools). Users access it via:
+1. **Claude sessions** — headless stream-json, JSON on stdin/stdout
+2. **Terminal sessions** — interactive PTY, raw bytes on stdin/stdout
 
-```bash
-kubectl exec -it project-{projectId} -n mclaude-{userId} -c session-agent -- /bin/zsh
+Terminal sessions are spawned via the same NATS API:
+
+```
+mclaude.{userId}.{projectId}.api.terminal.create    → spawn shell
+mclaude.{userId}.{projectId}.api.terminal.delete     → kill terminal
+mclaude.{userId}.{projectId}.api.terminal.resize     → resize PTY
 ```
 
-This gives a full interactive shell in the same filesystem as the Claude processes. Users can:
-- Inspect `/data/worktrees/` and git state
-- Run manual commands (`npm test`, `git log`, `ls`)
-- Check `~/.claude/` for session files
-- Use `mclaude-cli attach {sessionId}` to interact with a Claude session
-- Tail logs: `mclaude-cli logs {sessionId}` (streams raw stream-json events)
+The session agent spawns a shell using `creack/pty` (Go PTY library):
 
-The shell session is independent of Claude processes — `kubectl exec` creates a new process in the container, it doesn't attach to any existing Claude session. Claude processes continue running undisturbed.
+```go
+cmd := exec.Command("/bin/zsh")
+cmd.Dir = "/data/worktrees/" + branch
+cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+ptmx, _ := pty.Start(cmd)
 
-For the web SPA, a web terminal (xterm.js) could be added later that `exec`s into the pod via the K8s API. Deferred — `kubectl exec` from a local terminal is sufficient for now.
+// PTY output → NATS (raw bytes)
+go func() {
+    buf := make([]byte, 4096)
+    for {
+        n, _ := ptmx.Read(buf)
+        nats.Publish("terminal."+id+".output", buf[:n])
+    }
+}()
+
+// NATS → PTY input (raw bytes)
+go func() {
+    sub := nats.Subscribe("terminal."+id+".input")
+    for msg := range sub.Chan() {
+        ptmx.Write(msg.Data)
+    }
+}()
+```
+
+NATS subjects for terminal I/O:
+
+```
+mclaude.{userId}.{projectId}.terminal.{termId}.output    → raw PTY output bytes
+mclaude.{userId}.{projectId}.terminal.{termId}.input     → raw keyboard input bytes
+```
+
+These are **not** JetStream — raw terminal I/O is ephemeral, no replay needed. Use core NATS pub/sub for low latency.
+
+The web SPA renders terminal sessions with **xterm.js**:
+- Subscribes to `.terminal.{termId}.output` → feeds bytes to xterm.js
+- Captures keyboard input from xterm.js → publishes to `.terminal.{termId}.input`
+- Sends resize events on window resize → session agent calls `pty.Setsize()`
+
+Users can:
+- Open a terminal tab alongside Claude session tabs in the SPA
+- Run manual commands (`npm test`, `git log`, inspect files)
+- Debug issues that Claude can't solve
+- Run interactive tools (`vim`, `ssh`, `top`)
+
+Terminal sessions share the same filesystem as Claude sessions — same worktree, same `/data/`, same Nix tools.
+
+`kubectl exec` remains available as a fallback but is not the primary interface.
 
 ### Real-time Claude Output
 
@@ -962,7 +1006,38 @@ readinessProbe:
 
 **NATS unavailability** (session-agent): buffer state changes in memory, flush on reconnect. Claude processes continue running — sessions are not affected by NATS downtime. Stdout events are buffered and published when connection restores.
 
-**Pod restart** (session-agent): on startup, read NATS KV for existing sessions, relaunch with `--resume`. Claude Code reads its own JSONL from PVC to restore conversation context. No dependency on any other service being up.
+**Pod restart — graceful** (session-agent): graceful shutdown runs (see above). On startup, read NATS KV for existing sessions, relaunch with `--resume`. Claude Code reads its own JSONL from PVC to restore conversation context. No dependency on any other service being up.
+
+**Pod restart — ungraceful** (SIGKILL, node failure, OOM): graceful shutdown does NOT run. Stale state left behind:
+- NATS KV session entries still show old state (e.g. `running`)
+- `pendingControl` may reference a stale permission prompt
+- No `session_stopped` lifecycle events published
+- Buffered but unpublished events lost
+- Terminal (PTY) sessions are gone (ephemeral, no recovery)
+- JSONL on PVC is fine (persistent storage)
+
+Recovery sequence on startup after ungraceful termination:
+
+```
+1. Read KV for all sessions with this projectId
+2. Set all session KV entries to state: "restarting", clear pendingControl
+3. Publish session_restarting lifecycle events
+4. For each session: claude --resume {sessionId}
+5. On init event received: update KV with fresh state from Claude
+6. Publish session_resumed lifecycle events
+7. Sessions that fail to start within 30s: mark state: "failed", publish session_failed
+```
+
+This is the same sequence as a graceful restart — the agent doesn't distinguish between the two. It always re-derives state from Claude Code on startup.
+
+**Staleness detection** (heartbeats): the session agent writes a heartbeat to NATS KV every 30s:
+
+```
+KV bucket: mclaude-heartbeats
+  key: {userId}/{projectId}  →  {"ts": "2026-04-11T10:00:30Z"}
+```
+
+Clients check `now - lastHeartbeat > 60s` → agent is dead or unreachable, show "reconnecting" in the UI. When heartbeats resume after pod restart, client clears the warning and re-reads session state from KV.
 
 **Claude process crash**: session-agent detects child process exit, publishes lifecycle event, updates NATS KV state. Auto-restart with `--resume` if exit was unexpected (non-zero, no interrupt signal).
 
