@@ -142,7 +142,7 @@ textarea{resize:none;line-height:1.4}
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px}
 
 /* ── Session detail ── */
-.detail{height:100%;display:flex;flex-direction:column}
+.detail{height:100%;display:flex;flex-direction:column;position:relative}
 .det-meta{padding:8px 16px;background:var(--surf);border-bottom:1px solid var(--border);
   display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text2);flex-shrink:0}
 .det-meta .win{margin-left:auto;font-size:11px;color:var(--text3);font-variant-numeric:tabular-nums}
@@ -460,6 +460,10 @@ const S = {
   ptyTerm: null,      // xterm.js Terminal instance
   ptyFit: null,       // FitAddon instance
   ptyResizeObs: null, // ResizeObserver for terminal container
+  ptyTextBuf: '',      // plain-text mirror of terminal output for text-select mode
+  ptyTextMode: false,  // true = show selectable <pre> instead of xterm canvas
+  ptyRawAll: [],       // full raw data history for replay when xterm is recreated
+  ptyCtrlPending: false, // true = next keystroke is sent as Ctrl+key
   adminUsers: [],     // admin user list cache
 };
 
@@ -512,14 +516,17 @@ async function fetchUserInfo() {
 
 // ── PTY (web shell) ───────────────────────────────────────────────────────
 
-function cleanupPty() {
+// keepWs=true: detach xterm but keep the shell alive (tab switch)
+// keepWs=false: full teardown (navigate away from session)
+function cleanupPty(keepWs = false) {
   if (S.ptyResizeObs) { S.ptyResizeObs.disconnect(); S.ptyResizeObs = null; }
-  if (S.ptyWs) { S.ptyWs.close(); S.ptyWs = null; }
   if (S.ptyTerm) { S.ptyTerm.dispose(); S.ptyTerm = null; S.ptyFit = null; }
+  if (!keepWs && S.ptyWs) { S.ptyWs.close(); S.ptyWs = null; S.ptyRawAll = []; S.ptyTextBuf = ''; }
 }
 
 function connectPty(hostname) {
-  cleanupPty();
+  // Detach any existing xterm but keep WebSocket if already running
+  cleanupPty(true);
 
   const container = document.getElementById('xterm-container');
   if (!container) return;
@@ -530,6 +537,7 @@ function connectPty(hostname) {
     fontFamily: "'SF Mono', Menlo, 'Courier New', monospace",
     theme: { background: '#000000', foreground: '#ffffff' },
     scrollback: 5000,
+    minimumContrastRatio: 1,
   });
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
@@ -545,45 +553,137 @@ function connectPty(hostname) {
   S.ptyTerm = term;
   S.ptyFit = fitAddon;
 
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const rows = term.rows, cols = term.cols;
-  let url = `${proto}//${location.host}/ws/pty?token=${encodeURIComponent(S.token)}&rows=${rows}&cols=${cols}`;
-  if (hostname) url += `&laptop=${encodeURIComponent(hostname)}`;
-
-  const ws = new WebSocket(url);
-  ws.binaryType = 'arraybuffer';
-  S.ptyWs = ws;
-
-  ws.onopen = () => { term.focus(); };
-
-  ws.onmessage = (e) => {
-    if (e.data instanceof ArrayBuffer) {
-      term.write(new Uint8Array(e.data));
-    } else {
-      term.write(e.data);
+  const attachWs = (ws) => {
+    // Replay full history into the fresh xterm instance
+    for (const chunk of S.ptyRawAll) {
+      if (chunk instanceof ArrayBuffer) term.write(new Uint8Array(chunk));
+      else term.write(chunk);
     }
+
+    ws.onmessage = (e) => {
+      const chunk = e.data instanceof ArrayBuffer ? e.data.slice(0) : e.data;
+      S.ptyRawAll.push(chunk);
+      const raw = e.data instanceof ArrayBuffer ? new TextDecoder().decode(e.data) : e.data;
+      const plain = raw.replace(/\x1b\[[\x20-\x3f]*[\x40-\x7e]/g, '')   // CSI sequences (covers ?2004h etc)
+                       .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC sequences
+                       .replace(/\x1b[^[\]]/g, '');                        // other ESC sequences
+      S.ptyTextBuf += plain;
+      if (S.ptyTextMode) {
+        const pre = document.getElementById('pty-text-view');
+        if (pre) { pre.textContent = S.ptyTextBuf; pre.scrollTop = pre.scrollHeight; }
+      }
+      if (S.ptyTerm) {
+        if (e.data instanceof ArrayBuffer) S.ptyTerm.write(new Uint8Array(e.data));
+        else S.ptyTerm.write(e.data);
+      }
+    };
+
+    ws.onclose = () => {
+      if (S.ptyTerm) S.ptyTerm.write('\r\n\x1b[31m[Disconnected — reconnecting…]\x1b[0m\r\n');
+      S.ptyWs = null; S.ptyRawAll = []; S.ptyTextBuf = '';
+      // Auto-reconnect if still on terminal tab
+      if (S.activeTab === 'terminal' && !S.ptyTextMode) {
+        setTimeout(() => {
+          if (S.activeTab === 'terminal' && !S.ptyWs) {
+            const sess = S.sessions.find(s => s.id === S.activeId);
+            const hostname = sess?.laptop || S.laptop || (S.laptops[0]?.id || S.laptops[0]) || '';
+            connectPty(hostname);
+          }
+        }, 2000);
+      }
+    };
+
+    term.onData(data => {
+      if (ws.readyState !== 1) return;
+      if (S.ptyCtrlPending && data.length === 1) {
+        S.ptyCtrlPending = false;
+        const ctrlBtn = document.getElementById('pty-ctrl-btn');
+        if (ctrlBtn) { ctrlBtn.style.background = 'rgba(40,40,40,.92)'; ctrlBtn.style.color = '#ddd'; }
+        const code = data.toUpperCase().charCodeAt(0) - 64;
+        if (code > 0 && code < 32) { ws.send(String.fromCharCode(code)); return; }
+      }
+      ws.send(data);
+    });
+    term.onResize(({rows, cols}) => {
+      if (ws.readyState === 1) ws.send(JSON.stringify({type:'resize', rows, cols}));
+    });
+    term.focus();
   };
 
-  ws.onclose = () => {
-    term.write('\r\n\x1b[31m[Disconnected]\x1b[0m\r\n');
-  };
-
-  // Terminal input → WebSocket
-  term.onData(data => {
-    if (ws.readyState === 1) ws.send(data);
-  });
-
-  // Handle resize
-  term.onResize(({rows, cols}) => {
-    if (ws.readyState === 1) {
-      ws.send(JSON.stringify({type: 'resize', rows, cols}));
-    }
-  });
+  if (S.ptyWs && S.ptyWs.readyState === WebSocket.OPEN) {
+    // Reuse existing shell session
+    attachWs(S.ptyWs);
+  } else {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const rows = term.rows, cols = term.cols;
+    let url = `${proto}//${location.host}/ws/pty?token=${encodeURIComponent(S.token)}&rows=${rows}&cols=${cols}`;
+    if (hostname) url += `&laptop=${encodeURIComponent(hostname)}`;
+    const ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+    S.ptyWs = ws;
+    ws.onopen = () => attachWs(ws);
+  }
 
   // Container resize → fit → resize event
   const resizeObs = new ResizeObserver(() => { try { fitAddon.fit(); } catch(_) {} });
   resizeObs.observe(container);
   S.ptyResizeObs = resizeObs;
+}
+
+function sendPty(data) {
+  if (S.ptyWs && S.ptyWs.readyState === WebSocket.OPEN) S.ptyWs.send(data);
+  if (S.ptyTerm) S.ptyTerm.focus();
+}
+
+function bindPtyModeBtn(id) {
+  const toolbar = document.getElementById('pty-toolbar');
+  if (toolbar) {
+    toolbar.addEventListener('click', e => {
+      const key = e.target.dataset.key;
+      if (!key) return;
+      if (key === 'ctrl') {
+        S.ptyCtrlPending = !S.ptyCtrlPending;
+        e.target.style.background = S.ptyCtrlPending ? 'rgba(80,120,200,.9)' : 'rgba(40,40,40,.92)';
+        e.target.style.color = S.ptyCtrlPending ? '#fff' : '#ddd';
+      } else if (key === 'esc')   { sendPty('\x1b'); }
+      else if (key === 'tab')     { sendPty('\t'); }
+      else if (key === 'up')      { sendPty('\x1b[A'); }
+      else if (key === 'down')    { sendPty('\x1b[B'); }
+      else if (key === 'right')   { sendPty('\x1b[C'); }
+      else if (key === 'left')    { sendPty('\x1b[D'); }
+      if (S.ptyTerm) S.ptyTerm.focus();
+    });
+  }
+
+  const pasteBtn = document.getElementById('pty-paste-btn');
+  if (pasteBtn) {
+    pasteBtn.onclick = async () => {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) sendPty(text);
+      } catch(e) {
+        const text = window.prompt('Paste text to send:');
+        if (text) sendPty(text);
+      }
+    };
+  }
+  const btn = document.getElementById('pty-mode-btn');
+  if (!btn) return;
+  btn.onclick = () => {
+    S.ptyTextMode = !S.ptyTextMode;
+    const tc = document.getElementById('tab-content');
+    if (!tc) return;
+    tc.innerHTML = tabContentHTML(id);
+    if (S.ptyTextMode) {
+      const pre = document.getElementById('pty-text-view');
+      if (pre) pre.scrollTop = pre.scrollHeight;
+    } else {
+      const sess = S.sessions.find(s => s.id === id);
+      const hostname = sess?.laptop || S.laptop || (S.laptops[0]?.id || S.laptops[0]) || '';
+      setTimeout(() => connectPty(hostname), 50);
+    }
+    bindPtyModeBtn(id);
+  };
 }
 
 // ── WebSocket ──────────────────────────────────────────────────────────────
@@ -1852,8 +1952,28 @@ function tabContentHTML(id) {
     const evs = S.events[id] || [];
     const grouped = groupEventsForRender(evs);
     return `<div class="evlist" id="evlist">${grouped.map(renderGroupedItemHTML).join('')}</div>`;
+  } else if (S.ptyTextMode) {
+    return `<div style="position:relative;height:100%;width:100%">
+      <pre id="pty-text-view" style="height:100%;width:100%;margin:0;padding:10px;box-sizing:border-box;background:#000;color:#e5e5e5;font-family:'SF Mono',Menlo,'Courier New',monospace;font-size:12px;line-height:1.55;overflow-y:auto;white-space:pre-wrap;word-break:break-all;user-select:text;-webkit-user-select:text">${esc(S.ptyTextBuf)}</pre>
+      <button id="pty-mode-btn" style="position:absolute;bottom:8px;right:8px;z-index:10;background:rgba(40,40,40,.9);border:1px solid #444;color:#ccc;font-size:12px;cursor:pointer;padding:5px 10px;border-radius:6px">⌨ Live</button>
+    </div>`;
   } else {
-    return `<div id="xterm-container" style="height:100%;width:100%;background:#000"></div>`;
+    const kbtn = `background:rgba(40,40,40,.92);border:1px solid #555;color:#ddd;font-size:13px;cursor:pointer;padding:6px 11px;border-radius:6px;font-family:'SF Mono',Menlo,monospace`;
+    return `<div style="display:flex;flex-direction:column;height:100%;width:100%">
+      <div id="xterm-container" style="flex:1;min-height:0;width:100%;background:#000"></div>
+      <div id="pty-toolbar" style="display:flex;align-items:center;gap:5px;padding:5px 6px;background:#111;border-top:1px solid #333;overflow-x:auto;-webkit-overflow-scrolling:touch;flex-shrink:0">
+        <button data-key="esc"   style="${kbtn}">Esc</button>
+        <button data-key="ctrl"  id="pty-ctrl-btn" style="${kbtn}">Ctrl</button>
+        <button data-key="tab"   style="${kbtn}">Tab</button>
+        <button data-key="up"    style="${kbtn}">▲</button>
+        <button data-key="down"  style="${kbtn}">▼</button>
+        <button data-key="left"  style="${kbtn}">◀</button>
+        <button data-key="right" style="${kbtn}">▶</button>
+        <div style="flex:1"></div>
+        <button id="pty-paste-btn" style="${kbtn}">⌅ Paste</button>
+        <button id="pty-mode-btn"  style="${kbtn}">⎘ Text</button>
+      </div>
+    </div>`;
   }
 }
 
@@ -1962,7 +2082,8 @@ function bindDetail(id, sess) {
     const tc = document.getElementById('tab-content');
     if (tc) { tc.style.overflow = 'hidden'; }
     const hostname = sess?.laptop || S.laptop || (S.laptops[0]?.id || S.laptops[0]) || '';
-    setTimeout(() => connectPty(hostname), 50);
+    if (!S.ptyTextMode) setTimeout(() => connectPty(hostname), 50);
+    bindPtyModeBtn(S.activeId);
   }
 }
 
@@ -2090,8 +2211,8 @@ function autoGrow(el) {
 
 function switchTab(tab, id) {
   if (S.activeTab === tab) return;
-  // Clean up PTY when leaving terminal tab
-  if (S.activeTab === 'terminal') cleanupPty();
+  // Detach xterm but keep shell alive when leaving terminal tab
+  if (S.activeTab === 'terminal') cleanupPty(true);
   S.activeTab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === tab));
   const tc = document.getElementById('tab-content');
@@ -2109,7 +2230,8 @@ function switchTab(tab, id) {
     if (tab === 'terminal') {
       const sess = S.sessions.find(s => s.id === id);
       const hostname = sess?.laptop || S.laptop || (S.laptops[0]?.id || S.laptops[0]) || '';
-      setTimeout(() => connectPty(hostname), 50);
+      if (!S.ptyTextMode) setTimeout(() => connectPty(hostname), 50);
+      bindPtyModeBtn(id);
     }
     // Show/hide input bar based on tab
     const ibar = document.querySelector('.ibar');
