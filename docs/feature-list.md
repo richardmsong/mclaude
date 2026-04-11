@@ -86,6 +86,7 @@ Future: Figma designs linked per feature.
 | X1 | Cache reset | Button to clear all client-side caches (ConversationModel, capabilities, session state) and re-subscribe from scratch |
 | X2 | Reconnection | Auto-reconnect on network loss, JWT expiry, tab foreground — gap-free event replay |
 | X3 | Background reconnect | Mobile: reconnect on `visibilitychange`, re-watch KV |
+| X4 | Forced update | On connect, check client version against `minClientVersion` from control plane. If below minimum, block UI entirely and prompt user to update. No graceful degradation — breaking changes are hard cuts. |
 
 ---
 
@@ -102,4 +103,14 @@ Future: Figma designs linked per feature.
 | M1–M4 | All | M1 only | All |
 | T1–T3 | All (xterm.js) | — (`kubectl exec`) | All (SwiftTerm) |
 | V1 | WebSpeech API | — | SFSpeechRecognizer |
-| X1–X3 | All | X2 only | All |
+| X1–X4 | All | X2, X4 (print error + exit) | All |
+
+### X4 platform behaviour
+
+| Platform | Below `minClientVersion` |
+|----------|--------------------------|
+| Web SPA | Force `location.reload()` — new content-hashed assets load automatically. If version still below minimum after reload (shouldn't happen), show blocking "server is updating, please wait" screen. |
+| iOS | Blocking screen: "Update required — open TestFlight to update mclaude." No partial functionality. |
+| mclaude-cli | Print `mclaude: server requires client version ≥ {min}, you have {current}. Run: brew upgrade mclaude` and exit 1. |
+
+`minClientVersion` is set in control-plane config and returned on the auth login response and on a `GET /version` endpoint (no auth required). Clients check it on startup and on every reconnect. When a breaking mclaude version ships, bump `minClientVersion` in the control-plane deployment.
