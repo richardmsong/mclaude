@@ -1,8 +1,17 @@
 # Deploy MClaude Connector
 
-Build and restart the mclaude-connector as a launchd service.
+Build and restart the mclaude-connector on the local laptop inside its tmux window.
 
-Credentials come from your secrets vault and are baked into the plist at `~/Library/LaunchAgents/com.mclaude.connector.plist`.
+Credentials are stored in Vault at `appcodes/0LL0/DEV/MCLAUDE` (case-sensitive).
+
+Fetch them with:
+```
+vault kv get appcodes/0LL0/DEV/MCLAUDE
+```
+
+This provides `RELAY_URL` and `TUNNEL_TOKEN`. Other env vars:
+- `MCLAUDE_URL`: Local mclaude-server (default: `http://localhost:8377`)
+- `STATIC_DIR`: Path to local static files for hot-reload (optional)
 
 ## Steps
 
@@ -11,50 +20,43 @@ Credentials come from your secrets vault and are baked into the plist at `~/Libr
    cd mclaude-connector && go build -o mclaude-connector .
    ```
 
-2. **Restart the service** (rebuild only — no plist changes):
+2. **Kill** any running connector:
    ```
-   launchctl kickstart -k gui/$(id -u)/com.mclaude.connector
-   ```
-   If you changed the plist (env vars etc.), do a full reload instead:
-   ```
-   launchctl bootout gui/$(id -u)/com.mclaude.connector
-   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mclaude.connector.plist
+   pkill -f mclaude-connector || true
    ```
 
-3. **Verify** (check logs and tunnel status):
+3. **Restart** in the tmux "connector" window (mclaude session):
    ```
-   tail -10 /tmp/mclaude-connector.log
+   tmux send-keys -t mclaude:connector C-c
+   sleep 1
+   tmux send-keys -t mclaude:connector "RELAY_URL=$RELAY_URL TUNNEL_TOKEN=$TUNNEL_TOKEN MCLAUDE_URL=$MCLAUDE_URL STATIC_DIR=$STATIC_DIR $(pwd)/mclaude-connector/mclaude-connector" Enter
+   ```
+
+   If the tmux window doesn't exist yet, create it:
+   ```
+   tmux new-window -t mclaude -n connector "RELAY_URL=$RELAY_URL TUNNEL_TOKEN=$TUNNEL_TOKEN MCLAUDE_URL=$MCLAUDE_URL STATIC_DIR=$STATIC_DIR $(pwd)/mclaude-connector/mclaude-connector; exec zsh"
+   ```
+
+4. **Verify** (wait 2s for reconnect):
+   ```
    curl -s $RELAY_URL/health
    ```
 
-## Service Management
-
-| Action | Command |
-|--------|---------|
-| Status | `launchctl print gui/$(id -u)/com.mclaude.connector` |
-| Restart | `launchctl kickstart -k gui/$(id -u)/com.mclaude.connector` |
-| Stop | `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.mclaude.connector.plist` |
-| Start | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mclaude.connector.plist` |
-| Logs | `tail -f /tmp/mclaude-connector.log` |
-
-## Plist Location
-
-`~/Library/LaunchAgents/com.mclaude.connector.plist`
-
-To update env vars (e.g. after rotating `TUNNEL_TOKEN`), edit the plist and restart the service.
-
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `RELAY_URL` | URL of the mclaude relay |
-| `TUNNEL_TOKEN` | Auth token for the relay tunnel |
-| `MCLAUDE_URL` | Local server URL (default: `http://127.0.0.1:8377`) |
-| `STATIC_DIR` | Path to `mclaude-relay/static` for dev mode |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `RELAY_URL` | Yes | Relay WebSocket URL |
+| `TUNNEL_TOKEN` | Yes | Shared secret with relay |
+| `MCLAUDE_URL` | No | Local mclaude-server (default: `http://localhost:8377`) |
+| `STATIC_DIR` | No | Path to local static files for hot-reload dev mode |
+| `CONNECTOR_NAME` | No | Override auto-detected hostname for multi-laptop display |
+| `TLS_SKIP_VERIFY` | No | Set to `1` to skip TLS verification |
 
 ## Notes
 
-- Service auto-restarts on crash (`KeepAlive: true`)
-- Service auto-starts on login (`RunAtLoad: true`)
-- Connector auto-detects hostname and sends it to relay
-- Logs at `/tmp/mclaude-connector.log`
+- Connector runs in tmux window `mclaude:connector`
+- It auto-detects hostname (short, truncated at first dot) and sends it to relay
+- The relay shows the hostname in `/health` and `/laptops` responses
+- The connector auto-reconnects if the tunnel drops
+- STATIC_DIR enables hot-reload: edit index.html locally, browser auto-refreshes

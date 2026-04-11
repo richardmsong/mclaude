@@ -1378,6 +1378,22 @@ struct AskUserQuestionView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!allGroupsSelected)
+
+                // Escape / cancel button
+                Button {
+                    submitted = true
+                    onSendKey?("Escape")
+                } label: {
+                    Label("Cancel", systemImage: "xmark.circle.fill")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .frame(maxWidth: .infinity)
+                        .padding(10)
+                        .background(Color.red.opacity(0.15))
+                        .foregroundStyle(.red)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
             } else {
                 HStack(spacing: 4) {
                     Image(systemName: "checkmark.circle.fill")

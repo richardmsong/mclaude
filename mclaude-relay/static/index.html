@@ -146,6 +146,12 @@ textarea{resize:none;line-height:1.4}
 .det-meta{padding:8px 16px;background:var(--surf);border-bottom:1px solid var(--border);
   display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text2);flex-shrink:0}
 .det-meta .win{margin-left:auto;font-size:11px;color:var(--text3);font-variant-numeric:tabular-nums}
+.plan-card{background:var(--surf2);border-bottom:1px solid var(--border);flex-shrink:0}
+.plan-hdr{display:flex;align-items:center;gap:6px;padding:8px 16px;cursor:pointer}
+.plan-hdr:active{background:var(--surf3)}
+.plan-body{padding:0 16px 10px;font-size:13px;color:var(--text2);line-height:1.5;
+  max-height:200px;overflow-y:auto}
+.plan-body p{margin:4px 0}
 .act-bar{display:flex;gap:8px;padding:8px 16px;background:var(--surf2);
   border-bottom:1px solid var(--border);flex-shrink:0}
 .prompt-bar{padding:10px 16px;background:var(--surf2);
@@ -155,6 +161,30 @@ textarea{resize:none;line-height:1.4}
 .popt{background:var(--surf);border:1px solid var(--border);border-radius:16px;
   padding:6px 12px;font-size:13px;cursor:pointer;color:var(--blue)}
 .popt:active{background:var(--surf3)}
+
+/* ── Three-dot menu ── */
+.dot-menu-btn{background:none;border:none;color:var(--text2);font-size:20px;
+  cursor:pointer;padding:4px 8px;line-height:1;letter-spacing:2px}
+.dot-menu-btn:active{color:var(--text)}
+.dot-menu{position:absolute;right:12px;top:48px;background:var(--surf2);
+  border:1px solid var(--border);border-radius:12px;min-width:200px;
+  box-shadow:0 8px 24px rgba(0,0,0,.4);z-index:100;overflow:hidden}
+.dot-menu-item{display:flex;align-items:center;gap:10px;padding:12px 16px;
+  font-size:14px;color:var(--text);cursor:pointer;border-bottom:1px solid var(--border)}
+.dot-menu-item:last-child{border-bottom:none}
+.dot-menu-item:active{background:var(--surf3)}
+.dot-menu-item .dm-icon{font-size:16px;width:20px;text-align:center}
+.dot-menu-item .dm-sub{font-size:11px;color:var(--text2);margin-top:1px}
+.model-list{max-height:220px;overflow-y:auto}
+.model-opt{display:flex;align-items:center;gap:10px;padding:10px 16px;
+  font-size:14px;color:var(--text);cursor:pointer;border-bottom:1px solid var(--border)}
+.model-opt:active{background:var(--surf3)}
+.model-opt.active{color:var(--blue)}
+.model-opt.active::after{content:'✓';margin-left:auto;color:var(--blue)}
+.raw-overlay{position:fixed;inset:0;z-index:200;display:flex;flex-direction:column;background:#000}
+.raw-header{display:flex;align-items:center;padding:12px 16px;gap:8px;
+  background:var(--surf);border-bottom:1px solid var(--border);flex-shrink:0}
+.raw-header .raw-title{flex:1;font-size:15px;font-weight:600}
 
 /* ── Tabs ── */
 .tabs{display:flex;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--surf)}
@@ -328,6 +358,11 @@ textarea{resize:none;line-height:1.4}
   border:2px solid var(--blue);border-top-color:transparent;
   animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
+.istop{width:34px;height:34px;border-radius:17px;background:var(--red);
+  border:none;color:#fff;font-size:16px;font-weight:700;cursor:pointer;display:flex;
+  align-items:center;justify-content:center;flex-shrink:0;transition:transform .1s}
+.istop:active{transform:scale(.88)}
+.istop:disabled{background:var(--surf3);color:var(--text3)}
 
 /* ── Skills picker ── */
 .skill-picker{background:var(--surf);border-top:1px solid var(--border);
@@ -400,6 +435,7 @@ textarea{resize:none;line-height:1.4}
 // ── State ──────────────────────────────────────────────────────────────────
 const S = {
   token: localStorage.getItem('mc_tok') || '',
+  user: null,         // {id, name, email, role, laptops} from /auth/me
   sessions: [],
   projects: [],
   skills: [],
@@ -424,13 +460,14 @@ const S = {
   ptyTerm: null,      // xterm.js Terminal instance
   ptyFit: null,       // FitAddon instance
   ptyResizeObs: null, // ResizeObserver for terminal container
+  adminUsers: [],     // admin user list cache
 };
 
 // ── DOM root ───────────────────────────────────────────────────────────────
 const $app = document.getElementById('app');
 
-// Eagerly fetch laptops (no auth required) so Settings shows hosts immediately
-fetch('/laptops').then(r => r.ok ? r.json() : []).then(list => {
+// Eagerly fetch laptops so Settings shows hosts immediately
+fetch('/laptops', S.token ? {headers: {'Authorization': 'Bearer ' + S.token}} : {}).then(r => r.ok ? r.json() : []).then(list => {
   if (Array.isArray(list)) S.laptops = list.map(l => l.id || l);
   if (route().page === 'settings') renderSettings();
   else patchDashboard();
@@ -440,6 +477,8 @@ fetch('/laptops').then(r => r.ok ? r.json() : []).then(list => {
 function route() {
   const h = location.hash.slice(1);
   if (h === 'settings') return { page: 'settings' };
+  if (h === 'users') return { page: 'users' };
+  if (h === 'usage') return { page: 'usage' };
   if (h.startsWith('s/')) return { page: 'session', id: decodeURIComponent(h.slice(2)) };
   return { page: 'dashboard' };
 }
@@ -456,6 +495,20 @@ window.addEventListener('hashchange', () => {
   }
   render();
 });
+
+// Fetch user info after login
+async function fetchUserInfo() {
+  try {
+    const resp = await fetch('/auth/me', {
+      headers: { 'Authorization': `Bearer ${S.token}` }
+    });
+    if (resp.ok) {
+      S.user = await resp.json();
+    }
+  } catch(e) {
+    console.warn('fetchUserInfo:', e);
+  }
+}
 
 // ── PTY (web shell) ───────────────────────────────────────────────────────
 
@@ -486,6 +539,8 @@ function connectPty(hostname) {
 
   term.open(container);
   fitAddon.fit();
+  // Re-fit after layout settles (container may have had 0 height on first paint)
+  setTimeout(() => { try { fitAddon.fit(); } catch(_) {} }, 100);
 
   S.ptyTerm = term;
   S.ptyFit = fitAddon;
@@ -673,6 +728,222 @@ async function doCancel(id) {
   catch(e) { alert('Cancel failed: ' + e.message); }
 }
 
+// ── Three-dot menu ─────────────────────────────────────────────────────────
+S.dotMenuOpen = false;
+
+function getCurrentModel(id) {
+  const evs = S.events[id] || [];
+  for (let i = evs.length - 1; i >= 0; i--) {
+    if (evs[i].model) return evs[i].model;
+  }
+  return 'unknown';
+}
+
+function toggleDotMenu(id) {
+  const anchor = document.getElementById('dot-menu-anchor');
+  const existing = document.getElementById('dot-menu');
+  if (existing) { existing.remove(); S.dotMenuOpen = false; return; }
+
+  const model = getCurrentModel(id);
+  const shortModel = model.replace(/^claude-/, '').replace(/-\d{8}$/, '');
+
+  anchor.innerHTML = `<div class="dot-menu" id="dot-menu">
+    <div class="dot-menu-item" id="dm-model">
+      <span class="dm-icon">🧠</span>
+      <div><div>Model</div><div class="dm-sub">${esc(shortModel)}</div></div>
+    </div>
+    <div class="dot-menu-item" id="dm-usage">
+      <span class="dm-icon">📊</span>
+      <div>Token Usage</div>
+    </div>
+    <div class="dot-menu-item" id="dm-raw">
+      <span class="dm-icon">📜</span>
+      <div>Raw Output</div>
+    </div>
+  </div>`;
+  S.dotMenuOpen = true;
+
+  document.getElementById('dm-model').addEventListener('click', (e) => {
+    e.stopPropagation();
+    showModelPicker(id, model);
+  });
+  document.getElementById('dm-usage').addEventListener('click', () => {
+    closeDotMenu();
+    showTokenUsage(id);
+  });
+  document.getElementById('dm-raw').addEventListener('click', () => {
+    closeDotMenu();
+    showRawOutput(id);
+  });
+
+  // Close on outside click
+  setTimeout(() => {
+    const closeHandler = (e) => {
+      if (!e.target.closest('#dot-menu') && !e.target.closest('#dot-menu-btn')) {
+        closeDotMenu();
+        document.removeEventListener('click', closeHandler);
+      }
+    };
+    document.addEventListener('click', closeHandler);
+  }, 0);
+}
+
+function closeDotMenu() {
+  const m = document.getElementById('dot-menu');
+  if (m) m.remove();
+  S.dotMenuOpen = false;
+}
+
+const MODEL_OPTIONS = [
+  {id: 'opus', label: 'Opus', desc: 'Most capable'},
+  {id: 'sonnet', label: 'Sonnet', desc: 'Balanced'},
+  {id: 'haiku', label: 'Haiku', desc: 'Fast'},
+];
+
+function showModelPicker(id, currentModel) {
+  const menu = document.getElementById('dot-menu');
+  if (!menu) return;
+  const cur = currentModel.toLowerCase();
+  menu.innerHTML = `<div style="padding:12px 16px;font-size:13px;color:var(--text2);border-bottom:1px solid var(--border)">Switch Model</div>
+    <div class="model-list">${MODEL_OPTIONS.map(m => {
+      const active = cur.includes(m.id);
+      return `<div class="model-opt ${active?'active':''}" data-model="${m.id}">
+        <div><div>${esc(m.label)}</div><div style="font-size:11px;color:var(--text2)">${esc(m.desc)}</div></div>
+      </div>`;
+    }).join('')}</div>`;
+  menu.querySelectorAll('.model-opt').forEach(el => {
+    el.addEventListener('click', async () => {
+      closeDotMenu();
+      await sendInput(id, '/model ' + el.dataset.model);
+    });
+  });
+}
+
+async function showRawOutput(id) {
+  const overlay = document.createElement('div');
+  overlay.className = 'raw-overlay';
+  overlay.id = 'raw-overlay';
+  overlay.innerHTML = `<div class="raw-header">
+    <button class="nav-back" id="raw-close">‹ Back</button>
+    <div class="raw-title">Raw Output</div>
+  </div>
+  <pre id="raw-pre" style="flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;
+    margin:0;padding:12px 14px;font-family:'SF Mono',Menlo,'Courier New',monospace;
+    font-size:12px;line-height:1.55;word-break:break-all;white-space:pre-wrap;
+    background:#000;color:#e5e5e5">Loading…</pre>`;
+  document.body.appendChild(overlay);
+
+  let timer = null;
+
+  function cleanup() {
+    clearInterval(timer);
+    overlay.remove();
+  }
+  document.getElementById('raw-close').addEventListener('click', cleanup);
+
+  async function refresh() {
+    const pre = document.getElementById('raw-pre');
+    if (!pre) { clearInterval(timer); return; }
+    const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 60;
+    try {
+      const resp = await api('GET', `/sessions/${encodeURIComponent(id)}/output`);
+      const text = typeof resp === 'string' ? resp : (resp.output || '');
+      pre.innerHTML = ansi(text);
+      if (atBottom) pre.scrollTop = pre.scrollHeight;
+    } catch(e) {
+      pre.textContent = 'Failed to load: ' + e.message;
+      clearInterval(timer);
+    }
+  }
+
+  await refresh();
+  timer = setInterval(refresh, 500);
+}
+
+// Pricing per million tokens (April 2026)
+const MODEL_PRICING = {
+  opus:   { input:  5.00, output: 25.00, cacheWrite:  6.25, cacheRead: 0.50 },
+  sonnet: { input:  3.00, output: 15.00, cacheWrite:  3.75, cacheRead: 0.30 },
+  haiku:  { input:  1.00, output:  5.00, cacheWrite:  1.25, cacheRead: 0.10 },
+};
+
+function detectPricingTier(model) {
+  const m = (model || '').toLowerCase();
+  if (m.includes('opus'))   return MODEL_PRICING.opus;
+  if (m.includes('haiku'))  return MODEL_PRICING.haiku;
+  return MODEL_PRICING.sonnet; // default / sonnet
+}
+
+function fmtTokens(n) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+  return String(n);
+}
+
+function fmtCost(usd) {
+  if (usd < 0.01) return '<$0.01';
+  if (usd < 1) return '$' + usd.toFixed(3);
+  return '$' + usd.toFixed(2);
+}
+
+async function showTokenUsage(id) {
+  const overlay = document.createElement('div');
+  overlay.className = 'raw-overlay';
+  overlay.id = 'usage-overlay';
+  overlay.innerHTML = `<div class="raw-header">
+    <button class="nav-back" id="usage-close">‹ Back</button>
+    <div class="raw-title">Token Usage</div>
+  </div>
+  <div id="usage-body" style="flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:20px 16px">
+    <div class="loading">Loading…</div>
+  </div>`;
+  document.body.appendChild(overlay);
+  document.getElementById('usage-close').addEventListener('click', () => overlay.remove());
+
+  try {
+    const u = await api('GET', `/sessions/${encodeURIComponent(id)}/usage`);
+    const pricing = detectPricingTier(u.model);
+    const totalInput = u.inputTokens + u.cacheCreationTokens + u.cacheReadTokens;
+    const cost =
+      (u.inputTokens           / 1e6) * pricing.input +
+      (u.outputTokens          / 1e6) * pricing.output +
+      (u.cacheCreationTokens   / 1e6) * pricing.cacheWrite +
+      (u.cacheReadTokens       / 1e6) * pricing.cacheRead;
+    const shortModel = u.model ? u.model.replace(/^claude-/, '').replace(/-\d{8}$/, '') : 'unknown';
+    const el = document.getElementById('usage-body');
+    if (!el) return;
+    el.innerHTML = `
+      <div style="font-size:12px;color:var(--text2);margin-bottom:16px">${esc(shortModel)} · ${u.turnCount} turn${u.turnCount === 1 ? '' : 's'}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:24px">
+        ${usageTile('Input', u.inputTokens, pricing.input, 'var(--blue)')}
+        ${usageTile('Output', u.outputTokens, pricing.output, 'var(--green)')}
+        ${usageTile('Cache Write', u.cacheCreationTokens, pricing.cacheWrite, 'var(--orange)')}
+        ${usageTile('Cache Read', u.cacheReadTokens, pricing.cacheRead, 'var(--purple)')}
+      </div>
+      <div style="background:var(--surf2);border-radius:12px;padding:16px;border:1px solid var(--border)">
+        <div style="font-size:12px;color:var(--text2);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Estimated Cost</div>
+        <div style="font-size:32px;font-weight:700;color:var(--text)">${fmtCost(cost)}</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:4px">${fmtTokens(u.inputTokens + u.outputTokens + u.cacheCreationTokens + u.cacheReadTokens)} total tokens</div>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:16px;line-height:1.5;text-align:center">
+        Prices: input $${pricing.input}/M · output $${pricing.output}/M<br>
+        cache write $${pricing.cacheWrite}/M · cache read $${pricing.cacheRead}/M
+      </div>`;
+  } catch(e) {
+    const el = document.getElementById('usage-body');
+    if (el) el.innerHTML = `<div style="color:var(--red);padding:20px">Failed to load: ${esc(e.message)}</div>`;
+  }
+}
+
+function usageTile(label, tokens, pricePerM, color) {
+  const cost = (tokens / 1e6) * pricePerM;
+  return `<div style="background:var(--surf2);border-radius:10px;padding:14px;border:1px solid var(--border)">
+    <div style="font-size:11px;color:var(--text2);margin-bottom:6px;font-weight:500">${esc(label)}</div>
+    <div style="font-size:20px;font-weight:700;color:${color}">${fmtTokens(tokens)}</div>
+    <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtCost(cost)}</div>
+  </div>`;
+}
+
 async function doCreate(cwd) {
   S.modal = null;
   try {
@@ -786,6 +1057,8 @@ function render() {
   if (!S.token) { renderAuth(); return; }
   const r = route();
   if (r.page === 'settings') renderSettings();
+  else if (r.page === 'users') renderUsers();
+  else if (r.page === 'usage') renderUsageDashboard();
   else if (r.page === 'session') renderDetail(r.id);
   else renderDashboard();
 }
@@ -796,7 +1069,7 @@ function renderAuth() {
 <div class="auth">
   <div class="auth-icon">⚡</div>
   <div class="auth-title">MClaude</div>
-  <div class="auth-sub">Enter your WEB_TOKEN to connect to the relay</div>
+  <div class="auth-sub">Enter your access token to connect</div>
   <div class="auth-form">
     <input type="password" id="tok" placeholder="Access token" autocomplete="off" />
     <button class="btn" id="go-btn">Connect</button>
@@ -809,11 +1082,12 @@ function renderAuth() {
   setTimeout(() => inp.focus(), 80);
 }
 
-function doLogin() {
+async function doLogin() {
   const v = document.getElementById('tok')?.value?.trim();
   if (!v) return;
   S.token = v;
   localStorage.setItem('mc_tok', v);
+  await fetchUserInfo();
   connectWS();
   render();
 }
@@ -824,9 +1098,11 @@ function renderDashboard() {
   const tmuxSessions = discoverTmuxSessions();
   const showFilter = tmuxSessions.length > 1;
 
+  const userName = S.user?.name ? ` <span style="font-size:12px;color:var(--text2);font-weight:400">${esc(S.user.name)}</span>` : '';
   $app.innerHTML = `
 <div class="nav">
-  <div class="nav-title">MClaude ${attn ? `<span class="badge">${attn}</span>` : ''}</div>
+  <div class="nav-title">MClaude ${attn ? `<span class="badge">${attn}</span>` : ''}${userName}</div>
+  <button class="nav-icon" id="usage-btn" title="Token Usage">📊</button>
   <button class="nav-icon" id="settings-btn">⚙</button>
   <div class="cdot ${cdotClass()}" id="cdot"></div>
 </div>
@@ -836,6 +1112,7 @@ ${showFilter ? tmuxFilterHTML(tmuxSessions) : ''}
 ${S.modal === 'newSession' ? newSessionHTML() : ''}`;
 
   document.getElementById('fab').addEventListener('click', openNewSession);
+  document.getElementById('usage-btn').addEventListener('click', () => navTo('usage'));
   document.getElementById('settings-btn').addEventListener('click', () => navTo('settings'));
   if (S.modal === 'newSession') bindSheetClose();
   bindSessionRows();
@@ -1092,6 +1369,30 @@ function renderSettings() {
       </div>
     </div>
 
+    ${S.user?.role === 'admin' ? `<div class="settings-section">
+      <div class="settings-label">Administration</div>
+      <div class="settings-card">
+        <div class="settings-row" id="users-row" style="cursor:pointer">
+          <div class="settings-row-label">User Management</div>
+          <div class="schev" style="color:var(--text3);font-size:18px">›</div>
+        </div>
+      </div>
+    </div>` : ''}
+
+    ${S.user ? `<div class="settings-section">
+      <div class="settings-label">Account</div>
+      <div class="settings-card">
+        <div class="settings-row">
+          <div class="settings-row-label">Name</div>
+          <div class="settings-row-value">${esc(S.user.name || '-')}</div>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-label">Role</div>
+          <div class="settings-row-value">${esc(S.user.role || '-')}</div>
+        </div>
+      </div>
+    </div>` : ''}
+
     <div class="settings-section">
       <div class="settings-card">
         <div class="settings-row" id="logout-row" style="justify-content:center;cursor:pointer">
@@ -1103,6 +1404,8 @@ function renderSettings() {
 </div>`;
 
   document.getElementById('settings-back').addEventListener('click', () => navTo(''));
+  const usersRow = document.getElementById('users-row');
+  if (usersRow) usersRow.addEventListener('click', () => navTo('users'));
   document.getElementById('laptop-select').addEventListener('change', e => {
     const val = e.target.value;
     S.laptop = val === 'all' ? null : val;
@@ -1114,6 +1417,7 @@ function renderSettings() {
   });
   document.getElementById('logout-row').addEventListener('click', () => {
     S.token = '';
+    S.user = null;
     localStorage.removeItem('mc_tok');
     localStorage.removeItem('mc_laptop');
     if (S.ws) S.ws.close();
@@ -1136,6 +1440,322 @@ function discoverLaptops() {
   return Object.entries(map).map(([id, sessions]) => ({id, sessions})).sort((a, b) => a.id.localeCompare(b.id));
 }
 
+// ── Usage Dashboard ────────────────────────────────────────────────────────
+const MONTHLY_BUDGET = 140; // USD
+
+function getCalibFactor() { return parseFloat(localStorage.getItem('usageCalibFactor') || '1'); }
+function setCalibFactor(f) { localStorage.setItem('usageCalibFactor', String(f)); }
+
+function calibrateUsage(rawMtdCost) {
+  const hint = `Raw estimate: ${fmtCost(rawMtdCost)}\nEnter your actual MTD spend from Anthropic Console:`;
+  const val = prompt(hint);
+  if (val === null) return;
+  const actual = parseFloat(val.replace(/[$,\s]/g, ''));
+  if (isNaN(actual) || actual <= 0) { alert('Invalid amount'); return; }
+  setCalibFactor(actual / rawMtdCost);
+  loadUsageData();
+}
+
+function resetCalib() { localStorage.removeItem('usageCalibFactor'); loadUsageData(); }
+
+S._usageHours = 24;
+
+function renderUsageDashboard() {
+  $app.innerHTML = `
+<div style="height:100%;display:flex;flex-direction:column">
+  <div class="nav">
+    <button class="nav-back" id="usage-back">‹ Back</button>
+    <div class="nav-title" style="justify-content:center">Token Usage</div>
+  </div>
+  <div class="tmux-filter" id="usage-range">
+    ${['1H','6H','24H','7D','30D'].map((l,i) => {
+      const h = [1,6,24,168,720][i];
+      return `<div class="tmux-chip ${S._usageHours===h?'on':''}" data-h="${h}">${l}</div>`;
+    }).join('')}
+  </div>
+  <div class="content" id="usage-content" style="padding:16px;display:flex;flex-direction:column;gap:16px">
+    <div class="loading">Loading…</div>
+  </div>
+</div>`;
+
+  document.getElementById('usage-back').addEventListener('click', () => navTo(''));
+  document.querySelectorAll('#usage-range .tmux-chip').forEach(el => {
+    el.addEventListener('click', () => {
+      S._usageHours = parseInt(el.dataset.h);
+      document.querySelectorAll('#usage-range .tmux-chip').forEach(c => c.classList.toggle('on', c === el));
+      loadUsageData();
+    });
+  });
+
+  loadUsageData();
+}
+
+async function loadUsageData() {
+  const content = document.getElementById('usage-content');
+  if (!content) return;
+
+  // Fetch both the selected window AND 30 days for monthly budget
+  let windowData, monthData;
+  try {
+    [windowData, monthData] = await Promise.all([
+      api('GET', `/usage/timeline?hours=${S._usageHours}`),
+      api('GET', `/usage/timeline?hours=720`),
+    ]);
+  } catch(e) {
+    content.innerHTML = `<div style="color:var(--red);padding:20px;font-size:14px">Failed to load usage data: ${esc(String(e))}</div>`;
+    return;
+  }
+  // Relay may return raw string if Content-Type wasn't forwarded as application/json
+  if (typeof windowData === 'string') try { windowData = JSON.parse(windowData); } catch(_) {}
+  if (typeof monthData === 'string') try { monthData = JSON.parse(monthData); } catch(_) {}
+  windowData = windowData || {points:[]};
+  monthData = monthData || {points:[]};
+
+  const pts = windowData.points || [];
+  const monthPts = monthData.points || [];
+
+  // Compute month-to-date: only points from start of current month
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const mtdPts = monthPts.filter(p => new Date(p.ts) >= monthStart);
+
+  // Stats for the selected window
+  const totalInput = pts.reduce((s,p) => s + p.input, 0);
+  const totalOutput = pts.reduce((s,p) => s + p.output, 0);
+  const totalCacheRead = pts.reduce((s,p) => s + p.cacheRead, 0);
+  const totalCacheCreate = pts.reduce((s,p) => s + p.cacheCreate, 0);
+  const totalTokens = totalInput + totalOutput + totalCacheRead + totalCacheCreate;
+
+  // Detect model for pricing
+  // Per-point pricing — each call billed at its own model's rate
+  function pointCost(p) {
+    const pr = detectPricingTier(p.model);
+    return (p.input/1e6)*pr.input + (p.output/1e6)*pr.output +
+           (p.cacheRead/1e6)*pr.cacheRead + (p.cacheCreate/1e6)*pr.cacheWrite;
+  }
+
+  const windowCost = pts.reduce((s,p) => s + pointCost(p), 0);
+  const mtdCost = mtdPts.reduce((s,p) => s + pointCost(p), 0);
+
+  // Tokens per minute avg
+  const windowMs = S._usageHours * 3600 * 1000;
+  const tokPerMin = windowMs > 0 ? (totalTokens / (windowMs / 60000)) : 0;
+
+  // Trend: daily rate based on last 7 days of data
+  const sevenDaysAgo = new Date(now - 7 * 86400000);
+  const recentPts = monthPts.filter(p => new Date(p.ts) >= sevenDaysAgo);
+  const recentCost = recentPts.reduce((s,p) => s + pointCost(p), 0);
+
+  // Per-type cost totals (each type summed with per-point model pricing)
+  const inputCost = pts.reduce((s,p) => s + (p.input/1e6)*detectPricingTier(p.model).input, 0);
+  const outputCost = pts.reduce((s,p) => s + (p.output/1e6)*detectPricingTier(p.model).output, 0);
+  const cacheReadCost = pts.reduce((s,p) => s + (p.cacheRead/1e6)*detectPricingTier(p.model).cacheRead, 0);
+  const cacheWriteCost = pts.reduce((s,p) => s + (p.cacheCreate/1e6)*detectPricingTier(p.model).cacheWrite, 0);
+  const recentDays = Math.min(7, (now - sevenDaysAgo) / 86400000);
+  const dailyRate = recentDays > 0 ? recentCost / recentDays : 0;
+
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate();
+  const dayOfMonth = now.getDate();
+  const daysLeft = daysInMonth - dayOfMonth;
+  const projectedTotalRaw = mtdCost + dailyRate * daysLeft;
+
+  // Apply calibration factor to all displayed costs
+  const calibFactor = getCalibFactor();
+  const mtdCostDisp = mtdCost * calibFactor;
+  const windowCostDisp = windowCost * calibFactor;
+  const dailyRateDisp = dailyRate * calibFactor;
+  const projectedTotal = projectedTotalRaw * calibFactor;
+  const inputCostDisp = inputCost * calibFactor;
+  const outputCostDisp = outputCost * calibFactor;
+  const cacheReadCostDisp = cacheReadCost * calibFactor;
+  const cacheWriteCostDisp = cacheWriteCost * calibFactor;
+  const daysUntilLimit = dailyRateDisp > 0 ? (MONTHLY_BUDGET - mtdCostDisp) / dailyRateDisp : Infinity;
+
+  const budgetPct = Math.min((mtdCostDisp / MONTHLY_BUDGET) * 100, 100);
+  const projPct = Math.min((projectedTotal / MONTHLY_BUDGET) * 100, 100);
+  const budgetColor = budgetPct > 85 ? 'var(--red)' : budgetPct > 60 ? 'var(--orange)' : 'var(--green)';
+
+  const calibLabel = calibFactor !== 1
+    ? `<span style="font-size:10px;background:var(--orange);color:#fff;border-radius:4px;padding:1px 5px;cursor:pointer" onclick="resetCalib()">calibrated ×${calibFactor.toFixed(3)} ✕</span>`
+    : `<span style="font-size:11px;color:var(--text3);cursor:pointer;text-decoration:underline" onclick="calibrateUsage(${mtdCost})">Calibrate</span>`;
+
+  // Budget trend text
+  let trendText;
+  if (dailyRateDisp <= 0) {
+    trendText = 'No recent activity';
+  } else if (projectedTotal > MONTHLY_BUDGET) {
+    const hitDate = new Date(now.getTime() + daysUntilLimit * 86400000);
+    const hitStr = hitDate.toLocaleDateString(undefined, {month:'short', day:'numeric'});
+    trendText = `At current rate, hits $${MONTHLY_BUDGET} around <strong>${hitStr}</strong>`;
+  } else {
+    trendText = `Projected month-end: ${fmtCost(projectedTotal)} of $${MONTHLY_BUDGET}`;
+  }
+
+  // Build chart
+  const chartSVG = buildUsageChart(pts, S._usageHours);
+
+  content.innerHTML = `
+    <!-- Monthly Budget -->
+    <div style="background:var(--surf);border-radius:12px;padding:14px 16px;border:1px solid var(--border)">
+      <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:10px">
+        <div style="font-size:22px;font-weight:700;color:${budgetColor}">${fmtCost(mtdCostDisp)}</div>
+        <div style="font-size:13px;color:var(--text2)">/ $${MONTHLY_BUDGET} this month</div>
+        <div style="margin-left:auto">${calibLabel}</div>
+      </div>
+      <!-- Budget bar: actual -->
+      <div style="height:10px;background:var(--surf3);border-radius:5px;overflow:hidden;position:relative;margin-bottom:6px">
+        <div style="height:100%;border-radius:5px;background:${budgetColor};width:${budgetPct.toFixed(1)}%;transition:width .4s"></div>
+        ${projectedTotal > mtdCostDisp ? `<div style="position:absolute;top:0;left:${budgetPct.toFixed(1)}%;height:100%;width:${Math.min(projPct-budgetPct,100-budgetPct).toFixed(1)}%;background:${budgetColor};opacity:.3"></div>` : ''}
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text3);margin-bottom:8px">
+        <span>${budgetPct.toFixed(0)}% used · ${dayOfMonth}/${daysInMonth} days</span>
+        <span>$${MONTHLY_BUDGET}</span>
+      </div>
+      <div style="font-size:12px;color:var(--text2)">${trendText}</div>
+    </div>
+
+    <!-- Stats row -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+      ${statTile('Tokens', fmtTokens(totalTokens), 'var(--text)')}
+      ${statTile('Cost', fmtCost(windowCostDisp), 'var(--blue)')}
+      ${statTile('Tok/min', fmtTokens(Math.round(tokPerMin)), 'var(--orange)')}
+    </div>
+
+    <!-- Chart -->
+    <div style="background:var(--surf);border-radius:12px;padding:12px 4px 8px;border:1px solid var(--border)">
+      <div style="font-size:11px;color:var(--text2);padding:0 12px;margin-bottom:8px">Tokens over time</div>
+      ${chartSVG}
+      <div style="display:flex;gap:12px;padding:6px 12px 0;flex-wrap:wrap">
+        ${legendDot('var(--blue)', 'Input')}
+        ${legendDot('var(--green)', 'Output')}
+        ${legendDot('var(--purple)', 'Cache Read')}
+        ${legendDot('var(--orange)', 'Cache Write')}
+      </div>
+    </div>
+
+    <!-- Token breakdown -->
+    <div style="background:var(--surf);border-radius:12px;border:1px solid var(--border);overflow:hidden">
+      ${tokenRowCost('Input', totalInput, inputCostDisp, 'var(--blue)')}
+      ${tokenRowCost('Output', totalOutput, outputCostDisp, 'var(--green)')}
+      ${tokenRowCost('Cache Read', totalCacheRead, cacheReadCostDisp, 'var(--purple)')}
+      ${tokenRowCost('Cache Write', totalCacheCreate, cacheWriteCostDisp, 'var(--orange)')}
+    </div>
+
+    <div style="font-size:11px;color:var(--text3);text-align:center;padding-bottom:8px">
+      ${modelSummary(pts)} · ${pts.length} API calls
+    </div>`;
+}
+
+function statTile(label, value, color) {
+  return `<div style="background:var(--surf);border-radius:10px;padding:12px 14px;border:1px solid var(--border);text-align:center">
+    <div style="font-size:18px;font-weight:700;color:${color}">${esc(value)}</div>
+    <div style="font-size:11px;color:var(--text2);margin-top:3px">${esc(label)}</div>
+  </div>`;
+}
+
+function tokenRow(label, tokens, pricePerM, color) {
+  return tokenRowCost(label, tokens, (tokens/1e6)*pricePerM, color);
+}
+
+function tokenRowCost(label, tokens, cost, color) {
+  return `<div style="display:flex;align-items:center;padding:11px 16px;border-bottom:1px solid var(--border)">
+    <div style="width:8px;height:8px;border-radius:50%;background:${color};flex-shrink:0;margin-right:10px"></div>
+    <div style="flex:1;font-size:14px">${esc(label)}</div>
+    <div style="font-size:14px;font-weight:500;margin-right:12px">${fmtTokens(tokens)}</div>
+    <div style="font-size:12px;color:var(--text2);min-width:48px;text-align:right">${fmtCost(cost)}</div>
+  </div>`;
+}
+
+function modelSummary(pts) {
+  const counts = {};
+  for (const p of pts) {
+    const m = (p.model || 'unknown').replace(/^claude-/, '').replace(/-\d{8}$/, '');
+    if (m && m !== '<synthetic>') counts[m] = (counts[m] || 0) + 1;
+  }
+  return Object.entries(counts)
+    .sort((a,b) => b[1]-a[1])
+    .map(([m,n]) => `${esc(m)} ×${n}`)
+    .join(' · ') || 'unknown';
+}
+
+function legendDot(color, label) {
+  return `<div style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text2)">
+    <div style="width:8px;height:8px;border-radius:2px;background:${color}"></div>${esc(label)}
+  </div>`;
+}
+
+function buildUsageChart(pts, hours) {
+  // Determine bucket size
+  const bucketConfigs = [
+    {maxH:1,  mins:5,  label:(d)=>d.getHours()+':'+(d.getMinutes()+'').padStart(2,'0')},
+    {maxH:6,  mins:30, label:(d)=>d.getHours()+':'+(''+d.getMinutes()).padStart(2,'0')},
+    {maxH:24, mins:120,label:(d)=>d.getHours()+'h'},
+    {maxH:168,mins:360,label:(d)=>`${d.getMonth()+1}/${d.getDate()} ${d.getHours()}h`},
+    {maxH:999,mins:1440,label:(d)=>`${d.getMonth()+1}/${d.getDate()}`},
+  ];
+  const cfg = bucketConfigs.find(c => hours <= c.maxH) || bucketConfigs[bucketConfigs.length-1];
+  const bucketMs = cfg.mins * 60000;
+  const now = Date.now();
+  const start = now - hours * 3600000;
+  const nBuckets = Math.ceil((now - start) / bucketMs);
+
+  // Fill buckets
+  const buckets = Array.from({length: nBuckets}, () => ({input:0,output:0,cacheRead:0,cacheCreate:0}));
+  for (const p of pts) {
+    const t = new Date(p.ts).getTime();
+    const i = Math.floor((t - start) / bucketMs);
+    if (i >= 0 && i < nBuckets) {
+      buckets[i].input += p.input;
+      buckets[i].output += p.output;
+      buckets[i].cacheRead += p.cacheRead;
+      buckets[i].cacheCreate += p.cacheCreate;
+    }
+  }
+
+  const maxVal = Math.max(1, ...buckets.map(b => b.input + b.output + b.cacheRead + b.cacheCreate));
+  const W = 320, H = 140, padL = 4, padR = 4, padT = 8, padB = 28;
+  const chartW = W - padL - padR;
+  const chartH = H - padT - padB;
+  const barW = Math.max(1, chartW / nBuckets - 1);
+  const gap = chartW / nBuckets;
+
+  let bars = '';
+  for (let i = 0; i < nBuckets; i++) {
+    const b = buckets[i];
+    const total = b.input + b.output + b.cacheRead + b.cacheCreate;
+    const x = padL + i * gap + (gap - barW) / 2;
+    const segments = [
+      {val: b.input,       color: '#0a84ff'},
+      {val: b.output,      color: '#30d158'},
+      {val: b.cacheRead,   color: '#bf5af2'},
+      {val: b.cacheCreate, color: '#ff9f0a'},
+    ];
+    let y = padT + chartH;
+    for (const seg of segments) {
+      if (!seg.val) continue;
+      const h = (seg.val / maxVal) * chartH;
+      y -= h;
+      bars += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" fill="${seg.color}" rx="1"/>`;
+    }
+  }
+
+  // X-axis labels: ~4 evenly spaced
+  let labels = '';
+  const labelIndices = [0, Math.floor(nBuckets/3), Math.floor(2*nBuckets/3), nBuckets-1].filter((v,i,a) => a.indexOf(v)===i);
+  for (const i of labelIndices) {
+    const t = new Date(start + i * bucketMs);
+    const x = padL + i * gap + gap/2;
+    labels += `<text x="${x.toFixed(1)}" y="${H-6}" text-anchor="middle" fill="#48484a" font-size="10">${cfg.label(t)}</text>`;
+  }
+
+  // Baseline
+  const baseY = padT + chartH;
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;overflow:visible">
+    <line x1="${padL}" y1="${baseY}" x2="${W-padR}" y2="${baseY}" stroke="#38383a" stroke-width="1"/>
+    ${bars}${labels}
+  </svg>`;
+}
+
 // ── Session detail ─────────────────────────────────────────────────────────
 function renderDetail(id) {
   const sess = S.sessions.find(s => s.id === id) || {id, projectName: id, status: 'unknown', cwd: ''};
@@ -1148,7 +1768,9 @@ function renderDetail(id) {
     <div class="nav-title" style="justify-content:center">${esc(sess.projectName || id)}</div>
     <button class="nav-icon" id="refresh-btn" title="Refresh events">↻</button>
     <div class="cdot ${cdotClass()}" id="cdot"></div>
+    <button class="dot-menu-btn" id="dot-menu-btn">⋯</button>
   </div>
+  <div id="dot-menu-anchor" style="position:relative"></div>
   <div class="det-meta" id="det-meta">
     <div class="sdot ${sess.status || 'unknown'}" id="sstat-dot"></div>
     <span id="sstat-lbl">${statusLabel(sess)}</span>
@@ -1165,6 +1787,7 @@ function renderDetail(id) {
   </div>
   <div class="skill-picker" id="skill-picker" style="display:none"></div>
   <div class="ibar" ${S.activeTab==='terminal'?'style="display:none"':''}>
+    ${sess.status === 'working' ? `<button class="istop" id="stop-btn" title="Stop Claude">✕</button>` : ''}
     <label class="iattach" id="attach-btn" title="Attach screenshot">
       📷<input type="file" id="file-input" accept="image/*,image/png,image/jpeg,image/gif,image/webp" style="display:none;position:absolute;width:0;height:0;opacity:0">
     </label>
@@ -1179,10 +1802,39 @@ function renderDetail(id) {
 }
 
 function actionBarHTML(id) {
-  return `<div class="act-bar" id="act-bar">
+  const sess = S.sessions.find(s => String(s.id) === String(id));
+  const isPlan = sess && sess.status === 'plan_mode';
+  const planCard = isPlan ? `<div class="plan-card" id="plan-card">
+    <div class="plan-hdr" id="plan-toggle">
+      <span style="color:var(--purple)">📋</span>
+      <span style="font-weight:600;font-size:13px">View Plan</span>
+      <span style="font-size:11px;color:var(--text2);margin-left:4px" id="plan-file-name"></span>
+      <span style="margin-left:auto;font-size:11px;color:var(--text3)" id="plan-chev">▶</span>
+    </div>
+    <div class="plan-body" id="plan-body" style="display:none">
+      <span style="color:var(--text3);font-size:12px">Loading plan…</span>
+    </div>
+  </div>` : '';
+  return `${planCard}<div class="act-bar" id="act-bar">
     <button class="btn btn-green btn-sm" id="approve-btn">✓ Approve</button>
     <button class="btn btn-red btn-sm" id="cancel-btn">✕ Cancel</button>
   </div>`;
+}
+
+async function loadPlanContent(id) {
+  const body = document.getElementById('plan-body');
+  const nameEl = document.getElementById('plan-file-name');
+  try {
+    const resp = await api('GET', `/sessions/${encodeURIComponent(id)}/plan`);
+    if (resp && resp.plan) {
+      if (body) body.innerHTML = md(resp.plan);
+      if (nameEl && resp.fileName) nameEl.textContent = resp.fileName;
+    } else {
+      if (body) body.innerHTML = `<span style="color:var(--text3);font-size:12px">No plan file found in .claude/plans/</span>`;
+    }
+  } catch(e) {
+    if (body) body.innerHTML = `<span style="color:var(--red);font-size:12px">Failed to load plan: ${esc(e.message)}</span>`;
+  }
 }
 
 function promptBarHTML(prompt, id) {
@@ -1223,6 +1875,34 @@ function bindDetail(id, sess) {
   const cancel  = document.getElementById('cancel-btn');
   if (approve) approve.addEventListener('click', () => doApprove(id));
   if (cancel)  cancel.addEventListener('click', () => doCancel(id));
+
+  const stopBtn = document.getElementById('stop-btn');
+  if (stopBtn) stopBtn.addEventListener('click', async () => {
+    stopBtn.disabled = true;
+    try { await api('POST', `/sessions/${encodeURIComponent(id)}/input`, {text: 'Escape', sendEnter: false}); }
+    catch(e) { stopBtn.disabled = false; }
+  });
+
+  // Three-dot menu
+  const dotBtn = document.getElementById('dot-menu-btn');
+  if (dotBtn) dotBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleDotMenu(id);
+  });
+
+  const planToggle = document.getElementById('plan-toggle');
+  if (planToggle) {
+    loadPlanContent(id);
+    planToggle.addEventListener('click', () => {
+      const body = document.getElementById('plan-body');
+      const chev = document.getElementById('plan-chev');
+      if (body) {
+        const show = body.style.display === 'none';
+        body.style.display = show ? 'block' : 'none';
+        if (chev) chev.textContent = show ? '▼' : '▶';
+      }
+    });
+  }
 
   document.querySelectorAll('.popt').forEach(b => {
     b.addEventListener('click', () => sendInput(id, b.dataset.n));
@@ -1279,6 +1959,8 @@ function bindDetail(id, sess) {
 
   // Connect PTY if terminal tab is active on initial render
   if (S.activeTab === 'terminal') {
+    const tc = document.getElementById('tab-content');
+    if (tc) { tc.style.overflow = 'hidden'; }
     const hostname = sess?.laptop || S.laptop || (S.laptops[0]?.id || S.laptops[0]) || '';
     setTimeout(() => connectPty(hostname), 50);
   }
@@ -1417,6 +2099,7 @@ function switchTab(tab, id) {
     const dark = tab === 'terminal';
     tc.style.background = dark ? '#000' : '';
     tc.style.padding = dark ? '0' : '';
+    tc.style.overflow = dark ? 'hidden' : '';
     tc.innerHTML = tabContentHTML(id);
     if (tab === 'events') {
       setTimeout(scrollEventsToBottom, 30);
@@ -1449,9 +2132,13 @@ function patchSessionHeader() {
   const needsAct = sess.status === 'needs_permission' || sess.status === 'plan_mode';
   const bar = document.getElementById('act-bar');
   const ph  = document.getElementById('act-bar-ph');
+  const planCard = document.getElementById('plan-card');
+
+  // Remove stale plan card on status change
+  if (planCard && sess.status !== 'plan_mode') planCard.remove();
 
   if (needsAct && !bar) {
-    // Insert action bar
+    // Insert action bar (+ plan card for plan_mode)
     const det = document.querySelector('.det-meta');
     if (det) det.insertAdjacentHTML('afterend', actionBarHTML(S.activeId));
     if (ph) ph.remove();
@@ -1459,8 +2146,38 @@ function patchSessionHeader() {
     const cancel  = document.getElementById('cancel-btn');
     if (approve) approve.addEventListener('click', () => doApprove(S.activeId));
     if (cancel)  cancel.addEventListener('click', () => doCancel(S.activeId));
+    const planToggle = document.getElementById('plan-toggle');
+    if (planToggle) {
+      loadPlanContent(S.activeId);
+      planToggle.addEventListener('click', () => {
+        const body = document.getElementById('plan-body');
+        const chev = document.getElementById('plan-chev');
+        if (body) {
+          const show = body.style.display === 'none';
+          body.style.display = show ? 'block' : 'none';
+          if (chev) chev.textContent = show ? '▼' : '▶';
+        }
+      });
+    }
   } else if (!needsAct && bar) {
     bar.remove();
+    if (planCard) planCard.remove();
+  }
+
+  // Toggle stop button in input bar based on working status
+  const existingStop = document.getElementById('stop-btn');
+  const ibar = document.querySelector('.ibar');
+  if (sess.status === 'working' && !existingStop && ibar) {
+    const btn = document.createElement('button');
+    btn.className = 'istop'; btn.id = 'stop-btn'; btn.title = 'Stop Claude'; btn.textContent = '✕';
+    ibar.insertBefore(btn, ibar.firstChild);
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try { await api('POST', `/sessions/${encodeURIComponent(S.activeId)}/input`, {text: 'Escape', sendEnter: false}); }
+      catch(e) { btn.disabled = false; }
+    });
+  } else if (sess.status !== 'working' && existingStop) {
+    existingStop.remove();
   }
 }
 
@@ -2274,7 +2991,10 @@ function renderAskUserQuestion(ev) {
     html += `</div>`;
   });
 
-  html += `<button class="ask-submit ${submitted?'done':''}" data-ask-submit="${esc(uuid)}" ${submitted?'disabled':''}>${submitted?'✓ Submitted':'Submit'}</button>`;
+  html += `<div style="display:flex;gap:8px;margin:8px 12px 12px">`;
+  html += `<button class="ask-submit ${submitted?'done':''}" data-ask-submit="${esc(uuid)}" ${submitted?'disabled':''} style="flex:1;margin:0;width:auto">${submitted ? '✓ Submitted' : 'Submit'}</button>`;
+  if (!submitted) html += `<button class="ask-cancel" data-ask-cancel="${esc(uuid)}" style="flex:0 0 auto;padding:10px 16px;border-radius:8px;background:rgba(255,69,58,.15);color:var(--red);border:none;font-size:14px;font-weight:600;cursor:pointer">Cancel</button>`;
+  html += `</div>`;
   html += `</div>`;
   return html;
 }
@@ -2390,6 +3110,24 @@ function bindEventInteractions(root) {
       patchEventsList();
     });
   });
+
+  // AskUserQuestion cancel (send Escape)
+  root.querySelectorAll('[data-ask-cancel]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const uuid = btn.dataset.askCancel;
+      if (S.askSubmitted.has(uuid)) return;
+      btn.disabled = true;
+      btn.textContent = 'Cancelling…';
+      try {
+        await api('POST', `/sessions/${encodeURIComponent(id)}/input`, {text: 'Escape', sendEnter: false});
+        S.askSubmitted.add(uuid);
+      } catch(e) {
+        btn.disabled = false;
+        btn.textContent = 'Cancel';
+      }
+      patchEventsList();
+    });
+  });
 }
 
 function patchTerminal() {
@@ -2501,6 +3239,151 @@ function safeParse(s, def) {
   try { return JSON.parse(s); } catch(_) { return def; }
 }
 
+// ── User Management (admin) ─────────────────────────────────────────────
+
+async function loadAdminUsers() {
+  try {
+    const data = await api('GET', '/admin/users');
+    S.adminUsers = Array.isArray(data) ? data : [];
+  } catch(e) {
+    S.adminUsers = [];
+    console.warn('loadAdminUsers:', e);
+  }
+}
+
+function renderUsers() {
+  if (!S.user || S.user.role !== 'admin') { navTo('settings'); return; }
+
+  $app.innerHTML = `
+<div class="nav">
+  <button class="nav-back" id="users-back">‹ Settings</button>
+  <div class="nav-title" style="justify-content:center">Users</div>
+  <button class="btn btn-sm" id="add-user-btn" style="width:auto;padding:6px 14px;font-size:13px">+ Add</button>
+</div>
+<div class="content" id="users-content">
+  <div class="loading">Loading users...</div>
+</div>
+${S.modal === 'addUser' ? addUserModalHTML() : ''}
+${S.modal === 'editUser' ? editUserModalHTML() : ''}`;
+
+  document.getElementById('users-back').addEventListener('click', () => navTo('settings'));
+  document.getElementById('add-user-btn').addEventListener('click', () => { S.modal = 'addUser'; render(); });
+  if (S.modal === 'addUser') bindAddUserModal();
+  if (S.modal === 'editUser') bindEditUserModal();
+  loadAdminUsers().then(() => {
+    const el = document.getElementById('users-content');
+    if (el) { el.innerHTML = usersListHTML(); bindUserRows(); }
+  });
+}
+
+function usersListHTML() {
+  if (!S.adminUsers.length) return '<div class="empty"><h3>No Users</h3><p>Add a user to get started</p></div>';
+  return '<div class="settings" style="padding:12px">' + S.adminUsers.map(u =>
+    '<div class="settings-card" style="margin-bottom:8px"><div class="settings-row" data-uid="' + esc(u.id) + '" style="cursor:pointer"><div>' +
+    '<div style="font-size:15px;font-weight:500">' + esc(u.name) + (u.disabled ? ' <span style="color:var(--red);font-size:11px">(disabled)</span>' : '') + '</div>' +
+    '<div style="font-size:12px;color:var(--text2);margin-top:2px">' + esc(u.role) + ' · ' + esc(u.email || 'no email') + ' · token: ' + esc(u.token) + '</div>' +
+    '<div style="font-size:11px;color:var(--text3);margin-top:2px">Laptops: ' + (u.laptops && u.laptops.length ? esc(u.laptops.join(', ')) : '<span style="color:var(--red)">none</span>') + '</div>' +
+    '</div><div class="schev" style="color:var(--text3);font-size:18px;margin-left:auto;flex-shrink:0">›</div></div></div>'
+  ).join('') + '</div>';
+}
+
+function bindUserRows() {
+  document.querySelectorAll('[data-uid]').forEach(el => {
+    el.addEventListener('click', () => { S._editUserId = el.dataset.uid; S.modal = 'editUser'; render(); });
+  });
+}
+
+function addUserModalHTML() {
+  return '<div class="overlay" id="overlay"><div class="sheet">' +
+    '<div class="sheet-hdr"><div class="sheet-title">Add User</div><button class="sheet-close" id="modal-close">✕</button></div>' +
+    '<div style="padding:16px;display:flex;flex-direction:column;gap:10px">' +
+    '<input id="au-name" placeholder="Name" />' +
+    '<input id="au-email" placeholder="Email (optional)" />' +
+    '<select id="au-role" class="settings-select" style="width:100%"><option value="user">User</option><option value="admin">Admin</option></select>' +
+    '<input id="au-laptops" placeholder="Laptops (comma-separated, or * for all)" value="*" />' +
+    '<button class="btn" id="au-submit">Create User</button>' +
+    '<div id="au-result" style="font-size:12px;color:var(--green);display:none;word-break:break-all"></div>' +
+    '</div></div></div>';
+}
+
+function bindAddUserModal() {
+  document.getElementById('modal-close').addEventListener('click', () => { S.modal = null; render(); });
+  document.getElementById('overlay').addEventListener('click', e => { if (e.target.id === 'overlay') { S.modal = null; render(); }});
+  document.getElementById('au-submit').addEventListener('click', async () => {
+    const name = document.getElementById('au-name').value.trim();
+    const email = document.getElementById('au-email').value.trim();
+    const role = document.getElementById('au-role').value;
+    const laptopsStr = document.getElementById('au-laptops').value.trim();
+    const laptops = laptopsStr ? laptopsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
+    if (!name) { alert('Name is required'); return; }
+    try {
+      const user = await api('POST', '/admin/users', { name, email, role, laptops });
+      const resEl = document.getElementById('au-result');
+      if (resEl) {
+        resEl.style.display = 'block';
+        resEl.innerHTML = 'Created! Token: <strong style="user-select:all">' + esc(user.token) + '</strong><br><span style="color:var(--orange)">Copy this token now -- it will not be shown again.</span>';
+      }
+      document.getElementById('au-submit').disabled = true;
+      document.getElementById('au-submit').textContent = 'Created';
+    } catch(e) { alert('Create failed: ' + e.message); }
+  });
+}
+
+function editUserModalHTML() {
+  const u = S.adminUsers.find(u => u.id === S._editUserId);
+  if (!u) return '';
+  return '<div class="overlay" id="overlay"><div class="sheet">' +
+    '<div class="sheet-hdr"><div class="sheet-title">Edit User</div><button class="sheet-close" id="modal-close">✕</button></div>' +
+    '<div style="padding:16px;display:flex;flex-direction:column;gap:10px">' +
+    '<div style="font-size:11px;color:var(--text2);text-transform:uppercase">Name</div>' +
+    '<input id="eu-name" value="' + esc(u.name) + '" />' +
+    '<div style="font-size:11px;color:var(--text2);text-transform:uppercase">Email</div>' +
+    '<input id="eu-email" value="' + esc(u.email || '') + '" />' +
+    '<div style="font-size:11px;color:var(--text2);text-transform:uppercase">Role</div>' +
+    '<select id="eu-role" class="settings-select" style="width:100%"><option value="user"' + (u.role==='user'?' selected':'') + '>User</option><option value="admin"' + (u.role==='admin'?' selected':'') + '>Admin</option></select>' +
+    '<div style="font-size:11px;color:var(--text2);text-transform:uppercase">Laptops (comma-separated, * for all)</div>' +
+    '<input id="eu-laptops" value="' + esc((u.laptops||[]).join(', ')) + '" />' +
+    '<button class="btn" id="eu-save">Save Changes</button>' +
+    '<div style="display:flex;gap:8px"><button class="btn btn-surf btn-sm" id="eu-rotate" style="flex:1">Rotate Token</button><button class="btn btn-red btn-sm" id="eu-delete" style="flex:1">Delete User</button></div>' +
+    '<div id="eu-result" style="font-size:12px;color:var(--green);display:none;word-break:break-all"></div>' +
+    '</div></div></div>';
+}
+
+function bindEditUserModal() {
+  const uid = S._editUserId;
+  document.getElementById('modal-close').addEventListener('click', () => { S.modal = null; render(); });
+  document.getElementById('overlay').addEventListener('click', e => { if (e.target.id === 'overlay') { S.modal = null; render(); }});
+  document.getElementById('eu-save').addEventListener('click', async () => {
+    const name = document.getElementById('eu-name').value.trim();
+    const email = document.getElementById('eu-email').value.trim();
+    const role = document.getElementById('eu-role').value;
+    const laptopsStr = document.getElementById('eu-laptops').value.trim();
+    const laptops = laptopsStr ? laptopsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
+    try {
+      await api('PUT', '/admin/users/' + uid, { name, email, role, laptops });
+      S.modal = null; render();
+    } catch(e) { alert('Update failed: ' + e.message); }
+  });
+  document.getElementById('eu-rotate').addEventListener('click', async () => {
+    if (!confirm('Generate a new token? The old token will stop working.')) return;
+    try {
+      const data = await api('POST', '/admin/users/' + uid + '/rotate-token');
+      const resEl = document.getElementById('eu-result');
+      if (resEl) {
+        resEl.style.display = 'block';
+        resEl.innerHTML = 'New token: <strong style="user-select:all">' + esc(data.token) + '</strong><br><span style="color:var(--orange)">Copy this token now.</span>';
+      }
+    } catch(e) { alert('Rotate failed: ' + e.message); }
+  });
+  document.getElementById('eu-delete').addEventListener('click', async () => {
+    if (!confirm('Delete this user? This cannot be undone.')) return;
+    try {
+      await api('DELETE', '/admin/users/' + uid);
+      S.modal = null; render();
+    } catch(e) { alert('Delete failed: ' + e.message); }
+  });
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 const r = route();
 if (r.page === 'session') {
@@ -2509,7 +3392,10 @@ if (r.page === 'session') {
   if (S.token) ensureSessionData(r.id);
 }
 
-if (S.token) connectWS();
+if (S.token) {
+  fetchUserInfo().then(() => { render(); });
+  connectWS();
+}
 render();
 
 // Tick status labels every 20s while on dashboard

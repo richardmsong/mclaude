@@ -40,8 +40,9 @@ type TunnelMsg struct {
 	Reason string `json:"reason,omitempty"`
 
 	// pty fields
-	Rows int `json:"rows,omitempty"`
-	Cols int `json:"cols,omitempty"`
+	Rows    int    `json:"rows,omitempty"`
+	Cols    int    `json:"cols,omitempty"`
+	Command string `json:"command,omitempty"` // optional command to run instead of default shell
 }
 
 type pendingHTTP struct {
@@ -74,8 +75,9 @@ type wsClient struct {
 
 // Relay manages connector tunnels and bridges phone HTTP/WS to laptops.
 type Relay struct {
-	tunnelToken string
-	webToken    string
+	tunnelToken    string
+	legacyWebToken string // backward-compat: single WEB_TOKEN for all clients
+	users          *UserStore
 
 	// Multi-tunnel: one entry per connected laptop
 	tunnelsMu sync.RWMutex
@@ -102,19 +104,66 @@ type ptySession struct {
 	hostname   string
 }
 
-func NewRelay(tunnelToken, webToken string) *Relay {
+func NewRelay(tunnelToken, webToken string, users *UserStore) *Relay {
 	return &Relay{
-		tunnelToken: tunnelToken,
-		webToken:    webToken,
-		tunnels:     make(map[string]*tunnelEntry),
-		wsClients:   make(map[string]*wsClient),
-		ptySessions: make(map[string]*ptySession),
+		tunnelToken:    tunnelToken,
+		legacyWebToken: webToken,
+		users:          users,
+		tunnels:        make(map[string]*tunnelEntry),
+		wsClients:      make(map[string]*wsClient),
+		ptySessions:    make(map[string]*ptySession),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  32 * 1024,
 			WriteBufferSize: 32 * 1024,
 			CheckOrigin:     func(*http.Request) bool { return true },
 		},
 	}
+}
+
+// authenticateRequest extracts the bearer token and returns the authenticated user.
+// It checks the user store first, then falls back to legacyWebToken for backward compat.
+func (r *Relay) authenticateRequest(req *http.Request) *User {
+	token := extractToken(req)
+	if token == "" {
+		return nil
+	}
+
+	// Try user store first
+	if u := r.users.Authenticate(token); u != nil {
+		return u
+	}
+
+	// Legacy fallback: if WEB_TOKEN is set and matches, return a synthetic admin user
+	if r.legacyWebToken != "" && token == r.legacyWebToken {
+		return &User{
+			ID:      "legacy",
+			Name:    "Admin (legacy token)",
+			Role:    "admin",
+			Laptops: []string{"*"},
+			Source:  "byoc",
+		}
+	}
+
+	return nil
+}
+
+// filterTunnelsByUser returns only the tunnels the user is allowed to access.
+func (r *Relay) filterTunnelsByUser(tunnels map[string]*tunnelEntry, user *User) map[string]*tunnelEntry {
+	if user == nil {
+		return nil
+	}
+	filtered := make(map[string]*tunnelEntry)
+	for hostname, entry := range tunnels {
+		if r.users.CanAccessLaptop(user, hostname) {
+			filtered[hostname] = entry
+		}
+	}
+	return filtered
+}
+
+// userCanAccessLaptop checks if a user can access the given laptop hostname.
+func (r *Relay) userCanAccessLaptop(user *User, hostname string) bool {
+	return r.users.CanAccessLaptop(user, hostname)
 }
 
 // ── Tunnel (connector side) ────────────────────────────────────────────────
@@ -484,7 +533,8 @@ func (r *Relay) HandleTunnelStatic(w http.ResponseWriter, req *http.Request, sta
 
 func (r *Relay) HandleAPI(w http.ResponseWriter, req *http.Request) {
 	// Auth
-	if extractToken(req) != r.webToken {
+	user := r.authenticateRequest(req)
+	if user == nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -498,15 +548,15 @@ func (r *Relay) HandleAPI(w http.ResponseWriter, req *http.Request) {
 	laptopFilter := req.Header.Get("X-Laptop-ID")
 
 	if path == "/sessions" && req.Method == "GET" {
-		r.fanOutSessions(w, req, laptopFilter)
+		r.fanOutSessions(w, req, laptopFilter, user)
 		return
 	}
 	if path == "/projects" && req.Method == "GET" {
-		r.fanOutJSON(w, req, "/projects", laptopFilter)
+		r.fanOutJSON(w, req, "/projects", laptopFilter, user)
 		return
 	}
 	if path == "/skills" && req.Method == "GET" {
-		r.fanOutJSON(w, req, "/skills", laptopFilter)
+		r.fanOutJSON(w, req, "/skills", laptopFilter, user)
 		return
 	}
 
@@ -515,6 +565,10 @@ func (r *Relay) HandleAPI(w http.ResponseWriter, req *http.Request) {
 		parts := strings.SplitN(strings.TrimPrefix(path, "/sessions/"), "/", 2)
 		if len(parts) >= 1 {
 			hostname, realID := parsePrefixedID(parts[0])
+			if !r.userCanAccessLaptop(user, hostname) {
+				http.Error(w, "access denied to laptop: "+hostname, http.StatusForbidden)
+				return
+			}
 			tunnel := r.getTunnel(hostname)
 			if tunnel == nil {
 				http.Error(w, "laptop not connected: "+hostname, http.StatusServiceUnavailable)
@@ -539,12 +593,16 @@ func (r *Relay) HandleAPI(w http.ResponseWriter, req *http.Request) {
 			hostname = r.peekLaptopFromBody(req)
 		}
 		if hostname == "" {
-			// Default to first available tunnel
-			tunnels := r.getAllTunnels()
+			// Default to first available tunnel that user can access
+			tunnels := r.filterTunnelsByUser(r.getAllTunnels(), user)
 			for h := range tunnels {
 				hostname = h
 				break
 			}
+		}
+		if !r.userCanAccessLaptop(user, hostname) {
+			http.Error(w, "access denied to laptop: "+hostname, http.StatusForbidden)
+			return
 		}
 		tunnel := r.getTunnel(hostname)
 		if tunnel == nil {
@@ -559,11 +617,15 @@ func (r *Relay) HandleAPI(w http.ResponseWriter, req *http.Request) {
 	if strings.HasPrefix(path, "/screenshots") || strings.HasPrefix(path, "/files") {
 		hostname := req.Header.Get("X-Laptop-ID")
 		if hostname == "" {
-			tunnels := r.getAllTunnels()
+			tunnels := r.filterTunnelsByUser(r.getAllTunnels(), user)
 			for h := range tunnels {
 				hostname = h
 				break
 			}
+		}
+		if !r.userCanAccessLaptop(user, hostname) {
+			http.Error(w, "access denied to laptop: "+hostname, http.StatusForbidden)
+			return
 		}
 		tunnel := r.getTunnel(hostname)
 		if tunnel == nil {
@@ -574,8 +636,8 @@ func (r *Relay) HandleAPI(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Default: proxy to first available tunnel
-	tunnels := r.getAllTunnels()
+	// Default: proxy to first available tunnel the user can access
+	tunnels := r.filterTunnelsByUser(r.getAllTunnels(), user)
 	for _, tunnel := range tunnels {
 		r.proxyToTunnel(tunnel, w, req)
 		return
@@ -595,8 +657,8 @@ func (r *Relay) peekLaptopFromBody(req *http.Request) string {
 
 // fanOutSessions sends GET /sessions to tunnels, merges, prefixes IDs.
 // If laptopFilter is non-empty, only queries that single tunnel.
-func (r *Relay) fanOutSessions(w http.ResponseWriter, req *http.Request, laptopFilter string) {
-	tunnels := r.getTunnelsForFilter(laptopFilter)
+func (r *Relay) fanOutSessions(w http.ResponseWriter, req *http.Request, laptopFilter string, user *User) {
+	tunnels := r.filterTunnelsByUser(r.getTunnelsForFilter(laptopFilter), user)
 	if len(tunnels) == 0 {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte("[]")) //nolint:errcheck
@@ -654,8 +716,8 @@ func (r *Relay) fanOutSessions(w http.ResponseWriter, req *http.Request, laptopF
 
 // fanOutJSON fans out a GET request to tunnels and merges JSON array responses.
 // If laptopFilter is non-empty, only queries that single tunnel.
-func (r *Relay) fanOutJSON(w http.ResponseWriter, req *http.Request, path string, laptopFilter string) {
-	tunnels := r.getTunnelsForFilter(laptopFilter)
+func (r *Relay) fanOutJSON(w http.ResponseWriter, req *http.Request, path string, laptopFilter string, user *User) {
+	tunnels := r.filterTunnelsByUser(r.getTunnelsForFilter(laptopFilter), user)
 	if len(tunnels) == 0 {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte("[]")) //nolint:errcheck
@@ -790,7 +852,8 @@ func (r *Relay) proxyToTunnel(t *tunnelEntry, w http.ResponseWriter, req *http.R
 // HandleClientWS handles a browser's /ws connection and bridges it through
 // all connected tunnels to mclaude-servers on each laptop.
 func (r *Relay) HandleClientWS(w http.ResponseWriter, req *http.Request) {
-	if extractToken(req) != r.webToken {
+	user := r.authenticateRequest(req)
+	if user == nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -834,9 +897,9 @@ func (r *Relay) HandleClientWS(w http.ResponseWriter, req *http.Request) {
 		client.tunnelIDsMu.Unlock()
 	}()
 
-	// Connect to selected laptop's tunnel, or all if none specified
+	// Connect to selected laptop's tunnel, or all if none specified — filtered by user ACL
 	laptopParam := req.URL.Query().Get("laptop")
-	tunnels := r.getTunnelsForFilter(laptopParam)
+	tunnels := r.filterTunnelsByUser(r.getTunnelsForFilter(laptopParam), user)
 	for hostname, tunnel := range tunnels {
 		tunnelWsID := fmt.Sprintf("%s-%s", clientID, hostname)
 
@@ -952,19 +1015,25 @@ func (r *Relay) HandleClientWS(w http.ResponseWriter, req *http.Request) {
 // HandlePtyWS handles a browser's /ws/pty connection and bridges it to a
 // PTY session on the target laptop's connector via the tunnel.
 func (r *Relay) HandlePtyWS(w http.ResponseWriter, req *http.Request) {
-	if extractToken(req) != r.webToken {
+	user := r.authenticateRequest(req)
+	if user == nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	hostname := req.URL.Query().Get("laptop")
 	if hostname == "" {
-		// Default to first available tunnel
-		tunnels := r.getAllTunnels()
+		// Default to first available tunnel the user can access
+		tunnels := r.filterTunnelsByUser(r.getAllTunnels(), user)
 		for h := range tunnels {
 			hostname = h
 			break
 		}
+	}
+
+	if !r.userCanAccessLaptop(user, hostname) {
+		http.Error(w, "access denied to laptop: "+hostname, http.StatusForbidden)
+		return
 	}
 
 	tunnel := r.getTunnel(hostname)
@@ -1011,11 +1080,13 @@ func (r *Relay) HandlePtyWS(w http.ResponseWriter, req *http.Request) {
 	}()
 
 	// Ask connector to spawn PTY
+	ptyCmd := req.URL.Query().Get("command")
 	if err := tunnel.send(&TunnelMsg{
-		Type: "pty_connect",
-		ID:   ptyID,
-		Rows: rows,
-		Cols: cols,
+		Type:    "pty_connect",
+		ID:      ptyID,
+		Rows:    rows,
+		Cols:    cols,
+		Command: ptyCmd,
 	}); err != nil {
 		log.Printf("pty_connect send failed: %v", err)
 		return

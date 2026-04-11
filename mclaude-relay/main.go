@@ -16,7 +16,6 @@ var staticFiles embed.FS
 var apiPrefixes = []string{
 	"/sessions", "/projects", "/skills",
 	"/screenshots", "/files", "/telemetry",
-	"/auth/",
 }
 
 func isAPIPath(path string) bool {
@@ -36,14 +35,27 @@ func main() {
 		port = "8080"
 	}
 
-	if tunnelToken == "" || webToken == "" {
-		log.Fatal("TUNNEL_TOKEN and WEB_TOKEN env vars are required")
+	if tunnelToken == "" {
+		log.Fatal("TUNNEL_TOKEN env var is required")
+	}
+
+	// User store: load from file or create empty
+	usersFile := os.Getenv("USERS_FILE")
+	if usersFile == "" {
+		usersFile = "/tmp/mclaude-users.json"
+	}
+	users := NewUserStore(usersFile)
+
+	// Bootstrap: if user store is empty AND WEB_TOKEN is set, seed an admin user
+	if users.IsEmpty() && webToken != "" {
+		admin := users.CreateUserWithToken("Admin", "", "admin", webToken, []string{"*"})
+		log.Printf("Bootstrap: created admin user '%s' (id=%s) with WEB_TOKEN", admin.Name, admin.ID)
 	}
 
 	tunnelStatic := os.Getenv("TUNNEL_STATIC") == "1" || os.Getenv("TUNNEL_STATIC") == "true"
 	tunnelStaticHost := os.Getenv("TUNNEL_STATIC_HOST") // which laptop serves static files
 
-	relay := NewRelay(tunnelToken, webToken)
+	relay := NewRelay(tunnelToken, webToken, users)
 
 	// Static file serving strategy:
 	// 1. TUNNEL_STATIC=true → relay proxies static requests through tunnel to connector
@@ -82,7 +94,7 @@ func main() {
 		// CORS preflight
 		if r.Method == http.MethodOptions {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Filename, X-Laptop-ID")
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -91,6 +103,18 @@ func main() {
 		// Tunnel endpoint — connector registers here
 		if path == "/tunnel" {
 			relay.HandleTunnel(w, r)
+			return
+		}
+
+		// Auth endpoint — returns current user info
+		if path == "/auth/me" {
+			relay.HandleAuthMe(w, r)
+			return
+		}
+
+		// Admin endpoints — user management
+		if strings.HasPrefix(path, "/admin/") {
+			relay.HandleAdminUsers(w, r)
 			return
 		}
 
@@ -119,9 +143,19 @@ func main() {
 			return
 		}
 
-		// Laptops endpoint (no auth)
+		// Laptops endpoint — filter by user ACL if authenticated
 		if path == "/laptops" {
 			laptops := relay.ConnectedLaptops()
+			// If user is authenticated, filter by their ACL
+			if user := relay.authenticateRequest(r); user != nil {
+				var filtered []string
+				for _, h := range laptops {
+					if relay.userCanAccessLaptop(user, h) {
+						filtered = append(filtered, h)
+					}
+				}
+				laptops = filtered
+			}
 			w.Header().Set("Content-Type", "application/json")
 			type laptopInfo struct {
 				ID        string `json:"id"`

@@ -7,6 +7,9 @@ struct SessionDetailView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = SessionDetailViewModel()
     @State private var showStructured = true
+    @State private var planExpanded = false
+    @State private var planContent: String?
+    @State private var planFileName: String?
 
     private var session: ClaudeSession? {
         appState.sessions.first { $0.id == sessionId }
@@ -75,6 +78,11 @@ struct SessionDetailView: View {
                 .background(.red)
             }
 
+            // Plan summary (when awaiting approval)
+            if let session, session.status == .planMode {
+                planSummaryView
+            }
+
             // Quick actions
             if let session, session.status.needsAttention {
                 quickActions
@@ -137,6 +145,66 @@ struct SessionDetailView: View {
                 }
             }
         }
+    }
+
+    private func loadPlan() async {
+        do {
+            let resp = try await appState.client.fetchPlan(id: sessionId)
+            planContent = resp.plan
+            planFileName = resp.fileName
+        } catch {
+            planContent = nil
+            planFileName = nil
+        }
+    }
+
+    private var planSummaryView: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    planExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "list.clipboard.fill")
+                        .foregroundStyle(.purple)
+                        .font(.subheadline)
+                    Text("View Plan")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.primary)
+                    if let name = planFileName {
+                        Text(name)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    Spacer()
+                    Image(systemName: planExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+            }
+            .buttonStyle(.plain)
+
+            if planExpanded, let content = planContent {
+                Divider()
+                ScrollView {
+                    Text(content)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                }
+                .frame(maxHeight: 300)
+            }
+        }
+        .background(Color(.systemGray6))
+        .task { await loadPlan() }
     }
 
     private var quickActions: some View {

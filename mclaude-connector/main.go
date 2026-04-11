@@ -37,8 +37,9 @@ type TunnelMsg struct {
 	Binary  bool                `json:"binary,omitempty"`
 	Code    int                 `json:"code,omitempty"`
 	Reason  string              `json:"reason,omitempty"`
-	Rows    int                 `json:"rows,omitempty"`
-	Cols    int                 `json:"cols,omitempty"`
+	Rows    int    `json:"rows,omitempty"`
+	Cols    int    `json:"cols,omitempty"`
+	Command string `json:"command,omitempty"` // optional command to run instead of default shell
 }
 
 // API prefixes that should always be proxied to mclaude-server.
@@ -46,6 +47,7 @@ var apiPrefixes = []string{
 	"/sessions", "/projects", "/skills",
 	"/screenshots", "/files", "/telemetry",
 	"/auth/", "/ws", "/tunnel", "/health",
+	"/usage", "/admin", "/laptops", "/tmux-sessions",
 }
 
 func isAPIPath(path string) bool {
@@ -73,7 +75,7 @@ type Connector struct {
 	connMu  sync.RWMutex
 
 	wsMu    sync.Mutex
-	wsConns map[string]*websocket.Conn
+	wsConns map[string]*wsEntry
 
 	ptyMu       sync.Mutex
 	ptySessions map[string]*ptyEntry
@@ -82,6 +84,12 @@ type Connector struct {
 	wsDialer   *websocket.Dialer
 
 	sendSeq atomic.Uint64
+}
+
+// wsEntry wraps a websocket connection with a write mutex to prevent concurrent writes.
+type wsEntry struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
 }
 
 type ptyEntry struct {
@@ -99,7 +107,7 @@ func NewConnector(relayURL, tunnelToken, mclaudeURL, serviceToken, staticDir, ho
 		staticDir:     staticDir,
 		hostname:      hostname,
 		tlsSkipVerify: tlsSkipVerify,
-		wsConns:       make(map[string]*websocket.Conn),
+		wsConns:       make(map[string]*wsEntry),
 		ptySessions:   make(map[string]*ptyEntry),
 		httpClient: &http.Client{
 			Timeout:   25 * time.Second,
@@ -161,8 +169,8 @@ func (c *Connector) connect() error {
 
 		// close all upstream WS connections
 		c.wsMu.Lock()
-		for id, ws := range c.wsConns {
-			ws.Close()
+		for id, entry := range c.wsConns {
+			entry.conn.Close()
 			delete(c.wsConns, id)
 		}
 		c.wsMu.Unlock()
@@ -400,8 +408,9 @@ func (c *Connector) handleWSConnect(msg *TunnelMsg) {
 	}
 
 	wsID := msg.ID
+	entry := &wsEntry{conn: wsConn}
 	c.wsMu.Lock()
-	c.wsConns[wsID] = wsConn
+	c.wsConns[wsID] = entry
 	c.wsMu.Unlock()
 
 	// upstream → tunnel → relay → phone
@@ -430,7 +439,7 @@ func (c *Connector) handleWSConnect(msg *TunnelMsg) {
 
 func (c *Connector) handleWSMessage(msg *TunnelMsg) {
 	c.wsMu.Lock()
-	wsConn, ok := c.wsConns[msg.ID]
+	entry, ok := c.wsConns[msg.ID]
 	c.wsMu.Unlock()
 	if !ok {
 		return
@@ -443,18 +452,20 @@ func (c *Connector) handleWSMessage(msg *TunnelMsg) {
 	if msg.Binary {
 		mt = websocket.BinaryMessage
 	}
-	wsConn.WriteMessage(mt, data) //nolint:errcheck
+	entry.mu.Lock()
+	entry.conn.WriteMessage(mt, data) //nolint:errcheck
+	entry.mu.Unlock()
 }
 
 func (c *Connector) handleWSClose(msg *TunnelMsg) {
 	c.wsMu.Lock()
-	wsConn, ok := c.wsConns[msg.ID]
+	entry, ok := c.wsConns[msg.ID]
 	if ok {
 		delete(c.wsConns, msg.ID)
 	}
 	c.wsMu.Unlock()
 	if ok {
-		wsConn.Close()
+		entry.conn.Close()
 	}
 }
 
@@ -465,12 +476,18 @@ func (c *Connector) notifyWSClose(id string, code int, reason string) {
 // ── PTY bridge ────────────────────────────────────────────────────────────
 
 func (c *Connector) handlePtyConnect(msg *TunnelMsg) {
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/bash"
+	var cmd *exec.Cmd
+	if msg.Command != "" && strings.HasPrefix(msg.Command, "tmux ") {
+		// Only allow tmux commands for safety
+		parts := strings.Fields(msg.Command)
+		cmd = exec.Command(parts[0], parts[1:]...)
+	} else {
+		shell := os.Getenv("SHELL")
+		if shell == "" {
+			shell = "/bin/bash"
+		}
+		cmd = exec.Command(shell)
 	}
-
-	cmd := exec.Command(shell)
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
 	ptmx, err := pty.Start(cmd)
@@ -487,7 +504,7 @@ func (c *Connector) handlePtyConnect(msg *TunnelMsg) {
 	c.ptySessions[msg.ID] = &ptyEntry{ptmx: ptmx, cmd: cmd}
 	c.ptyMu.Unlock()
 
-	log.Printf("pty session started: %s (shell=%s)", msg.ID, shell)
+	log.Printf("pty session started: %s (%s)", msg.ID, cmd.Path)
 
 	// Read PTY output → tunnel
 	go func() {
