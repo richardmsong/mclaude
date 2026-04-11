@@ -743,6 +743,44 @@ mclaude-cli/
   main.go               Text REPL: readline → sendMessage, permission prompt → y/n
 ```
 
+### Development Harness
+
+All clients share the same protocol (NATS subjects, KV schema, stream-json events, input message formats). A purpose-built harness simulates the server side so any client can be developed and tested without a real cluster, session agent, or Claude process running.
+
+The harness is a standalone process (or library) that:
+- **Runs an embedded NATS server** (nats-server can be embedded in Go) with JetStream and KV enabled
+- **Replays recorded sessions** — feed a captured stream-json recording into JetStream on the correct subjects. Develop the full conversation UI against real data without spending API tokens.
+- **Simulates live interaction** — accepts input messages on `.api.sessions.input`, responds with canned or scripted stream-json events (typing delay, tool use, permission prompts). Tests the full send → stream → render loop.
+- **Simulates state transitions** — writes to KV (session state, capabilities, heartbeats) on a schedule or in response to triggers. Tests the SessionStore/HeartbeatMonitor path.
+- **Simulates failure modes** — drops NATS connection, expires JWT, stops heartbeats, sends clear/compaction events. Tests reconnection (X2), cache reset (X1), and staleness detection (P6).
+- **Simulates terminal** — echoes input back on `.terminal.{termId}.output` for basic terminal UI development.
+
+```
+mclaude-harness/
+  main.go                   CLI entry point
+  harness.go                Embedded NATS server + scenario runner
+  scenarios/
+    basic-conversation.json   Recorded stream-json session
+    permission-flow.json      Tool approval sequence
+    subagent-nesting.json     Agent with nested subagents
+    compaction.json           Mid-session compaction
+    disconnect.json           Connection drop + reconnect
+```
+
+Usage:
+```bash
+# Start harness on default NATS port, replay a recorded session
+mclaude-harness --scenario basic-conversation.json
+
+# Interactive mode — accepts typed input, responds with scripted events
+mclaude-harness --interactive
+
+# Chaos mode — randomly drops connections, expires JWTs, kills heartbeats
+mclaude-harness --chaos
+```
+
+Every client connects to the harness the same way it connects to production — same NATSClient, same subjects, same KV buckets. The harness is the single development dependency for all platforms.
+
 ### Testing
 
 Store and View Model layers are testable without any platform dependencies:
@@ -750,5 +788,7 @@ Store and View Model layers are testable without any platform dependencies:
 - Feed mock KV updates into SessionStore → assert SessionState
 - Call ConversationVM.sendMessage() → assert correct NATS publish call
 - Simulate JWT expiry → assert AuthStore triggers refresh
+
+The harness also serves as an integration test backend — run Playwright against the SPA pointed at the harness, or run mclaude-cli against it in a CI pipeline.
 
 Platform layer tested via browser automation (Playwright) or visual snapshot tests.
