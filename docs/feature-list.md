@@ -1,6 +1,6 @@
-# mclaude Feature List
+# mclaude Client Feature List
 
-Canonical list of features every client implements. Platform-specific docs and implementation tasks should reference features by ID (e.g., C3, T1, X1) rather than re-describing behavior.
+Canonical list of client-side features every platform implements. Platform-specific docs and implementation tasks should reference features by ID (e.g., C3, T1, X1) rather than re-describing behavior.
 
 Future: Figma designs linked per feature.
 
