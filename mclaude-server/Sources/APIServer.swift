@@ -393,8 +393,10 @@ func buildRouter(monitor: TmuxMonitor, broadcaster: WSBroadcaster, jsonlTailer: 
         guard let session = await capturedMonitor.getSession(id: id) else {
             return Response(status: .notFound, body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
         }
-        let plansDir = "\(session.cwd)/.claude/plans"
         let fm = FileManager.default
+        // Check both .claude/plans/ (Claude Code default) and plans/ (project-root)
+        let candidateDirs = ["\(session.cwd)/.claude/plans", "\(session.cwd)/plans"]
+        let plansDir = candidateDirs.first { fm.fileExists(atPath: $0) } ?? candidateDirs[0]
         guard fm.fileExists(atPath: plansDir),
               let files = try? fm.contentsOfDirectory(atPath: plansDir) else {
             return Response(status: .ok, headers: [.contentType: "application/json"],
