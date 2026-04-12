@@ -1,0 +1,40 @@
+{{- if .Values.nats.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mclaude.fullname" . }}-nats-config
+  namespace: {{ include "mclaude.namespace" . }}
+  labels:
+    {{- include "mclaude.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+data:
+  nats.conf: |
+    # mclaude NATS Server Configuration
+    # Ref: docs/plan-k8s-integration.md — NATS Subject Structure
+
+    port: {{ .Values.nats.service.clientPort }}
+    http_port: {{ .Values.nats.service.monitorPort }}
+
+    # JetStream — event bus, KV state, replay
+    jetstream {
+      store_dir: /data/jetstream
+      max_file_store: {{ .Values.nats.config.maxFileStoreSize }}
+    }
+
+    # WebSocket — browser clients connect via /nats WebSocket proxy
+    websocket {
+      port: {{ .Values.nats.service.websocketPort }}
+      no_tls: true
+    }
+
+    # Max message payload: 8MB for large tool results
+    max_payload: {{ .Values.nats.config.maxPayload }}
+
+    # Cluster name for JetStream
+    server_name: $POD_NAME
+
+    # Logging
+    logtime: true
+    debug: false
+    trace: false
+{{- end }}

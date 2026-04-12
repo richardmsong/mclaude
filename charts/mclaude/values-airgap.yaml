@@ -1,0 +1,45 @@
+## Air-gapped Values
+## All images pulled from internal registry mirror.
+## Set global.imageRegistry to your internal registry.
+
+global:
+  imageRegistry: "registry.internal.example.com"
+  imagePullSecrets:
+    - name: internal-registry-secret
+
+## Override individual image registries if the global mirror uses different paths
+nats:
+  image:
+    registry: registry.internal.example.com
+    repository: mirror/nats
+    tag: "2.10.24-alpine"
+
+postgres:
+  image:
+    registry: registry.internal.example.com
+    repository: mirror/postgres
+    tag: "16.6-alpine"
+
+controlPlane:
+  image:
+    registry: registry.internal.example.com
+    repository: mclaude/mclaude-control-plane
+    tag: "0.1.0"
+
+spa:
+  image:
+    registry: registry.internal.example.com
+    repository: mclaude/mclaude-spa
+    tag: "0.1.0"
+
+sessionAgent:
+  image:
+    registry: registry.internal.example.com
+    repository: mclaude/mclaude-session-agent
+    tag: "0.1.0"
+
+tests:
+  curl:
+    registry: registry.internal.example.com
+    repository: mirror/curlimages-curl
+    tag: "8.11.1"

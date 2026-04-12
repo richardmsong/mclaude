@@ -1,0 +1,52 @@
+{{- if .Values.spa.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mclaude.fullname" . }}-spa
+  namespace: {{ include "mclaude.namespace" . }}
+  labels:
+    {{- include "mclaude.labels" . | nindent 4 }}
+    app.kubernetes.io/component: spa
+spec:
+  replicas: {{ .Values.spa.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mclaude.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: spa
+  template:
+    metadata:
+      labels:
+        {{- include "mclaude.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: spa
+    spec:
+      {{- include "mclaude.podSecurityContext" . | nindent 6 }}
+      {{- include "mclaude.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: spa
+          image: {{ include "mclaude.image" (dict "imageValues" .Values.spa.image "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.spa.image.pullPolicy }}
+          {{- include "mclaude.securityContext" . | nindent 10 }}
+          {{- with .Values.spa.command }}
+          command: {{- toJson . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.spa.containerPort | default .Values.spa.service.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.spa.resources | nindent 12 }}
+{{- end }}
