@@ -26,31 +26,37 @@ test.describe('Smoke tests', () => {
 
   test('shows auth screen when unauthenticated', async ({ page }) => {
     await page.goto('/')
-    // Auth screen should be visible (no stored token)
     await expect(page.getByTestId('auth-screen')).toBeVisible({ timeout: 5000 })
     await expect(page.getByTestId('auth-title')).toHaveText('MClaude')
   })
 
-  test('auth screen has server URL, email, and token fields', async ({ page }) => {
+  test('auth screen has email and token fields (no server URL field)', async ({ page }) => {
     await page.goto('/')
-    await expect(page.getByPlaceholder(/Server URL/)).toBeVisible()
     await expect(page.getByPlaceholder(/Email/)).toBeVisible()
     await expect(page.getByPlaceholder(/Access token/)).toBeVisible()
     await expect(page.getByRole('button', { name: 'Connect' })).toBeVisible()
+    // Server URL field was removed — derived from window.location.origin
+    await expect(page.getByPlaceholder(/Server URL/)).not.toBeVisible()
   })
 
-  test('connect button is disabled when fields are empty', async ({ page }) => {
+  test('connect button is disabled when token is empty', async ({ page }) => {
     await page.goto('/')
     const connectBtn = page.getByRole('button', { name: 'Connect' })
     await expect(connectBtn).toBeDisabled()
   })
 
-  test('connect button enables when server URL and token are filled', async ({ page }) => {
+  test('connect button enables when token is filled', async ({ page }) => {
     await page.goto('/')
-    await page.getByPlaceholder(/Server URL/).fill('http://localhost:8080')
     await page.getByPlaceholder(/Access token/).fill('test-token')
     const connectBtn = page.getByRole('button', { name: 'Connect' })
     await expect(connectBtn).toBeEnabled()
+  })
+
+  test('connect button disabled without token even if email is filled', async ({ page }) => {
+    await page.goto('/')
+    await page.getByPlaceholder(/Email/).fill('user@example.com')
+    const connectBtn = page.getByRole('button', { name: 'Connect' })
+    await expect(connectBtn).toBeDisabled()
   })
 
   test('hash navigation does not crash the app', async ({ page }) => {
@@ -76,9 +82,8 @@ test.describe('Session flow', () => {
   test('auth → session list → open session → send message → approve permission → see result', async ({ page }) => {
     await page.goto('/')
 
-    // Login form
+    // Login form — no Server URL field, only email + token
     await expect(page.getByTestId('auth-screen')).toBeVisible()
-    await page.getByPlaceholder(/Server URL/).fill(process.env['E2E_SERVER_URL'] ?? 'http://localhost:8080')
     await page.getByPlaceholder(/Email/).fill('test@example.com')
     await page.getByPlaceholder(/Access token/).fill(process.env['E2E_TOKEN'] ?? 'test-token')
     await page.getByRole('button', { name: 'Connect' }).click()
