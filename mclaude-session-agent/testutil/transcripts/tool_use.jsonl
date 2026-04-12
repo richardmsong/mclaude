@@ -1,0 +1,17 @@
+{"type":"system","subtype":"init","session_id":"test-session","tools":["Bash","Read","Edit","Write","Glob","Grep"],"mcp_servers":[],"model":"claude-sonnet-4-6","permissionMode":"managed"}
+{"type":"system","subtype":"session_state_changed","session_id":"test-session","state":"idle"}
+{"type":"__turn_boundary__"}
+{"type":"system","subtype":"session_state_changed","session_id":"test-session","state":"running"}
+{"type":"assistant","session_id":"test-session","message":{"id":"msg_01","type":"message","role":"assistant","content":[{"type":"text","text":"Let me run a command to check."},{"type":"tool_use","id":"tu_01","name":"Bash","input":{"command":"echo hello"}}],"model":"claude-sonnet-4-6","stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":20,"output_tokens":15,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+{"type":"control_request","session_id":"test-session","request_id":"cr_01","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_input":{"command":"echo hello"}}}
+{"type":"system","subtype":"session_state_changed","session_id":"test-session","state":"requires_action"}
+{"type":"__turn_boundary__"}
+{"type":"system","subtype":"session_state_changed","session_id":"test-session","state":"running"}
+{"type":"tool_progress","session_id":"test-session","tool_use_id":"tu_01","tool_name":"Bash","elapsed_time_seconds":1}
+{"type":"user","session_id":"test-session","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_01","content":"hello\n"}]}}
+{"type":"stream_event","session_id":"test-session","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
+{"type":"stream_event","session_id":"test-session","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The command ran successfully and output 'hello'."}}}
+{"type":"stream_event","session_id":"test-session","event":{"type":"content_block_stop","index":0}}
+{"type":"assistant","session_id":"test-session","message":{"id":"msg_02","type":"message","role":"assistant","content":[{"type":"text","text":"The command ran successfully and output 'hello'."}],"model":"claude-sonnet-4-6","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":30,"output_tokens":12,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+{"type":"system","subtype":"session_state_changed","session_id":"test-session","state":"idle"}
+{"type":"result","subtype":"success","session_id":"test-session","total_cost_usd":0.0002,"usage":{"input_tokens":50,"output_tokens":27,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"server_tool_use_input_tokens":0,"server_tool_use_output_tokens":0},"is_error":false,"duration_ms":2345,"duration_api_ms":2000,"num_turns":1}
