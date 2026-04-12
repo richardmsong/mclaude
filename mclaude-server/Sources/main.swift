@@ -170,12 +170,10 @@ let useTLS = FileManager.default.fileExists(atPath: certFile.path)
     && FileManager.default.fileExists(atPath: keyFile.path)
 
 if useTLS {
-    let certData = try Data(contentsOf: certFile)
-    let keyData = try Data(contentsOf: keyFile)
-    let certificate = try NIOSSLCertificate(bytes: [UInt8](certData), format: .pem)
-    let privateKey = try NIOSSLPrivateKey(bytes: [UInt8](keyData), format: .pem)
+    let certs = try NIOSSLCertificate.fromPEMFile(certFile.path)
+    let privateKey = try NIOSSLPrivateKey(file: keyFile.path, format: .pem)
     let tlsConfig = TLSConfiguration.makeServerConfiguration(
-        certificateChain: [.certificate(certificate)],
+        certificateChain: certs.map { .certificate($0) },
         privateKey: .privateKey(privateKey)
     )
     let app = Application(
