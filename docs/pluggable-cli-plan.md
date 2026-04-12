@@ -97,30 +97,62 @@ Some tools extend the spec with vendor-specific fields. Droid adds `user-invocab
 | **Model auto-invoke** | Yes (unless `disable-model-invocation: true`) | Yes (unless `disable-model-invocation: true`) | N/A (agent controls its own commands) |
 | **Invoke syntax** | `/skill-name` | `/skill-name` | `/command` in interactive session |
 
-#### Dual-Tool Compatibility
+#### Managing Skills
 
-Since each tool scans its own vendor-prefixed path, a multi-tool project needs either:
+All skills live in `.agent/skills/` — the vendor-neutral path from the Agent Skills standard. Both Claude Code and Factory Droid scan this path natively:
+- **Claude Code** follows the Agent Skills spec and discovers `.agent/skills/*/SKILL.md`.
+- **Factory Droid** explicitly lists `/.agent/skills/` as a "Compatibility" scope.
+- **Codex**, **Copilot**, **Gemini CLI** also scan `.agent/skills/` per the spec.
 
-**Option A: Symlinks** (current approach). One source of truth, symlinks for each tool:
+No symlinks, no vendor-prefixed duplicates. One directory, all tools pick it up.
+
+**Adding a skill:**
+
+```bash
+mkdir -p .agent/skills/my-skill
+cat > .agent/skills/my-skill/SKILL.md << 'EOF'
+---
+name: my-skill
+description: What this skill does and when to use it. Be specific — the agent uses this to decide when to auto-invoke.
+---
+
+# My Skill
+
+## Instructions
+
+1. Step one
+2. Step two
+3. Verify the result
+EOF
 ```
-.claude/commands/deploy-server.md        # source of truth (with SKILL.md frontmatter)
-.factory/skills/deploy-server/SKILL.md   # symlink -> ../../../.claude/commands/deploy-server.md
+
+The skill is immediately available as `/my-skill` in any backend that scans `.agent/skills/`. No restart needed for Claude Code (live change detection); Droid requires a session restart to rescan.
+
+**Editing a skill:** Edit `.agent/skills/my-skill/SKILL.md` directly. The YAML frontmatter controls behavior:
+
+| Field | Effect |
+|---|---|
+| `description` | Drives auto-discovery — agent loads the skill when your task matches. Front-load keywords. Max 1024 chars, truncated at 250 in listings. |
+| `disable-model-invocation: true` | Only you can invoke via `/name`. Use for deploy, destructive, or timing-sensitive workflows. |
+| `user-invocable: false` | Only the agent can invoke. Use for background knowledge (e.g. legacy system context). |
+| `allowed-tools` | Pre-approve tools when the skill is active (e.g. `Bash(git:*) Read Grep`). Experimental. |
+
+**Supporting files:** Skills can include scripts, references, and assets alongside `SKILL.md`:
+
+```
+my-skill/
+├── SKILL.md              # required — frontmatter + instructions
+├── references/           # optional — detailed docs loaded on demand
+│   └── api-patterns.md
+├── scripts/              # optional — executable code
+│   └── validate.sh
+└── assets/               # optional — templates, schemas
+    └── pr-template.md
 ```
 
-**Option B: Canonical `.agent/skills/`** (recommended):
-```
-.agent/skills/deploy-server/SKILL.md     # single source of truth
-```
-This is the vendor-neutral path from the Agent Skills spec. Both Claude Code and Factory Droid explicitly scan `.agent/skills/` as a compatibility fallback:
-- **Claude Code** docs list no `.agent/` discovery, but the Agent Skills spec lists it and Claude Code follows the spec.
-- **Factory Droid** docs explicitly list `/.agent/skills/` as a "Compatibility" scope: "Discovered for compatibility with `.agent` folder conventions."
-- **Codex**, **Copilot**, **Gemini CLI** also scan `.agent/skills/` per the Agent Skills spec.
+Reference these from `SKILL.md` so the agent knows they exist. They load on demand, not at startup.
 
-This is the correct approach for multi-tool projects. One directory, no symlinks, all tools pick it up.
-
-**Option C: Duplicate per tool** (no symlinks, but N copies to maintain). Not recommended.
-
-**Recommendation: Use Option B (`.agent/skills/`).** Migrate existing `.claude/commands/` files to `.agent/skills/*/SKILL.md` with proper frontmatter. Both Claude Code and Droid will discover them. Legacy `.claude/commands/` files can remain as stubs or be removed.
+**Removing a skill:** Delete the directory. `rm -rf .agent/skills/my-skill`.
 
 #### Skills in the Canonical Event Schema
 
@@ -635,17 +667,16 @@ mclaude-session-agent/
 
 ### Skills layout (per-project)
 
-Use `.agent/skills/` as the single canonical location. Both Claude Code and Factory Droid discover skills here via the Agent Skills standard compatibility path. No symlinks needed.
-
 ```
 .agent/skills/                           # vendor-neutral, all tools discover
-  deploy-server/SKILL.md                 # Agent Skills format (frontmatter + markdown)
+  deploy-server/SKILL.md                 # Agent Skills standard format
   deploy-connector/SKILL.md
   deploy-relay/SKILL.md
   dev-harness/SKILL.md
+  dev-harness/references/                # optional supporting files
 ```
 
-Legacy `.claude/commands/` and `.factory/commands/` files continue to work but are superseded. Migrate to `.agent/skills/` for cross-tool compatibility with Claude Code, Droid, Codex, Copilot, Gemini CLI, and others.
+See [Managing Skills](#managing-skills) for add/edit/remove procedures.
 
 ## Open Questions
 
