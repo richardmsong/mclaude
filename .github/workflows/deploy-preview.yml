@@ -9,6 +9,9 @@ jobs:
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       control-plane: ${{ steps.filter.outputs.control-plane }}
       spa: ${{ steps.filter.outputs.spa }}
