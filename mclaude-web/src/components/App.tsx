@@ -89,6 +89,32 @@ export function App() {
     return new SessionListVM(sessionStore, heartbeatMonitor, natsClient, authState.userId)
   }, [sessionStore, heartbeatMonitor, authState.userId])
 
+  // First-run: auto-create default project + session
+  const [initialMessage, setInitialMessage] = useState<string | null>(null)
+  useEffect(() => {
+    if (!sessionListVM) return
+    const timer = setTimeout(async () => {
+      if (sessionListVM.projects.length > 0) return
+      try {
+        const projectId = await sessionListVM.createProject('Default')
+        const sessionId = await sessionListVM.createSession(projectId, 'main', 'Getting Started')
+        setInitialMessage(
+          "Hi! I'm Claude. You're in MClaude — a real-time coding environment powered by Claude Code.\n\n" +
+          "Here's what you can do here:\n" +
+          "- Write and edit files across your project\n" +
+          "- Run shell commands (git, npm, make, etc.)\n" +
+          "- Search and read your codebase\n" +
+          "- Create more sessions for different tasks or branches\n\n" +
+          "Ask me anything to get started — like \"what's in this project?\" or \"help me fix this bug\". What would you like to work on?"
+        )
+        navigate(`s/${sessionId}`)
+      } catch {
+        // server unavailable — user can create manually
+      }
+    }, 1000)
+    return () => clearTimeout(timer)
+  }, [sessionListVM])
+
   // Per-session EventStore + ConversationVM
   const [eventStore, setEventStore] = useState<EventStore | null>(null)
   const [conversationVM, setConversationVM] = useState<ConversationVM | null>(null)
@@ -196,6 +222,8 @@ export function App() {
         conversationVM={conversationVM}
         onBack={() => navigate('/')}
         connected={connected}
+        initialMessage={initialMessage ?? undefined}
+        onInitialMessageSent={() => setInitialMessage(null)}
       />
     )
   }
