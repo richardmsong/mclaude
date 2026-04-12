@@ -1,0 +1,66 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "mclaude.fullname" . }}
+  namespace: {{ include "mclaude.namespace" . }}
+  labels:
+    {{- include "mclaude.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingress
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- toYaml .Values.ingress.tls | nindent 4 }}
+  {{- end }}
+  rules:
+    - {{- if .Values.ingress.host }}
+      host: {{ .Values.ingress.host | quote }}
+      {{- end }}
+      http:
+        paths:
+          ## Auth + API + SCIM → control-plane
+          - path: /auth
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "mclaude.fullname" . }}-control-plane
+                port:
+                  name: http
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "mclaude.fullname" . }}-control-plane
+                port:
+                  name: http
+          - path: /scim
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "mclaude.fullname" . }}-control-plane
+                port:
+                  name: http
+          ## NATS WebSocket proxy — browser clients connect here
+          - path: /nats
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "mclaude.fullname" . }}-nats
+                port:
+                  name: websocket
+          ## SPA static files — catch-all
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "mclaude.fullname" . }}-spa
+                port:
+                  name: http
+{{- end }}

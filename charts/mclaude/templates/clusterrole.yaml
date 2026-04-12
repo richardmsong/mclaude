@@ -1,0 +1,43 @@
+{{- if and .Values.serviceAccount.create .Values.controlPlane.enabled }}
+## ClusterRole: control-plane needs to create/manage per-user namespaces,
+## Deployments, PVCs, Secrets, ServiceAccounts, and Roles across namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "mclaude.fullname" . }}-control-plane
+  labels:
+    {{- include "mclaude.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+rules:
+  ## Namespace management (user provisioning / deprovisioning)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  ## Pod management (read project pod status)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  ## Deployment management (per-project session-agent deployments)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  ## PVC management (per-project data volumes)
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  ## Secret management (per-namespace NATS credentials)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  ## ConfigMap management (per-namespace user config seeds)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  ## ServiceAccount + RBAC (per-namespace SA for session agents)
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+{{- end }}
