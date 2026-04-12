@@ -1,3 +1,8 @@
+---
+name: deploy-connector
+description: Build and restart the mclaude-connector in its tmux window. Use when the user wants to deploy, rebuild, or restart the connector.
+---
+
 # Deploy MClaude Connector
 
 Build and restart the mclaude-connector on the local laptop inside its tmux window.
