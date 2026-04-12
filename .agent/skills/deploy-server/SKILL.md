@@ -1,3 +1,8 @@
+---
+name: deploy-server
+description: Build and restart mclaude-server as a launchd service. Use when the user wants to deploy, rebuild, or restart the server.
+---
+
 # Deploy MClaude Server
 
 Build and restart mclaude-server as a launchd service.
