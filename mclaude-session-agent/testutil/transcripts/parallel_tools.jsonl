@@ -1,0 +1,16 @@
+{"type":"system","subtype":"init","session_id":"test-session","tools":["Bash","Read","Glob","Grep"],"mcp_servers":[],"model":"claude-sonnet-4-6","permissionMode":"managed"}
+{"type":"system","subtype":"session_state_changed","session_id":"test-session","state":"idle"}
+{"type":"__turn_boundary__"}
+{"type":"system","subtype":"session_state_changed","session_id":"test-session","state":"running"}
+{"type":"assistant","session_id":"test-session","message":{"id":"msg_01","type":"message","role":"assistant","content":[{"type":"text","text":"I'll check two things at once."},{"type":"tool_use","id":"tu_01","name":"Bash","input":{"command":"echo first"}},{"type":"tool_use","id":"tu_02","name":"Bash","input":{"command":"echo second"}}],"model":"claude-sonnet-4-6","stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":20,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+{"type":"control_request","session_id":"test-session","request_id":"cr_01","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_input":{"command":"echo first"}}}
+{"type":"control_request","session_id":"test-session","request_id":"cr_02","request":{"subtype":"can_use_tool","tool_name":"Bash","tool_input":{"command":"echo second"}}}
+{"type":"system","subtype":"session_state_changed","session_id":"test-session","state":"requires_action"}
+{"type":"__turn_boundary__"}
+{"type":"system","subtype":"session_state_changed","session_id":"test-session","state":"running"}
+{"type":"tool_progress","session_id":"test-session","tool_use_id":"tu_01","tool_name":"Bash","elapsed_time_seconds":1}
+{"type":"tool_progress","session_id":"test-session","tool_use_id":"tu_02","tool_name":"Bash","elapsed_time_seconds":1}
+{"type":"user","session_id":"test-session","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_01","content":"first\n"},{"type":"tool_result","tool_use_id":"tu_02","content":"second\n"}]}}
+{"type":"assistant","session_id":"test-session","message":{"id":"msg_02","type":"message","role":"assistant","content":[{"type":"text","text":"Both commands succeeded: 'first' and 'second'."}],"model":"claude-sonnet-4-6","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":40,"output_tokens":14,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+{"type":"system","subtype":"session_state_changed","session_id":"test-session","state":"idle"}
+{"type":"result","subtype":"success","session_id":"test-session","total_cost_usd":0.0003,"usage":{"input_tokens":65,"output_tokens":34,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"server_tool_use_input_tokens":0,"server_tool_use_output_tokens":0},"is_error":false,"duration_ms":3000,"duration_api_ms":2800,"num_turns":1}
