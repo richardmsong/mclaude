@@ -35,17 +35,30 @@ Before doing anything, read these in full. They are the source of truth for what
 
 ---
 
+## Spec Discipline
+
+**The reference docs are the source of truth. Implement exactly what they specify — nothing more.**
+
+- For the `views` category: every screen, component, field, and interaction must match `docs/ui-spec.md` exactly. If a feature is not in the spec, do not build it. If the spec shows two fields, build two fields — not three.
+- For backend categories: every endpoint, subject, and payload must match `docs/plan-k8s-integration.md`. Do not add convenience endpoints or extra fields.
+- When the spec is ambiguous, implement the minimal interpretation and note the ambiguity in the commit message. Do not invent behavior.
+- If the current code has more than the spec describes, that is acceptable — do not remove it. Only new work must be spec-bounded.
+
+---
+
 ## Algorithm
 
 ```
 1. Identify component root (passed as arg or detected from cwd)
-2. Read reference docs (above)
+2. Read reference docs (above) in full before writing any code
 3. Audit — classify each applicable test/monitoring category as:
      implemented | partial | missing
 4. Print gap report ordered by dependency
 5. If --audit-only: stop here
 6. Pick the next missing category (dependency order)
 7. Implement the category (see per-component specs below)
+   - Implement ONLY what the reference docs specify for this category
+   - Do not add helpers, screens, fields, or behaviors not in the spec
 8. Run the full test suite: must pass before proceeding
    - If tests fail: fix, don't move to next category
 9. Commit: one commit per category, message: "harness(component): add {category}"
@@ -201,7 +214,7 @@ mclaude-session-agent/
 | `unit` | EventStore accumulation: feed mock events → assert ConversationModel state for each transcript scenario. AuthStore JWT expiry + refresh loop. SessionStore KV watch → SessionState updates. Deduplication: duplicate sequence numbers skipped. |
 | `component` | ConversationVM actions: sendMessage publishes correct NATS payload, approvePermission publishes correct control_response, interrupt publishes interrupt. PermissionPromptVM: multiple simultaneous pendingControls rendered. |
 | `nats-impl` | Implement the real NATSClient using `nats.ws`. Replace all `throw new Error('not implemented')` stubs. Connect to NATS server URL from config. Implement: `connect`, `disconnect`, `subscribe(subject, cb)`, `publish(subject, data)`, `kvGet(bucket, key)`, `kvWatch(bucket, key, cb)`, `kvPut(bucket, key, value)`. Must work in browser (nats.ws uses WebSocket transport). Use the same in-memory mock from `mocks` category for unit tests — the real implementation is used in `e2e` and production. |
-| `views` | Build all React UI components per `docs/ui-spec.md`. The goal is a complete, usable app. Implement in this order: (1) design tokens (CSS custom properties matching the spec palette), (2) AuthScreen, (3) DashboardScreen (session list + tmux filter chips + FAB + new-session sheet), (4) SessionDetailScreen (nav + det-meta + tabs + input bar), (5) event renderers: UserMessage, AssistantText (markdown), ThinkingBlock (collapsible), ToolCard (tool+result pair with syntax highlighting), AskUserQuestion (interactive radio options), AgentGroup (expandable subagent nesting), SystemEvent, CompactionEvent, DiffView (unified diff with char highlighting), (6) Settings screen, (7) TokenUsage screen (budget bar + chart + breakdown). Wire all components to the stores/viewmodels already built. The app must be fully interactive — not a stub. |
+| `views` | Build React UI components per `docs/ui-spec.md` **exactly** — no more, no less. Read the spec in full before writing a single line. Implement in order: (1) design tokens (CSS custom properties matching the spec palette exactly), (2) AuthScreen, (3) DashboardScreen, (4) SessionDetailScreen (nav + tabs + input bar), (5) event renderers listed in the spec, (6) Settings screen, (7) TokenUsage screen. Each screen must match the spec wireframe: same fields, same labels, same layout — do not add fields or interactions not shown. Wire components to the stores/viewmodels already built. |
 | `reconnect` | NATS disconnect simulation: EventStore re-subscribes from max(lastSeq+1, replayFromSeq), no duplicate events rendered, no gaps. |
 | `forced-update` | X4: minClientVersion below client version → UI blocked, correct platform message shown. |
 | `monitoring` | Console structured logs for all store operations, error boundaries on all components, Sentry/OTEL error reporting wired. |
