@@ -1,0 +1,213 @@
+## mclaude Helm Chart Values
+## Ref: docs/plan-k8s-integration.md
+
+global:
+  ## Override image registry for all images (air-gapped mirror)
+  imageRegistry: ""
+  ## Global image pull secrets
+  imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+## Namespace to deploy into. Created if namespace.create is true.
+namespace:
+  create: true
+  name: mclaude-system
+
+## ---------------------------------------------------------------------------
+## NATS JetStream
+## ---------------------------------------------------------------------------
+nats:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: nats
+    tag: "2.10.24-alpine"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 10Gi
+  ## NATS server configuration overrides
+  config:
+    ## Max NATS message size (bytes). 8MB to handle large tool results.
+    ## Use string to prevent Helm rendering as scientific notation in config.
+    maxPayload: "8388608"
+    ## JetStream max file store in bytes (10GB default).
+    ## Use string; rendered without quotes in nats.conf so NATS parses as integer.
+    maxFileStoreSize: "10737418240"
+  service:
+    clientPort: 4222
+    monitorPort: 8222
+    websocketPort: 8080
+
+## ---------------------------------------------------------------------------
+## PostgreSQL (users table only)
+## ---------------------------------------------------------------------------
+postgres:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: postgres
+    tag: "16.6-alpine"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 20Gi
+  auth:
+    database: mclaude
+    username: mclaude
+    ## Name of existing Secret with key "postgres-password"
+    existingSecret: "mclaude-postgres"
+    secretPasswordKey: "postgres-password"
+
+## ---------------------------------------------------------------------------
+## Control Plane
+## ---------------------------------------------------------------------------
+controlPlane:
+  enabled: true
+  image:
+    registry: ghcr.io
+    repository: mclaude-project/mclaude-control-plane
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  service:
+    type: ClusterIP
+    httpPort: 8080
+    adminPort: 9090
+    metricsPort: 9091
+  config:
+    logLevel: info
+    jwtExpirySeconds: 28800
+    jwtRefreshThresholdSeconds: 900
+  ## Name of existing Secret containing:
+  ##   admin-token       — break-glass bearer token
+  ##   nats-operator-jwt — NATS operator JWT
+  ##   nats-operator-seed — NATS operator NKey seed
+  existingSecret: "mclaude-control-plane"
+  ## Override container command (e.g. for e2e stubs)
+  command: []
+  ## Whether to run dbmate schema migrations as an init container
+  migrations:
+    enabled: true
+  ## Health probe paths
+  probe:
+    liveness:
+      path: /healthz
+    readiness:
+      path: /readyz
+
+## ---------------------------------------------------------------------------
+## SPA (static web client)
+## ---------------------------------------------------------------------------
+spa:
+  enabled: true
+  image:
+    registry: ghcr.io
+    repository: mclaude-project/mclaude-spa
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+  service:
+    type: ClusterIP
+    port: 80
+  ## Override containerPort (defaults to service.port). Set for e2e stubs
+  ## that can't bind port 80 without root.
+  containerPort: 80
+  ## Override container command (e.g. for e2e stubs)
+  command: []
+
+## ---------------------------------------------------------------------------
+## Ingress
+## ---------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: nginx
+  ## nginx annotations for WebSocket support and large payloads (NATS)
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "8m"
+  ## Hostname for the platform (e.g. mclaude.example.com)
+  host: ""
+  tls: []
+  # tls:
+  #   - secretName: mclaude-tls
+  #     hosts:
+  #       - mclaude.example.com
+
+## ---------------------------------------------------------------------------
+## Session Agent pod template (control-plane instantiates per project)
+## ---------------------------------------------------------------------------
+sessionAgent:
+  image:
+    registry: ghcr.io
+    repository: mclaude-project/mclaude-session-agent
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  terminationGracePeriodSeconds: 30
+  persistence:
+    ## Storage class for project PVCs (RWO)
+    storageClass: ""
+    size: 50Gi
+  nix:
+    ## Storage class for Nix store PVCs (must support RWX)
+    storageClass: ""
+    size: 20Gi
+
+## ---------------------------------------------------------------------------
+## Helm test configuration
+## ---------------------------------------------------------------------------
+tests:
+  curl:
+    registry: docker.io
+    repository: curlimages/curl
+    tag: "8.11.1"
+    pullPolicy: IfNotPresent
+
+## ---------------------------------------------------------------------------
+## ServiceAccount for control-plane (ClusterRole for cross-namespace ops)
+## ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""

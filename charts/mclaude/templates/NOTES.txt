@@ -1,0 +1,45 @@
+mclaude has been deployed.
+
+Components enabled:
+{{- if .Values.nats.enabled }}
+  - NATS JetStream
+{{- end }}
+{{- if .Values.postgres.enabled }}
+  - PostgreSQL
+{{- end }}
+{{- if .Values.controlPlane.enabled }}
+  - Control Plane
+{{- end }}
+{{- if .Values.spa.enabled }}
+  - SPA
+{{- end }}
+
+Namespace: {{ include "mclaude.namespace" . }}
+
+Before the platform is functional, create the required Secrets:
+
+  # Postgres password
+  kubectl create secret generic mclaude-postgres \
+    --namespace {{ include "mclaude.namespace" . }} \
+    --from-literal=postgres-password="$(openssl rand -base64 32)"
+
+  # Control-plane credentials
+  kubectl create secret generic mclaude-control-plane \
+    --namespace {{ include "mclaude.namespace" . }} \
+    --from-literal=admin-token="$(openssl rand -base64 32)" \
+    --from-literal=nats-operator-jwt="" \
+    --from-literal=nats-operator-seed=""
+
+{{- if .Values.ingress.enabled }}
+  {{- if .Values.ingress.host }}
+
+The platform will be available at: https://{{ .Values.ingress.host }}
+  {{- else }}
+
+Set ingress.host to your domain name, then configure DNS to point to the ingress controller's external IP.
+  {{- end }}
+{{- end }}
+
+Break-glass admin access (when NATS is down):
+  kubectl port-forward -n {{ include "mclaude.namespace" . }} deploy/{{ include "mclaude.fullname" . }}-control-plane 9090:9090
+  curl -H "Authorization: Bearer <admin-token>" http://localhost:9090/admin/projects
