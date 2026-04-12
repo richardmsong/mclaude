@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 1.2.3)'
+        required: true
+        type: string
+      dry-run:
+        description: 'Dry run — show what would happen without pushing'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  tag:
+    name: Create tag and version branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate and parse version
+        id: version
+        run: |
+          VERSION="${{ inputs.version }}"
+          VERSION="${VERSION#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid version: $VERSION (expected X.Y.Z)"
+            exit 1
+          fi
+          MINOR="v$(echo "$VERSION" | cut -d. -f1-2)"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "minor_branch=${MINOR}" >> "$GITHUB_OUTPUT"
+          echo "Version: v${VERSION}, minor branch: ${MINOR}"
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Tag and update minor branch
+        if: ${{ !inputs.dry-run }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          MINOR="${{ steps.version.outputs.minor_branch }}"
+          git tag "$TAG"
+          git push origin "$TAG"
+          git branch -f "$MINOR" HEAD
+          git push origin "$MINOR" --force
+          echo "Created tag $TAG and updated branch $MINOR"
+
+      - name: Dry run summary
+        if: ${{ inputs.dry-run }}
+        run: |
+          echo "DRY RUN — would have created:"
+          echo "  tag: ${{ steps.version.outputs.tag }}"
+          echo "  branch: ${{ steps.version.outputs.minor_branch }}"
+
+  docker-relay:
+    name: Push relay image
+    needs: tag
+    if: ${{ !inputs.dry-run }}
+    uses: ./.github/workflows/docker-relay.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+    permissions:
+      contents: read
+      packages: write
+
+  docker-session:
+    name: Push session image
+    needs: tag
+    if: ${{ !inputs.dry-run }}
+    uses: ./.github/workflows/docker-session.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+    permissions:
+      contents: read
+      packages: write
