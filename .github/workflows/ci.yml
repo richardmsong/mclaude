@@ -13,6 +13,9 @@ jobs:
     outputs:
       relay: ${{ steps.filter.outputs.relay }}
       session: ${{ steps.filter.outputs.session }}
+      control-plane: ${{ steps.filter.outputs.control-plane }}
+      spa: ${{ steps.filter.outputs.spa }}
+      session-agent: ${{ steps.filter.outputs.session-agent }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -24,6 +27,15 @@ jobs:
               - '.github/workflows/ci.yml'
             session:
               - 'mclaude-session/**'
+              - '.github/workflows/ci.yml'
+            control-plane:
+              - 'mclaude-control-plane/**'
+              - '.github/workflows/ci.yml'
+            spa:
+              - 'mclaude-web/**'
+              - '.github/workflows/ci.yml'
+            session-agent:
+              - 'mclaude-session-agent/**'
               - '.github/workflows/ci.yml'
 
   build-relay:
@@ -69,3 +81,93 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  build-control-plane:
+    name: Build control-plane image
+    needs: changes
+    if: needs.changes.outputs.control-plane == 'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./mclaude-control-plane
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  test-control-plane:
+    name: Test control-plane
+    needs: changes
+    if: needs.changes.outputs.control-plane == 'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mclaude-control-plane/go.mod
+          cache-dependency-path: mclaude-control-plane/go.sum
+      - run: go test -race ./...
+        working-directory: mclaude-control-plane
+
+  build-spa:
+    name: Build spa image
+    needs: changes
+    if: needs.changes.outputs.spa == 'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./mclaude-web
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  test-spa:
+    name: Test spa
+    needs: changes
+    if: needs.changes.outputs.spa == 'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: mclaude-web/package-lock.json
+      - run: npm ci
+        working-directory: mclaude-web
+      - run: npm test
+        working-directory: mclaude-web
+
+  build-session-agent:
+    name: Build session-agent image
+    needs: changes
+    if: needs.changes.outputs.session-agent == 'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./mclaude-session-agent
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  test-session-agent:
+    name: Test session-agent
+    needs: changes
+    if: needs.changes.outputs.session-agent == 'true' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mclaude-session-agent/go.mod
+          cache-dependency-path: mclaude-session-agent/go.sum
+      - run: go test -race ./...
+        working-directory: mclaude-session-agent
