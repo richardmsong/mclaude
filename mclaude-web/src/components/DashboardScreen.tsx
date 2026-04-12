@@ -1,8 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NavBar } from './NavBar'
 import { StatusDot } from './StatusDot'
 import { NewSessionSheet } from './NewSessionSheet'
+import { NewProjectSheet } from './NewProjectSheet'
 import type { SessionListVM, ProjectVM, SessionVM } from '@/viewmodels/session-list-vm'
+
+const LAST_PROJECT_KEY = 'mclaude.lastProjectId'
 
 interface DashboardScreenProps {
   sessionListVM: SessionListVM
@@ -21,13 +24,28 @@ export function DashboardScreen({
 }: DashboardScreenProps) {
   const [projects, setProjects] = useState<ProjectVM[]>(sessionListVM.projects)
   const [activeGroup, setActiveGroup] = useState<string>('all')
-  const [showSheet, setShowSheet] = useState(false)
+  const [showNewSession, setShowNewSession] = useState(false)
+  const [showNewProject, setShowNewProject] = useState(false)
+  const [showMenu, setShowMenu] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     setProjects(sessionListVM.projects)
     const unsub = sessionListVM.onProjectsChanged(p => setProjects([...p]))
     return unsub
   }, [sessionListVM])
+
+  // Close menu on outside click
+  useEffect(() => {
+    if (!showMenu) return
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setShowMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showMenu])
 
   // Flatten all sessions
   const allSessions: Array<{ session: SessionVM; projectName: string }> = []
@@ -37,7 +55,6 @@ export function DashboardScreen({
     }
   }
 
-  // Badge count — sessions needing attention
   const badge = allSessions.filter(
     ({ session: s }) => s.state === 'requires_action' || s.hasPendingPermission
   ).length
@@ -57,9 +74,66 @@ export function DashboardScreen({
     ? allSessions
     : allSessions.filter(({ session }) => session.name.includes(activeGroup))
 
-  // Group names for filter chips (use project names as groups)
   const groups = ['all', ...Array.from(new Set(allSessions.map(({ projectName }) => projectName))).sort()]
-  const showChips = groups.length > 2 // more than just 'all' + one group
+  const showChips = groups.length > 2
+
+  const handleFAB = async () => {
+    if (projects.length === 0) return
+    if (projects.length === 1) {
+      // Single project — create session directly
+      try {
+        const projectId = projects[0]!.id
+        const sessionId = await sessionListVM.createSession(projectId, 'main', 'new-session')
+        localStorage.setItem(LAST_PROJECT_KEY, projectId)
+        onSelectSession(sessionId)
+      } catch {
+        // ignore — session store will reflect any created session
+      }
+    } else {
+      setShowNewSession(true)
+    }
+  }
+
+  const menuButton = (
+    <div ref={menuRef} style={{ position: 'relative' }}>
+      <button
+        onClick={() => setShowMenu(v => !v)}
+        style={{ fontSize: 16, color: 'var(--text2)', padding: '0 2px' }}
+      >
+        ⋯
+      </button>
+      {showMenu && (
+        <div style={{
+          position: 'absolute',
+          top: 'calc(100% + 8px)',
+          right: 0,
+          background: 'var(--surf)',
+          border: '1px solid var(--border)',
+          borderRadius: 10,
+          minWidth: 160,
+          zIndex: 300,
+          overflow: 'hidden',
+          boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+        }}>
+          <button
+            onClick={() => { setShowMenu(false); setShowNewProject(true) }}
+            style={{
+              width: '100%',
+              padding: '12px 16px',
+              textAlign: 'left',
+              color: 'var(--text)',
+              fontSize: 14,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+            }}
+          >
+            <span>📁</span> New Project
+          </button>
+        </div>
+      )}
+    </div>
+  )
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg)' }}>
@@ -69,6 +143,7 @@ export function DashboardScreen({
         connected={connected}
         onSettings={onSettings}
         onUsage={onUsage}
+        right={menuButton}
       />
 
       {/* Filter chips */}
@@ -152,7 +227,7 @@ export function DashboardScreen({
 
       {/* FAB */}
       <button
-        onClick={() => setShowSheet(true)}
+        onClick={handleFAB}
         style={{
           position: 'fixed',
           bottom: 20,
@@ -173,10 +248,30 @@ export function DashboardScreen({
         +
       </button>
 
-      {showSheet && (
+      {showNewSession && (
         <NewSessionSheet
           sessionListVM={sessionListVM}
-          onClose={() => setShowSheet(false)}
+          onClose={() => setShowNewSession(false)}
+          onSessionCreated={sessionId => { onSelectSession(sessionId); setShowNewSession(false) }}
+        />
+      )}
+
+      {showNewProject && (
+        <NewProjectSheet
+          sessionListVM={sessionListVM}
+          onClose={() => setShowNewProject(false)}
+          onCreated={async projectId => {
+            // If this is now the only project, auto-create a session in it
+            if (projects.length === 0) {
+              try {
+                const sessionId = await sessionListVM.createSession(projectId, 'main', 'new-session')
+                localStorage.setItem(LAST_PROJECT_KEY, projectId)
+                onSelectSession(sessionId)
+              } catch {
+                // session store will reflect the project
+              }
+            }
+          }}
         />
       )}
     </div>

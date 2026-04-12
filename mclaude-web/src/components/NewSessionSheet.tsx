@@ -1,25 +1,39 @@
 import { useEffect, useState } from 'react'
 import type { SessionListVM, ProjectVM } from '@/viewmodels/session-list-vm'
 
+const LAST_PROJECT_KEY = 'mclaude.lastProjectId'
+
 interface NewSessionSheetProps {
   sessionListVM: SessionListVM
   onClose: () => void
+  onSessionCreated?: (sessionId: string) => void
 }
 
-export function NewSessionSheet({ sessionListVM, onClose }: NewSessionSheetProps) {
-  const [projects, setProjects] = useState<ProjectVM[]>(sessionListVM.projects)
+function sortProjects(projects: ProjectVM[]): ProjectVM[] {
+  const lastId = localStorage.getItem(LAST_PROJECT_KEY)
+  return [...projects].sort((a, b) => {
+    if (a.id === lastId) return -1
+    if (b.id === lastId) return 1
+    return a.name.localeCompare(b.name)
+  })
+}
+
+export function NewSessionSheet({ sessionListVM, onClose, onSessionCreated }: NewSessionSheetProps) {
+  const [projects, setProjects] = useState<ProjectVM[]>(() => sortProjects(sessionListVM.projects))
   const [creating, setCreating] = useState<string | null>(null)
 
   useEffect(() => {
-    setProjects(sessionListVM.projects)
-    const unsub = sessionListVM.onProjectsChanged(p => setProjects([...p]))
+    setProjects(sortProjects(sessionListVM.projects))
+    const unsub = sessionListVM.onProjectsChanged(p => setProjects(sortProjects(p)))
     return unsub
   }, [sessionListVM])
 
   const handleSelect = async (projectId: string) => {
     setCreating(projectId)
     try {
-      await sessionListVM.createSession(projectId, 'main', 'new-session')
+      const sessionId = await sessionListVM.createSession(projectId, 'main', 'new-session')
+      localStorage.setItem(LAST_PROJECT_KEY, projectId)
+      onSessionCreated?.(sessionId)
       onClose()
     } catch {
       setCreating(null)

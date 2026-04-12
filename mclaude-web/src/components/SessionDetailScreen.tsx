@@ -12,6 +12,8 @@ interface SessionDetailScreenProps {
   conversationVM: ConversationVM
   onBack: () => void
   connected: boolean
+  initialMessage?: string
+  onInitialMessageSent?: () => void
 }
 
 const STATE_LABELS: Record<string, string> = {
@@ -29,6 +31,8 @@ export function SessionDetailScreen({
   conversationVM,
   onBack,
   connected,
+  initialMessage,
+  onInitialMessageSent,
 }: SessionDetailScreenProps) {
   const [vmState, setVmState] = useState<ConversationVMState>(conversationVM.state)
   const [activeTab, setActiveTab] = useState<'events' | 'terminal'>('events')
@@ -36,6 +40,19 @@ export function SessionDetailScreen({
   const [sending, setSending] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const atBottomRef = useRef(true)
+  const initialMessageSentRef = useRef(false)
+
+  // Send pre-seeded onboarding message once the session is ready
+  useEffect(() => {
+    if (!initialMessage || initialMessageSentRef.current) return
+    // Wait a tick for the EventStore to subscribe before publishing
+    const timer = setTimeout(() => {
+      initialMessageSentRef.current = true
+      conversationVM.sendMessage(initialMessage)
+      onInitialMessageSent?.()
+    }, 500)
+    return () => clearTimeout(timer)
+  }, [initialMessage, conversationVM, onInitialMessageSent])
 
   useEffect(() => {
     setVmState(conversationVM.state)
