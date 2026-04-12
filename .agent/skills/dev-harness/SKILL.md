@@ -162,7 +162,8 @@ Categories in dependency order:
 | `integration` | Real NATS + real Postgres via StartDeps: KV bucket init, session CRUD in KV, heartbeat write/TTL expiry, lifecycle event publish/subscribe |
 | `component` | Full session lifecycle using mock-claude: create session → init event → user message → tool_use + control_request → control_response → tool_result → result → KV state transitions at each step |
 | `failure` | Failure scenarios using mock-claude transcripts: NATS disconnect during event stream (buffer + flush), ungraceful restart (stale pendingControls cleared, Claude resumes), crash_mid_tool (auto-restart with --resume) |
-| `monitoring` | OTEL trace spans on all NATS publishes, Claude process spawns, KV writes. Prometheus metrics: active_sessions, events_published_total, nats_reconnects_total, claude_restarts_total. Structured zerolog on all operations. Verify spans appear in OTEL collector. |
+| `monitoring` | OTEL trace spans on all NATS publishes, Claude process spawns, KV writes. Prometheus metrics: active_sessions, events_published_total, nats_reconnects_total, claude_restarts_total. Structured zerolog on all operations. **Audit for "partial"**: helpers defined in `metrics.go` but not called from production code = partial, not implemented. Required wiring: `ClaudeSpawnSpan` in `session.start()` at process launch; `NATSPublishSpan` per event in stdout loop; `KVWriteSpan` in `writeSessionKV`; `m.EventPublished(evType)` per event; NATS reconnect handler → `m.NATSReconnect()`; `StartMetricsServer` + `SetupPropagator` called in `main.go`. |
+| `daemon` | `--daemon` mode (laptop/BYOM): spawn child session-agent processes on `projects.create` NATS message, monitor and restart on crash, JWT refresh goroutine (reload from `~/.config/mclaude/creds` every 60s, refresh when TTL < 15min), hostname collision detection via NATS KV. Tests: daemon spawns child on project create, restarts crashed child, refreshes JWT before expiry, exits on hostname collision. |
 | `e2e` | Real k3d cluster, real session-agent image, mock-claude sidecar. Full session lifecycle end-to-end via NATS. |
 
 **Test file layout:**
@@ -301,6 +302,8 @@ Each component has a `monitoring_test.go` (or `.test.ts`) that:
 4. Asserts log lines contain required fields
 
 Use `go.opentelemetry.io/otel/sdk/trace/tracetest` (in-memory exporter) for Go trace assertions. Use `prom/client_golang/prometheus/testutil` for metric assertions.
+
+**Partial pattern to avoid**: tests that only call helpers like `NATSPublishSpan()` directly do not verify production wiring — they only verify the helper itself. The monitoring test must invoke the real production entry point (e.g. `session.start()` for session-agent, an HTTP handler for control-plane) and assert spans/metrics appear from that path. Add dedicated `TestXxxEmitsSpans` and `TestXxxEmitsMetrics` tests that run through production code with `setupTestTracer` and a fresh `prometheus.NewRegistry()`.
 
 ---
 
