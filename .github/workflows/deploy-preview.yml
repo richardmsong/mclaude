@@ -148,6 +148,7 @@ jobs:
             --set controlPlane.image.tag="${CP_TAG}" \
             --set spa.image.tag="${SPA_TAG}" \
             --set sessionAgent.image.tag="${SA_TAG}" \
+            --set namespace.create=false \
             --namespace "preview-${BRANCH_SLUG}" \
             --create-namespace \
             --wait --timeout 5m
