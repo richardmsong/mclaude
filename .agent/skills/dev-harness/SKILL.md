@@ -1,3 +1,8 @@
+---
+name: dev-harness
+description: Iteratively build and verify test + monitoring infrastructure for any mclaude component. Audits gaps, implements the next missing category, runs tests, and commits. Run repeatedly until the branch converges to fully-tested.
+---
+
 # Dev Harness
 
 Iteratively build and verify the test + monitoring infrastructure for any mclaude component. Run this skill repeatedly — each session audits what exists, implements the next missing category, runs the tests, and commits. The branch converges to a fully-tested, fully-instrumented component.
@@ -26,6 +31,7 @@ Before doing anything, read these in full. They are the source of truth for what
 - `docs/plan-k8s-integration.md` — architecture, NATS subjects, KV schema, stream-json protocol, session lifecycle, all failure modes
 - `docs/plan-client-architecture.md` — client layers, stores, view models, protocol contract, accumulation algorithm
 - `docs/feature-list.md` — feature IDs and platform support matrix
+- `docs/ui-spec.md` — cross-platform wireframe spec: screens, components, event types, visual states, interaction patterns (required for `views` category)
 
 ---
 
@@ -194,6 +200,8 @@ mclaude-session-agent/
 | `build` | `npm run build` clean, TypeScript strict mode, no type errors |
 | `unit` | EventStore accumulation: feed mock events → assert ConversationModel state for each transcript scenario. AuthStore JWT expiry + refresh loop. SessionStore KV watch → SessionState updates. Deduplication: duplicate sequence numbers skipped. |
 | `component` | ConversationVM actions: sendMessage publishes correct NATS payload, approvePermission publishes correct control_response, interrupt publishes interrupt. PermissionPromptVM: multiple simultaneous pendingControls rendered. |
+| `nats-impl` | Implement the real NATSClient using `nats.ws`. Replace all `throw new Error('not implemented')` stubs. Connect to NATS server URL from config. Implement: `connect`, `disconnect`, `subscribe(subject, cb)`, `publish(subject, data)`, `kvGet(bucket, key)`, `kvWatch(bucket, key, cb)`, `kvPut(bucket, key, value)`. Must work in browser (nats.ws uses WebSocket transport). Use the same in-memory mock from `mocks` category for unit tests — the real implementation is used in `e2e` and production. |
+| `views` | Build all React UI components per `docs/ui-spec.md`. The goal is a complete, usable app. Implement in this order: (1) design tokens (CSS custom properties matching the spec palette), (2) AuthScreen, (3) DashboardScreen (session list + tmux filter chips + FAB + new-session sheet), (4) SessionDetailScreen (nav + det-meta + tabs + input bar), (5) event renderers: UserMessage, AssistantText (markdown), ThinkingBlock (collapsible), ToolCard (tool+result pair with syntax highlighting), AskUserQuestion (interactive radio options), AgentGroup (expandable subagent nesting), SystemEvent, CompactionEvent, DiffView (unified diff with char highlighting), (6) Settings screen, (7) TokenUsage screen (budget bar + chart + breakdown). Wire all components to the stores/viewmodels already built. The app must be fully interactive — not a stub. |
 | `reconnect` | NATS disconnect simulation: EventStore re-subscribes from max(lastSeq+1, replayFromSeq), no duplicate events rendered, no gaps. |
 | `forced-update` | X4: minClientVersion below client version → UI blocked, correct platform message shown. |
 | `monitoring` | Console structured logs for all store operations, error boundaries on all components, Sentry/OTEL error reporting wired. |
@@ -210,6 +218,24 @@ mclaude-web/
     viewmodels/
       conversation-vm.test.ts
       permission-prompt-vm.test.ts
+    transport/
+      nats-client.ts        real NATSClient (nats.ws)
+      nats-client.test.ts   unit tests using in-memory mock
+    components/
+      AuthScreen.tsx
+      DashboardScreen.tsx
+      SessionDetailScreen.tsx
+      events/
+        UserMessage.tsx
+        AssistantText.tsx
+        ThinkingBlock.tsx
+        ToolCard.tsx        (tool_use + tool_result pair)
+        AskUserQuestion.tsx
+        AgentGroup.tsx
+        SystemEvent.tsx
+        DiffView.tsx
+      Settings.tsx
+      TokenUsage.tsx
     testutil/
       mock-nats.ts        in-memory NATS mock
       fixtures.ts         canned SessionState, events, transcripts

@@ -1,3 +1,8 @@
+---
+name: deploy-relay
+description: Cross-compile and deploy the mclaude-relay binary to the remote VM. Use when the user wants to deploy, rebuild, or restart the relay.
+---
+
 # Deploy MClaude Relay
 
 Build and deploy the mclaude-relay binary to a remote VM.
