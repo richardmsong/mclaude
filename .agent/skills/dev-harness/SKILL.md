@@ -64,7 +64,12 @@ Before doing anything, read these in full. They are the source of truth for what
 9. Commit: one commit per category, message: "harness(component): add {category}"
 10. Push to current branch
 11. Re-audit → go to step 4
-12. When audit is clean: print summary, stop
+12. When audit is clean: print summary and stop
+
+The summary must include:
+- **Gaps found** — what was missing or partial and why it mattered
+- **Changes made** — each file changed or created, with a one-line description of what was added
+- **Test count before → after** — e.g. "115 tests → 126 tests, all passing"
 ```
 
 Convergence: each run moves the branch strictly closer to fully-tested. Sessions are disposable — die and restart, re-audit picks up from last push.
