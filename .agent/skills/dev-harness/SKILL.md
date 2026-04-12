@@ -307,9 +307,19 @@ Use `go.opentelemetry.io/otel/sdk/trace/tracetest` (in-memory exporter) for Go t
 
 ---
 
+## Single component
+
+Run directly in the current session — no worktree needed:
+
+```
+/dev-harness spa
+```
+
+Claude runs the audit → implement → test → commit loop inline. The component root is resolved from the repo root (e.g. `mclaude-web/` for `spa`, `mclaude-session-agent/` for `session-agent`). All file edits and test runs happen in-session.
+
 ## Parallel (`all`)
 
-Parallel orchestration is handled outside the skill:
+Only needed when running all components at once. Parallel orchestration is handled outside the skill:
 
 **1. You create the worktrees** (one per component, each on its own branch):
 ```bash
@@ -320,7 +330,7 @@ git worktree add worktrees/spa harness/spa
 git worktree add worktrees/helm harness/helm
 ```
 
-**2. You ask Claude to spawn sessions** — Claude calls `create_session` on each worktree with `/dev-harness {component}` as the initial prompt. All five sessions start immediately in parallel.
+**2. You spawn sessions** — call `create_session` on each worktree with `/dev-harness {component}` as the initial prompt. All five sessions start immediately in parallel.
 
 Each session runs independently in its worktree. No coordination needed — components don't share branches. When all sessions reach audit-clean, open one PR per branch.
 
