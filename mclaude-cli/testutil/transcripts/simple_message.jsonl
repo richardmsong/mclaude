@@ -1,0 +1,7 @@
+{"type":"system","subtype":"init","skills":[],"tools":["Bash","Read"],"model":"claude-opus-4-6"}
+{"type":"system","subtype":"session_state_changed","state":"running"}
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":" there!"}}}
+{"type":"assistant","content":[{"type":"text","text":"Hello there!"}],"model":"claude-opus-4-6","usage":{"input_tokens":10,"output_tokens":5}}
+{"type":"system","subtype":"session_state_changed","state":"idle"}
+{"type":"result","subtype":"success","usage":{"input_tokens":10,"output_tokens":5},"duration_ms":500}
