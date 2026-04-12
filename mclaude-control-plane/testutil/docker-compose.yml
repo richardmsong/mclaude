@@ -1,0 +1,21 @@
+services:
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-p", "4222"]
+    ports:
+      - "4222"
+      - "8222"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mclaude_test
+      POSTGRES_USER: mclaude
+      POSTGRES_PASSWORD: mclaude
+    ports:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mclaude -d mclaude_test"]
+      interval: 1s
+      timeout: 5s
+      retries: 30
