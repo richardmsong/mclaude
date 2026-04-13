@@ -1,6 +1,6 @@
 ---
 name: feature-change
-description: Universal entry point for any change to the mclaude app — new features, bug fixes, refactors, config changes, anything. Always starts with the spec. If the spec already describes correct behavior, skip to /dev-harness. If not, update the spec first.
+description: Universal entry point for any change to the mclaude app — new features, bug fixes, refactors, config changes, anything. Always starts with the spec. If the spec already describes correct behavior, skip to the dev-harness agent. If not, run /spec-change first.
 ---
 
 # Feature Change
@@ -28,17 +28,17 @@ Examples:
 ```
 1. Read the relevant spec docs
 2. Determine the spec relationship:
-   A. Spec is correct, code is wrong (bug)     → skip to step 5
-   B. Spec doesn't describe this yet (feature) → update spec first (step 3)
-   C. Spec needs updating (behavior change)    → update spec first (step 3)
-   D. Spec and code will both change (refactor) → update spec if behavior changes, otherwise skip to step 5
-3. Update the spec doc (see below)
-4. Commit: spec only, no code
-   git commit -m "spec(<area>): <what changed and why>"
-5. /dev-harness <component> for each affected component
+   A. Spec is correct, code is wrong (bug)      → skip to step 5
+   B. Spec doesn't describe this yet (feature)  → run /spec-change (step 3)
+   C. Spec needs updating (behavior change)     → run /spec-change (step 3)
+   D. Spec and code will both change (refactor) → run /spec-change if behavior changes, otherwise skip to step 5
+3. /spec-change <description> — updates spec docs and commits them
+4. (handled by /spec-change)
+5. Invoke the dev-harness agent for each affected component:
+   Agent(subagent_type="dev-harness", prompt="<component> — <brief description>")
 ```
 
-This order is mandatory. The spec always reflects intended behavior. If the code doesn't match the spec, the code is wrong — fix the code. If the spec doesn't describe the desired behavior, fix the spec first, then fix the code.
+This order is mandatory. The spec always reflects intended behavior. If the code doesn't match the spec, the code is wrong — fix the code. If the spec doesn't describe the desired behavior, run `/spec-change` first, then invoke the dev-harness agent.
 
 ---
 
@@ -144,70 +144,38 @@ Never bundle spec and code in the same commit. The commit message must say what 
 
 ---
 
-## Step 5 — /dev-harness per component
+## Step 5 — dev-harness agent per component
 
-For each affected component:
+For each affected component, invoke the dev-harness agent:
+
 ```
-/dev-harness <component>
+Agent(subagent_type="dev-harness", prompt="<component> — <brief description of what was specced>")
 ```
 
-dev-harness reads the spec, audits Phase 1 (spec → code) and Phase 2 (code → tests), implements gaps, runs tests, and commits. See the dev-harness skill.
+The agent reads the spec, audits Phase 1 (spec → code) and Phase 2 (code → tests), implements gaps, runs tests, and commits. It runs to convergence independently.
 
 ---
 
-## Step 5b — Spec evaluator loop (mandatory after every dev-harness)
+## Step 5b — Spec evaluator loop (mandatory after every dev-harness pass)
 
-After each dev-harness run, spin up a spec evaluator agent to exhaustively compare the spec against the actual code. The evaluator loops until it finds zero differences.
+After the dev-harness agent completes, run the spec-evaluator to exhaustively compare the spec against the actual code. Loop until the evaluator returns CLEAN.
 
 ```
 Loop:
-  1. Launch spec evaluator agent:
-     - Read all relevant spec docs in full
-     - Read all relevant component code in full
-     - Produce an exhaustive diff: for every spec statement, does the code implement it?
-     - Include: missing features, wrong behavior, missing env vars, missing K8s resources,
-       missing NATS subjects/handlers, wrong field names, wrong error handling, etc.
+  1. /spec-evaluator <component>
      - Output: list of gaps (or "CLEAN" if none)
   2. If gaps found:
-     → /dev-harness <component> targeting each gap
+     → Agent(subagent_type="dev-harness", prompt="<component> — fix these gaps: <list>")
      → go to step 1
   3. If CLEAN: proceed to Step 6
 ```
 
-**Evaluator agent prompt template:**
-
-```
-You are a spec compliance auditor for the mclaude project.
-
-Read the spec doc(s) for <component>:
-  <list spec docs>
-
-Read all source files under <component root>.
-
-Produce an exhaustive list of gaps — places where the spec says something should exist
-or behave a certain way, but the code does not implement it. Be specific: quote the spec
-statement and describe what the code does or doesn't do.
-
-Do NOT list things the spec is silent about. Only list cases where spec says X and code
-does not implement X.
-
-**Every gap is required to be fixed. Do not categorize any gap as "deferred", "low priority",
-"optional", or "future work". If the spec says it, it must be implemented. The only exception
-is if the spec explicitly marks something as optional or future.**
-
-Output format:
-  CLEAN                  (if zero gaps)
-  GAP: <spec quote> → <what code is missing or wrong>
-  GAP: ...
-```
-
 **Rules:**
 - Never report a task complete until the evaluator returns CLEAN
-- The evaluator must read both the spec AND the code — not just one
-- One failing evaluator gap = one more dev-harness pass
-- Evaluator runs after EVERY dev-harness, not just the first
-- **Never deprioritize any gap** — every gap in the evaluator output goes to dev-harness immediately
-- If a gap cannot be implemented due to environment constraints (e.g., RWX PVC on a cluster that only supports RWO), update the spec to reflect the constraint, then re-evaluate
+- One failing evaluator gap = one more dev-harness agent pass
+- Evaluator runs after EVERY dev-harness pass, not just the first
+- **Never deprioritize any gap** — every gap goes to dev-harness immediately
+- If a gap cannot be implemented due to environment constraints, run `/spec-change` to update the spec, then re-evaluate
 
 ---
 
