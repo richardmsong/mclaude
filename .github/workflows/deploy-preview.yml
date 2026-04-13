@@ -64,7 +64,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: mclaude-control-plane/go.mod
-          cache-dependency-path: mclaude-control-plane/go.sum
+          cache: false
 
       - name: Build binary
         working-directory: mclaude-control-plane
@@ -133,7 +133,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: mclaude-session-agent/go.mod
-          cache-dependency-path: mclaude-session-agent/go.sum
+          cache: false
 
       - name: Build binary
         working-directory: mclaude-session-agent
