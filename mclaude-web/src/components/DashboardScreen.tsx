@@ -182,16 +182,68 @@ export function DashboardScreen({
           <div style={{
             display: 'flex',
             flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
             height: '100%',
-            gap: 8,
-            color: 'var(--text2)',
+            padding: '16px 0',
           }}>
-            <div style={{ fontSize: 18, fontWeight: 600, color: 'var(--text)' }}>No Sessions</div>
-            <div style={{ fontSize: 14 }}>
-              {activeGroup !== 'all' ? 'No sessions in this group' : 'Tap + to start a session'}
-            </div>
+            {activeGroup === 'all' && projects.length > 0 ? (
+              <>
+                <div style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.5px',
+                  color: 'var(--text2)',
+                  padding: '0 16px 8px',
+                }}>
+                  Your Projects
+                </div>
+                {projects.map(p => (
+                  <button
+                    key={p.id}
+                    onClick={async () => {
+                      try {
+                        const sessionId = await sessionListVM.createSession(p.id, 'main', 'new-session')
+                        onSelectSession(sessionId)
+                      } catch {
+                        // session-agent not available
+                      }
+                    }}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      width: '100%',
+                      padding: '12px 16px',
+                      borderBottom: '1px solid var(--border)',
+                      background: 'none',
+                      textAlign: 'left',
+                      gap: 10,
+                    }}
+                  >
+                    <span style={{ fontSize: 16 }}>📁</span>
+                    <span style={{ flex: 1, color: 'var(--text)', fontSize: 15, fontWeight: 500 }}>{p.name}</span>
+                    <span style={{ color: 'var(--text3)', fontSize: 18 }}>›</span>
+                  </button>
+                ))}
+                <div style={{ fontSize: 14, color: 'var(--text2)', padding: '12px 16px' }}>
+                  Tap + to start a session
+                </div>
+              </>
+            ) : (
+              <div style={{
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                color: 'var(--text2)',
+              }}>
+                <div style={{ fontSize: 18, fontWeight: 600, color: 'var(--text)' }}>No Sessions</div>
+                <div style={{ fontSize: 14 }}>
+                  {activeGroup !== 'all' ? 'No sessions in this group' : 'Tap + to start a Claude session'}
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           displayed.map(({ session, projectName }) => (
@@ -261,15 +313,13 @@ export function DashboardScreen({
           sessionListVM={sessionListVM}
           onClose={() => setShowNewProject(false)}
           onCreated={async projectId => {
-            // If this is now the only project, auto-create a session in it
-            if (projects.length === 0) {
-              try {
-                const sessionId = await sessionListVM.createSession(projectId, 'main', 'new-session')
-                localStorage.setItem(LAST_PROJECT_KEY, projectId)
-                onSelectSession(sessionId)
-              } catch {
-                // session store will reflect the project
-              }
+            // Always navigate into the new project by starting a session in it
+            try {
+              const sessionId = await sessionListVM.createSession(projectId, 'main', 'new-session')
+              localStorage.setItem(LAST_PROJECT_KEY, projectId)
+              onSelectSession(sessionId)
+            } catch {
+              // session-agent not available — project was still created, user can tap it later
             }
           }}
         />

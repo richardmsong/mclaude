@@ -89,14 +89,19 @@ export function App() {
     return new SessionListVM(sessionStore, heartbeatMonitor, natsClient, authState.userId)
   }, [sessionStore, heartbeatMonitor, authState.userId])
 
-  // First-run: auto-create default project + session
+  // First-run: auto-create session if no sessions exist (handles seeded projects with no sessions)
   const [initialMessage, setInitialMessage] = useState<string | null>(null)
   useEffect(() => {
     if (!sessionListVM) return
     const timer = setTimeout(async () => {
-      if (sessionListVM.projects.length > 0) return
+      const projs = sessionListVM.projects
+      const totalSessions = projs.reduce((sum, p) => sum + p.sessions.length, 0)
+      if (totalSessions > 0) return  // sessions already exist — nothing to do
       try {
-        const projectId = await sessionListVM.createProject('Default')
+        // Use existing project or create a default one
+        const projectId = projs.length > 0
+          ? projs[0]!.id
+          : await sessionListVM.createProject('Default')
         const sessionId = await sessionListVM.createSession(projectId, 'main', 'Getting Started')
         setInitialMessage(
           "Hi! I'm Claude. You're in MClaude — a real-time coding environment powered by Claude Code.\n\n" +
@@ -109,7 +114,7 @@ export function App() {
         )
         navigate(`s/${sessionId}`)
       } catch {
-        // server unavailable — user can create manually
+        // server unavailable (e.g. no session-agent) — user can create manually
       }
     }, 1000)
     return () => clearTimeout(timer)
