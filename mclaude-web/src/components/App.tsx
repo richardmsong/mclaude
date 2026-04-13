@@ -195,7 +195,7 @@ export function App() {
     const serverUrl = window.location.origin
     const ac = new AuthClient(serverUrl)
     const freshStore = new AuthStore(ac, natsClient)
-    await freshStore.login(email || 'user', password)
+    await freshStore.login(email, password)
     const tokens = ac.getStoredTokens()
     if (!tokens) throw new Error('Login did not return tokens')
     // Use natsUrl from login response; fall back to ws(s)://host/nats

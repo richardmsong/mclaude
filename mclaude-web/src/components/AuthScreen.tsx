@@ -51,9 +51,10 @@ export function AuthScreen({ onConnect, error }: AuthScreenProps) {
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <input
             type="email"
-            placeholder="Email (optional)"
+            placeholder="Email"
             value={email}
             onChange={e => setEmail(e.target.value)}
+            required
             style={inputStyle}
           />
           <input
@@ -74,7 +75,7 @@ export function AuthScreen({ onConnect, error }: AuthScreenProps) {
           <button
             type="submit"
             data-testid="connect-button"
-            disabled={loading || !password.trim()}
+            disabled={loading || !password.trim() || !email.trim()}
             style={{
               padding: '12px 0',
               background: 'var(--blue)',
