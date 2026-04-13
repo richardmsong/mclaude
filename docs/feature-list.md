@@ -114,3 +114,10 @@ Future: Figma designs linked per feature.
 | mclaude-cli | Print `mclaude: server requires client version ≥ {min}, you have {current}. Run: brew upgrade mclaude` and exit 1. |
 
 `minClientVersion` is set in control-plane config and returned on the auth login response and on a `GET /version` endpoint (no auth required). Clients check it on startup and on every reconnect. When a breaking mclaude version ships, bump `minClientVersion` in the control-plane deployment.
+
+
+## Infrastructure
+
+| # | Feature | Description |
+|---|---------|-------------|
+| I1 | Tailscale ExternalDNS | ExternalDNS with Tailscale provider; preview Ingresses get MagicDNS hostnames resolving on any Tailnet device. See `docs/spec-tailscale-dns.md`. |
