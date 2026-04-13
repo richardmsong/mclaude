@@ -46,7 +46,7 @@ function renderBlock(block: Block, turn: Turn, allTurns: Turn[], onApprove: (id:
           />
         )
       }
-      return <ToolCard key={block.id} block={block} />
+      return <ToolCard key={block.id} block={block} turn={turn} />
     }
 
     case 'tool_result':

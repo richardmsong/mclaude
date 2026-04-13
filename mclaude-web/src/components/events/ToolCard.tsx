@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import type { ToolUseBlock } from '@/types'
+import type { ToolUseBlock, Turn } from '@/types'
 import { DiffView } from './DiffView'
+import { EventDetailModal } from './EventDetailModal'
 
 const TOOL_ICONS: Record<string, string> = {
   Bash: '💻',
@@ -140,15 +141,21 @@ function formatInput(toolName: string, input: unknown): { summary: string; isDif
 
 interface ToolCardProps {
   block: ToolUseBlock
+  turn?: Turn
 }
 
-export function ToolCard({ block }: ToolCardProps) {
+export function ToolCard({ block, turn }: ToolCardProps) {
   const [showDetail, setShowDetail] = useState(false)
+  const [showModal, setShowModal] = useState(false)
   const { summary, isDiff, diff } = formatInput(block.name, block.fullInput)
   const isBash = block.name === 'Bash' || block.name === '!'
   const isError = block.result?.isError
 
   return (
+    <>
+    {showModal && turn && (
+      <EventDetailModal block={block} turn={turn} onClose={() => setShowModal(false)} />
+    )}
     <div style={{
       background: 'var(--surf)',
       border: '1px solid var(--border)',
@@ -156,9 +163,9 @@ export function ToolCard({ block }: ToolCardProps) {
       overflow: 'hidden',
       margin: '4px 0',
     }}>
-      {/* Tool header + body */}
+      {/* Tool header + body — tap to open detail modal */}
       <div
-        onClick={() => setShowDetail(s => !s)}
+        onClick={() => turn ? setShowModal(true) : setShowDetail(s => !s)}
         style={{
           padding: '8px 12px',
           cursor: 'pointer',
@@ -232,5 +239,6 @@ export function ToolCard({ block }: ToolCardProps) {
         </div>
       )}
     </div>
+    </>
   )
 }
