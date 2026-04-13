@@ -287,61 +287,46 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 		dataDir = "/data"
 	}
 
-	// Step 1 (spec): Check whether /data/repo exists.
-	// If it does NOT exist this is a scratch project (no GIT_URL configured) —
-	// skip all git/worktree operations and set cwd directly under dataDir.
 	repoPath := filepath.Join(dataDir, "repo")
-	scratch := !dirExists(repoPath)
 
-	var (
-		branch       string
-		branchSlug   string
-		worktreePath string
-		cwd          string
-	)
-
-	if scratch {
-		// Scratch project: no bare repo — skip steps 3–7.
-		// branch and worktree remain empty strings; cwd is /data/{req.CWD}.
-		if req.CWD != "" {
-			cwd = filepath.Join(dataDir, req.CWD)
+	// Step 1 (spec): Derive branch.
+	// If branch is empty, slugify name. If both are empty, use session-{shortId}.
+	if req.Branch == "" {
+		if req.Name != "" {
+			req.Branch = SlugifyBranch(req.Name)
 		} else {
-			cwd = dataDir
+			req.Branch = "session-" + sessionID[:8]
 		}
-	} else {
-		// Git project: full worktree flow (steps 3–9).
-		if req.Branch == "" {
-			req.Branch = "main"
-		}
-		branch = req.Branch
-		branchSlug = SlugifyBranch(branch)
-		worktreePath = filepath.Join(dataDir, "worktrees", branchSlug)
-		cwd = worktreePath
-		if req.CWD != "" {
-			cwd = filepath.Join(worktreePath, req.CWD)
-		}
+	}
 
-		// Check for worktree collision (step 4).
-		a.mu.RLock()
-		collision := a.worktreeInUse(branchSlug)
-		a.mu.RUnlock()
+	branch := req.Branch
+	branchSlug := SlugifyBranch(branch)
+	worktreePath := filepath.Join(dataDir, "worktrees", branchSlug)
+	cwd := worktreePath
+	if req.CWD != "" {
+		cwd = filepath.Join(worktreePath, req.CWD)
+	}
 
-		if collision && !req.JoinWorktree {
-			// Step 5: error if not joining.
-			a.reply(msg, nil, "worktree already in use for branch "+req.Branch)
+	// Check for worktree collision (step 4).
+	a.mu.RLock()
+	collision := a.worktreeInUse(branchSlug)
+	a.mu.RUnlock()
+
+	if collision && !req.JoinWorktree {
+		// Step 5: error if not joining.
+		a.reply(msg, nil, "worktree already in use for branch "+req.Branch)
+		return
+	}
+
+	// Step 7: create worktree if not joining an existing one.
+	if !collision {
+		if err := a.gitWorktreeAdd(repoPath, worktreePath, branch); err != nil {
+			a.log.Error().Err(err).
+				Str("branch", branch).
+				Str("worktreePath", worktreePath).
+				Msg("git worktree add failed")
+			a.reply(msg, nil, "git worktree add: "+err.Error())
 			return
-		}
-
-		// Step 7: create worktree if not joining an existing one.
-		if !collision {
-			if err := a.gitWorktreeAdd(repoPath, worktreePath, branch); err != nil {
-				a.log.Error().Err(err).
-					Str("branch", branch).
-					Str("worktreePath", worktreePath).
-					Msg("git worktree add failed")
-				a.reply(msg, nil, "git worktree add: "+err.Error())
-				return
-			}
 		}
 	}
 
@@ -356,7 +341,7 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 		State:           StateIdle,
 		StateSince:      now,
 		CreatedAt:       now,
-		JoinWorktree:    req.JoinWorktree && !scratch,
+		JoinWorktree:    req.JoinWorktree,
 		PendingControls: make(map[string]any),
 	}
 
@@ -472,17 +457,15 @@ func (a *Agent) handleDelete(msg *nats.Msg) {
 			effectiveDataDir = "/data"
 		}
 		repoPath := filepath.Join(effectiveDataDir, "repo")
-		if dirExists(repoPath) {
-			a.mu.RLock()
-			lastUser := !a.worktreeInUse(st.Worktree)
-			a.mu.RUnlock()
-			if lastUser {
-				worktreePath := filepath.Join(effectiveDataDir, "worktrees", st.Worktree)
-				if err := a.gitWorktreeRemove(repoPath, worktreePath); err != nil {
-					a.log.Warn().Err(err).
-						Str("worktree", st.Worktree).
-						Msg("git worktree remove failed (non-fatal)")
-				}
+		a.mu.RLock()
+		lastUser := !a.worktreeInUse(st.Worktree)
+		a.mu.RUnlock()
+		if lastUser {
+			worktreePath := filepath.Join(effectiveDataDir, "worktrees", st.Worktree)
+			if err := a.gitWorktreeRemove(repoPath, worktreePath); err != nil {
+				a.log.Warn().Err(err).
+					Str("worktree", st.Worktree).
+					Msg("git worktree remove failed (non-fatal)")
 			}
 		}
 	}
