@@ -32,8 +32,8 @@ describe('SessionListVM', () => {
     })
 
     it('returns projects with their sessions', () => {
-      mockNats.kvSet('mclaude-projects', 'user-1/project-1', makeProjectKVState({ id: 'project-1', name: 'Alpha' }))
-      mockNats.kvSet('mclaude-sessions', 'user-1/project-1/session-1', makeSessionKVState({ id: 'session-1', projectId: 'project-1' }))
+      mockNats.kvSet('mclaude-projects', 'user-1.project-1', makeProjectKVState({ id: 'project-1', name: 'Alpha' }))
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({ id: 'session-1', projectId: 'project-1' }))
 
       const projects = vm.projects
       expect(projects).toHaveLength(1)
@@ -111,7 +111,7 @@ describe('SessionListVM', () => {
 
   describe('deleteSession', () => {
     it('publishes to the session project delete subject', async () => {
-      mockNats.kvSet('mclaude-sessions', 'user-1/project-1/session-1', makeSessionKVState({
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({
         id: 'session-1', projectId: 'project-1',
       }))
       sessionStore.startWatching()
@@ -134,7 +134,7 @@ describe('SessionListVM', () => {
       const calls: number[] = []
       vm.onProjectsChanged(projects => calls.push(projects.length))
 
-      mockNats.kvSet('mclaude-projects', 'user-1/project-1', makeProjectKVState())
+      mockNats.kvSet('mclaude-projects', 'user-1.project-1', makeProjectKVState())
       expect(calls.length).toBeGreaterThan(0)
     })
 
@@ -143,7 +143,7 @@ describe('SessionListVM', () => {
       const unsub = vm.onProjectsChanged(() => calls.push(1))
       unsub()
 
-      mockNats.kvSet('mclaude-projects', 'user-1/project-1', makeProjectKVState())
+      mockNats.kvSet('mclaude-projects', 'user-1.project-1', makeProjectKVState())
       expect(calls).toHaveLength(0)
     })
   })
@@ -154,7 +154,7 @@ describe('SessionListVM', () => {
       vm.onProjectsChanged(() => calls.push(1))
       vm.destroy()
 
-      mockNats.kvSet('mclaude-projects', 'user-1/project-1', makeProjectKVState())
+      mockNats.kvSet('mclaude-projects', 'user-1.project-1', makeProjectKVState())
       expect(calls).toHaveLength(0)
     })
   })
