@@ -1,15 +1,11 @@
 # Runtime: node base for claude CLI, Go binary copied from build context.
+# claude-code installed via native installer (pre-built binary download, not npm compile).
 FROM node:22-alpine
-# Re-declare after FROM — ARGs before FROM are only scoped to FROM itself.
 ARG TARGETARCH=amd64
 
-# Install claude CLI (runs under QEMU for arm64 — Go binary is pre-built natively).
-ARG CLAUDE_VERSION=latest
-RUN if [ "$CLAUDE_VERSION" = "latest" ]; then \
-      npm install -g @anthropic-ai/claude-code; \
-    else \
-      npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION}; \
-    fi
+RUN apk add --no-cache curl bash && \
+    curl -fsSL https://claude.ai/install.sh | bash && \
+    apk del curl bash
 
 COPY session-agent-${TARGETARCH} /usr/local/bin/session-agent
 
