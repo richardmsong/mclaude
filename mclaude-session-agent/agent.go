@@ -46,15 +46,15 @@ func NewAgent(nc *nats.Conn, userID, projectID, claudePath string, log zerolog.L
 
 	ctx := context.Background()
 
-	sessKV, err := js.KeyValue(ctx, kvBucketSessions)
+	sessKV, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: kvBucketSessions, History: 1})
 	if err != nil {
 		return nil, fmt.Errorf("sessions KV: %w", err)
 	}
-	projKV, err := js.KeyValue(ctx, kvBucketProjects)
+	projKV, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: kvBucketProjects, History: 1})
 	if err != nil {
 		return nil, fmt.Errorf("projects KV: %w", err)
 	}
-	hbKV, err := js.KeyValue(ctx, kvBucketHeartbeats)
+	hbKV, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: kvBucketHeartbeats, History: 1})
 	if err != nil {
 		return nil, fmt.Errorf("heartbeats KV: %w", err)
 	}
