@@ -1,12 +1,15 @@
 FROM golang:1.25-alpine AS builder
 
+# TARGETARCH is injected by docker buildx (e.g. amd64, arm64).
+# Setting GOARCH lets Go cross-compile natively on the host without QEMU.
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -o /control-plane .
+    --mount=type=cache,id=go-build-${TARGETARCH},target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -o /control-plane .
 
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates
