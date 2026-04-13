@@ -162,17 +162,13 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-body-size: "8m"
-  ## Hostname for the platform (e.g. mclaude.example.com)
+  ## Hostname for the platform (e.g. preview-foo.mclaude.internal)
   host: ""
   tls: []
   # tls:
   #   - secretName: mclaude-tls
   #     hosts:
   #       - mclaude.example.com
-  ## ExternalDNS integration — annotates the Ingress so ExternalDNS registers
-  ## the hostname as an A record in the Tailnet via the Tailscale provider.
-  externalDns:
-    enabled: true
 
 ## ---------------------------------------------------------------------------
 ## Session Agent pod template (control-plane instantiates per project)
