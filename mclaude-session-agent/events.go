@@ -49,7 +49,9 @@ type initEvent struct {
 	Type        string   `json:"type"`
 	Subtype     string   `json:"subtype"`
 	SessionID   string   `json:"session_id"`
+	Skills      []string `json:"skills"`
 	Tools       []string `json:"tools"`
+	Agents      []string `json:"agents"`
 	MCPServers  []any    `json:"mcp_servers"`
 	Model       string   `json:"model"`
 	PermMode    string   `json:"permissionMode"`
