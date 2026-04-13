@@ -5,6 +5,8 @@ ARG TARGETARCH=amd64
 
 RUN apk add --no-cache curl bash && \
     curl -fsSL https://claude.ai/install.sh | bash && \
+    cp /root/.claude/local/claude /usr/local/bin/claude && \
+    chmod +x /usr/local/bin/claude && \
     apk del curl bash
 
 COPY session-agent-${TARGETARCH} /usr/local/bin/session-agent
