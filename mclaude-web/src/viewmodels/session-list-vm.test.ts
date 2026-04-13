@@ -54,6 +54,21 @@ describe('SessionListVM', () => {
       const session = vm.projects[0]!.sessions[0]!
       expect(session.cwd).toBe('/home/user/work/myproject')
     })
+
+    it('P6: healthy is false when no heartbeat seen', () => {
+      mockNats.kvSet('mclaude-projects', 'user-1.project-1', makeProjectKVState({ id: 'project-1', name: 'Alpha' }))
+      heartbeat.start()
+      const project = vm.projects[0]!
+      expect(project.healthy).toBe(false)
+    })
+
+    it('P6: healthy is true after recent heartbeat arrives', () => {
+      mockNats.kvSet('mclaude-projects', 'user-1.project-1', makeProjectKVState({ id: 'project-1', name: 'Alpha' }))
+      heartbeat.start()
+      const now = new Date().toISOString()
+      mockNats.kvSet('mclaude-heartbeats', 'user-1.project-1', { ts: now })
+      expect(vm.projects[0]!.healthy).toBe(true)
+    })
   })
 
   describe('createProject', () => {
