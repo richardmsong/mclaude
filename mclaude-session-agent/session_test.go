@@ -102,7 +102,7 @@ func startTestSession(t *testing.T, transcriptName, sessionID string) (*Session,
 	pc := &publishCapture{}
 	kc := &kvCapture{}
 
-	if err := sess.start(mockClaude, pc.publish, kc.write); err != nil {
+	if err := sess.start(mockClaude, false, pc.publish, kc.write); err != nil {
 		t.Fatalf("session.start: %v", err)
 	}
 	t.Cleanup(func() {
