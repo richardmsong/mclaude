@@ -35,25 +35,27 @@ type LoginResponse struct {
 
 // Server holds application-wide dependencies.
 type Server struct {
-	db         *DB
-	accountKP  nkeys.KeyPair
-	natsURL    string // internal broker URL (used by session-agent, not returned to browser clients)
-	natsWsURL  string // external WebSocket URL returned to browser clients on login; empty = client derives from origin
-	jwtExpiry  time.Duration
-	adminToken string // break-glass admin bearer token
+	db             *DB
+	accountKP      nkeys.KeyPair
+	natsURL        string // internal broker URL (used by session-agent, not returned to browser clients)
+	natsWsURL      string // external WebSocket URL returned to browser clients on login; empty = client derives from origin
+	jwtExpiry      time.Duration
+	adminToken     string // break-glass admin bearer token
+	k8sProvisioner *K8sProvisioner // nil when not running in a Kubernetes cluster
 }
 
 // NewServer constructs a Server. accountKP must be an account-level NKey pair —
 // it signs per-user JWTs. natsWsURL is the WebSocket URL returned to browser clients
 // on login; if empty the client derives it from window.location.origin.
-func NewServer(db *DB, accountKP nkeys.KeyPair, natsURL, natsWsURL string, jwtExpiry time.Duration, adminToken string) *Server {
+func NewServer(db *DB, accountKP nkeys.KeyPair, natsURL, natsWsURL string, jwtExpiry time.Duration, adminToken string, k8s *K8sProvisioner) *Server {
 	return &Server{
-		db:         db,
-		accountKP:  accountKP,
-		natsURL:    natsURL,
-		natsWsURL:  natsWsURL,
-		jwtExpiry:  jwtExpiry,
-		adminToken: adminToken,
+		db:             db,
+		accountKP:      accountKP,
+		natsURL:        natsURL,
+		natsWsURL:      natsWsURL,
+		jwtExpiry:      jwtExpiry,
+		adminToken:     adminToken,
+		k8sProvisioner: k8s,
 	}
 }
 

@@ -155,7 +155,7 @@ func TestMetrics_HTTPLatencyHistogramRegistered(t *testing.T) {
 }
 
 func TestMetrics_AdminMetricsEndpointServes(t *testing.T) {
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0, "token")
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0, "token", nil)
 	mux := srv.AdminMux()
 
 	// Record some metrics so there's something to serve.
