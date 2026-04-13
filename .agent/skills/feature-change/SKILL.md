@@ -26,9 +26,6 @@ Examples:
 ## The Loop
 
 ```
-0. Touch the spec-reviewed marker to unlock code writes for this session:
-   touch .claude/.feature-ok
-
 1. Read the relevant spec docs
 2. Determine the spec relationship:
    A. Spec is correct, code is wrong (bug)     → skip to step 5

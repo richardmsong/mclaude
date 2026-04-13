@@ -19,6 +19,17 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".agent/hooks/spec-session.sh"
+          }
+        ]
+      }
     ]
   }
 }

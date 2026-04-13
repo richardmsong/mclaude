@@ -50,6 +50,9 @@ Read these in full before writing any code. The spec is the source of truth — 
 ## The Loop
 
 ```
+0. Touch the code-write marker to authorize source code edits for this session:
+   touch .claude/.feature-ok
+
 1. Read ALL relevant spec docs
 
 2. Phase 1 — Spec compliance audit (spec → production code)

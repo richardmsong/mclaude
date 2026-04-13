@@ -1,16 +1,26 @@
 #!/bin/bash
-# Spec-first guard: block source code edits unless /feature-change has been run recently.
-# Fires on Edit and Write tool use. Checks for .claude/.feature-ok marker touched by
-# the /feature-change skill. Marker expires after 6 hours.
+# PreToolUse guard: block source code edits unless this session has been authorized
+# by running /dev-harness (which runs `touch .claude/.feature-ok`, intercepted by
+# spec-session.sh PostToolUse hook to create a per-session .feature-ok-{session_id}).
 
 set -euo pipefail
 
 INPUT=$(cat)
+
 FILE_PATH=$(python3 -c "
 import sys, json
 try:
     d = json.load(sys.stdin)
     print(d.get('tool_input', {}).get('file_path', ''))
+except:
+    print('')
+" <<< "$INPUT" 2>/dev/null || echo "")
+
+SESSION_ID=$(python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('session_id', ''))
 except:
     print('')
 " <<< "$INPUT" 2>/dev/null || echo "")
@@ -35,8 +45,6 @@ esac
 REPO_DIR=$(git -C "$(dirname "$FILE_PATH")" rev-parse --show-toplevel 2>/dev/null || echo "")
 [[ -z "$REPO_DIR" ]] && exit 0
 
-MARKER="$REPO_DIR/.claude/.feature-ok"
-
 deny() {
   python3 -c "
 import json, sys
@@ -50,21 +58,26 @@ print(json.dumps({
   exit 0
 }
 
-# Check marker exists and is < 6 hours old
-if [[ -f "$MARKER" ]]; then
-  MARKER_MTIME=$(stat -f %m "$MARKER" 2>/dev/null || echo 0)
-  MARKER_AGE=$(( $(date +%s) - MARKER_MTIME ))
-  if [[ $MARKER_AGE -lt 21600 ]]; then
-    exit 0
+# Check per-session marker (created by spec-session.sh PostToolUse hook)
+if [[ -n "$SESSION_ID" ]]; then
+  MARKER="$REPO_DIR/.claude/.feature-ok-$SESSION_ID"
+  if [[ -f "$MARKER" ]]; then
+    MARKER_AGE=$(( $(date +%s) - $(stat -f %m "$MARKER" 2>/dev/null || echo 0) ))
+    if [[ $MARKER_AGE -lt 21600 ]]; then
+      exit 0
+    fi
   fi
 fi
 
-deny "SPEC-FIRST VIOLATION: /feature-change has not been run for this change.
+deny "SPEC-FIRST VIOLATION: this session is not authorized to write source code.
 
 File: $FILE_PATH
+Session: ${SESSION_ID:-unknown}
 
-REQUIRED: Run /feature-change <description> before writing implementation code.
-  - New feature: /feature-change updates spec first, then calls /dev-harness
-  - Bug fix (spec already correct): /feature-change verifies spec, then calls /dev-harness
+REQUIRED: Source code writes must go through /dev-harness, which reads the spec
+and implements only what the spec describes.
 
-Running /feature-change will touch .claude/.feature-ok and unlock code writes for 6 hours."
+  /feature-change <description>   — update spec if needed, then calls /dev-harness
+  /dev-harness <component>        — implement spec gaps directly
+
+/dev-harness authorizes this session (session-scoped, expires after 6 hours or push)."
