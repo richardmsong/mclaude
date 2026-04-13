@@ -18,14 +18,29 @@ helm uninstall "{release}" -n mclaude-system
 ```
 If that fails, use `helm get manifest {release} -n mclaude-system` to get the full resource list first.
 
-## UI changes — spec first, then dev-harness
+## All app changes — /feature-change first
 
-**Never write UI implementation code directly.**
-Order: update `docs/ui-spec.md` → commit spec → run `/dev-harness spa` → it implements and tests.
+**Never write implementation code directly for any app change.**
+Every change — feature, bug fix, refactor, config, UI tweak, backend change — goes through `/feature-change` first.
+
+The loop: `/feature-change` checks the spec → updates spec if needed → commits spec → calls `/dev-harness <component>` → implements and tests.
+
+For bug fixes where the spec is already correct, `/feature-change` skips the spec update and goes straight to `/dev-harness`.
 
 ## Polling — keep checking until done
 
 After triggering any async operation (CI run, pod rollout), **keep polling** until it resolves. Do not summarize and hand back to the user mid-flight. Check `gh run view` + `kubectl get pods` on every cycle.
+
+## Parallelism — use subagents for independent work
+
+**When requests can be parallelized, use subagents extensively rather than handling them sequentially.**
+
+Examples of work that should run in parallel via `Agent(run_in_background=true)`:
+- Spec evaluator + CI polling while a build runs
+- Multiple component audits or implementations at the same time
+- Research tasks (reading spec docs, reading code, web searches) that don't depend on each other
+
+Launch multiple agents in a single message when their work is independent. Don't serialize tasks that can overlap.
 
 ## Before debugging a config mismatch — read the source
 
