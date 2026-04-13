@@ -173,7 +173,7 @@ jobs:
           echo "spa:           ghcr.io/mclaude-project/mclaude-spa:${SPA_TAG}"
           echo "session-agent: ghcr.io/mclaude-project/mclaude-session-agent:${SA_TAG}"
           TS_IP=$(tailscale ip -4 2>/dev/null | head -1)
-          PREVIEW_HOST="preview-${BRANCH_SLUG}.${TS_IP}.nip.io"
+          PREVIEW_HOST="preview-${BRANCH_SLUG}.${TS_IP}.sslip.io"
           echo "preview URL:   http://${PREVIEW_HOST}"
           echo "PREVIEW_HOST=${PREVIEW_HOST}" >> "$GITHUB_ENV"
 

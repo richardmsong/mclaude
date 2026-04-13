@@ -217,7 +217,7 @@ After CI deploys the preview, use the **Playwright MCP** to validate the golden 
 
 ```
 Validation checklist for spa changes:
-1. Navigate to the preview URL (format: http://preview-{branch-slug}.{tailscale-ip}.nip.io)
+1. Navigate to the preview URL (format: http://preview-{branch-slug}.{tailscale-ip}.sslip.io)
 2. Log in as dev@mclaude.local / dev
 3. Assert the changed screen/behavior matches the spec
 4. Assert the previous state (before the fix/feature) is gone
