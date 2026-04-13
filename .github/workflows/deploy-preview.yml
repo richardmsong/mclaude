@@ -142,18 +142,6 @@ jobs:
           echo "spa:           ghcr.io/mclaude-project/mclaude-spa:${SPA_TAG}"
           echo "session-agent: ghcr.io/mclaude-project/mclaude-session-agent:${SA_TAG}"
 
-      - name: Import images into k3d
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-          docker pull ghcr.io/mclaude-project/mclaude-control-plane:${CP_TAG}
-          docker pull ghcr.io/mclaude-project/mclaude-spa:${SPA_TAG}
-          docker pull ghcr.io/mclaude-project/mclaude-session-agent:${SA_TAG}
-          k3d image import \
-            ghcr.io/mclaude-project/mclaude-control-plane:${CP_TAG} \
-            ghcr.io/mclaude-project/mclaude-spa:${SPA_TAG} \
-            ghcr.io/mclaude-project/mclaude-session-agent:${SA_TAG} \
-            -c mclaude-dev
-
       - name: Helm deploy preview
         run: |
           helm upgrade --install "mclaude-preview-${BRANCH_SLUG}" ./charts/mclaude \
@@ -161,6 +149,7 @@ jobs:
             --set spa.image.tag="${SPA_TAG}" \
             --set sessionAgent.image.tag="${SA_TAG}" \
             --set namespace.create=false \
+            --set global.imagePullSecrets[0].name=ghcr-pull-secret \
             --namespace "preview-${BRANCH_SLUG}" \
             --create-namespace \
             --wait --timeout 5m
