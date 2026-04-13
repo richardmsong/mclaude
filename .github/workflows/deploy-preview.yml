@@ -53,6 +53,11 @@ jobs:
       tag: ${{ needs.changes.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
+      - name: Set up Docker config for CI
+        run: |
+          mkdir -p "$RUNNER_TEMP/docker"
+          echo '{"auths":{}}' > "$RUNNER_TEMP/docker/config.json"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
 
       - uses: actions/setup-go@v5
         with:
@@ -93,6 +98,11 @@ jobs:
       tag: ${{ needs.changes.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
+      - name: Set up Docker config for CI
+        run: |
+          mkdir -p "$RUNNER_TEMP/docker"
+          echo '{"auths":{}}' > "$RUNNER_TEMP/docker/config.json"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@v3
         with:
           driver: docker
@@ -122,6 +132,11 @@ jobs:
       tag: ${{ needs.changes.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
+      - name: Set up Docker config for CI
+        run: |
+          mkdir -p "$RUNNER_TEMP/docker"
+          echo '{"auths":{}}' > "$RUNNER_TEMP/docker/config.json"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
 
       # Go binary: cross-compile natively.
       - uses: actions/setup-go@v5
