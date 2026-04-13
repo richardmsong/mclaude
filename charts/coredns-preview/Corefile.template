@@ -1,0 +1,5 @@
+mclaude.internal. {
+    file /etc/coredns/mclaude.internal.zone
+    log
+    errors
+}

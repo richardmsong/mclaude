@@ -170,7 +170,7 @@ jobs:
           echo "control-plane: ghcr.io/mclaude-project/mclaude-control-plane:${CP_TAG}"
           echo "spa:           ghcr.io/mclaude-project/mclaude-spa:${SPA_TAG}"
           echo "session-agent: ghcr.io/mclaude-project/mclaude-session-agent:${SA_TAG}"
-          PREVIEW_HOST="preview-${BRANCH_SLUG}"
+          PREVIEW_HOST="preview-${BRANCH_SLUG}.mclaude.internal"
           echo "preview URL:   http://${PREVIEW_HOST}"
           echo "PREVIEW_HOST=${PREVIEW_HOST}" >> "$GITHUB_ENV"
 
