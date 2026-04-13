@@ -57,17 +57,20 @@ func NewAgent(nc *nats.Conn, userID, projectID, claudePath, dataDir string, log 
 
 	ctx := context.Background()
 
-	sessKV, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: kvBucketSessions, History: 1})
+	// Session agents fail fast if buckets don't exist — bucket creation is
+	// owned by the control-plane.  Presence of buckets confirms the
+	// control-plane has started successfully.
+	sessKV, err := js.KeyValue(ctx, kvBucketSessions)
 	if err != nil {
-		return nil, fmt.Errorf("sessions KV: %w", err)
+		return nil, fmt.Errorf("sessions KV bucket not found (control-plane not started?): %w", err)
 	}
-	projKV, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: kvBucketProjects, History: 1})
+	projKV, err := js.KeyValue(ctx, kvBucketProjects)
 	if err != nil {
-		return nil, fmt.Errorf("projects KV: %w", err)
+		return nil, fmt.Errorf("projects KV bucket not found (control-plane not started?): %w", err)
 	}
-	hbKV, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{Bucket: kvBucketHeartbeats, History: 1})
+	hbKV, err := js.KeyValue(ctx, kvBucketHeartbeats)
 	if err != nil {
-		return nil, fmt.Errorf("heartbeats KV: %w", err)
+		return nil, fmt.Errorf("heartbeats KV bucket not found (control-plane not started?): %w", err)
 	}
 
 	agent := &Agent{
