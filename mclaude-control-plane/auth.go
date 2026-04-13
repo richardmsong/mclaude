@@ -20,7 +20,8 @@ type LoginRequest struct {
 // LoginResponse is returned on successful login.
 type LoginResponse struct {
 	// NATSUrl is the WebSocket URL the client should connect to for NATS.
-	NATSUrl string `json:"natsUrl"`
+	// Empty string means the client should derive it from its own origin.
+	NATSUrl string `json:"natsUrl,omitempty"`
 	// JWT is the NATS user JWT scoped to mclaude.{userId}.>
 	JWT string `json:"jwt"`
 	// NKeySeed is the user's NKey seed. The client uses it to sign NATS
@@ -36,18 +37,21 @@ type LoginResponse struct {
 type Server struct {
 	db         *DB
 	accountKP  nkeys.KeyPair
-	natsURL    string
+	natsURL    string // internal broker URL (used by session-agent, not returned to browser clients)
+	natsWsURL  string // external WebSocket URL returned to browser clients on login; empty = client derives from origin
 	jwtExpiry  time.Duration
 	adminToken string // break-glass admin bearer token
 }
 
 // NewServer constructs a Server. accountKP must be an account-level NKey pair —
-// it signs per-user JWTs. natsURL is the WebSocket URL returned to clients on login.
-func NewServer(db *DB, accountKP nkeys.KeyPair, natsURL string, jwtExpiry time.Duration, adminToken string) *Server {
+// it signs per-user JWTs. natsWsURL is the WebSocket URL returned to browser clients
+// on login; if empty the client derives it from window.location.origin.
+func NewServer(db *DB, accountKP nkeys.KeyPair, natsURL, natsWsURL string, jwtExpiry time.Duration, adminToken string) *Server {
 	return &Server{
 		db:         db,
 		accountKP:  accountKP,
 		natsURL:    natsURL,
+		natsWsURL:  natsWsURL,
 		jwtExpiry:  jwtExpiry,
 		adminToken: adminToken,
 	}
@@ -98,7 +102,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(LoginResponse{ //nolint:errcheck
-		NATSUrl:   s.natsURL,
+		NATSUrl:   s.natsWsURL,
 		JWT:       jwt,
 		NKeySeed:  string(seed),
 		UserID:    user.ID,
