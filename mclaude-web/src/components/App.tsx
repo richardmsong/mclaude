@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, Fragment } from 'react'
+import { useVersionPoller } from '@/hooks/useVersionPoller'
 import { AuthClient } from '@/transport/auth-client'
 import { NATSClient } from '@/transport/nats-client'
 import { AuthStore } from '@/stores/auth-store'
@@ -27,6 +28,33 @@ function getRoute(): { screen: string; sessionId?: string } {
 
 function navigate(hash: string) {
   window.location.hash = hash
+}
+
+// ── Update banner ─────────────────────────────────────────────────────────
+function UpdateBanner() {
+  return (
+    <div
+      onClick={() => window.location.reload()}
+      style={{
+        position: 'fixed',
+        bottom: 72,  // above FAB (56px) + some gap
+        left: '50%',
+        transform: 'translateX(-50%)',
+        zIndex: 9999,
+        background: 'var(--surf2)',
+        border: '1px solid var(--border)',
+        borderRadius: 10,
+        padding: '8px 16px',
+        fontSize: 13,
+        color: 'var(--text2)',
+        cursor: 'pointer',
+        whiteSpace: 'nowrap',
+        boxShadow: '0 2px 12px rgba(0,0,0,0.4)',
+      }}
+    >
+      New version available — tap to reload
+    </div>
+  )
 }
 
 // ── Global singleton ──────────────────────────────────────────────────────
@@ -148,6 +176,9 @@ export function App() {
     }
   }, [route.screen, route.sessionId, authState.userId, sessionStore])
 
+  // ── Version poller ───────────────────────────────────────────────────
+  const { updateAvailable } = useVersionPoller()
+
   // ── Login handler ─────────────────────────────────────────────────────
   const handleConnect = async (email: string, password: string) => {
     const serverUrl = window.location.origin
@@ -190,72 +221,92 @@ export function App() {
 
   // ── Auth gate ─────────────────────────────────────────────────────────
   if (authState.status === 'unauthenticated' || authState.status === 'expired') {
-    return <AuthScreen onConnect={handleConnect} />
+    return (
+      <Fragment>
+        <AuthScreen onConnect={handleConnect} />
+        {updateAvailable && <UpdateBanner />}
+      </Fragment>
+    )
   }
 
   // ── Route rendering ───────────────────────────────────────────────────
   if (route.screen === 'settings') {
     return (
-      <Settings
-        userId={authState.userId ?? ''}
-        serverUrl={window.location.origin}
-        connected={connected}
-        sessionCount={sessionStore?.sessions.size ?? 0}
-        onBack={() => navigate('/')}
-        onLogout={handleLogout}
-      />
+      <Fragment>
+        <Settings
+          userId={authState.userId ?? ''}
+          serverUrl={window.location.origin}
+          connected={connected}
+          sessionCount={sessionStore?.sessions.size ?? 0}
+          onBack={() => navigate('/')}
+          onLogout={handleLogout}
+        />
+        {updateAvailable && <UpdateBanner />}
+      </Fragment>
     )
   }
 
   if (route.screen === 'usage') {
     return (
-      <TokenUsage
-        usage={totalUsage}
-        onBack={() => navigate('/')}
-        connected={connected}
-      />
+      <Fragment>
+        <TokenUsage
+          usage={totalUsage}
+          onBack={() => navigate('/')}
+          connected={connected}
+        />
+        {updateAvailable && <UpdateBanner />}
+      </Fragment>
     )
   }
 
   if (route.screen === 'session' && route.sessionId && conversationVM && eventStore && sessionStore) {
     const session = sessionStore.sessions.get(route.sessionId)
     return (
-      <SessionDetailScreen
-        sessionId={route.sessionId}
-        sessionName={session?.name ?? route.sessionId.slice(0, 8)}
-        sessionState={session?.state ?? 'idle'}
-        conversationVM={conversationVM}
-        onBack={() => navigate('/')}
-        connected={connected}
-        initialMessage={initialMessage ?? undefined}
-        onInitialMessageSent={() => setInitialMessage(null)}
-      />
+      <Fragment>
+        <SessionDetailScreen
+          sessionId={route.sessionId}
+          sessionName={session?.name ?? route.sessionId.slice(0, 8)}
+          sessionState={session?.state ?? 'idle'}
+          conversationVM={conversationVM}
+          onBack={() => navigate('/')}
+          connected={connected}
+          initialMessage={initialMessage ?? undefined}
+          onInitialMessageSent={() => setInitialMessage(null)}
+        />
+        {updateAvailable && <UpdateBanner />}
+      </Fragment>
     )
   }
 
   if (sessionListVM) {
     return (
-      <DashboardScreen
-        sessionListVM={sessionListVM}
-        connected={connected}
-        onSelectSession={id => navigate(`s/${id}`)}
-        onSettings={() => navigate('settings')}
-        onUsage={() => navigate('usage')}
-      />
+      <Fragment>
+        <DashboardScreen
+          sessionListVM={sessionListVM}
+          connected={connected}
+          onSelectSession={id => navigate(`s/${id}`)}
+          onSettings={() => navigate('settings')}
+          onUsage={() => navigate('usage')}
+        />
+        {updateAvailable && <UpdateBanner />}
+      </Fragment>
     )
   }
 
   // Loading state
   return (
-    <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      height: '100vh',
-      color: 'var(--text2)',
-      fontSize: 14,
-    }}>
-      Connecting…
-    </div>
+    <Fragment>
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: '100vh',
+        color: 'var(--text2)',
+        fontSize: 14,
+      }}>
+        Connecting…
+      </div>
+      {updateAvailable && <UpdateBanner />}
+    </Fragment>
   )
 }
