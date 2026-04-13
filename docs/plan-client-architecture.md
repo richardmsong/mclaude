@@ -67,7 +67,8 @@ AuthClient
 ```
 
 Responsibilities:
-- Stores JWT and nkeySeed (in-memory or platform secure storage)
+- Persists JWT, nkeySeed, userId, and natsUrl to `localStorage` on login; clears on logout
+- On app startup, exposes `loadFromStorage()` so the app layer can restore a session without re-authenticating
 - Decodes JWT for userId and expiry
 - No refresh logic here — that's in AuthStore
 
@@ -86,6 +87,7 @@ AuthStore(authClient, natsClient)
   login(email, password)
   loginSSO(provider)
   logout()
+  restoreTokens(tokens)   // rehydrate state from stored tokens, no network call
   
   // Internal: periodic check, refresh when TTL < threshold
   startRefreshLoop(checkIntervalMs: 60000)
@@ -96,6 +98,7 @@ Responsibilities:
 - On refresh success: reconnects NATS with new JWT
 - On refresh failure: sets status to `expired`, upper layers show login screen
 - Threshold and expiry are read from the JWT itself (control-plane configures them)
+- `restoreTokens()` is called on app startup when `AuthClient.loadFromStorage()` returns tokens; if the subsequent NATS connect fails (expired/invalid), tokens are cleared and the login screen is shown
 
 ### SessionStore
 
