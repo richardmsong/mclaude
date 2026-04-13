@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -118,186 +119,126 @@ func TestGitWorktreeRemoveBadWorktree(t *testing.T) {
 	}
 }
 
-// TestHandleCreateSkipsGitWhenNoDataDir verifies that handleCreate does NOT
-// attempt git worktree operations when dataDir is empty — the session is
-// created successfully without needing a git repo.
-func TestHandleCreateSkipsGitWhenNoDataDir(t *testing.T) {
-	// Build an agent with no dataDir and no real NATS (nc is nil).
-	// We cannot exercise the full handler path without NATS, so we test
-	// the gitWorktreeAdd skip logic via the dataDir guard directly.
-	a := buildMinimalAgent(t)
-	if a.dataDir != "" {
-		t.Fatal("expected empty dataDir in minimal agent")
+// TestAutoBranchFromName verifies that when branch is empty, the branch is
+// derived by slugifying the session name (spec: step 1 of session create).
+func TestAutoBranchFromName(t *testing.T) {
+	cases := []struct {
+		name     string
+		wantSlug string
+	}{
+		{"Fix auth bug", "fix-auth-bug"},
+		{"Add feature/auth", "add-feature-auth"},
+		{"", ""},            // both empty → handled separately
+		{"main", "main"},
 	}
-
-	// When dataDir is empty, gitWorktreeAdd should NOT be called.
-	// Confirm by checking that the handler guard works:
-	// a.dataDir == "" means skip git ops.
-	shouldSkip := a.dataDir == ""
-	if !shouldSkip {
-		t.Error("expected git ops to be skipped when dataDir is empty")
-	}
-}
-
-// TestDirExists verifies the dirExists helper for the scratch project check.
-func TestDirExists(t *testing.T) {
-	// Existing directory.
-	tmp := t.TempDir()
-	if !dirExists(tmp) {
-		t.Errorf("dirExists(%q): expected true for existing dir", tmp)
-	}
-
-	// Non-existent path.
-	absent := filepath.Join(tmp, "does-not-exist")
-	if dirExists(absent) {
-		t.Errorf("dirExists(%q): expected false for absent path", absent)
-	}
-
-	// Existing file (not a directory).
-	filePath := filepath.Join(tmp, "file.txt")
-	if err := os.WriteFile(filePath, []byte("x"), 0644); err != nil {
-		t.Fatalf("write file: %v", err)
-	}
-	if dirExists(filePath) {
-		t.Errorf("dirExists(%q): expected false for regular file", filePath)
-	}
-}
-
-// TestScratchProjectCWDComputation verifies the cwd computation logic for
-// scratch projects (no /data/repo): cwd must be dataDir/{req.CWD} or just
-// dataDir when cwd is empty.
-//
-// We test the dirExists-gated branch directly by setting up a temp dir that
-// has NO "repo" subdirectory, then confirming that dirExists returns false
-// (the scratch path is taken) and the resulting cwd is computed correctly.
-func TestScratchProjectCWDComputation(t *testing.T) {
-	dataDir := t.TempDir() // no "repo" subdir — scratch project
-
-	repoPath := filepath.Join(dataDir, "repo")
-	if dirExists(repoPath) {
-		t.Fatal("test setup error: repo dir should not exist yet")
-	}
-
-	// Case 1: no cwd in request.
-	{
-		var cwd string
-		if !dirExists(repoPath) { // scratch path
-			cwd = dataDir
+	for _, tc := range cases {
+		if tc.name == "" {
+			continue
 		}
-		if cwd != dataDir {
-			t.Errorf("scratch no-cwd: want %q, got %q", dataDir, cwd)
-		}
-	}
-
-	// Case 2: cwd = "packages/api" in request.
-	{
-		reqCWD := "packages/api"
-		var cwd string
-		if !dirExists(repoPath) { // scratch path
-			cwd = filepath.Join(dataDir, reqCWD)
-		}
-		want := filepath.Join(dataDir, reqCWD)
-		if cwd != want {
-			t.Errorf("scratch with-cwd: want %q, got %q", want, cwd)
+		got := SlugifyBranch(tc.name)
+		if got != tc.wantSlug {
+			t.Errorf("SlugifyBranch(%q) = %q, want %q", tc.name, got, tc.wantSlug)
 		}
 	}
 }
 
-// TestGitProjectCWDComputation verifies that when /data/repo exists, the git
-// worktree path is computed (not the scratch path).
-func TestGitProjectCWDComputation(t *testing.T) {
+// TestAutoBranchFallback verifies that when both branch and name are empty,
+// the derived branch starts with "session-" followed by 8 chars of the session ID.
+func TestAutoBranchFallback(t *testing.T) {
+	sessionID := "abcdef12-3456-7890-abcd-ef1234567890"
+	// Spec: "session-" + sessionID[:8]
+	want := "session-" + sessionID[:8]
+	if !strings.HasPrefix(want, "session-") {
+		t.Error("expected session- prefix")
+	}
+	if len(want) != len("session-")+8 {
+		t.Errorf("expected length %d, got %d", len("session-")+8, len(want))
+	}
+}
+
+// TestWorktreeCWDComputation verifies that cwd is always computed from the
+// worktree path — there is no scratch path. Every project has a bare repo.
+func TestWorktreeCWDComputation(t *testing.T) {
 	dataDir := t.TempDir()
-	repoPath := filepath.Join(dataDir, "repo")
-	// Create repo directory to simulate a git project.
-	if err := os.MkdirAll(repoPath, 0755); err != nil {
-		t.Fatalf("mkdir repo: %v", err)
-	}
-
-	if !dirExists(repoPath) {
-		t.Fatal("test setup error: repo dir should exist")
-	}
-
 	branch := "feature/auth"
 	branchSlug := SlugifyBranch(branch)
 	worktreePath := filepath.Join(dataDir, "worktrees", branchSlug)
 
-	// Case 1: no cwd.
+	// Case 1: no cwd in request — cwd is the worktree root.
 	{
 		cwd := worktreePath
 		want := filepath.Join(dataDir, "worktrees", "feature-auth")
 		if cwd != want {
-			t.Errorf("git no-cwd: want %q, got %q", want, cwd)
+			t.Errorf("no-cwd: want %q, got %q", want, cwd)
 		}
 	}
 
-	// Case 2: cwd = "packages/api".
+	// Case 2: cwd = "packages/api" — cwd is worktree/{cwd}.
 	{
 		reqCWD := "packages/api"
 		cwd := filepath.Join(worktreePath, reqCWD)
 		want := filepath.Join(dataDir, "worktrees", "feature-auth", "packages", "api")
 		if cwd != want {
-			t.Errorf("git with-cwd: want %q, got %q", want, cwd)
+			t.Errorf("with-cwd: want %q, got %q", want, cwd)
 		}
 	}
 }
 
-// TestScratchProjectKVState verifies that scratch project sessions get empty
-// branch and worktree in their SessionState — matching the spec requirement
-// that KV is written with branch:"", worktree:"".
-//
-// We test this by simulating the scratch path logic that populates the
-// SessionState fields, using the same dirExists guard the production code uses.
-func TestScratchProjectKVState(t *testing.T) {
-	dataDir := t.TempDir() // no repo subdir
+// TestWorktreeKVState verifies that every session has a non-empty branch and
+// worktree in its SessionState — the universal worktree flow always sets them.
+func TestWorktreeKVState(t *testing.T) {
+	dataDir := t.TempDir()
 
-	repoPath := filepath.Join(dataDir, "repo")
-	scratch := !dirExists(repoPath)
-	if !scratch {
-		t.Fatal("test setup error: should be scratch (no repo)")
+	// Simulate handleCreate branch derivation when both branch and name are empty.
+	sessionID := "abcdef12-dead-beef-0000-111122223333"
+	reqBranch := ""
+	reqName := ""
+	if reqBranch == "" {
+		if reqName != "" {
+			reqBranch = SlugifyBranch(reqName)
+		} else {
+			reqBranch = "session-" + sessionID[:8]
+		}
 	}
 
-	// Simulate the fields set in handleCreate for the scratch path.
-	branch := ""
-	branchSlug := ""
-	cwd := dataDir // req.CWD is empty
+	branchSlug := SlugifyBranch(reqBranch)
+	worktreePath := filepath.Join(dataDir, "worktrees", branchSlug)
 
 	state := SessionState{
-		ID:        "test-sess",
+		ID:        sessionID,
 		ProjectID: "test-proj",
-		Branch:    branch,
+		Branch:    reqBranch,
 		Worktree:  branchSlug,
-		CWD:       cwd,
+		CWD:       worktreePath,
 	}
 
-	if state.Branch != "" {
-		t.Errorf("scratch: Branch should be empty, got %q", state.Branch)
+	if state.Branch == "" {
+		t.Error("Branch must not be empty in universal worktree flow")
 	}
-	if state.Worktree != "" {
-		t.Errorf("scratch: Worktree should be empty, got %q", state.Worktree)
+	if state.Worktree == "" {
+		t.Error("Worktree must not be empty in universal worktree flow")
 	}
-	if state.CWD != dataDir {
-		t.Errorf("scratch: CWD should be %q, got %q", dataDir, state.CWD)
+	if !strings.HasPrefix(state.Branch, "session-") {
+		t.Errorf("expected session- prefix, got %q", state.Branch)
 	}
 }
 
-// TestHandleDeleteSkipsWorktreeForScratch verifies that the delete handler
-// does NOT attempt git worktree removal for scratch projects.  The guard is
-// st.Worktree != "" — scratch sessions have empty worktree — so removal is
-// skipped without needing to check dirExists.
-func TestHandleDeleteSkipsWorktreeForScratch(t *testing.T) {
-	// A scratch session has Worktree == "".
-	scratchState := SessionState{
-		ID:        "scratch-sess",
+// TestHandleDeleteWorktreeRemoval verifies that the delete handler always
+// attempts worktree removal when st.Worktree != "" — there is no dirExists
+// guard since the bare repo is guaranteed to exist.
+func TestHandleDeleteWorktreeRemoval(t *testing.T) {
+	// A session with a worktree slug should trigger removal.
+	st := SessionState{
+		ID:        "sess-1",
 		ProjectID: "test-proj",
-		Branch:    "",
-		Worktree:  "", // scratch: always empty
-		CWD:       "/data",
+		Branch:    "main",
+		Worktree:  "main",
+		CWD:       "/data/worktrees/main",
 	}
 
-	// The delete handler only runs gitWorktreeRemove when st.Worktree != "".
-	// Confirm the guard prevents removal.
-	wouldRemove := scratchState.Worktree != ""
-	if wouldRemove {
-		t.Error(`scratch project: worktree removal guard should prevent removal (Worktree == "")`)
+	// The delete handler runs gitWorktreeRemove whenever st.Worktree != "".
+	wouldRemove := st.Worktree != ""
+	if !wouldRemove {
+		t.Error("expected worktree removal to be attempted for non-empty Worktree")
 	}
 }

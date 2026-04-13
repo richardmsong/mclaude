@@ -32,17 +32,27 @@ ln -sf /data/projects "$HOME/.claude/projects"
 echo '{"hasCompletedOnboarding":true,"bypassPermissions":true}' > "$HOME/.claude.json"
 
 # Git setup (bare repo — worktrees created by session agent)
-if [ -n "$GIT_URL" ]; then
-    if [ ! -d "/data/repo/HEAD" ]; then
+# Every project gets a bare repo. Git-backed projects clone from GIT_URL;
+# scratch projects (no GIT_URL) get an empty bare repo initialized in place.
+# This means the session agent's worktree machinery works uniformly for all projects.
+if [ ! -d "/data/repo/HEAD" ]; then
+    if [ -n "$GIT_URL" ]; then
         git clone --bare "$GIT_URL" /data/repo || {
             echo "[entrypoint] Git clone failed — exiting for restart"
             exit 1
         }
     else
+        git init --bare /data/repo
+        # Create an initial empty commit so worktrees have something to branch from.
+        git -C /data/repo commit --allow-empty -m "init" \
+            --author="mclaude <mclaude@local>" 2>/dev/null || true
+    fi
+else
+    if [ -n "$GIT_URL" ]; then
         git -C /data/repo fetch --all --prune || true
     fi
-    mkdir -p /data/worktrees
 fi
+mkdir -p /data/worktrees
 
 # Shared memory — symlink each worktree's memory dir to /data/shared-memory/
 mkdir -p /data/shared-memory
