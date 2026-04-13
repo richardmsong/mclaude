@@ -280,6 +280,8 @@ export function SessionDetailScreen({
               borderRadius: 20,
               padding: '7px 14px',
               color: 'var(--text)',
+              WebkitTextFillColor: 'var(--text)',
+              WebkitAppearance: 'none',
               fontSize: 15,
               resize: 'none',
               minHeight: 36,
