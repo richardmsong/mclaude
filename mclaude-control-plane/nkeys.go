@@ -14,13 +14,17 @@ type NATSPermissions struct {
 }
 
 // UserSubjectPermissions returns the NATS pub/sub permissions for a user.
-// Clients may only operate on their own mclaude.{userId}.> namespace plus
-// the _INBOX.> namespace required for request/reply.
+// Clients may operate on their own mclaude.{userId}.> namespace, the
+// _INBOX.> namespace (required for request/reply), and the KV buckets
+// scoped to their user ID ($KV.mclaude-projects.{userId}.> and
+// $KV.mclaude-sessions.{userId}.>).
 func UserSubjectPermissions(userID string) NATSPermissions {
 	prefix := fmt.Sprintf("mclaude.%s.>", userID)
+	kvProjects := fmt.Sprintf("$KV.mclaude-projects.%s.>", userID)
+	kvSessions := fmt.Sprintf("$KV.mclaude-sessions.%s.>", userID)
 	return NATSPermissions{
 		PubAllow: []string{prefix, "_INBOX.>"},
-		SubAllow: []string{prefix, "_INBOX.>"},
+		SubAllow: []string{prefix, "_INBOX.>", kvProjects, kvSessions},
 	}
 }
 
