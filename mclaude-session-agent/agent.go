@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -35,13 +37,19 @@ type Agent struct {
 	userID     string
 	projectID  string
 	claudePath string
+	// dataDir is the root of the project data volume (e.g. /data).
+	// Used to compute worktree paths: {dataDir}/worktrees/{branchSlug}.
+	// When empty, git worktree operations are skipped (laptop/dev mode without PVC).
+	dataDir    string
 	log        zerolog.Logger
 	metrics    *Metrics
 }
 
 // NewAgent creates an Agent connected to the given NATS server.
 // m may be nil (no-op metrics) — pass NewMetrics(reg) in production.
-func NewAgent(nc *nats.Conn, userID, projectID, claudePath string, log zerolog.Logger, m *Metrics) (*Agent, error) {
+// dataDir is the project PVC mount point (e.g. "/data"); pass "" to skip git
+// worktree operations (dev/laptop mode without a bare repo).
+func NewAgent(nc *nats.Conn, userID, projectID, claudePath, dataDir string, log zerolog.Logger, m *Metrics) (*Agent, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return nil, fmt.Errorf("jetstream: %w", err)
@@ -73,6 +81,7 @@ func NewAgent(nc *nats.Conn, userID, projectID, claudePath string, log zerolog.L
 		userID:     userID,
 		projectID:  projectID,
 		claudePath: claudePath,
+		dataDir:    dataDir,
 		log:        log,
 		metrics:    m,
 	}
@@ -240,9 +249,29 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 		return
 	}
 
-	cwd := "/data/worktrees/" + branchSlug
+	// Compute worktree path from dataDir if available; fall back to /data.
+	dataDir := a.dataDir
+	if dataDir == "" {
+		dataDir = "/data"
+	}
+	worktreePath := filepath.Join(dataDir, "worktrees", branchSlug)
+	cwd := worktreePath
 	if req.CWD != "" {
-		cwd = "/data/worktrees/" + branchSlug + "/" + req.CWD
+		cwd = filepath.Join(worktreePath, req.CWD)
+	}
+
+	// Create git worktree if we have a data dir and the worktree isn't already
+	// in use (joinWorktree: true skips creation when worktree exists).
+	if a.dataDir != "" && !collision {
+		repoPath := filepath.Join(a.dataDir, "repo")
+		if err := a.gitWorktreeAdd(repoPath, worktreePath, req.Branch); err != nil {
+			a.log.Error().Err(err).
+				Str("branch", req.Branch).
+				Str("worktreePath", worktreePath).
+				Msg("git worktree add failed")
+			a.reply(msg, nil, "git worktree add: "+err.Error())
+			return
+		}
 	}
 
 	now := time.Now().UTC()
@@ -324,6 +353,23 @@ func (a *Agent) handleDelete(msg *nats.Msg) {
 
 	if err := sess.stopAndWait(sessionDeleteTimeout); err != nil {
 		a.log.Warn().Err(err).Str("sessionId", req.SessionID).Msg("session did not stop cleanly")
+	}
+
+	// Remove git worktree if this was the last session using the branch.
+	st := sess.getState()
+	if a.dataDir != "" && st.Worktree != "" {
+		a.mu.RLock()
+		lastUser := !a.worktreeInUse(st.Worktree)
+		a.mu.RUnlock()
+		if lastUser {
+			repoPath := filepath.Join(a.dataDir, "repo")
+			worktreePath := filepath.Join(a.dataDir, "worktrees", st.Worktree)
+			if err := a.gitWorktreeRemove(repoPath, worktreePath); err != nil {
+				a.log.Warn().Err(err).
+					Str("worktree", st.Worktree).
+					Msg("git worktree remove failed (non-fatal)")
+			}
+		}
 	}
 
 	// Delete from KV.
@@ -561,6 +607,26 @@ func (a *Agent) sessionForRequest(requestID string) *Session {
 // controlResponse is the inner object of a control_response message.
 type controlResponse struct {
 	RequestID string `json:"request_id"`
+}
+
+// gitWorktreeAdd runs `git -C {repoPath} worktree add {worktreePath} {branch}`.
+// Returns nil if the command succeeds.
+func (a *Agent) gitWorktreeAdd(repoPath, worktreePath, branch string) error {
+	cmd := exec.Command("git", "-C", repoPath, "worktree", "add", worktreePath, branch)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git worktree add: %w — %s", err, out)
+	}
+	return nil
+}
+
+// gitWorktreeRemove runs `git -C {repoPath} worktree remove {worktreePath}`.
+// Returns nil if the command succeeds or if the worktree doesn't exist.
+func (a *Agent) gitWorktreeRemove(repoPath, worktreePath string) error {
+	cmd := exec.Command("git", "-C", repoPath, "worktree", "remove", worktreePath)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git worktree remove: %w — %s", err, out)
+	}
+	return nil
 }
 
 // handleTerminalCreate spawns a PTY shell and bridges it to NATS.
