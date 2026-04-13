@@ -5,10 +5,20 @@ import { EventList } from './events/EventList'
 import type { Turn, SessionState } from '@/types'
 import type { ConversationVM, ConversationVMState } from '@/viewmodels/conversation-vm'
 
+interface SessionUsage {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  costUsd: number
+}
+
 interface SessionDetailScreenProps {
   sessionId: string
   sessionName: string
   sessionState: SessionState
+  sessionModel?: string
+  sessionUsage?: SessionUsage
   conversationVM: ConversationVM
   onBack: () => void
   connected: boolean
@@ -73,6 +83,8 @@ export function SessionDetailScreen({
   sessionId,
   sessionName,
   sessionState,
+  sessionModel,
+  sessionUsage,
   conversationVM,
   onBack,
   connected,
@@ -85,6 +97,8 @@ export function SessionDetailScreen({
   const [sending, setSending] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
   const [showSkills, setShowSkills] = useState(false)
+  const [showUsageOverlay, setShowUsageOverlay] = useState(false)
+  const [showRawOutput, setShowRawOutput] = useState(false)
   const [stagedImage, setStagedImage] = useState<{ base64: string; mimeType: string; previewUrl: string } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const atBottomRef = useRef(true)
@@ -324,7 +338,7 @@ export function SessionDetailScreen({
           </div>
           {/* Token Usage */}
           <button
-            onClick={() => { setShowMenu(false) }}
+            onClick={() => { setShowMenu(false); setShowUsageOverlay(true) }}
             style={{
               width: '100%',
               padding: '12px 16px',
@@ -341,7 +355,7 @@ export function SessionDetailScreen({
           </button>
           {/* Raw Output */}
           <button
-            onClick={() => { setShowMenu(false) }}
+            onClick={() => { setShowMenu(false); setShowRawOutput(true) }}
             style={{
               width: '100%',
               padding: '12px 16px',
@@ -360,13 +374,106 @@ export function SessionDetailScreen({
     </div>
   )
 
+  // Helpers for usage overlay
+  const PRICE_PER_M = { input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 }
+
+  function formatTokens(n: number): string {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
+    return String(n)
+  }
+
+  function formatCost(usd: number): string {
+    return `$${usd.toFixed(3)}`
+  }
+
+  const usageTiles = sessionUsage ? [
+    { label: 'Input', tokens: sessionUsage.inputTokens, color: 'var(--blue)', cost: sessionUsage.inputTokens / 1_000_000 * PRICE_PER_M.input },
+    { label: 'Output', tokens: sessionUsage.outputTokens, color: 'var(--green)', cost: sessionUsage.outputTokens / 1_000_000 * PRICE_PER_M.output },
+    { label: 'Cache W', tokens: sessionUsage.cacheWriteTokens, color: 'var(--orange)', cost: sessionUsage.cacheWriteTokens / 1_000_000 * PRICE_PER_M.cacheWrite },
+    { label: 'Cache R', tokens: sessionUsage.cacheReadTokens, color: 'var(--purple)', cost: sessionUsage.cacheReadTokens / 1_000_000 * PRICE_PER_M.cacheRead },
+  ] : []
+  const totalUsageCost = usageTiles.reduce((s, t) => s + t.cost, 0)
+  const totalUsageTokens = usageTiles.reduce((s, t) => s + t.tokens, 0)
+
+  // Raw output: extract all assistant text from turns
+  const rawTextLines = vmState.turns
+    .filter(t => t.type === 'assistant')
+    .flatMap(t => t.blocks)
+    .filter(b => b.type === 'text' || b.type === 'streaming_text')
+    .map(b => b.type === 'text' ? b.text : (b as { chunks: string[] }).chunks.join(''))
+    .join('\n')
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg)' }}>
+      {/* Token Usage overlay */}
+      {showUsageOverlay && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 500, display: 'flex', flexDirection: 'column', background: 'var(--bg)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', padding: '14px 16px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+            <button onClick={() => setShowUsageOverlay(false)} style={{ color: 'var(--blue)', fontSize: 15, marginRight: 12 }}>‹ Back</button>
+            <span style={{ fontWeight: 600, fontSize: 17 }}>Token Usage</span>
+          </div>
+          <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
+            <div style={{ color: 'var(--text2)', fontSize: 13, marginBottom: 16 }}>
+              {sessionModel ?? vmState.model} · {vmState.turns.filter(t => t.type === 'assistant').length} turns
+            </div>
+            {sessionUsage ? (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 16 }}>
+                  {usageTiles.map(tile => (
+                    <div key={tile.label} style={{ background: 'var(--surf)', border: '1px solid var(--border)', borderRadius: 12, padding: 14 }}>
+                      <div style={{ color: 'var(--text2)', fontSize: 12, marginBottom: 4 }}>{tile.label}</div>
+                      <div style={{ fontSize: 22, fontWeight: 700, color: tile.color }}>{formatTokens(tile.tokens)}</div>
+                      <div style={{ color: 'var(--text2)', fontSize: 12, marginTop: 2 }}>{formatCost(tile.cost)}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ background: 'var(--surf)', border: '1px solid var(--border)', borderRadius: 12, padding: 16 }}>
+                  <div style={{ color: 'var(--text2)', fontSize: 12, marginBottom: 4 }}>Estimated Cost</div>
+                  <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--text)' }}>{formatCost(totalUsageCost)}</div>
+                  <div style={{ color: 'var(--text2)', fontSize: 13, marginTop: 4 }}>{formatTokens(totalUsageTokens)} total tokens</div>
+                  <div style={{ color: 'var(--text3)', fontSize: 11, marginTop: 8 }}>
+                    Prices: input ${PRICE_PER_M.input}/M · output ${PRICE_PER_M.output}/M
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div style={{ color: 'var(--text2)', fontSize: 14 }}>No usage data available.</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Raw Output overlay */}
+      {showRawOutput && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 500, display: 'flex', flexDirection: 'column', background: '#0d1117' }}>
+          <div style={{ display: 'flex', alignItems: 'center', padding: '14px 16px', borderBottom: '1px solid rgba(255,255,255,0.1)', flexShrink: 0 }}>
+            <button onClick={() => setShowRawOutput(false)} style={{ color: 'var(--blue)', fontSize: 15, marginRight: 12 }}>‹ Back</button>
+            <span style={{ fontWeight: 600, fontSize: 17, color: '#eee' }}>Raw Output</span>
+          </div>
+          <div style={{ flex: 1, overflowY: 'auto', padding: 12 }}>
+            <pre style={{
+              fontFamily: "'Menlo','Courier New',monospace",
+              fontSize: 12,
+              color: '#eee',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-all',
+              lineHeight: 1.5,
+            }}>
+              {rawTextLines || '(no output yet)'}
+            </pre>
+          </div>
+        </div>
+      )}
       <NavBar
         title={sessionName}
         onBack={onBack}
         connected={connected}
         right={menuButton}
+        onRefresh={() => {
+          // Scroll to top to show refresh
+          if (scrollRef.current) scrollRef.current.scrollTop = 0
+        }}
       />
 
       {/* Det-meta row */}
@@ -635,6 +742,26 @@ export function SessionDetailScreen({
               style={{ display: 'none' }}
               onChange={handleFileChange}
             />
+
+            {/* PTT button */}
+            <button
+              onPointerDown={() => { /* PTT: hold to record voice input — not yet implemented */ }}
+              style={{
+                width: 32,
+                height: 32,
+                borderRadius: '50%',
+                background: 'var(--surf2)',
+                color: 'var(--text2)',
+                flexShrink: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 15,
+              }}
+              title="Push to talk"
+            >
+              🎙
+            </button>
 
             {/* Textarea */}
             <textarea
