@@ -105,6 +105,9 @@ controlPlane:
     logLevel: info
     jwtExpirySeconds: 28800
     jwtRefreshThresholdSeconds: 900
+    ## devSeed: when true, creates dev@mclaude.local/dev on startup if no user exists.
+    ## Never enable in production.
+    devSeed: false
   ## Name of existing Secret containing:
   ##   admin-token       — break-glass bearer token
   ##   nats-operator-jwt — NATS operator JWT
