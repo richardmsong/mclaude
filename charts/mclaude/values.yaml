@@ -169,6 +169,10 @@ ingress:
   #   - secretName: mclaude-tls
   #     hosts:
   #       - mclaude.example.com
+  ## ExternalDNS integration — annotates the Ingress so ExternalDNS registers
+  ## the hostname as an A record in the Tailnet via the Tailscale provider.
+  externalDns:
+    enabled: true
 
 ## ---------------------------------------------------------------------------
 ## Session Agent pod template (control-plane instantiates per project)

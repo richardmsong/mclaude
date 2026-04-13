@@ -1,0 +1,91 @@
+---
+# ExternalDNS with Tailscale provider.
+# Singleton for the cluster — applied once, not managed by the mclaude Helm chart.
+# Watches Ingress resources for external-dns.alpha.kubernetes.io/hostname annotations
+# and writes A records into the Tailnet via the Tailscale API.
+#
+# Prerequisites:
+#   kubectl create secret generic tailscale-dns-credentials \
+#     --namespace mclaude-system \
+#     --from-literal=TAILSCALE_API_KEY=<oauth-client-secret-with-dns:write-scope>
+#
+# Apply:
+#   kubectl apply -f charts/external-dns/external-dns.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: external-dns
+  namespace: mclaude-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: external-dns
+rules:
+  - apiGroups: [""]
+    resources: ["services", "endpoints", "pods", "nodes"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["extensions", "networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "watch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: external-dns
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: external-dns
+subjects:
+  - kind: ServiceAccount
+    name: external-dns
+    namespace: mclaude-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: external-dns
+  namespace: mclaude-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: external-dns
+  template:
+    metadata:
+      labels:
+        app: external-dns
+    spec:
+      serviceAccountName: external-dns
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: external-dns
+          image: registry.k8s.io/external-dns/external-dns:v0.14.2
+          args:
+            - --source=ingress
+            - --provider=tailscale
+            - --policy=upsert-only
+            - --interval=1m
+            - --log-level=info
+            - --log-format=json
+          env:
+            - name: EXTERNAL_DNS_TAILSCALE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: tailscale-dns-credentials
+                  key: TAILSCALE_API_KEY
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

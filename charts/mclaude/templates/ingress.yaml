@@ -7,10 +7,13 @@ metadata:
   labels:
     {{- include "mclaude.labels" . | nindent 4 }}
     app.kubernetes.io/component: ingress
-  {{- with .Values.ingress.annotations }}
   annotations:
+    {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
+    {{- if and .Values.ingress.externalDns.enabled .Values.ingress.host }}
+    external-dns.alpha.kubernetes.io/hostname: {{ .Values.ingress.host | quote }}
+    {{- end }}
 spec:
   {{- if .Values.ingress.className }}
   ingressClassName: {{ .Values.ingress.className }}
