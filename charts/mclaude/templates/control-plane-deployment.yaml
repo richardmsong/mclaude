@@ -82,6 +82,10 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.controlPlane.existingSecret }}
                   key: database-url
+            {{- if .Values.controlPlane.config.devSeed }}
+            - name: DEV_SEED
+              value: "true"
+            {{- end }}
             - name: ADMIN_TOKEN
               valueFrom:
                 secretKeyRef:

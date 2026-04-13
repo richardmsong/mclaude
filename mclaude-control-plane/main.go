@@ -6,11 +6,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/nats-io/nkeys"
 	"github.com/rs/zerolog"
 )
@@ -58,6 +60,13 @@ func main() {
 		logger.Fatal().Err(err).Msg("account nkey")
 	}
 
+	// Dev seed: create a known account when DEV_SEED=true and DB is available.
+	if os.Getenv("DEV_SEED") == "true" && db != nil {
+		if err := seedDevUser(ctx, db, logger); err != nil {
+			logger.Error().Err(err).Msg("dev seed failed")
+		}
+	}
+
 	srv := NewServer(db, accountKP, natsURL, jwtExpiry, adminToken)
 
 	// Main API mux (public + protected routes)
@@ -76,6 +85,39 @@ func main() {
 	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		logger.Fatal().Err(err).Msg("listen and serve")
 	}
+}
+
+// seedDevUser creates a dev account (dev@mclaude.local / dev) if it doesn't exist.
+// Only called when DEV_SEED=true. Safe to call on every startup — no-op if the
+// user already exists.
+func seedDevUser(ctx context.Context, db *DB, logger zerolog.Logger) error {
+	const devEmail = "dev@mclaude.local"
+	const devPassword = "dev"
+
+	existing, err := db.GetUserByEmail(ctx, devEmail)
+	if err != nil {
+		return fmt.Errorf("check dev user: %w", err)
+	}
+	if existing != nil {
+		logger.Info().Str("email", devEmail).Msg("dev user already exists")
+		return nil
+	}
+
+	hash, err := HashPassword(devPassword)
+	if err != nil {
+		return fmt.Errorf("hash dev password: %w", err)
+	}
+
+	id := uuid.NewString()
+	if _, err := db.CreateUser(ctx, id, devEmail, "Dev User", hash); err != nil {
+		return fmt.Errorf("create dev user: %w", err)
+	}
+
+	logger.Warn().
+		Str("email", devEmail).
+		Str("password", devPassword).
+		Msg("DEV_SEED: created dev account — do not use in production")
+	return nil
 }
 
 // loadOrGenerateAccountKey loads the account NKey from NATS_ACCOUNT_SEED env,
