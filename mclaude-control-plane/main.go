@@ -93,7 +93,7 @@ func main() {
 	// Dev seed: create a known account + default project when DEV_SEED=true and DB is available.
 	// Runs after NATS connects so the seed can write to the mclaude-projects KV bucket.
 	if os.Getenv("DEV_SEED") == "true" && db != nil {
-		if err := seedDev(ctx, db, nc, logger); err != nil {
+		if err := seedDev(ctx, db, nc, k8sProv, logger); err != nil {
 			logger.Error().Err(err).Msg("dev seed failed")
 		}
 	}
@@ -118,7 +118,7 @@ func main() {
 
 // seedDev creates a dev user and default project if they don't exist.
 // Only called when DEV_SEED=true. Safe to call on every startup — idempotent.
-func seedDev(ctx context.Context, db *DB, nc *nats.Conn, logger zerolog.Logger) error {
+func seedDev(ctx context.Context, db *DB, nc *nats.Conn, k8s *K8sProvisioner, logger zerolog.Logger) error {
 	const devEmail = "dev@mclaude.local"
 	const devPassword = "dev"
 
@@ -162,6 +162,19 @@ func seedDev(ctx context.Context, db *DB, nc *nats.Conn, logger zerolog.Logger) 
 	for _, proj := range projects {
 		if err := writeProjectKV(nc, user.ID, proj); err != nil {
 			logger.Error().Err(err).Str("projectId", proj.ID).Msg("DEV_SEED: write project KV failed (non-fatal)")
+		}
+		// Provision K8s resources for the project if not already done.
+		// Idempotent — ensureDeployment/ensurePVC skip creation if resources exist.
+		if k8s != nil {
+			if err := k8s.ProvisionProject(ctx, user.ID, proj.ID, proj.GitURL); err != nil {
+				logger.Error().Err(err).
+					Str("userId", user.ID).Str("projectId", proj.ID).
+					Msg("DEV_SEED: k8s provisioning failed (non-fatal)")
+			} else {
+				logger.Info().
+					Str("userId", user.ID).Str("projectId", proj.ID).
+					Msg("DEV_SEED: k8s resources provisioned for project")
+			}
 		}
 	}
 
