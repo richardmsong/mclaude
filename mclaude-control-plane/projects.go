@@ -66,11 +66,24 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 			return
 		}
 
-		// Provision Kubernetes resources (Namespace, PVC, Deployment) for the session-agent.
-		// Non-fatal if provisioning fails — the project record and KV entry are still created.
-		// The project will appear in the dashboard but sessions cannot be created until the
-		// session-agent pod is running.
-		if s.k8sProvisioner != nil {
+		// Create MCProject CR to trigger the reconciler to provision K8s resources.
+		// When k8sClient is available (running in cluster), we use the reconciler-driven
+		// path. Falls back to direct provisioning via K8sProvisioner for backward
+		// compatibility when the Manager is not running (e.g., local dev without cluster).
+		// Non-fatal — project record and KV entry are always created.
+		if s.k8sClient != nil {
+			if err := CreateMCProject(context.Background(), s.k8sClient, s.controlPlaneNs, userID, id, req.GitURL); err != nil {
+				log.Error().Err(err).
+					Str("userId", userID).
+					Str("projectId", id).
+					Msg("create MCProject CR failed — session-agent pod will not start")
+			} else {
+				log.Info().
+					Str("userId", userID).
+					Str("projectId", id).
+					Msg("MCProject CR created — reconciler will provision K8s resources")
+			}
+		} else if s.k8sProvisioner != nil {
 			if err := s.k8sProvisioner.ProvisionProject(context.Background(), userID, id, req.GitURL); err != nil {
 				log.Error().Err(err).
 					Str("userId", userID).

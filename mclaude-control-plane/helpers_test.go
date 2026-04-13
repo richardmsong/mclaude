@@ -4,6 +4,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"testing"
+
+	"github.com/rs/zerolog"
 )
 
 // fakeResponseWriter captures status + body for simple handler tests that
@@ -41,4 +44,10 @@ func fakeRequestWithBody(method, path, body string) *http.Request {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	return req
+}
+
+// testLogger returns a zerolog.Logger that discards output — suitable for tests.
+func testLogger(t *testing.T) zerolog.Logger {
+	t.Helper()
+	return zerolog.Nop()
 }
