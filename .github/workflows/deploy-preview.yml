@@ -188,7 +188,8 @@ jobs:
             --set ingress.className=traefik \
             --set ingress.host="${PREVIEW_HOST}" \
             --namespace "mclaude-system" \
-            --wait --timeout 5m
+            --wait --timeout 5m \
+            --force-conflicts
 
       - name: Preview URL
         run: echo "✓ Preview live at http://${PREVIEW_HOST}"
