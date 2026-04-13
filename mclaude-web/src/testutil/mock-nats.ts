@@ -173,13 +173,19 @@ export class MockNATSClient implements INATSClient {
 
   private _matchKVKey(pattern: string, key: string): boolean {
     if (pattern === key) return true
-    if (pattern.endsWith('/>')) {
-      const prefix = pattern.slice(0, -1) // Remove '>'
+    // Handle > wildcard: matches one or more path segments
+    // Supports both "prefix/>" and "prefix>"
+    if (pattern.endsWith('>')) {
+      const prefix = pattern.endsWith('/>') ? pattern.slice(0, -1) : pattern.slice(0, -1)
       return key.startsWith(prefix)
     }
-    if (pattern.endsWith('>')) {
-      const prefix = pattern.slice(0, -1)
-      return key.startsWith(prefix)
+    // Handle * wildcard: matches exactly one path segment
+    if (pattern.includes('*')) {
+      const sep = pattern.includes('/') ? '/' : '.'
+      const patParts = pattern.split(sep)
+      const keyParts = key.split(sep)
+      if (patParts.length !== keyParts.length) return false
+      return patParts.every((p, i) => p === '*' || p === keyParts[i])
     }
     return false
   }
