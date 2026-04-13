@@ -46,3 +46,4 @@ mclaude-relay/relay-linux
 mclaude-relay/mclaude-relay
 mclaude-relay/mclaude-connector
 scripts/._*
+.claude/.feature-ok
