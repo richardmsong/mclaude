@@ -252,6 +252,21 @@ export function App() {
     setAuthStore(freshStore)
   }
 
+  // ── Cache reset ───────────────────────────────────────────────────────
+  const handleCacheReset = () => {
+    // X1: Clear all client-side caches and re-subscribe from scratch
+    // Stop all watches/subscriptions
+    sessionStore?.stopWatching()
+    heartbeatMonitor?.stop()
+    // Re-start to re-subscribe from scratch (replayFromSeq = 0)
+    if (sessionStore && heartbeatMonitor) {
+      sessionStore.startWatching()
+      heartbeatMonitor.start()
+    }
+    // Force re-render of event store by bumping session version
+    setSessionVersion(v => v + 1)
+  }
+
   // ── Logout ────────────────────────────────────────────────────────────
   const handleLogout = async () => {
     await authStore.logout()
@@ -296,6 +311,7 @@ export function App() {
           sessionCount={sessionStore?.sessions.size ?? 0}
           onBack={() => navigate('/')}
           onLogout={handleLogout}
+          onCacheReset={handleCacheReset}
         />
         {updateAvailable && <UpdateBanner />}
       </Fragment>

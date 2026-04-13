@@ -136,6 +136,12 @@ export class ConversationVM {
     this.sendMessage(text)
   }
 
+  setMaxThinkingTokens(budget: number): void {
+    const subject = `mclaude.${this.userId}.${this.projectId}.api.sessions.control`
+    const payload = { type: 'control_request', request: { subtype: 'set_max_thinking_tokens', budget } }
+    this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
+  }
+
   reloadPlugins(): void {
     const subject = `mclaude.${this.userId}.${this.projectId}.api.sessions.control`
     const payload = { type: 'control_request', request: { subtype: 'reload_plugins' } }
