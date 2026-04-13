@@ -317,6 +317,8 @@ export function App() {
           sessionId={route.sessionId}
           sessionName={session?.name ?? route.sessionId.slice(0, 8)}
           sessionState={session?.state ?? 'idle'}
+          sessionModel={session?.model}
+          sessionUsage={session?.usage}
           conversationVM={conversationVM}
           onBack={() => navigate('/')}
           connected={connected}
