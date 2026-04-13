@@ -1,7 +1,7 @@
-ARG TARGETARCH=amd64
-
 # Runtime: node base for claude CLI, Go binary copied from build context.
 FROM node:22-alpine
+# Re-declare after FROM — ARGs before FROM are only scoped to FROM itself.
+ARG TARGETARCH=amd64
 
 # Install claude CLI (runs under QEMU for arm64 — Go binary is pre-built natively).
 ARG CLAUDE_VERSION=latest
