@@ -77,8 +77,11 @@ export type SessionState =
   | 'idle'
   | 'running'
   | 'requires_action'
+  | 'plan_mode'
   | 'restarting'
   | 'failed'
+  | 'unknown'
+  | 'waiting_for_input'
 
 export interface SessionKVState {
   id: string

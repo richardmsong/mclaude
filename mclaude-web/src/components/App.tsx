@@ -13,6 +13,7 @@ import { DashboardScreen } from './DashboardScreen'
 import { SessionDetailScreen } from './SessionDetailScreen'
 import { Settings } from './Settings'
 import { TokenUsage } from './TokenUsage'
+import { UserManagement } from './UserManagement'
 import type { UsageStats } from '@/types'
 
 // ── Hash routing ──────────────────────────────────────────────────────────
@@ -21,6 +22,7 @@ function getRoute(): { screen: string; sessionId?: string } {
   if (!hash || hash === '/') return { screen: 'dashboard' }
   if (hash === 'settings') return { screen: 'settings' }
   if (hash === 'usage') return { screen: 'usage' }
+  if (hash === 'users') return { screen: 'users' }
   const sessionMatch = /^s\/(.+)$/.exec(hash)
   if (sessionMatch) return { screen: 'session', sessionId: sessionMatch[1] }
   return { screen: 'dashboard' }
@@ -198,7 +200,9 @@ export function App() {
       projectId,
       sessionId: route.sessionId,
     })
-    store.start()
+    // Start from replayFromSeq in KV — skips events before last clear/compaction (spec: plan-client-architecture.md)
+    const replayFromSeq = session.replayFromSeq ?? undefined
+    store.start(replayFromSeq)
     const vm = new ConversationVM(store, sessionStore, natsClient, authState.userId, projectId, route.sessionId)
     setEventStore(store)
     setConversationVM(vm)
@@ -287,6 +291,18 @@ export function App() {
           usage={totalUsage}
           onBack={() => navigate('/')}
           connected={connected}
+        />
+        {updateAvailable && <UpdateBanner />}
+      </Fragment>
+    )
+  }
+
+  if (route.screen === 'users') {
+    return (
+      <Fragment>
+        <UserManagement
+          connected={connected}
+          onBack={() => navigate('/')}
         />
         {updateAvailable && <UpdateBanner />}
       </Fragment>

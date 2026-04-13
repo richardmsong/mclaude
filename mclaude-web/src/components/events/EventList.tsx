@@ -50,8 +50,27 @@ function renderBlock(block: Block, turn: Turn, allTurns: Turn[], onApprove: (id:
     }
 
     case 'tool_result':
-      // Tool results are rendered inline with tool_use blocks
-      return null
+      // Standalone tool_result: monospace card with colored left border
+      // (Paired results are rendered inline inside ToolCard)
+      return (
+        <div
+          key={'result-' + block.toolUseId}
+          style={{
+            background: 'var(--surf2)',
+            borderRadius: 8,
+            borderLeft: `3px solid ${block.isError ? 'var(--red)' : 'var(--green)'}`,
+            padding: '8px 12px',
+            margin: '4px 0',
+            fontFamily: "'Menlo','Courier New',monospace",
+            fontSize: 12,
+            color: block.isError ? 'var(--red)' : 'var(--text2)',
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-all',
+          }}
+        >
+          {block.content}
+        </div>
+      )
 
     case 'control_request':
       return (
