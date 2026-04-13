@@ -62,16 +62,18 @@ export class SessionListVM {
     const payload: Record<string, string> = { name }
     if (gitUrl) payload['gitUrl'] = gitUrl
     const reply = await this.natsClient.request(subject, new TextEncoder().encode(JSON.stringify(payload)))
-    const { id } = JSON.parse(new TextDecoder().decode(reply.data)) as { id: string }
-    return id
+    const result = JSON.parse(new TextDecoder().decode(reply.data)) as { id?: string; error?: string }
+    if (result.error) throw new Error(result.error)
+    return result.id!
   }
 
   async createSession(projectId: string, branch: string, name: string): Promise<string> {
     const subject = `mclaude.${this.userId}.${projectId}.api.sessions.create`
     const payload = { projectId, branch, name }
     const reply = await this.natsClient.request(subject, new TextEncoder().encode(JSON.stringify(payload)))
-    const { id } = JSON.parse(new TextDecoder().decode(reply.data)) as { id: string }
-    return id
+    const result = JSON.parse(new TextDecoder().decode(reply.data)) as { id?: string; error?: string }
+    if (result.error) throw new Error(result.error)
+    return result.id!
   }
 
   async deleteSession(sessionId: string): Promise<void> {
