@@ -425,17 +425,23 @@ Session create request payload:
 | `true` | Yes | Skip `git worktree add`, reuse `/data/worktrees/{branchSlug}`, spawn Claude |
 
 On session create:
-1. Compute `branchSlug = slugify(branch)`
-2. Scan KV for any session in this projectId with the same `worktree` slug
-3. If found and `joinWorktree: false` → reply with error
-4. If found and `joinWorktree: true` → skip to step 6
-5. If not found → `git -C /data/repo worktree add /data/worktrees/{branchSlug} {branch}`
-6. Set cwd to `/data/worktrees/{branchSlug}/{cwd}`
-7. Write to NATS KV with `branch` (raw), `worktree` (slug), `joinWorktree` (bool)
+1. Check whether `/data/repo` exists (bare repo from GIT_URL clone)
+2. **If `/data/repo` does not exist** (scratch project, no GIT_URL):
+   - Skip steps 3–7 (no branch, no worktree)
+   - Set cwd to `/data/{cwd}` (or `/data` if cwd is empty)
+   - Write to NATS KV with `branch: ""`, `worktree: ""`, `joinWorktree: false`
+   - Proceed to spawn Claude
+3. Compute `branchSlug = slugify(branch)`
+4. Scan KV for any session in this projectId with the same `worktree` slug
+5. If found and `joinWorktree: false` → reply with error
+6. If found and `joinWorktree: true` → skip to step 8
+7. If not found → `git -C /data/repo worktree add /data/worktrees/{branchSlug} {branch}`
+8. Set cwd to `/data/worktrees/{branchSlug}/{cwd}`
+9. Write to NATS KV with `branch` (raw), `worktree` (slug), `joinWorktree` (bool)
 
 On session delete:
 1. Send interrupt → wait for Claude exit
-2. Scan KV bucket for all sessions in this projectId — if no other session has the same `worktree` slug: `git -C /data/repo worktree remove /data/worktrees/{branchSlug}`
+2. If `/data/repo` exists: scan KV bucket for all sessions in this projectId — if no other session has the same `worktree` slug: `git -C /data/repo worktree remove /data/worktrees/{branchSlug}`
 3. Delete from NATS KV
 
 ---
@@ -476,6 +482,8 @@ Events are published as raw stream-json bytes — no envelope. The NATS subject 
   "replayFromSeq": 1042
 }
 ```
+
+For scratch projects (no GIT_URL): `branch` and `worktree` are empty strings, `cwd` is `/data` or `/data/{subdirectory}`.
 
 `state` maps directly from stream-json `session_state_changed` events: `"idle"`, `"running"`, `"requires_action"`.
 
