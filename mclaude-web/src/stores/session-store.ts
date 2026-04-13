@@ -27,8 +27,8 @@ export class SessionStore {
   startWatching(): void {
     this._stopWatching()
 
-    // Watch sessions — key format: "{userId}.{sessionId}" (NATS "." separator for wildcard support)
-    const sessionKey = `${this.userId}.*`
+    // Watch sessions — keys are {userId}.{projectId}.{sessionId}, use > for multi-level match
+    const sessionKey = `${this.userId}.>`
     const unwatch1 = this.natsClient.kvWatch('mclaude-sessions', sessionKey, (entry) => {
       try {
         const state = JSON.parse(new TextDecoder().decode(entry.value)) as SessionKVState
@@ -36,7 +36,7 @@ export class SessionStore {
         logger.debug({ component: 'session-store', sessionId: state.id, userId: this.userId }, 'session updated')
         this._notifySessions()
       } catch {
-        // Deleted key or malformed
+        // Deleted key or malformed — extract sessionId from key {userId}.{projectId}.{sessionId}
         const parts = entry.key.split('.')
         const sessionId = parts[parts.length - 1]
         this._sessions.delete(sessionId)

@@ -25,8 +25,8 @@ export class HeartbeatMonitor {
   start(checkIntervalMs = 5_000): void {
     this.stop()
 
-    this._unwatcher = this.natsClient.kvWatch('mclaude-heartbeats', `${this.userId}/>`, (entry) => {
-      const projectId = entry.key.split('/')[1]
+    this._unwatcher = this.natsClient.kvWatch('mclaude-heartbeats', `${this.userId}.*`, (entry) => {
+      const projectId = entry.key.split('.')[1]
       if (!projectId) return
       try {
         const { ts } = JSON.parse(new TextDecoder().decode(entry.value)) as { ts: string }

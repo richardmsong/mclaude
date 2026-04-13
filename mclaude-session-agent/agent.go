@@ -476,7 +476,7 @@ func (a *Agent) runHeartbeat(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-tick.C:
-				key := fmt.Sprintf("%s/%s", a.userID, a.projectID)
+				key := heartbeatKVKey(a.userID, a.projectID)
 				val := []byte(fmt.Sprintf(`{"ts":%q}`, time.Now().UTC().Format(time.RFC3339)))
 				_, _ = a.hbKV.Put(ctx, key, val)
 			}
@@ -490,7 +490,7 @@ func (a *Agent) writeSessionKV(state SessionState) error {
 	if err != nil {
 		return err
 	}
-	key := fmt.Sprintf("%s/%s/%s", a.userID, state.ProjectID, state.ID)
+	key := sessionKVKey(a.userID, state.ProjectID, state.ID)
 	_, span := KVWriteSpan(context.Background(), kvBucketSessions, key)
 	_, err = a.sessKV.Put(context.Background(), key, data)
 	span.End()
