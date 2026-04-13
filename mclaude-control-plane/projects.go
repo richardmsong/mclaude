@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
+	"github.com/rs/zerolog/log"
 )
 
 // ProjectKVState is the value written to the mclaude-projects JetStream KV bucket.
@@ -63,6 +64,24 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 		if err != nil {
 			replyError(msg, "failed to create project")
 			return
+		}
+
+		// Provision Kubernetes resources (Namespace, PVC, Deployment) for the session-agent.
+		// Non-fatal if provisioning fails — the project record and KV entry are still created.
+		// The project will appear in the dashboard but sessions cannot be created until the
+		// session-agent pod is running.
+		if s.k8sProvisioner != nil {
+			if err := s.k8sProvisioner.ProvisionProject(context.Background(), userID, id, req.GitURL); err != nil {
+				log.Error().Err(err).
+					Str("userId", userID).
+					Str("projectId", id).
+					Msg("k8s provisioning failed — session-agent pod will not start")
+			} else {
+				log.Info().
+					Str("userId", userID).
+					Str("projectId", id).
+					Msg("k8s resources provisioned for project")
+			}
 		}
 
 		// Write to KV so session-store watchers pick it up immediately.
