@@ -42,6 +42,18 @@ describe('SessionListVM', () => {
       expect(projects[0]!.sessions).toHaveLength(1)
       expect(projects[0]!.sessions[0]!.id).toBe('session-1')
     })
+
+    it('maps cwd from SessionKVState to SessionVM', () => {
+      mockNats.kvSet('mclaude-projects', 'user-1.project-1', makeProjectKVState({ id: 'project-1', name: 'Alpha' }))
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({
+        id: 'session-1',
+        projectId: 'project-1',
+        cwd: '/home/user/work/myproject',
+      }))
+
+      const session = vm.projects[0]!.sessions[0]!
+      expect(session.cwd).toBe('/home/user/work/myproject')
+    })
   })
 
   describe('createProject', () => {

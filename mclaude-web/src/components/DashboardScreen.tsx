@@ -7,6 +7,14 @@ import type { SessionListVM, ProjectVM, SessionVM } from '@/viewmodels/session-l
 
 const LAST_PROJECT_KEY = 'mclaude.lastProjectId'
 
+// Show last 2 path segments, replacing $HOME with ~
+function shortenPath(p: string): string {
+  if (!p) return ''
+  const parts = p.replace(/\/$/, '').split('/')
+  const short = parts.slice(-2).join('/')
+  return short.startsWith('~') ? short : `~/${short}`
+}
+
 interface DashboardScreenProps {
   sessionListVM: SessionListVM
   connected: boolean
@@ -263,12 +271,12 @@ export function DashboardScreen({
             >
               <StatusDot state={session.state as 'idle' | 'running' | 'requires_action' | 'restarting' | 'failed'} size={12} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ color: 'var(--text)', fontWeight: 500, fontSize: 15 }}>
+                <div style={{ color: 'var(--text)', fontWeight: 500, fontSize: 15, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {session.name || projectName}
                 </div>
-                <div style={{ color: 'var(--text2)', fontSize: 13, marginTop: 2 }}>
+                <div style={{ color: 'var(--text2)', fontSize: 13, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {STATE_LABELS[session.state] ?? session.state}
-                  {session.name ? ` · ${projectName}` : ''}
+                  {session.cwd ? ` · ${shortenPath(session.cwd)}` : (session.name ? ` · ${projectName}` : '')}
                 </div>
               </div>
               <span style={{ color: 'var(--text3)', fontSize: 18 }}>›</span>
