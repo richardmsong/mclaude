@@ -63,8 +63,8 @@ export class SessionListVM {
     if (gitUrl) payload['gitUrl'] = gitUrl
     const reply = await this.natsClient.request(subject, new TextEncoder().encode(JSON.stringify(payload)))
     const result = JSON.parse(new TextDecoder().decode(reply.data)) as { id?: string; error?: string }
-    if (result.error) throw new Error(result.error)
-    return result.id!
+    if (!result.id) throw new Error(result.error ?? 'createProject: no id in reply')
+    return result.id
   }
 
   async createSession(projectId: string, branch: string, name: string): Promise<string> {
@@ -72,8 +72,8 @@ export class SessionListVM {
     const payload = { projectId, branch, name }
     const reply = await this.natsClient.request(subject, new TextEncoder().encode(JSON.stringify(payload)))
     const result = JSON.parse(new TextDecoder().decode(reply.data)) as { id?: string; error?: string }
-    if (result.error) throw new Error(result.error)
-    return result.id!
+    if (!result.id) throw new Error(result.error ?? 'createSession: no id in reply')
+    return result.id
   }
 
   async deleteSession(sessionId: string): Promise<void> {
