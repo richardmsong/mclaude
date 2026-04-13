@@ -143,11 +143,15 @@ func seedDev(ctx context.Context, db *DB, nc *nats.Conn, logger zerolog.Logger) 
 		if err != nil {
 			return fmt.Errorf("create dev project: %w", err)
 		}
-		// Write to NATS KV so the SPA session-store picks it up immediately.
-		if err := writeProjectKV(nc, user.ID, proj); err != nil {
-			logger.Error().Err(err).Msg("DEV_SEED: write project to KV failed (non-fatal)")
-		}
+		projects = []*Project{proj}
 		logger.Warn().Str("userId", user.ID).Str("projectId", proj.ID).Msg("DEV_SEED: created default project")
+	}
+	// Always rewrite KV entries — ensures correct key format even if a previous
+	// startup wrote with the wrong separator.
+	for _, proj := range projects {
+		if err := writeProjectKV(nc, user.ID, proj); err != nil {
+			logger.Error().Err(err).Str("projectId", proj.ID).Msg("DEV_SEED: write project KV failed (non-fatal)")
+		}
 	}
 
 	return nil
