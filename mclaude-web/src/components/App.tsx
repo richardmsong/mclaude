@@ -94,6 +94,10 @@ export function App() {
     return () => window.removeEventListener('hashchange', handler)
   }, [])
 
+  // Track session store version — increments whenever any session changes so
+  // App re-renders and picks up fresh session data (name, projectId, state).
+  const [sessionVersion, setSessionVersion] = useState(0)
+
   // Bootstrap session store after login
   useEffect(() => {
     if (authState.status === 'authenticated' && authState.userId) {
@@ -101,9 +105,11 @@ export function App() {
       const hb = new HeartbeatMonitor(natsClient, authState.userId)
       store.startWatching()
       hb.start()
+      const unsub = store.onSessionChanged(() => setSessionVersion(v => v + 1))
       setSessionStore(store)
       setHeartbeatMonitor(hb)
       return () => {
+        unsub()
         store.stopWatching()
         hb.stop()
       }
@@ -159,7 +165,10 @@ export function App() {
       return
     }
     const session = sessionStore.sessions.get(route.sessionId)
-    const projectId = session?.projectId ?? 'unknown'
+    // Wait until the session appears in KV — avoids publishing to 'unknown' projectId
+    // and ensures the title shows the real name. Re-runs when sessionVersion increments.
+    if (!session) return
+    const projectId = session.projectId
     const store = new EventStore({
       natsClient,
       userId: authState.userId,
@@ -174,7 +183,9 @@ export function App() {
       store.stop()
       vm.destroy()
     }
-  }, [route.screen, route.sessionId, authState.userId, sessionStore])
+  // sessionVersion causes re-run when KV watch fires with the session data
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [route.screen, route.sessionId, authState.userId, sessionStore, sessionVersion])
 
   // ── Version poller ───────────────────────────────────────────────────
   const { updateAvailable } = useVersionPoller()
