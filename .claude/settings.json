@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".agent/hooks/pre-tool-use.sh"
+            "command": "~/mclaude/.agent/hooks/pre-tool-use.sh"
           }
         ]
       },
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".agent/hooks/spec-check.sh"
+            "command": "~/mclaude/.agent/hooks/spec-check.sh"
           }
         ]
       }
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".agent/hooks/spec-session.sh"
+            "command": "~/mclaude/.agent/hooks/spec-session.sh"
           }
         ]
       }
