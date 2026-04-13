@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/nats-io/nkeys"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -24,10 +25,11 @@ import (
 // If the control-plane is not running inside a Kubernetes cluster, NewK8sProvisioner
 // returns (nil, nil) — callers treat nil as "provisioning disabled".
 type K8sProvisioner struct {
-	client             *kubernetes.Clientset
-	controlPlaneNs     string
-	releaseName        string
+	client              *kubernetes.Clientset
+	controlPlaneNs      string
+	releaseName         string
 	sessionAgentNATSURL string
+	accountKP           nkeys.KeyPair // signs per-user session-agent JWTs
 }
 
 // sessionAgentTpl holds parsed values from the session-agent-template ConfigMap.
@@ -43,8 +45,9 @@ type sessionAgentTpl struct {
 }
 
 // NewK8sProvisioner initialises a provisioner using in-cluster service-account credentials.
+// accountKP is the NATS account key pair used to sign session-agent JWTs.
 // Returns (nil, nil) if not running inside a cluster (e.g., during local dev or tests).
-func NewK8sProvisioner(releaseName, natsURL string) (*K8sProvisioner, error) {
+func NewK8sProvisioner(releaseName, natsURL string, accountKP nkeys.KeyPair) (*K8sProvisioner, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		// Not in cluster — provisioning disabled.
@@ -68,6 +71,7 @@ func NewK8sProvisioner(releaseName, natsURL string) (*K8sProvisioner, error) {
 		controlPlaneNs:      controlPlaneNs,
 		releaseName:         releaseName,
 		sessionAgentNATSURL: sessionAgentNATSURL(natsURL, controlPlaneNs),
+		accountKP:           accountKP,
 	}, nil
 }
 
@@ -109,7 +113,7 @@ func (p *K8sProvisioner) ProvisionProject(ctx context.Context, userID, projectID
 	if err := p.ensureUserConfig(ctx, userNs); err != nil {
 		return fmt.Errorf("user-config: %w", err)
 	}
-	if err := p.ensureUserSecrets(ctx, userNs); err != nil {
+	if err := p.ensureUserSecrets(ctx, userNs, userID); err != nil {
 		return fmt.Errorf("user-secrets: %w", err)
 	}
 	// Copy registry pull secrets from control-plane namespace so pods can pull images.
@@ -290,8 +294,9 @@ func (p *K8sProvisioner) ensureUserConfig(ctx context.Context, ns string) error 
 
 // ensureUserSecrets creates the user-secrets Secret in the user namespace if it doesn't exist.
 // Session-agents mount this read-only at /home/node/.user-secrets/ for API keys and credentials.
-// Initially empty — populated via the break-glass admin API or SCIM provisioning.
-func (p *K8sProvisioner) ensureUserSecrets(ctx context.Context, ns string) error {
+// The Secret is populated with a NATS credentials file (key "nats-creds") scoped to
+// mclaude.{userID}.> so the session-agent can authenticate to NATS.
+func (p *K8sProvisioner) ensureUserSecrets(ctx context.Context, ns, userID string) error {
 	_, err := p.client.CoreV1().Secrets(ns).Get(ctx, "user-secrets", metav1.GetOptions{})
 	if err == nil {
 		return nil
@@ -299,9 +304,19 @@ func (p *K8sProvisioner) ensureUserSecrets(ctx context.Context, ns string) error
 	if !k8serrors.IsNotFound(err) {
 		return err
 	}
+
+	// Generate a long-lived session-agent NATS credential.
+	jwt, seed, err := IssueSessionAgentJWT(userID, p.accountKP)
+	if err != nil {
+		return fmt.Errorf("issue session-agent jwt for %s: %w", userID, err)
+	}
+	natsCreds := FormatNATSCredentials(jwt, seed)
+
 	_, err = p.client.CoreV1().Secrets(ns).Create(ctx, &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "user-secrets", Namespace: ns},
-		Data:       map[string][]byte{},
+		Data: map[string][]byte{
+			"nats-creds": natsCreds,
+		},
 	}, metav1.CreateOptions{})
 	if k8serrors.IsAlreadyExists(err) {
 		return nil

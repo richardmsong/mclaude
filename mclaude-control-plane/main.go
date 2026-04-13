@@ -64,7 +64,7 @@ func main() {
 	}
 
 	// K8s provisioner — nil if not running in a cluster (local dev, CI).
-	k8sProv, err := NewK8sProvisioner(helmReleaseName, natsURL)
+	k8sProv, err := NewK8sProvisioner(helmReleaseName, natsURL, accountKP)
 	if err != nil {
 		logger.Warn().Err(err).Msg("k8s provisioner init failed — project deployment disabled")
 	} else if k8sProv == nil {
