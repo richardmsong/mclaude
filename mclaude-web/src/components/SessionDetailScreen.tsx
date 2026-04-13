@@ -100,6 +100,9 @@ export function SessionDetailScreen({
   const [showUsageOverlay, setShowUsageOverlay] = useState(false)
   const [showRawOutput, setShowRawOutput] = useState(false)
   const [stagedImage, setStagedImage] = useState<{ base64: string; mimeType: string; previewUrl: string } | null>(null)
+  const [pttRecording, setPttRecording] = useState(false)
+  const [pttSupported, setPttSupported] = useState<boolean | null>(null)  // null = not yet checked
+  const pttRecognitionRef = useRef<{ stop(): void } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const atBottomRef = useRef(true)
   const initialMessageSentRef = useRef(false)
@@ -257,6 +260,102 @@ export function SessionDetailScreen({
   const handleTabChange = (tab: 'events' | 'terminal') => {
     setActiveTab(tab)
     storeTab(tab)
+  }
+
+  // PTT: check Speech API availability on mount
+  useEffect(() => {
+    type SpeechRecAPI = {
+      new(): {
+        lang: string
+        interimResults: boolean
+        maxAlternatives: number
+        onresult: ((event: Event) => void) | null
+        onerror: (() => void) | null
+        onend: (() => void) | null
+        start(): void
+        stop(): void
+      }
+    }
+    const win = window as Window & typeof globalThis & {
+      SpeechRecognition?: SpeechRecAPI
+      webkitSpeechRecognition?: SpeechRecAPI
+    }
+    const SpeechRecognitionCtor = win.SpeechRecognition ?? win.webkitSpeechRecognition
+    const supported = !!SpeechRecognitionCtor && location.protocol !== 'http:'
+    setPttSupported(supported)
+  }, [])
+
+  const handlePttStart = () => {
+    if (!pttSupported) {
+      const isHttp = location.protocol === 'http:'
+      alert(isHttp
+        ? 'Voice input requires HTTPS. Connect via a secure URL.'
+        : 'Voice input is not supported in this browser.'
+      )
+      return
+    }
+    if (pttRecording) return
+
+    type SpeechRecAPI2 = {
+      new(): {
+        lang: string
+        interimResults: boolean
+        maxAlternatives: number
+        onresult: ((event: Event) => void) | null
+        onerror: (() => void) | null
+        onend: (() => void) | null
+        start(): void
+        stop(): void
+      }
+    }
+    const win2 = window as Window & typeof globalThis & {
+      SpeechRecognition?: SpeechRecAPI2
+      webkitSpeechRecognition?: SpeechRecAPI2
+    }
+    const SpeechRecognitionCtor = win2.SpeechRecognition ?? win2.webkitSpeechRecognition
+    if (!SpeechRecognitionCtor) return
+
+    const recognition = new SpeechRecognitionCtor()
+    recognition.lang = 'en-US'
+    recognition.interimResults = false
+    recognition.maxAlternatives = 1
+
+    recognition.onresult = (event: Event) => {
+      const e = event as unknown as { results: Array<Array<{ transcript: string }>> }
+      const transcript = e.results[0]?.[0]?.transcript
+      if (transcript) {
+        conversationVM.sendMessage(transcript)
+        // Scroll to bottom after PTT send
+        requestAnimationFrame(() => {
+          if (scrollRef.current) {
+            scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+            atBottomRef.current = true
+          }
+        })
+      }
+    }
+
+    recognition.onerror = () => {
+      setPttRecording(false)
+      pttRecognitionRef.current = null
+    }
+
+    recognition.onend = () => {
+      setPttRecording(false)
+      pttRecognitionRef.current = null
+    }
+
+    pttRecognitionRef.current = recognition
+    recognition.start()
+    setPttRecording(true)
+  }
+
+  const handlePttStop = () => {
+    if (pttRecognitionRef.current) {
+      pttRecognitionRef.current.stop()
+      pttRecognitionRef.current = null
+    }
+    setPttRecording(false)
   }
 
   const handleApprove = useCallback(() => {
@@ -745,20 +844,25 @@ export function SessionDetailScreen({
 
             {/* PTT button */}
             <button
-              onPointerDown={() => { /* PTT: hold to record voice input — not yet implemented */ }}
+              onPointerDown={handlePttStart}
+              onPointerUp={handlePttStop}
+              onPointerLeave={handlePttStop}
               style={{
                 width: 32,
                 height: 32,
                 borderRadius: '50%',
-                background: 'var(--surf2)',
-                color: 'var(--text2)',
+                background: pttRecording ? 'var(--red)' : 'var(--surf2)',
+                color: pttRecording ? '#fff' : (pttSupported === false ? 'var(--text3)' : 'var(--text2)'),
                 flexShrink: 0,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 fontSize: 15,
+                opacity: pttSupported === false ? 0.4 : 1,
+                animation: pttRecording ? 'pulse-opacity 1.2s ease-in-out infinite' : undefined,
+                transition: 'background 0.15s, color 0.15s',
               }}
-              title="Push to talk"
+              title={pttRecording ? 'Recording… release to send' : 'Hold to record (push-to-talk)'}
             >
               🎙
             </button>
