@@ -311,11 +311,12 @@ export function App() {
 
   if (route.screen === 'session' && route.sessionId && conversationVM && eventStore && sessionStore) {
     const session = sessionStore.sessions.get(route.sessionId)
+    const project = session ? sessionStore.projects.get(session.projectId) : undefined
     return (
       <Fragment>
         <SessionDetailScreen
           sessionId={route.sessionId}
-          sessionName={session?.name ?? route.sessionId.slice(0, 8)}
+          sessionName={project?.name ?? session?.name ?? route.sessionId.slice(0, 8)}
           sessionState={session?.state ?? 'idle'}
           sessionModel={session?.model}
           sessionUsage={session?.usage}
