@@ -56,14 +56,13 @@ func main() {
 	// CLI flags — accepted from entrypoint.sh or direct invocation.
 	// All flags also fall back to env vars for backward compatibility.
 	var (
-		flagNATSURL   = flag.String("nats-url", os.Getenv("NATS_URL"), "NATS server URL")
-		flagNATSCreds = flag.String("nats-creds", os.Getenv("NATS_CREDS_FILE"), "Path to NATS credentials file")
-		flagUserID    = flag.String("user-id", os.Getenv("USER_ID"), "User ID (required)")
-		flagProjectID = flag.String("project-id", os.Getenv("PROJECT_ID"), "Project ID (required)")
+		flagNATSURL    = flag.String("nats-url", os.Getenv("NATS_URL"), "NATS server URL")
+		flagNATSCreds  = flag.String("nats-creds", os.Getenv("NATS_CREDS_FILE"), "Path to NATS credentials file")
+		flagUserID     = flag.String("user-id", os.Getenv("USER_ID"), "User ID (required)")
+		flagProjectID  = flag.String("project-id", os.Getenv("PROJECT_ID"), "Project ID (required)")
 		flagClaudePath = flag.String("claude-path", os.Getenv("CLAUDE_PATH"), "Path to claude binary")
-		// --data-dir and --mode are accepted but not yet used by the core agent.
-		_ = flag.String("data-dir", "/data", "Data directory (unused by agent binary, consumed by entrypoint)")
-		_ = flag.String("mode", "standalone", "Run mode: k8s | standalone")
+		flagDataDir    = flag.String("data-dir", "/data", "Data directory (project PVC mount: repo + worktrees)")
+		_              = flag.String("mode", "standalone", "Run mode: k8s | standalone")
 	)
 	flag.Parse()
 
@@ -78,6 +77,7 @@ func main() {
 		claudePath = "claude"
 	}
 	natsCredsFile := *flagNATSCreds
+	dataDir := *flagDataDir
 
 	// Observability setup — must run before anything that emits spans/metrics.
 	SetupPropagator()
@@ -95,7 +95,7 @@ func main() {
 	}
 	defer nc.Close()
 
-	agent, err := NewAgent(nc, userID, projectID, claudePath, log.Logger, m)
+	agent, err := NewAgent(nc, userID, projectID, claudePath, dataDir, log.Logger, m)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create agent")
 	}
