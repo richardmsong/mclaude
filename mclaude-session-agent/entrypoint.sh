@@ -43,9 +43,15 @@ if [ ! -d "/data/repo/HEAD" ]; then
         }
     else
         git init --bare /data/repo
+        # Set default branch to main (some git versions default to master).
+        git -C /data/repo symbolic-ref HEAD refs/heads/main
         # Create an initial empty commit so worktrees have something to branch from.
-        git -C /data/repo commit --allow-empty -m "init" \
-            --author="mclaude <mclaude@local>" 2>/dev/null || true
+        # git commit requires a working tree, so use plumbing commands instead.
+        TREE=$(git -C /data/repo hash-object -t tree /dev/null)
+        COMMIT=$(GIT_AUTHOR_NAME="mclaude" GIT_AUTHOR_EMAIL="mclaude@local" \
+                 GIT_COMMITTER_NAME="mclaude" GIT_COMMITTER_EMAIL="mclaude@local" \
+                 git -C /data/repo commit-tree "$TREE" -m "init")
+        git -C /data/repo update-ref refs/heads/main "$COMMIT"
     fi
 else
     if [ -n "$GIT_URL" ]; then
