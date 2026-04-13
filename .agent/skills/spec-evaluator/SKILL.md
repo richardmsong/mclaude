@@ -10,10 +10,12 @@ Audits one component against its spec. Produces an exhaustive gap list, or CLEAN
 ## Usage
 
 ```
-/spec-evaluator <component>
+/spec-evaluator [component]
 ```
 
 **component**: `control-plane` | `session-agent` | `spa` | `cli` | `helm`
+
+Omit to audit **all** components in parallel. Each component runs as a separate subagent so they finish concurrently.
 
 ---
 
@@ -37,7 +39,7 @@ Reports only real gaps — spec says X, code doesn't do X. Does not report thing
 
 ---
 
-## Algorithm
+## Algorithm — single component
 
 ```
 1. Read all spec docs for the component in full
@@ -45,7 +47,22 @@ Reports only real gaps — spec says X, code doesn't do X. Does not report thing
 3. For each statement in the spec that describes behavior/structure:
    - Does corresponding code exist?
    - Does it behave as described?
-4. Output: CLEAN or one GAP: line per gap
+4. Save to .agent/audits/spec-<component>-<YYYY-MM-DD>.md (append if exists)
+5. Output: CLEAN or one GAP: line per gap
+```
+
+## Algorithm — all components (no argument)
+
+Spawn one subagent per component in parallel, each running the single-component algorithm above. Wait for all to finish, then print a combined summary:
+
+```
+### control-plane: N gaps
+### session-agent: N gaps
+### spa:           N gaps
+### cli:           N gaps
+### helm:          N gaps
+
+See .agent/audits/ for full per-component reports.
 ```
 
 ---
@@ -74,6 +91,22 @@ Every gap line must:
 - **Never** report things the spec doesn't say (missing tests, style issues, etc.)
 - **Only** report: spec says X, code does not do X
 - If a gap cannot be implemented due to environment constraints, that must be noted in the spec itself — update the spec to reflect the constraint, then re-evaluate
+
+---
+
+## Saving results
+
+**Always** write the full output to `.agent/audits/spec-<component>-<YYYY-MM-DD>.md` before doing anything else with the result. Append if the file exists (multiple runs per day).
+
+Format:
+
+```markdown
+## Run: <ISO timestamp>
+
+<CLEAN or all GAP: lines>
+```
+
+Create `.agent/audits/` if it doesn't exist. This is mandatory — auditing history must be preserved.
 
 ---
 
