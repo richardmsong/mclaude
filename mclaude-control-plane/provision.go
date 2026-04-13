@@ -377,9 +377,12 @@ func (p *K8sProvisioner) ensurePVC(ctx context.Context, ns, name, size, storageC
 func (p *K8sProvisioner) ensureDeployment(ctx context.Context, ns, projectID, userID, gitURL string, tpl *sessionAgentTpl) error {
 	name := "project-" + projectID
 
-	_, err := p.client.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
+	existing, err := p.client.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
-		return nil // already exists
+		// Deployment exists — update the container image so rolling deploys pick up new images.
+		existing.Spec.Template.Spec.Containers[0].Image = tpl.image
+		_, err = p.client.AppsV1().Deployments(ns).Update(ctx, existing, metav1.UpdateOptions{})
+		return err
 	}
 	if !k8serrors.IsNotFound(err) {
 		return err
