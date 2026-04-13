@@ -75,6 +75,8 @@ spec:
               value: {{ .Values.controlPlane.config.jwtExpirySeconds | quote }}
             - name: JWT_REFRESH_THRESHOLD_SECONDS
               value: {{ .Values.controlPlane.config.jwtRefreshThresholdSeconds | quote }}
+            - name: HELM_RELEASE_NAME
+              value: {{ include "mclaude.fullname" . | quote }}
             - name: NATS_URL
               value: "nats://{{ include "mclaude.fullname" . }}-nats:{{ .Values.nats.service.clientPort }}"
             - name: DATABASE_URL

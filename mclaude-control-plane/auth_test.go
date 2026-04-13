@@ -53,7 +53,7 @@ func newTestServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("create account key: %v", err)
 	}
-	return NewServer(nil, accountKP, "nats://localhost:4222", "", 8*time.Hour, "test-admin-token")
+	return NewServer(nil, accountKP, "nats://localhost:4222", "", 8*time.Hour, "test-admin-token", nil)
 }
 
 func TestHandleLogin_MissingFields(t *testing.T) {
@@ -130,7 +130,7 @@ func TestHandleRefresh_MalformedToken(t *testing.T) {
 
 func TestHandleRefresh_ValidJWT(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
-	srv := NewServer(nil, accountKP, "nats://localhost:4222", "", 8*time.Hour, "admin")
+	srv := NewServer(nil, accountKP, "nats://localhost:4222", "", 8*time.Hour, "admin", nil)
 
 	expiresAt := time.Now().Add(8 * time.Hour).Unix()
 	jwt, _, err := IssueUserJWT("refresh-user", accountKP, expiresAt)
@@ -170,7 +170,7 @@ func TestHandleRefresh_WrongAccountKey(t *testing.T) {
 	// JWT signed by accountA, server has accountB → should reject.
 	accountA, _ := nkeys.CreateAccount()
 	accountB, _ := nkeys.CreateAccount()
-	srv := NewServer(nil, accountB, "nats://localhost:4222", "", time.Hour, "admin")
+	srv := NewServer(nil, accountB, "nats://localhost:4222", "", time.Hour, "admin", nil)
 
 	expiresAt := time.Now().Add(time.Hour).Unix()
 	jwt, _, _ := IssueUserJWT("user", accountA, expiresAt)
@@ -207,7 +207,7 @@ func TestAuthMiddleware_NoToken(t *testing.T) {
 
 func TestAuthMiddleware_ValidToken_InjectsUserID(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
-	srv := NewServer(nil, accountKP, "nats://test", "", time.Hour, "admin")
+	srv := NewServer(nil, accountKP, "nats://test", "", time.Hour, "admin", nil)
 
 	expiresAt := time.Now().Add(time.Hour).Unix()
 	jwt, _, _ := IssueUserJWT("middleware-user", accountKP, expiresAt)
@@ -252,7 +252,7 @@ func TestAuthMiddleware_InvalidToken(t *testing.T) {
 // ---- Admin middleware ----
 
 func TestAdminAuthMiddleware_Enforced(t *testing.T) {
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", time.Hour, "secret-admin-token")
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", time.Hour, "secret-admin-token", nil)
 	called := false
 	handler := srv.adminAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true

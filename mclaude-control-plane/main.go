@@ -30,6 +30,7 @@ func main() {
 	natsURL := envOr("NATS_URL", "nats://localhost:4222")
 	natsWsURL := envOr("NATS_WS_URL", "") // external WebSocket URL for browser clients; empty = client derives from origin
 	adminToken := envOr("ADMIN_TOKEN", "")
+	helmReleaseName := envOr("HELM_RELEASE_NAME", "mclaude")
 
 	jwtExpiry := 8 * time.Hour
 	if v := os.Getenv("JWT_EXPIRY_SECONDS"); v != "" {
@@ -62,7 +63,17 @@ func main() {
 		logger.Fatal().Err(err).Msg("account nkey")
 	}
 
-	srv := NewServer(db, accountKP, natsURL, natsWsURL, jwtExpiry, adminToken)
+	// K8s provisioner — nil if not running in a cluster (local dev, CI).
+	k8sProv, err := NewK8sProvisioner(helmReleaseName, natsURL)
+	if err != nil {
+		logger.Warn().Err(err).Msg("k8s provisioner init failed — project deployment disabled")
+	} else if k8sProv == nil {
+		logger.Info().Msg("k8s provisioner disabled — not running in cluster")
+	} else {
+		logger.Info().Msg("k8s provisioner ready")
+	}
+
+	srv := NewServer(db, accountKP, natsURL, natsWsURL, jwtExpiry, adminToken, k8sProv)
 
 	// NATS connection — used for project subscriptions and KV writes.
 	nc, err := nats.Connect(natsURL,
