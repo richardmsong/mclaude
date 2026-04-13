@@ -8,7 +8,7 @@ on:
 jobs:
   changes:
     name: Detect changes
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
       pull-requests: read
@@ -45,7 +45,7 @@ jobs:
     name: Build control-plane (branch)
     needs: changes
     if: needs.changes.outputs.control-plane == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
       packages: write
@@ -86,7 +86,7 @@ jobs:
     name: Build spa (branch)
     needs: changes
     if: needs.changes.outputs.spa == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
       packages: write
@@ -114,7 +114,7 @@ jobs:
     name: Build session-agent (branch)
     needs: changes
     if: needs.changes.outputs.session-agent == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
       packages: write
