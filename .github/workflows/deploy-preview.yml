@@ -150,5 +150,6 @@ jobs:
             --set sessionAgent.image.tag="${SA_TAG}" \
             --set namespace.create=false \
             --set "global.imagePullSecrets[0]=ghcr-pull-secret" \
+            --set controlPlane.migrations.enabled=false \
             --namespace "mclaude-system" \
             --wait --timeout 5m
