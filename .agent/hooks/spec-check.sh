@@ -5,7 +5,10 @@
 
 set -euo pipefail
 
+echo "spec-check: invoked at $(date)" >> /tmp/spec-check-debug.log
+
 INPUT=$(cat)
+echo "spec-check: input=$(echo "$INPUT" | head -c 200)" >> /tmp/spec-check-debug.log
 
 FILE_PATH=$(python3 -c "
 import sys, json
