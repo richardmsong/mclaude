@@ -27,6 +27,7 @@ func main() {
 	adminPort := envOr("ADMIN_PORT", "9091")
 	databaseDSN := envOr("DATABASE_URL", envOr("DATABASE_DSN", "")) // DATABASE_URL is the k8s/helm convention
 	natsURL := envOr("NATS_URL", "nats://localhost:4222")
+	natsWsURL := envOr("NATS_WS_URL", "") // external WebSocket URL for browser clients; empty = client derives from origin
 	adminToken := envOr("ADMIN_TOKEN", "")
 
 	jwtExpiry := 8 * time.Hour
@@ -67,7 +68,7 @@ func main() {
 		}
 	}
 
-	srv := NewServer(db, accountKP, natsURL, jwtExpiry, adminToken)
+	srv := NewServer(db, accountKP, natsURL, natsWsURL, jwtExpiry, adminToken)
 
 	// Main API mux (public + protected routes)
 	mux := http.NewServeMux()
