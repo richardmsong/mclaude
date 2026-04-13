@@ -38,6 +38,8 @@ type sessionAgentTpl struct {
 	resources                     corev1.ResourceRequirements
 	projectPvcSize                string
 	projectPvcStorageClass        string
+	nixPvcSize                    string
+	nixPvcStorageClass            string
 }
 
 // NewK8sProvisioner initialises a provisioner using in-cluster service-account credentials.
@@ -86,8 +88,9 @@ func sessionAgentNATSURL(rawURL, ns string) string {
 	return "nats://" + hostname + "." + ns + ".svc.cluster.local" + port
 }
 
-// ProvisionProject creates a user namespace, RBAC, PVC, and session-agent Deployment
-// for a newly-created project. Idempotent — safe to call again if resources already exist.
+// ProvisionProject creates a user namespace, RBAC, PVCs, user config resources,
+// and a session-agent Deployment for a newly-created project.
+// Idempotent — safe to call again if resources already exist.
 func (p *K8sProvisioner) ProvisionProject(ctx context.Context, userID, projectID, gitURL string) error {
 	tpl, err := p.loadTemplate(ctx)
 	if err != nil {
@@ -102,8 +105,25 @@ func (p *K8sProvisioner) ProvisionProject(ctx context.Context, userID, projectID
 	if err := p.ensureServiceAccount(ctx, userNs); err != nil {
 		return fmt.Errorf("serviceaccount in %s: %w", userNs, err)
 	}
+	// Per-user resources (idempotent — only created once per user namespace).
+	if err := p.ensureUserConfig(ctx, userNs); err != nil {
+		return fmt.Errorf("user-config: %w", err)
+	}
+	if err := p.ensureUserSecrets(ctx, userNs); err != nil {
+		return fmt.Errorf("user-secrets: %w", err)
+	}
+	// Copy registry pull secrets from control-plane namespace so pods can pull images.
+	if err := p.ensureImagePullSecrets(ctx, userNs); err != nil {
+		return fmt.Errorf("image pull secrets: %w", err)
+	}
+	// Per-project PVCs.
 	if err := p.ensurePVC(ctx, userNs, "project-"+projectID, tpl.projectPvcSize, tpl.projectPvcStorageClass); err != nil {
 		return fmt.Errorf("project pvc: %w", err)
+	}
+	// Nix-store PVC: spec says RWX shared per namespace; dev clusters (local-path)
+	// only support RWO so each project gets its own nix PVC.
+	if err := p.ensurePVC(ctx, userNs, "nix-"+projectID, tpl.nixPvcSize, tpl.nixPvcStorageClass); err != nil {
+		return fmt.Errorf("nix pvc: %w", err)
 	}
 	if err := p.ensureDeployment(ctx, userNs, projectID, userID, gitURL, tpl); err != nil {
 		return fmt.Errorf("deployment: %w", err)
@@ -123,10 +143,15 @@ func (p *K8sProvisioner) loadTemplate(ctx context.Context) (*sessionAgentTpl, er
 		imagePullPolicy:        corev1.PullPolicy(cm.Data["imagePullPolicy"]),
 		projectPvcSize:         cm.Data["projectPvcSize"],
 		projectPvcStorageClass: cm.Data["projectPvcStorageClass"],
+		nixPvcSize:             cm.Data["nixPvcSize"],
+		nixPvcStorageClass:     cm.Data["nixPvcStorageClass"],
 	}
 
 	if tpl.projectPvcSize == "" {
 		tpl.projectPvcSize = "10Gi"
+	}
+	if tpl.nixPvcSize == "" {
+		tpl.nixPvcSize = "10Gi"
 	}
 
 	if v := cm.Data["terminationGracePeriodSeconds"]; v != "" {
@@ -242,6 +267,79 @@ func (p *K8sProvisioner) ensureServiceAccount(ctx context.Context, ns string) er
 	return nil
 }
 
+// ensureUserConfig creates the user-config ConfigMap in the user namespace if it doesn't exist.
+// Session-agents mount this read-only at /home/node/.claude-seed/ to seed their Claude home.
+// Initially empty — the config-sync sidecar writes to it when the user updates their config.
+func (p *K8sProvisioner) ensureUserConfig(ctx context.Context, ns string) error {
+	_, err := p.client.CoreV1().ConfigMaps(ns).Get(ctx, "user-config", metav1.GetOptions{})
+	if err == nil {
+		return nil
+	}
+	if !k8serrors.IsNotFound(err) {
+		return err
+	}
+	_, err = p.client.CoreV1().ConfigMaps(ns).Create(ctx, &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "user-config", Namespace: ns},
+		Data:       map[string]string{},
+	}, metav1.CreateOptions{})
+	if k8serrors.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
+}
+
+// ensureUserSecrets creates the user-secrets Secret in the user namespace if it doesn't exist.
+// Session-agents mount this read-only at /home/node/.user-secrets/ for API keys and credentials.
+// Initially empty — populated via the break-glass admin API or SCIM provisioning.
+func (p *K8sProvisioner) ensureUserSecrets(ctx context.Context, ns string) error {
+	_, err := p.client.CoreV1().Secrets(ns).Get(ctx, "user-secrets", metav1.GetOptions{})
+	if err == nil {
+		return nil
+	}
+	if !k8serrors.IsNotFound(err) {
+		return err
+	}
+	_, err = p.client.CoreV1().Secrets(ns).Create(ctx, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "user-secrets", Namespace: ns},
+		Data:       map[string][]byte{},
+	}, metav1.CreateOptions{})
+	if k8serrors.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
+}
+
+// ensureImagePullSecrets copies registry pull secrets from the control-plane namespace
+// to the user namespace. Session-agent pods need these to pull images from private registries.
+// Only copies secrets of type kubernetes.io/dockerconfigjson.
+func (p *K8sProvisioner) ensureImagePullSecrets(ctx context.Context, destNs string) error {
+	secrets, err := p.client.CoreV1().Secrets(p.controlPlaneNs).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list secrets in %s: %w", p.controlPlaneNs, err)
+	}
+	for _, src := range secrets.Items {
+		if src.Type != corev1.SecretTypeDockerConfigJson {
+			continue
+		}
+		_, err := p.client.CoreV1().Secrets(destNs).Get(ctx, src.Name, metav1.GetOptions{})
+		if err == nil {
+			continue // already exists
+		}
+		if !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("check secret %s: %w", src.Name, err)
+		}
+		copy := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: src.Name, Namespace: destNs},
+			Type:       src.Type,
+			Data:       src.Data,
+		}
+		if _, err := p.client.CoreV1().Secrets(destNs).Create(ctx, copy, metav1.CreateOptions{}); err != nil && !k8serrors.IsAlreadyExists(err) {
+			return fmt.Errorf("copy secret %s: %w", src.Name, err)
+		}
+	}
+	return nil
+}
+
 func (p *K8sProvisioner) ensurePVC(ctx context.Context, ns, name, size, storageClass string) error {
 	_, err := p.client.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
@@ -293,6 +391,17 @@ func (p *K8sProvisioner) ensureDeployment(ctx context.Context, ns, projectID, us
 	fsGroup := int64(1000)
 	runAsNonRoot := true
 
+	// Collect imagePullSecrets from any docker config secrets in the user namespace.
+	var imagePullSecrets []corev1.LocalObjectReference
+	secrets, err := p.client.CoreV1().Secrets(ns).List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, s := range secrets.Items {
+			if s.Type == corev1.SecretTypeDockerConfigJson {
+				imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{Name: s.Name})
+			}
+		}
+	}
+
 	env := []corev1.EnvVar{
 		{Name: "USER_ID", Value: userID},
 		{Name: "PROJECT_ID", Value: projectID},
@@ -328,6 +437,7 @@ func (p *K8sProvisioner) ensureDeployment(ctx context.Context, ns, projectID, us
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName:            "mclaude-sa",
+					ImagePullSecrets:              imagePullSecrets,
 					TerminationGracePeriodSeconds: &grace,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &runAsNonRoot,
@@ -344,9 +454,33 @@ func (p *K8sProvisioner) ensureDeployment(ctx context.Context, ns, projectID, us
 							},
 						},
 						{
+							Name: "nix-store",
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+									ClaimName: "nix-" + projectID,
+								},
+							},
+						},
+						{
 							Name: "claude-home",
 							VolumeSource: corev1.VolumeSource{
 								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
+						{
+							Name: "user-config",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{Name: "user-config"},
+								},
+							},
+						},
+						{
+							Name: "user-secrets",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{
+									SecretName: "user-secrets",
+								},
 							},
 						},
 					},
@@ -359,7 +493,10 @@ func (p *K8sProvisioner) ensureDeployment(ctx context.Context, ns, projectID, us
 							Resources:       tpl.resources,
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "project-data", MountPath: "/data"},
+								{Name: "nix-store", MountPath: "/nix"},
 								{Name: "claude-home", MountPath: "/home/node/.claude"},
+								{Name: "user-config", MountPath: "/home/node/.claude-seed", ReadOnly: true},
+								{Name: "user-secrets", MountPath: "/home/node/.user-secrets", ReadOnly: true},
 							},
 						},
 					},
