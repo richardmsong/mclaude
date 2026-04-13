@@ -109,7 +109,7 @@ func TestResumeClearsPendingControls(t *testing.T) {
 	pc := &publishCapture{}
 	kc := &kvCapture{}
 
-	if err := sess.start(mockClaude, pc.publish, kc.write); err != nil {
+	if err := sess.start(mockClaude, false, pc.publish, kc.write); err != nil {
 		t.Fatalf("session.start (resume): %v", err)
 	}
 	t.Cleanup(func() {
@@ -175,7 +175,7 @@ func TestPublishErrorTolerance(t *testing.T) {
 		return nil
 	}
 
-	if err := sess.start(mockClaude, publish, writeKV); err != nil {
+	if err := sess.start(mockClaude, false, publish, writeKV); err != nil {
 		t.Fatalf("session.start: %v", err)
 	}
 	t.Cleanup(func() {
@@ -233,7 +233,7 @@ func TestGracefulStop(t *testing.T) {
 		return nil
 	}
 
-	if err := sess.start(mockClaude, publish, func(SessionState) error { return nil }); err != nil {
+	if err := sess.start(mockClaude, false, publish, func(SessionState) error { return nil }); err != nil {
 		t.Fatalf("session.start: %v", err)
 	}
 

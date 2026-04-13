@@ -41,17 +41,72 @@ func newSession(state SessionState, userID string) *Session {
 	}
 }
 
-// start spawns the Claude Code process and begins routing events.
-func (s *Session) start(claudePath string, publish func(subject string, data []byte) error, writeKV func(state SessionState) error) error {
-	args := []string{
-		"--print", "--verbose",
-		"--output-format", "stream-json",
-		"--input-format", "stream-json",
-		"--include-partial-messages",
-		"--session-id", s.state.ID,
+// getState returns a thread-safe copy of the current session state.
+func (s *Session) getState() SessionState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state
+}
+
+// stopAndWait sends an interrupt to Claude, waits up to timeout for exit,
+// then SIGKILLs if it hasn't stopped.
+func (s *Session) stopAndWait(timeout time.Duration) error {
+	s.mu.Lock()
+	cmd := s.cmd
+	s.mu.Unlock()
+	if cmd == nil {
+		return nil
 	}
-	if s.state.CWD != "" {
-		args = append(args, "-w", s.state.CWD)
+
+	// Send interrupt via stdin.
+	interrupt := []byte(`{"type":"control_request","request":{"subtype":"interrupt"}}`)
+	select {
+	case s.stdinCh <- interrupt:
+	default:
+	}
+	close(s.stopCh)
+
+	// Wait for process to exit or timeout.
+	done := make(chan struct{})
+	go func() {
+		<-s.doneCh
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-time.After(timeout):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		<-done
+		return fmt.Errorf("process did not exit within %s; killed", timeout)
+	}
+}
+
+// start spawns the Claude Code process and begins routing events.
+// If resume is true, uses --resume {id} instead of --session-id {id}.
+func (s *Session) start(claudePath string, resume bool, publish func(subject string, data []byte) error, writeKV func(state SessionState) error) error {
+	var args []string
+	if resume {
+		args = []string{
+			"--print", "--verbose",
+			"--output-format", "stream-json",
+			"--input-format", "stream-json",
+			"--include-partial-messages",
+			"--resume", s.state.ID,
+		}
+	} else {
+		args = []string{
+			"--print", "--verbose",
+			"--output-format", "stream-json",
+			"--input-format", "stream-json",
+			"--include-partial-messages",
+			"--session-id", s.state.ID,
+		}
+		if s.state.CWD != "" {
+			args = append(args, "-w", s.state.CWD)
+		}
 	}
 
 	cmd := exec.Command(claudePath, args...)

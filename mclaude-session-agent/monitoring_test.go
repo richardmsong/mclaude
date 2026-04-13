@@ -246,7 +246,7 @@ func TestMonitoringLogs(t *testing.T) {
 		return nil
 	}
 
-	if err := sess.start(mockClaude, publish, writeKV); err != nil {
+	if err := sess.start(mockClaude, false, publish, writeKV); err != nil {
 		t.Fatalf("session start: %v", err)
 	}
 	t.Cleanup(func() {
@@ -351,7 +351,7 @@ func TestSessionStartEmitsSpans(t *testing.T) {
 		return nil
 	}
 
-	if err := sess.start(mockClaude, publish, func(SessionState) error { return nil }); err != nil {
+	if err := sess.start(mockClaude, false, publish, func(SessionState) error { return nil }); err != nil {
 		t.Fatalf("session start: %v", err)
 	}
 	t.Cleanup(func() {
@@ -418,7 +418,7 @@ func TestSessionStartEmitsMetrics(t *testing.T) {
 	sess.metrics = m
 	sess.extraEnv = []string{"MOCK_TRANSCRIPT=" + transcript}
 
-	if err := sess.start(mockClaude, func(string, []byte) error { return nil }, func(SessionState) error { return nil }); err != nil {
+	if err := sess.start(mockClaude, false, func(string, []byte) error { return nil }, func(SessionState) error { return nil }); err != nil {
 		t.Fatalf("session start: %v", err)
 	}
 	t.Cleanup(func() {
