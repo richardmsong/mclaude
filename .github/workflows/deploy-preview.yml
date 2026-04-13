@@ -80,8 +80,6 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: ghcr.io/mclaude-project/mclaude-control-plane:${{ needs.changes.outputs.image_tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
   build-spa:
     name: Build spa (branch)
@@ -111,8 +109,6 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: ghcr.io/mclaude-project/mclaude-spa:${{ needs.changes.outputs.image_tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
   build-session-agent:
     name: Build session-agent (branch)
@@ -153,8 +149,6 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: ghcr.io/mclaude-project/mclaude-session-agent:${{ needs.changes.outputs.image_tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
   deploy:
     name: Deploy preview
