@@ -74,7 +74,7 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 			CreatedAt: proj.CreatedAt.UTC().Format(time.RFC3339),
 		}
 		val, _ := json.Marshal(state)
-		if _, err := kv.Put(userID+"/"+id, val); err != nil {
+		if _, err := kv.Put(userID+"."+id, val); err != nil {
 			// Non-fatal: DB row was created; KV is best-effort and will be
 			// back-filled if the control-plane reconnects.
 			_ = err
@@ -104,7 +104,9 @@ func writeProjectKV(nc *nats.Conn, userID string, proj *Project) error {
 		CreatedAt: proj.CreatedAt.UTC().Format(time.RFC3339),
 	}
 	val, _ := json.Marshal(state)
-	_, err = kv.Put(userID+"/"+proj.ID, val)
+	// Key uses "." as separator — NATS uses "." as the token separator for
+	// wildcard matching (">" and "*"). Using "/" would break kvWatch patterns.
+	_, err = kv.Put(userID+"."+proj.ID, val)
 	return err
 }
 
