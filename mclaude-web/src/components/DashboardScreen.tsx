@@ -67,6 +67,8 @@ export function DashboardScreen({
     ({ session: s }) => s.state === 'requires_action' || s.hasPendingPermission
   ).length
 
+  const unhealthyProjects = projects.filter(p => !p.healthy)
+
   const STATE_LABELS: Record<string, string> = {
     working: 'Working',
     running: 'Working',
@@ -181,6 +183,26 @@ export function DashboardScreen({
               {group === 'all' ? 'All' : group}
             </button>
           ))}
+        </div>
+      )}
+
+      {/* P6: Agent health banner */}
+      {unhealthyProjects.length > 0 && (
+        <div style={{
+          background: 'rgba(255,69,58,0.12)',
+          borderBottom: '1px solid rgba(255,69,58,0.3)',
+          padding: '8px 16px',
+          color: 'var(--red)',
+          fontSize: 13,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          flexShrink: 0,
+        }}>
+          <span>⚠</span>
+          <span>
+            Agent down: {unhealthyProjects.map(p => p.name).join(', ')} — heartbeat stale
+          </span>
         </div>
       )}
 
