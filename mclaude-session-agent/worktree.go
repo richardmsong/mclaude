@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"regexp"
 	"strings"
 )
@@ -34,4 +35,15 @@ func worktreeExists(sessions map[string]*SessionState, projectID, slug string) b
 		}
 	}
 	return false
+}
+
+// dirExists reports whether path exists and is a directory.
+// Returns false if the path does not exist, is not a directory, or if stat
+// returns any error (e.g. permission denied).
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
 }

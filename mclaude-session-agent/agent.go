@@ -278,45 +278,70 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 			return
 		}
 	}
-	if req.Branch == "" {
-		req.Branch = "main"
-	}
 
-	branchSlug := SlugifyBranch(req.Branch)
 	sessionID := uuid.NewString()
 
-	// Check for worktree collision.
-	a.mu.RLock()
-	collision := a.worktreeInUse(branchSlug)
-	a.mu.RUnlock()
-
-	if collision && !req.JoinWorktree {
-		a.reply(msg, nil, "worktree already in use for branch "+req.Branch)
-		return
-	}
-
-	// Compute worktree path from dataDir if available; fall back to /data.
+	// Resolve the effective data directory (fall back to /data when unset).
 	dataDir := a.dataDir
 	if dataDir == "" {
 		dataDir = "/data"
 	}
-	worktreePath := filepath.Join(dataDir, "worktrees", branchSlug)
-	cwd := worktreePath
-	if req.CWD != "" {
-		cwd = filepath.Join(worktreePath, req.CWD)
-	}
 
-	// Create git worktree if we have a data dir and the worktree isn't already
-	// in use (joinWorktree: true skips creation when worktree exists).
-	if a.dataDir != "" && !collision {
-		repoPath := filepath.Join(a.dataDir, "repo")
-		if err := a.gitWorktreeAdd(repoPath, worktreePath, req.Branch); err != nil {
-			a.log.Error().Err(err).
-				Str("branch", req.Branch).
-				Str("worktreePath", worktreePath).
-				Msg("git worktree add failed")
-			a.reply(msg, nil, "git worktree add: "+err.Error())
+	// Step 1 (spec): Check whether /data/repo exists.
+	// If it does NOT exist this is a scratch project (no GIT_URL configured) —
+	// skip all git/worktree operations and set cwd directly under dataDir.
+	repoPath := filepath.Join(dataDir, "repo")
+	scratch := !dirExists(repoPath)
+
+	var (
+		branch       string
+		branchSlug   string
+		worktreePath string
+		cwd          string
+	)
+
+	if scratch {
+		// Scratch project: no bare repo — skip steps 3–7.
+		// branch and worktree remain empty strings; cwd is /data/{req.CWD}.
+		if req.CWD != "" {
+			cwd = filepath.Join(dataDir, req.CWD)
+		} else {
+			cwd = dataDir
+		}
+	} else {
+		// Git project: full worktree flow (steps 3–9).
+		if req.Branch == "" {
+			req.Branch = "main"
+		}
+		branch = req.Branch
+		branchSlug = SlugifyBranch(branch)
+		worktreePath = filepath.Join(dataDir, "worktrees", branchSlug)
+		cwd = worktreePath
+		if req.CWD != "" {
+			cwd = filepath.Join(worktreePath, req.CWD)
+		}
+
+		// Check for worktree collision (step 4).
+		a.mu.RLock()
+		collision := a.worktreeInUse(branchSlug)
+		a.mu.RUnlock()
+
+		if collision && !req.JoinWorktree {
+			// Step 5: error if not joining.
+			a.reply(msg, nil, "worktree already in use for branch "+req.Branch)
 			return
+		}
+
+		// Step 7: create worktree if not joining an existing one.
+		if !collision {
+			if err := a.gitWorktreeAdd(repoPath, worktreePath, branch); err != nil {
+				a.log.Error().Err(err).
+					Str("branch", branch).
+					Str("worktreePath", worktreePath).
+					Msg("git worktree add failed")
+				a.reply(msg, nil, "git worktree add: "+err.Error())
+				return
+			}
 		}
 	}
 
@@ -324,14 +349,14 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 	state := SessionState{
 		ID:              sessionID,
 		ProjectID:       a.projectID,
-		Branch:          req.Branch,
+		Branch:          branch,
 		Worktree:        branchSlug,
 		CWD:             cwd,
 		Name:            req.Name,
 		State:           StateIdle,
 		StateSince:      now,
 		CreatedAt:       now,
-		JoinWorktree:    req.JoinWorktree,
+		JoinWorktree:    req.JoinWorktree && !scratch,
 		PendingControls: make(map[string]any),
 	}
 
@@ -435,19 +460,29 @@ func (a *Agent) handleDelete(msg *nats.Msg) {
 		a.log.Warn().Err(err).Str("sessionId", req.SessionID).Msg("session did not stop cleanly")
 	}
 
-	// Remove git worktree if this was the last session using the branch.
+	// Remove git worktree if /data/repo exists and this was the last session
+	// using the branch.  Scratch projects (no bare repo) have no worktree to
+	// remove; the worktree field will be empty in that case, so the guard on
+	// st.Worktree also covers them — but we additionally check that /data/repo
+	// exists to be explicit.
 	st := sess.getState()
-	if a.dataDir != "" && st.Worktree != "" {
-		a.mu.RLock()
-		lastUser := !a.worktreeInUse(st.Worktree)
-		a.mu.RUnlock()
-		if lastUser {
-			repoPath := filepath.Join(a.dataDir, "repo")
-			worktreePath := filepath.Join(a.dataDir, "worktrees", st.Worktree)
-			if err := a.gitWorktreeRemove(repoPath, worktreePath); err != nil {
-				a.log.Warn().Err(err).
-					Str("worktree", st.Worktree).
-					Msg("git worktree remove failed (non-fatal)")
+	if st.Worktree != "" {
+		effectiveDataDir := a.dataDir
+		if effectiveDataDir == "" {
+			effectiveDataDir = "/data"
+		}
+		repoPath := filepath.Join(effectiveDataDir, "repo")
+		if dirExists(repoPath) {
+			a.mu.RLock()
+			lastUser := !a.worktreeInUse(st.Worktree)
+			a.mu.RUnlock()
+			if lastUser {
+				worktreePath := filepath.Join(effectiveDataDir, "worktrees", st.Worktree)
+				if err := a.gitWorktreeRemove(repoPath, worktreePath); err != nil {
+					a.log.Warn().Err(err).
+						Str("worktree", st.Worktree).
+						Msg("git worktree remove failed (non-fatal)")
+				}
 			}
 		}
 	}
