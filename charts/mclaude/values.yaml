@@ -143,9 +143,8 @@ spa:
   service:
     type: ClusterIP
     port: 80
-  ## Override containerPort (defaults to service.port). Set for e2e stubs
-  ## that can't bind port 80 without root.
-  containerPort: 80
+  ## Container port — nginx runs as non-root on 8080; service maps 80→8080.
+  containerPort: 8080
   ## Override container command (e.g. for e2e stubs)
   command: []
 
