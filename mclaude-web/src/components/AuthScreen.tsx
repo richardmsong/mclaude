@@ -101,6 +101,8 @@ const inputStyle: React.CSSProperties = {
   border: '1px solid var(--border)',
   borderRadius: 12,
   color: 'var(--text)',
+  WebkitTextFillColor: 'var(--text)',
+  WebkitAppearance: 'none',
   fontSize: 15,
   width: '100%',
 }
