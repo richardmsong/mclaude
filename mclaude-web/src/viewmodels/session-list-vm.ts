@@ -8,6 +8,7 @@ export interface SessionVM {
   state: string
   model: string
   branch: string
+  cwd: string
   costUsd: number
   hasPendingPermission: boolean
 }
@@ -51,6 +52,7 @@ export class SessionListVM {
         state: s.state,
         model: s.model,
         branch: s.branch,
+        cwd: s.cwd,
         costUsd: s.usage.costUsd,
         hasPendingPermission: Object.keys(s.pendingControls).length > 0,
       })),
