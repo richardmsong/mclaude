@@ -1,5 +1,6 @@
-ARG TARGETARCH=amd64
 FROM alpine:3.21
+# Re-declare after FROM — ARGs before FROM are only scoped to FROM itself.
+ARG TARGETARCH=amd64
 RUN apk add --no-cache ca-certificates
 
 RUN addgroup -g 1000 app && adduser -u 1000 -G app -s /bin/sh -D app
