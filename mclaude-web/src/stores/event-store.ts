@@ -27,6 +27,7 @@ export type EventStoreListener = (model: ConversationModel) => void
 export class EventStore {
   private _conversation: ConversationModel = { turns: [] }
   private _lastSequence = 0
+  private _replayFromSeq = 0
   private _listeners: EventStoreListener[] = []
   private _unsubscribe: (() => void) | null = null
   private _sessionState: SessionState = 'idle'
@@ -44,6 +45,10 @@ export class EventStore {
     return this._lastSequence
   }
 
+  get replayFromSeq(): number {
+    return this._replayFromSeq
+  }
+
   get sessionState(): SessionState {
     return this._sessionState
   }
@@ -59,6 +64,7 @@ export class EventStore {
   start(replayFromSeq?: number): void {
     const subject = `mclaude.${this.opts.userId}.${this.opts.projectId}.events.${this.opts.sessionId}`
     const startSeq = replayFromSeq ?? 0
+    this._replayFromSeq = startSeq
 
     logger.debug(
       {
@@ -162,6 +168,10 @@ export class EventStore {
           'processing clear event',
         )
         this._conversation = { turns: [] }
+        // Update replayFromSeq so reconnects skip events before this clear
+        if (this._lastSequence > 0) {
+          this._replayFromSeq = this._lastSequence
+        }
         break
       }
 
@@ -182,6 +192,10 @@ export class EventStore {
             type: 'system',
             blocks: [{ type: 'compaction', summary: event.summary }],
           }],
+        }
+        // Update replayFromSeq — events before compaction are no longer relevant
+        if (this._lastSequence > 0) {
+          this._replayFromSeq = this._lastSequence
         }
         break
       }
@@ -308,14 +322,17 @@ export class EventStore {
             } else if (c.type === 'tool_result' && c.tool_use_id) {
               // Attach tool result to matching tool use block
               const toolUseBlock = this._findToolUseBlock(c.tool_use_id)
+              const resultBlock: ToolResultBlock = {
+                type: 'tool_result',
+                toolUseId: c.tool_use_id,
+                content: typeof c.content === 'string' ? c.content : JSON.stringify(c.content),
+                isError: c.is_error ?? false,
+              }
               if (toolUseBlock) {
-                const resultBlock: ToolResultBlock = {
-                  type: 'tool_result',
-                  toolUseId: c.tool_use_id,
-                  content: typeof c.content === 'string' ? c.content : JSON.stringify(c.content),
-                  isError: c.is_error ?? false,
-                }
                 toolUseBlock.result = resultBlock
+              } else {
+                // Orphaned tool_result — no matching tool_use found; add as standalone block
+                turn.blocks.push(resultBlock)
               }
               return // Don't add user turn for tool_result
             }
