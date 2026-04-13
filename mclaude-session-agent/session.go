@@ -189,7 +189,11 @@ func (s *Session) handleSideEffect(line []byte, writeKV func(state SessionState)
 			if err := json.Unmarshal(line, &init); err == nil {
 				s.mu.Lock()
 				s.state.Model = init.Model
-				s.state.Capabilities = Capabilities{Tools: init.Tools}
+				s.state.Capabilities = Capabilities{
+					Skills: init.Skills,
+					Tools:  init.Tools,
+					Agents: init.Agents,
+				}
 				s.mu.Unlock()
 				s.flushKV(writeKV)
 			}

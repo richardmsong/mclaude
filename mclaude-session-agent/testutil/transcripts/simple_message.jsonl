@@ -1,4 +1,4 @@
-{"type":"system","subtype":"init","session_id":"test-session","tools":["Bash","Read","Edit","Write","Glob","Grep"],"mcp_servers":[],"model":"claude-sonnet-4-6","permissionMode":"managed"}
+{"type":"system","subtype":"init","session_id":"test-session","skills":["commit","review-pr"],"tools":["Bash","Read","Edit","Write","Glob","Grep"],"agents":["general-purpose","Explore"],"mcp_servers":[],"model":"claude-sonnet-4-6","permissionMode":"managed"}
 {"type":"system","subtype":"session_state_changed","session_id":"test-session","state":"idle"}
 {"type":"__turn_boundary__"}
 {"type":"system","subtype":"session_state_changed","session_id":"test-session","state":"running"}
