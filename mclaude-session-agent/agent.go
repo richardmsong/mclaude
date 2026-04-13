@@ -26,6 +26,7 @@ const (
 type Agent struct {
 	mu         sync.RWMutex
 	sessions   map[string]*Session
+	terminals  map[string]*TerminalSession
 	nc         *nats.Conn
 	js         jetstream.JetStream
 	sessKV     jetstream.KeyValue
@@ -63,6 +64,7 @@ func NewAgent(nc *nats.Conn, userID, projectID, claudePath string, log zerolog.L
 
 	agent := &Agent{
 		sessions:   make(map[string]*Session),
+		terminals:  make(map[string]*TerminalSession),
 		nc:         nc,
 		js:         js,
 		sessKV:     sessKV,
@@ -175,20 +177,26 @@ func (a *Agent) gracefulShutdown() {
 	}
 }
 
-// subscribeAPI sets up NATS subscriptions for session CRUD and I/O.
+// subscribeAPI sets up NATS subscriptions for session CRUD, I/O, and terminal management.
 func (a *Agent) subscribeAPI() error {
-	prefix := fmt.Sprintf("mclaude.%s.%s.api.sessions.", a.userID, a.projectID)
+	sessPrefix := fmt.Sprintf("mclaude.%s.%s.api.sessions.", a.userID, a.projectID)
+	termPrefix := fmt.Sprintf("mclaude.%s.%s.api.terminal.", a.userID, a.projectID)
 
 	type entry struct {
 		subject string
 		handler nats.MsgHandler
 	}
 	entries := []entry{
-		{prefix + "create", a.handleCreate},
-		{prefix + "delete", a.handleDelete},
-		{prefix + "input", a.handleInput},
-		{prefix + "control", a.handleControl},
-		{prefix + "restart", a.handleRestart},
+		// Session API
+		{sessPrefix + "create", a.handleCreate},
+		{sessPrefix + "delete", a.handleDelete},
+		{sessPrefix + "input", a.handleInput},
+		{sessPrefix + "control", a.handleControl},
+		{sessPrefix + "restart", a.handleRestart},
+		// Terminal API
+		{termPrefix + "create", a.handleTerminalCreate},
+		{termPrefix + "delete", a.handleTerminalDelete},
+		{termPrefix + "resize", a.handleTerminalResize},
 	}
 
 	for _, e := range entries {
@@ -553,4 +561,117 @@ func (a *Agent) sessionForRequest(requestID string) *Session {
 // controlResponse is the inner object of a control_response message.
 type controlResponse struct {
 	RequestID string `json:"request_id"`
+}
+
+// handleTerminalCreate spawns a PTY shell and bridges it to NATS.
+// Payload: {termId, branch, shell}
+// Reply:   {id} or {error}
+// NATS subjects:
+//
+//	mclaude.{userId}.{projectId}.terminal.{termId}.output  → PTY stdout (raw bytes)
+//	mclaude.{userId}.{projectId}.terminal.{termId}.input   ← PTY stdin (raw bytes)
+func (a *Agent) handleTerminalCreate(msg *nats.Msg) {
+	var req struct {
+		TermID string `json:"termId"`
+		Shell  string `json:"shell"`
+	}
+	if len(msg.Data) > 0 {
+		if err := json.Unmarshal(msg.Data, &req); err != nil {
+			a.reply(msg, nil, "invalid request: "+err.Error())
+			return
+		}
+	}
+	if req.TermID == "" {
+		req.TermID = "term-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	if req.Shell == "" {
+		req.Shell = "/bin/sh"
+	}
+
+	a.mu.Lock()
+	if _, exists := a.terminals[req.TermID]; exists {
+		a.mu.Unlock()
+		a.reply(msg, nil, "terminal already exists: "+req.TermID)
+		return
+	}
+	a.mu.Unlock()
+
+	tr := NATSTermPubSub(a.nc)
+	ts, err := startTerminal(req.TermID, req.Shell, tr, a.userID, a.projectID)
+	if err != nil {
+		a.log.Error().Err(err).Str("termId", req.TermID).Msg("failed to start terminal")
+		a.reply(msg, nil, "start terminal: "+err.Error())
+		return
+	}
+
+	a.mu.Lock()
+	a.terminals[req.TermID] = ts
+	a.mu.Unlock()
+
+	a.log.Info().
+		Str("termId", req.TermID).
+		Str("shell", req.Shell).
+		Msg("terminal created")
+
+	a.reply(msg, map[string]string{"id": req.TermID}, "")
+}
+
+// handleTerminalDelete terminates a PTY session.
+// Payload: {termId}
+// Reply:   {} or {error}
+func (a *Agent) handleTerminalDelete(msg *nats.Msg) {
+	var req struct {
+		TermID string `json:"termId"`
+	}
+	if err := json.Unmarshal(msg.Data, &req); err != nil || req.TermID == "" {
+		a.reply(msg, nil, "invalid request: missing termId")
+		return
+	}
+
+	a.mu.Lock()
+	ts, ok := a.terminals[req.TermID]
+	if ok {
+		delete(a.terminals, req.TermID)
+	}
+	a.mu.Unlock()
+
+	if !ok {
+		a.reply(msg, nil, "terminal not found: "+req.TermID)
+		return
+	}
+
+	ts.stop()
+	a.log.Info().Str("termId", req.TermID).Msg("terminal deleted")
+	a.reply(msg, map[string]string{}, "")
+}
+
+// handleTerminalResize resizes the PTY window for a terminal session.
+// Payload: {termId, rows, cols}
+// Reply:   {} or {error}
+func (a *Agent) handleTerminalResize(msg *nats.Msg) {
+	var req struct {
+		TermID string `json:"termId"`
+		Rows   uint16 `json:"rows"`
+		Cols   uint16 `json:"cols"`
+	}
+	if err := json.Unmarshal(msg.Data, &req); err != nil || req.TermID == "" {
+		a.reply(msg, nil, "invalid request: missing termId")
+		return
+	}
+
+	a.mu.RLock()
+	ts, ok := a.terminals[req.TermID]
+	a.mu.RUnlock()
+
+	if !ok {
+		a.reply(msg, nil, "terminal not found: "+req.TermID)
+		return
+	}
+
+	if err := ts.resize(req.Rows, req.Cols); err != nil {
+		a.reply(msg, nil, "resize: "+err.Error())
+		return
+	}
+
+	a.reply(msg, map[string]string{}, "")
 }
