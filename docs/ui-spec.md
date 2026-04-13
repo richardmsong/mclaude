@@ -105,10 +105,10 @@ Shown when no access token is stored.
 
 ## First-Run Flow
 
-Triggered when the user logs in and no projects exist in the KV store (checked after ~1s watch-settle delay).
+Triggered when the user logs in and no sessions exist in any project in the KV store (checked after ~1s watch-settle delay). This handles the case where the server has seeded a project (e.g. "Default Project") with no sessions yet.
 
-1. Client calls `projects.create` with `{ name: "Default" }`
-2. Client calls `sessions.create` in the new project with `{ name: "Getting Started" }`
+1. If no projects exist, client calls `projects.create` with `{ name: "Default" }` to create one first.
+2. Client calls `sessions.create` in the first available project with `{ name: "Getting Started" }`
 3. Client navigates directly to the new session
 4. Client sends the pre-seeded onboarding message as the first user turn:
 
@@ -206,9 +206,32 @@ Status labels:
 
 ### Empty State
 
-Centered in the content area:
+When there are no sessions but there ARE projects:
+
+```
+┌─────────────────────────────────┐
+│                                 │
+│  Your Projects                  │  section label, 12px caps
+│  📁 Default Project          ›  │  project row
+│  📁 Other Project            ›  │
+│                                 │
+│  Tap + to start a session       │  body text, --text2
+│                                 │
+└─────────────────────────────────┘
+```
+
+- Section label "Your Projects": 12px, weight 600, uppercase, `--text2`
+- Project rows: full-width tap target, `--text` color, chevron `›` on right
+- On tap: starts a new session in that project immediately
+- Body line below project list: "Tap + to start a session"
+
+When there are no sessions AND no projects:
 - Heading: "No Sessions"
-- Body: "Tap + to start a Claude session" (or "No sessions in this tmux group" if filtered)
+- Body: "Tap + to start a Claude session"
+
+When filtered to a tmux group with no sessions:
+- Heading: "No Sessions"
+- Body: "No sessions in this group"
 
 ### FAB
 
@@ -273,7 +296,7 @@ Bottom sheet modal with scrim overlay (tapping scrim closes it).
 - Git URL is optional; if provided the server will clone it
 - On submit: calls `projects.create`, shows spinner on button, dismisses on success
 - On error: shows inline error text below the form in `--red`
-- After creation: if this is the only project, immediately creates a session in it and navigates to it
+- After creation: always navigates to the new project by starting a session in it immediately
 
 ---
 
