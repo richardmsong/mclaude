@@ -119,6 +119,24 @@ export function App() {
     return () => window.removeEventListener('hashchange', handler)
   }, [])
 
+  // X3: Background reconnect — mobile browsers (iOS Safari) kill the WebSocket
+  // when the tab is backgrounded. On visibility restore, reconnect NATS so
+  // the session store and event store resume without a full page reload.
+  useEffect(() => {
+    const handler = () => {
+      if (document.visibilityState !== 'visible') return
+      if (!natsClient.isConnected()) {
+        natsClient.reconnect('').catch(() => {
+          // Reconnect failure is handled by the NATS disconnect/reconnect listeners
+          // which update the connected state and eventually trigger auth refresh
+        })
+      }
+    }
+    document.addEventListener('visibilitychange', handler)
+    return () => document.removeEventListener('visibilitychange', handler)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Track session store version — increments whenever any session changes so
   // App re-renders and picks up fresh session data (name, projectId, state).
   const [sessionVersion, setSessionVersion] = useState(0)
