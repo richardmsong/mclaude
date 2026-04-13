@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"github.com/rs/zerolog"
 )
@@ -61,14 +62,30 @@ func main() {
 		logger.Fatal().Err(err).Msg("account nkey")
 	}
 
-	// Dev seed: create a known account when DEV_SEED=true and DB is available.
+	srv := NewServer(db, accountKP, natsURL, natsWsURL, jwtExpiry, adminToken)
+
+	// NATS connection — used for project subscriptions and KV writes.
+	nc, err := nats.Connect(natsURL,
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(-1),
+	)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("connect to nats")
+	}
+	defer nc.Close()
+
+	if err := srv.StartProjectsSubscriber(nc); err != nil {
+		logger.Fatal().Err(err).Msg("start projects subscriber")
+	}
+	logger.Info().Msg("projects subscriber started")
+
+	// Dev seed: create a known account + default project when DEV_SEED=true and DB is available.
+	// Runs after NATS connects so the seed can write to the mclaude-projects KV bucket.
 	if os.Getenv("DEV_SEED") == "true" && db != nil {
-		if err := seedDevUser(ctx, db, logger); err != nil {
+		if err := seedDev(ctx, db, nc, logger); err != nil {
 			logger.Error().Err(err).Msg("dev seed failed")
 		}
 	}
-
-	srv := NewServer(db, accountKP, natsURL, natsWsURL, jwtExpiry, adminToken)
 
 	// Main API mux (public + protected routes)
 	mux := http.NewServeMux()
@@ -88,36 +105,51 @@ func main() {
 	}
 }
 
-// seedDevUser creates a dev account (dev@mclaude.local / dev) if it doesn't exist.
-// Only called when DEV_SEED=true. Safe to call on every startup — no-op if the
-// user already exists.
-func seedDevUser(ctx context.Context, db *DB, logger zerolog.Logger) error {
+// seedDev creates a dev user and default project if they don't exist.
+// Only called when DEV_SEED=true. Safe to call on every startup — idempotent.
+func seedDev(ctx context.Context, db *DB, nc *nats.Conn, logger zerolog.Logger) error {
 	const devEmail = "dev@mclaude.local"
 	const devPassword = "dev"
 
-	existing, err := db.GetUserByEmail(ctx, devEmail)
+	user, err := db.GetUserByEmail(ctx, devEmail)
 	if err != nil {
 		return fmt.Errorf("check dev user: %w", err)
 	}
-	if existing != nil {
+
+	if user == nil {
+		hash, err := HashPassword(devPassword)
+		if err != nil {
+			return fmt.Errorf("hash dev password: %w", err)
+		}
+		user, err = db.CreateUser(ctx, uuid.NewString(), devEmail, "Dev User", hash)
+		if err != nil {
+			return fmt.Errorf("create dev user: %w", err)
+		}
+		logger.Warn().
+			Str("email", devEmail).
+			Str("password", devPassword).
+			Msg("DEV_SEED: created dev account — do not use in production")
+	} else {
 		logger.Info().Str("email", devEmail).Msg("dev user already exists")
-		return nil
 	}
 
-	hash, err := HashPassword(devPassword)
+	// Seed a default project for the dev user.
+	projects, err := db.GetProjectsByUser(ctx, user.ID)
 	if err != nil {
-		return fmt.Errorf("hash dev password: %w", err)
+		return fmt.Errorf("check dev projects: %w", err)
+	}
+	if len(projects) == 0 {
+		proj, err := db.CreateProject(ctx, uuid.NewString(), user.ID, "Default Project", "")
+		if err != nil {
+			return fmt.Errorf("create dev project: %w", err)
+		}
+		// Write to NATS KV so the SPA session-store picks it up immediately.
+		if err := writeProjectKV(nc, user.ID, proj); err != nil {
+			logger.Error().Err(err).Msg("DEV_SEED: write project to KV failed (non-fatal)")
+		}
+		logger.Warn().Str("userId", user.ID).Str("projectId", proj.ID).Msg("DEV_SEED: created default project")
 	}
 
-	id := uuid.NewString()
-	if _, err := db.CreateUser(ctx, id, devEmail, "Dev User", hash); err != nil {
-		return fmt.Errorf("create dev user: %w", err)
-	}
-
-	logger.Warn().
-		Str("email", devEmail).
-		Str("password", devPassword).
-		Msg("DEV_SEED: created dev account — do not use in production")
 	return nil
 }
 

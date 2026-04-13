@@ -105,6 +105,48 @@ func (db *DB) DeleteUser(ctx context.Context, id string) error {
 	return err
 }
 
+// Project is a row from the projects table.
+type Project struct {
+	ID        string
+	UserID    string
+	Name      string
+	GitURL    string
+	Status    string
+	CreatedAt time.Time
+}
+
+// CreateProject inserts a new project row. id must be a pre-generated UUID.
+func (db *DB) CreateProject(ctx context.Context, id, userID, name, gitURL string) (*Project, error) {
+	now := time.Now().UTC()
+	_, err := db.pool.Exec(ctx,
+		`INSERT INTO projects (id, user_id, name, git_url, status, created_at) VALUES ($1, $2, $3, $4, 'active', $5)`,
+		id, userID, name, gitURL, now)
+	if err != nil {
+		return nil, fmt.Errorf("create project: %w", err)
+	}
+	return &Project{ID: id, UserID: userID, Name: name, GitURL: gitURL, Status: "active", CreatedAt: now}, nil
+}
+
+// GetProjectsByUser returns all projects owned by a user.
+func (db *DB) GetProjectsByUser(ctx context.Context, userID string) ([]*Project, error) {
+	rows, err := db.pool.Query(ctx,
+		`SELECT id, user_id, name, git_url, status, created_at FROM projects WHERE user_id = $1 ORDER BY created_at`,
+		userID)
+	if err != nil {
+		return nil, fmt.Errorf("get projects: %w", err)
+	}
+	defer rows.Close()
+	var projects []*Project
+	for rows.Next() {
+		p := &Project{}
+		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.GitURL, &p.Status, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		projects = append(projects, p)
+	}
+	return projects, rows.Err()
+}
+
 // schema is the DDL applied on startup via Migrate().
 const schema = `
 CREATE TABLE IF NOT EXISTS users (
@@ -113,5 +155,14 @@ CREATE TABLE IF NOT EXISTS users (
     name          TEXT NOT NULL,
     password_hash TEXT NOT NULL DEFAULT '',
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+    id         TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    git_url    TEXT NOT NULL DEFAULT '',
+    status     TEXT NOT NULL DEFAULT 'active',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `
