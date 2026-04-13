@@ -149,7 +149,6 @@ jobs:
             --set spa.image.tag="${SPA_TAG}" \
             --set sessionAgent.image.tag="${SA_TAG}" \
             --set namespace.create=false \
-            --set global.imagePullSecrets[0].name=ghcr-pull-secret \
-            --namespace "preview-${BRANCH_SLUG}" \
-            --create-namespace \
+            --set "global.imagePullSecrets[0]=ghcr-pull-secret" \
+            --namespace "mclaude-system" \
             --wait --timeout 5m
