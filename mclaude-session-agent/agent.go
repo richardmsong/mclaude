@@ -43,6 +43,9 @@ type Agent struct {
 	dataDir    string
 	log        zerolog.Logger
 	metrics    *Metrics
+	// subs holds all active API NATS subscriptions so they can be drained on
+	// graceful shutdown (stop accepting new sessions before stopping active ones).
+	subs       []*nats.Subscription
 }
 
 // NewAgent creates an Agent connected to the given NATS server.
@@ -150,7 +153,24 @@ func (a *Agent) recoverSessions() error {
 		}
 		sess := newSession(st, a.userID)
 		sess.metrics = a.metrics
+
+		// Start debug unix socket for mclaude-cli attach.
+		sessID := st.ID
+		dbg := NewDebugServer(sessID,
+			func(data []byte) { sess.sendInput(data) },
+			func() { a.publishLifecycle(sessID, "debug_attached") },
+			func() { a.publishLifecycle(sessID, "debug_detached") },
+		)
+		if err := dbg.Start(); err != nil {
+			a.log.Warn().Err(err).Str("sessionId", sessID).Msg("debug socket start failed on recovery (non-fatal)")
+		} else {
+			sess.mu.Lock()
+			sess.debug = dbg
+			sess.mu.Unlock()
+		}
+
 		if sErr := sess.start(a.claudePath, true, publish, a.writeSessionKV); sErr != nil {
+			dbg.Stop()
 			a.log.Warn().Err(sErr).Str("sessionId", st.ID).Msg("failed to resume session on startup")
 			continue
 		}
@@ -166,8 +186,26 @@ func (a *Agent) recoverSessions() error {
 	return nil
 }
 
-// gracefulShutdown stops all active sessions on SIGTERM/cancel.
+// gracefulShutdown implements the spec shutdown sequence:
+//
+//  1. Stop accepting new sessions (drain all API subscriptions)
+//  2. For each active Claude process: interrupt → wait up to 10s → kill
+//  3. Publish session_stopped lifecycle events
 func (a *Agent) gracefulShutdown() {
+	// Step 1: stop accepting new sessions by draining API subscriptions.
+	// Draining flushes any in-flight message handlers before unsubscribing.
+	a.mu.RLock()
+	subs := make([]*nats.Subscription, len(a.subs))
+	copy(subs, a.subs)
+	a.mu.RUnlock()
+
+	for _, sub := range subs {
+		if err := sub.Drain(); err != nil {
+			a.log.Warn().Err(err).Str("subject", sub.Subject).Msg("subscription drain failed")
+		}
+	}
+
+	// Step 2 & 3: stop each active session and publish lifecycle events.
 	a.mu.RLock()
 	ids := make([]string, 0, len(a.sessions))
 	for id := range a.sessions {
@@ -190,6 +228,7 @@ func (a *Agent) gracefulShutdown() {
 }
 
 // subscribeAPI sets up NATS subscriptions for session CRUD, I/O, and terminal management.
+// The subscriptions are stored in a.subs so they can be drained on graceful shutdown.
 func (a *Agent) subscribeAPI() error {
 	sessPrefix := fmt.Sprintf("mclaude.%s.%s.api.sessions.", a.userID, a.projectID)
 	termPrefix := fmt.Sprintf("mclaude.%s.%s.api.terminal.", a.userID, a.projectID)
@@ -211,10 +250,14 @@ func (a *Agent) subscribeAPI() error {
 		{termPrefix + "resize", a.handleTerminalResize},
 	}
 
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	for _, e := range entries {
-		if _, err := a.nc.Subscribe(e.subject, e.handler); err != nil {
+		sub, err := a.nc.Subscribe(e.subject, e.handler)
+		if err != nil {
 			return fmt.Errorf("subscribe %s: %w", e.subject, err)
 		}
+		a.subs = append(a.subs, sub)
 	}
 	return nil
 }
@@ -304,8 +347,42 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 
 	sess := newSession(state, a.userID)
 	sess.metrics = a.metrics
+
+	// Wire the onEventPublished callback so that compact_boundary events update
+	// replayFromSeq in KV.  The seq argument is the JetStream sequence number
+	// of the published message (0 for core NATS publishes that aren't ack'd).
+	// We use a js.Publish override via a separate JetStream publish for the
+	// compact_boundary event to get its seq; for other events we use core NATS.
+	sessIDForCB := sessionID
+	sess.onEventPublished = func(evType string, seq uint64) {
+		if evType != EventTypeCompactBoundary {
+			return
+		}
+		// When the agent uses core NATS (seq==0), we can ask JetStream for the
+		// last sequence on the events stream for this session subject.
+		// This is a best-effort update; failures are non-fatal.
+		a.updateReplayFromSeq(sessIDForCB)
+	}
+
+	// Start debug unix socket for mclaude-cli attach.
+	dbg := NewDebugServer(sessionID,
+		func(data []byte) { sess.sendInput(data) },
+		func() { a.publishLifecycle(sessionID, "debug_attached") },
+		func() { a.publishLifecycle(sessionID, "debug_detached") },
+	)
+	if err := dbg.Start(); err != nil {
+		a.log.Warn().Err(err).Str("sessionId", sessionID).Msg("debug socket start failed (non-fatal)")
+		// Non-fatal — CLI attach won't work but sessions still function.
+	} else {
+		sess.mu.Lock()
+		sess.debug = dbg
+		sess.mu.Unlock()
+	}
+
 	if err := sess.start(a.claudePath, false, publish, a.writeSessionKV); err != nil {
+		dbg.Stop()
 		a.log.Error().Err(err).Str("sessionId", sessionID).Msg("failed to start claude")
+		a.publishLifecycleFailed(sessionID, err.Error())
 		a.reply(msg, nil, "start claude: "+err.Error())
 		return
 	}
@@ -503,7 +580,24 @@ func (a *Agent) handleRestart(msg *nats.Msg) {
 	// Relaunch with --resume.
 	newSess := newSession(st, a.userID)
 	newSess.metrics = a.metrics
+
+	// Restart debug unix socket for mclaude-cli attach.
+	restartID := req.SessionID
+	newDbg := NewDebugServer(restartID,
+		func(data []byte) { newSess.sendInput(data) },
+		func() { a.publishLifecycle(restartID, "debug_attached") },
+		func() { a.publishLifecycle(restartID, "debug_detached") },
+	)
+	if err := newDbg.Start(); err != nil {
+		a.log.Warn().Err(err).Str("sessionId", restartID).Msg("debug socket start failed on restart (non-fatal)")
+	} else {
+		newSess.mu.Lock()
+		newSess.debug = newDbg
+		newSess.mu.Unlock()
+	}
+
 	if err := newSess.start(a.claudePath, true, publish, a.writeSessionKV); err != nil {
+		newDbg.Stop()
 		a.log.Error().Err(err).Str("sessionId", req.SessionID).Msg("failed to resume session")
 		a.reply(msg, nil, "resume failed: "+err.Error())
 		return
@@ -563,6 +657,63 @@ func (a *Agent) publishLifecycle(sessionID, eventType string) {
 		"ts":        time.Now().UTC().Format(time.RFC3339),
 	})
 	_ = a.nc.Publish(subject, payload)
+}
+
+// publishLifecycleFailed publishes a session_failed lifecycle event with an
+// error message.  Called when sess.start() returns an error so clients know
+// the session will never become active.
+func (a *Agent) publishLifecycleFailed(sessionID, errMsg string) {
+	subject := fmt.Sprintf("mclaude.%s.%s.lifecycle.%s", a.userID, a.projectID, sessionID)
+	payload, _ := json.Marshal(map[string]string{
+		"type":      "session_failed",
+		"sessionId": sessionID,
+		"error":     errMsg,
+		"ts":        time.Now().UTC().Format(time.RFC3339),
+	})
+	_ = a.nc.Publish(subject, payload)
+}
+
+// updateReplayFromSeq queries JetStream for the last sequence number of the
+// events stream and writes it to KV as replayFromSeq for the given session.
+// Called after a compact_boundary event is published so that new subscribers
+// skip already-compacted history.
+func (a *Agent) updateReplayFromSeq(sessionID string) {
+	ctx := context.Background()
+
+	// Get the stream handle, then query its current state for the last seq.
+	stream, err := a.js.Stream(ctx, "MCLAUDE_EVENTS")
+	if err != nil {
+		a.log.Warn().Err(err).Str("sessionId", sessionID).Msg("updateReplayFromSeq: Stream lookup failed")
+		return
+	}
+	info, err := stream.Info(ctx)
+	if err != nil {
+		a.log.Warn().Err(err).Str("sessionId", sessionID).Msg("updateReplayFromSeq: stream.Info failed")
+		return
+	}
+
+	// Read current state, update replayFromSeq, write back.
+	a.mu.RLock()
+	sess, ok := a.sessions[sessionID]
+	a.mu.RUnlock()
+	if !ok {
+		return
+	}
+	lastSeq := info.State.LastSeq
+	st := sess.getState()
+	st.ReplayFromSeq = lastSeq
+	if err := a.writeSessionKV(st); err != nil {
+		a.log.Warn().Err(err).Str("sessionId", sessionID).Msg("updateReplayFromSeq: KV write failed")
+		return
+	}
+	// Update in-memory state too.
+	sess.mu.Lock()
+	sess.state.ReplayFromSeq = lastSeq
+	sess.mu.Unlock()
+	a.log.Debug().
+		Str("sessionId", sessionID).
+		Uint64("replayFromSeq", lastSeq).
+		Msg("replayFromSeq updated on compact_boundary")
 }
 
 // reply sends a NATS reply. If errMsg is non-empty, sends {error: errMsg}.

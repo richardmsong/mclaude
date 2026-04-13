@@ -6,6 +6,20 @@ import (
 	"time"
 )
 
+// PermissionPolicy controls how the session agent responds to control_request
+// events (tool-use permission prompts).
+//
+//   - PermissionPolicyManaged  — forward to NATS client (default)
+//   - PermissionPolicyAuto     — auto-approve all tools without forwarding
+//   - PermissionPolicyAllowlist — auto-approve listed tools; forward the rest
+type PermissionPolicy string
+
+const (
+	PermissionPolicyManaged   PermissionPolicy = "managed"
+	PermissionPolicyAuto      PermissionPolicy = "auto"
+	PermissionPolicyAllowlist PermissionPolicy = "allowlist"
+)
+
 // SessionState is the materialised view of a session stored in the
 // mclaude-sessions NATS KV bucket.
 type SessionState struct {
