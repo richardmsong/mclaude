@@ -2,6 +2,7 @@ import type { IAuthClient, AuthTokens } from '@/types'
 
 export class AuthClient implements IAuthClient {
   private _tokens: AuthTokens | null = null
+  private static readonly STORAGE_KEY = 'mclaude_tokens'
 
   constructor(private readonly baseUrl: string) {}
 
@@ -14,6 +15,7 @@ export class AuthClient implements IAuthClient {
     if (!res.ok) throw new Error(`Login failed: ${res.status}`)
     const tokens: AuthTokens = await res.json()
     this._tokens = tokens
+    this._persist(tokens)
     return tokens
   }
 
@@ -43,6 +45,7 @@ export class AuthClient implements IAuthClient {
       }).catch(() => {})
     }
     this._tokens = null
+    this._clearPersisted()
   }
 
   getStoredTokens(): AuthTokens | null {
@@ -51,9 +54,31 @@ export class AuthClient implements IAuthClient {
 
   storeTokens(tokens: AuthTokens): void {
     this._tokens = tokens
+    this._persist(tokens)
   }
 
   clearTokens(): void {
     this._tokens = null
+    this._clearPersisted()
+  }
+
+  loadFromStorage(): AuthTokens | null {
+    try {
+      const raw = localStorage.getItem(AuthClient.STORAGE_KEY)
+      if (!raw) return null
+      const tokens = JSON.parse(raw) as AuthTokens
+      this._tokens = tokens
+      return tokens
+    } catch {
+      return null
+    }
+  }
+
+  private _persist(tokens: AuthTokens): void {
+    try { localStorage.setItem(AuthClient.STORAGE_KEY, JSON.stringify(tokens)) } catch {}
+  }
+
+  private _clearPersisted(): void {
+    try { localStorage.removeItem(AuthClient.STORAGE_KEY) } catch {}
   }
 }
