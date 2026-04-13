@@ -25,7 +25,7 @@ import (
 // If the control-plane is not running inside a Kubernetes cluster, NewK8sProvisioner
 // returns (nil, nil) — callers treat nil as "provisioning disabled".
 type K8sProvisioner struct {
-	client              *kubernetes.Clientset
+	client              kubernetes.Interface
 	controlPlaneNs      string
 	releaseName         string
 	sessionAgentNATSURL string
@@ -297,15 +297,30 @@ func (p *K8sProvisioner) ensureUserConfig(ctx context.Context, ns string) error 
 // The Secret is populated with a NATS credentials file (key "nats-creds") scoped to
 // mclaude.{userID}.> so the session-agent can authenticate to NATS.
 func (p *K8sProvisioner) ensureUserSecrets(ctx context.Context, ns, userID string) error {
-	_, err := p.client.CoreV1().Secrets(ns).Get(ctx, "user-secrets", metav1.GetOptions{})
+	existing, err := p.client.CoreV1().Secrets(ns).Get(ctx, "user-secrets", metav1.GetOptions{})
 	if err == nil {
-		return nil
+		// Secret exists — only return early if nats-creds is already populated.
+		if len(existing.Data["nats-creds"]) > 0 {
+			return nil
+		}
+		// Secret exists but is missing nats-creds (created empty by old code).
+		// Generate credentials and patch the Secret in place.
+		jwt, seed, err := IssueSessionAgentJWT(userID, p.accountKP)
+		if err != nil {
+			return fmt.Errorf("issue session-agent jwt for %s: %w", userID, err)
+		}
+		if existing.Data == nil {
+			existing.Data = make(map[string][]byte)
+		}
+		existing.Data["nats-creds"] = FormatNATSCredentials(jwt, seed)
+		_, err = p.client.CoreV1().Secrets(ns).Update(ctx, existing, metav1.UpdateOptions{})
+		return err
 	}
 	if !k8serrors.IsNotFound(err) {
 		return err
 	}
 
-	// Generate a long-lived session-agent NATS credential.
+	// Secret does not exist — generate credentials and create it.
 	jwt, seed, err := IssueSessionAgentJWT(userID, p.accountKP)
 	if err != nil {
 		return fmt.Errorf("issue session-agent jwt for %s: %w", userID, err)
