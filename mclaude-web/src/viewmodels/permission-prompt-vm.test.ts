@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { PermissionPromptVM } from './permission-prompt-vm'
 import { ConversationVM } from './conversation-vm'
 import { EventStore } from '../stores/event-store'
@@ -139,6 +139,31 @@ describe('PermissionPromptVM', () => {
       expect(payload.type).toBe('control_response')
       expect(payload.response.request_id).toBe('req-1')
       expect(payload.response.response.behavior).toBe('deny')
+    })
+  })
+
+  describe('R2: desktop notification', () => {
+    it('requests notification permission when first permission arrives (permission=default)', () => {
+      // Mock Notification API — node test env has no document so we only check
+      // that requestPermission is called; visibilityState mock is skipped in node.
+      const requestPermissionMock = vi.fn().mockResolvedValue('denied')
+      const originalNotification = (global as Record<string, unknown>)['Notification']
+      ;(global as Record<string, unknown>)['Notification'] = {
+        permission: 'default' as NotificationPermission,
+        requestPermission: requestPermissionMock,
+      }
+      // In node env document.visibilityState is unavailable; the guard
+      // in PermissionPromptVM uses optional chaining so it won't crash.
+
+      for (const event of transcripts.permissionRequest) {
+        eventStore.applyEventForTest(event)
+      }
+
+      // requestPermission is called when Notification.permission === 'default'
+      expect(requestPermissionMock).toHaveBeenCalled()
+
+      // Restore
+      ;(global as Record<string, unknown>)['Notification'] = originalNotification
     })
   })
 

@@ -435,6 +435,35 @@ export function SessionDetailScreen({
               </button>
             ))}
           </div>
+          {/* Effort switcher */}
+          <div style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+            <div style={{ padding: '4px 16px 8px', color: 'var(--text3)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Thinking Budget
+            </div>
+            {([
+              { label: 'None', budget: 0 },
+              { label: 'Low', budget: 2000 },
+              { label: 'Medium', budget: 8000 },
+              { label: 'High', budget: 20000 },
+            ] as Array<{ label: string; budget: number }>).map(({ label, budget }) => (
+              <button
+                key={label}
+                onClick={() => {
+                  conversationVM.setMaxThinkingTokens(budget)
+                  setShowMenu(false)
+                }}
+                style={{
+                  width: '100%',
+                  padding: '8px 16px',
+                  textAlign: 'left',
+                  color: 'var(--text)',
+                  fontSize: 13,
+                }}
+              >
+                {label} {budget > 0 ? `(${(budget / 1000).toFixed(0)}K)` : ''}
+              </button>
+            ))}
+          </div>
           {/* Token Usage */}
           <button
             onClick={() => { setShowMenu(false); setShowUsageOverlay(true) }}
