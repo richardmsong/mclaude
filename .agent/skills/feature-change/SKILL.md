@@ -155,6 +155,56 @@ dev-harness reads the spec, audits Phase 1 (spec → code) and Phase 2 (code →
 
 ---
 
+## Step 5b — Spec evaluator loop (mandatory after every dev-harness)
+
+After each dev-harness run, spin up a spec evaluator agent to exhaustively compare the spec against the actual code. The evaluator loops until it finds zero differences.
+
+```
+Loop:
+  1. Launch spec evaluator agent:
+     - Read all relevant spec docs in full
+     - Read all relevant component code in full
+     - Produce an exhaustive diff: for every spec statement, does the code implement it?
+     - Include: missing features, wrong behavior, missing env vars, missing K8s resources,
+       missing NATS subjects/handlers, wrong field names, wrong error handling, etc.
+     - Output: list of gaps (or "CLEAN" if none)
+  2. If gaps found:
+     → /dev-harness <component> targeting each gap
+     → go to step 1
+  3. If CLEAN: proceed to Step 6
+```
+
+**Evaluator agent prompt template:**
+
+```
+You are a spec compliance auditor for the mclaude project.
+
+Read the spec doc(s) for <component>:
+  <list spec docs>
+
+Read all source files under <component root>.
+
+Produce an exhaustive list of gaps — places where the spec says something should exist
+or behave a certain way, but the code does not implement it. Be specific: quote the spec
+statement and describe what the code does or doesn't do.
+
+Do NOT list things the spec is silent about. Only list cases where spec says X and code
+does not implement X.
+
+Output format:
+  CLEAN                  (if zero gaps)
+  GAP: <spec quote> → <what code is missing or wrong>
+  GAP: ...
+```
+
+**Rules:**
+- Never report a task complete until the evaluator returns CLEAN
+- The evaluator must read both the spec AND the code — not just one
+- One failing evaluator gap = one more dev-harness pass
+- Evaluator runs after EVERY dev-harness, not just the first
+
+---
+
 ## Step 6 — Validate (SPA changes only)
 
 After CI deploys the preview, use the **Playwright MCP** to validate the golden path directly in the browser. Do not stop at "build passes" — drive the browser through the actual user flow.
