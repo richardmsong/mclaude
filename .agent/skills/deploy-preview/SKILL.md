@@ -84,7 +84,7 @@ The workflow computes: `slug="${GITHUB_REF_NAME//\//-"}`
 So branch `preview/new-project-ui` → slug `preview-new-project-ui` → release `mclaude-preview-preview-new-project-ui`.
 
 The k3d cluster (`k3d-mclaude-dev`) maps host port 80 → cluster port 80 (Traefik).
-Preview URL is `http://{slug}.{ts-ip}.nip.io` — **no :8080**. Port 8080 is a different k3d cluster (`k3d-cluster`).
+Preview URL is `http://{slug}.{ts-ip}.sslip.io` — **no :8080**. Port 8080 is a different k3d cluster (`k3d-cluster`).
 
 ---
 
