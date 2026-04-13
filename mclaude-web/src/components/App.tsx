@@ -87,6 +87,29 @@ export function App() {
     return () => { unsub1(); unsub2() }
   }, [])
 
+  // On mount: restore session from localStorage so refresh doesn't log the user out
+  useEffect(() => {
+    const ac = new AuthClient(window.location.origin)
+    const tokens = ac.loadFromStorage()
+    if (!tokens) return
+    const serverUrl = window.location.origin
+    const natsUrl = tokens.natsUrl
+      ?? serverUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:') + '/nats'
+    const freshStore = new AuthStore(ac, natsClient)
+    freshStore.restoreTokens(tokens)
+    natsClient.connect({ url: natsUrl, jwt: tokens.jwt, nkeySeed: tokens.nkeySeed })
+      .then(() => {
+        setConnected(true)
+        freshStore.startRefreshLoop()
+        setAuthStore(freshStore)
+      })
+      .catch(() => {
+        // Stored tokens invalid/expired — clear and show login
+        ac.clearTokens()
+      })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Hash routing
   useEffect(() => {
     const handler = () => setRoute(getRoute())
