@@ -408,12 +408,14 @@ Branch slugification: `feature/auth` → `feature-auth` (replace `/` and non-alp
 Session create request payload:
 ```json
 {
+  "name": "Fix auth bug",
   "branch": "feature/auth",
   "cwd": "packages/api",
-  "name": "optional display name",
   "joinWorktree": false
 }
 ```
+
+`branch` is optional. If omitted, the session agent derives it from `name` via slugification (`"Fix auth bug"` → `fix-auth-bug`). If both `name` and `branch` are omitted, the agent generates a default: `session-{shortId}`. Git-savvy users can specify `branch` explicitly; the SPA hides it by default and only shows the `name` field.
 
 `joinWorktree` controls behaviour when a worktree for the branch already exists (git only allows one worktree per branch):
 
@@ -425,23 +427,20 @@ Session create request payload:
 | `true` | Yes | Skip `git worktree add`, reuse `/data/worktrees/{branchSlug}`, spawn Claude |
 
 On session create:
-1. Check whether `/data/repo` exists (bare repo from GIT_URL clone)
-2. **If `/data/repo` does not exist** (scratch project, no GIT_URL):
-   - Skip steps 3–7 (no branch, no worktree)
-   - Set cwd to `/data/{cwd}` (or `/data` if cwd is empty)
-   - Write to NATS KV with `branch: ""`, `worktree: ""`, `joinWorktree: false`
-   - Proceed to spawn Claude
-3. Compute `branchSlug = slugify(branch)`
-4. Scan KV for any session in this projectId with the same `worktree` slug
-5. If found and `joinWorktree: false` → reply with error
-6. If found and `joinWorktree: true` → skip to step 8
-7. If not found → `git -C /data/repo worktree add /data/worktrees/{branchSlug} {branch}`
-8. Set cwd to `/data/worktrees/{branchSlug}/{cwd}`
-9. Write to NATS KV with `branch` (raw), `worktree` (slug), `joinWorktree` (bool)
+1. Derive branch: if `branch` is empty, slugify `name`; if `name` is also empty, use `session-{shortId}`
+2. Compute `branchSlug = slugify(branch)`
+3. Scan KV for any session in this projectId with the same `worktree` slug
+4. If found and `joinWorktree: false` → reply with error
+5. If found and `joinWorktree: true` → skip to step 7
+6. If not found → `git -C /data/repo worktree add /data/worktrees/{branchSlug} {branch}`
+7. Set cwd to `/data/worktrees/{branchSlug}/{cwd}`
+8. Write to NATS KV with `branch` (raw), `worktree` (slug), `joinWorktree` (bool)
+
+Every project has a bare repo at `/data/repo` — the entrypoint initializes one via `git init --bare` for scratch projects (no GIT_URL) and `git clone --bare` for git-backed projects. The session agent does not need to check whether the repo exists; it always does.
 
 On session delete:
 1. Send interrupt → wait for Claude exit
-2. If `/data/repo` exists: scan KV bucket for all sessions in this projectId — if no other session has the same `worktree` slug: `git -C /data/repo worktree remove /data/worktrees/{branchSlug}`
+2. Scan KV bucket for all sessions in this projectId — if no other session has the same `worktree` slug: `git -C /data/repo worktree remove /data/worktrees/{branchSlug}`
 3. Delete from NATS KV
 
 ---
@@ -482,8 +481,6 @@ Events are published as raw stream-json bytes — no envelope. The NATS subject 
   "replayFromSeq": 1042
 }
 ```
-
-For scratch projects (no GIT_URL): `branch` and `worktree` are empty strings, `cwd` is `/data` or `/data/{subdirectory}`.
 
 `state` maps directly from stream-json `session_state_changed` events: `"idle"`, `"running"`, `"requires_action"`.
 
@@ -876,17 +873,27 @@ ln -sf /data/projects "$HOME/.claude/projects"
 echo '{"hasCompletedOnboarding":true,"bypassPermissions":true}' > "$HOME/.claude.json"
 
 # Git setup (bare repo — worktrees created by session agent)
-if [ -n "$GIT_URL" ]; then
-    if [ ! -d "/data/repo/HEAD" ]; then
+# Every project gets a bare repo. Git-backed projects clone from GIT_URL;
+# scratch projects (no GIT_URL) get an empty bare repo initialized in place.
+# This means the session agent's worktree machinery works uniformly for all projects.
+if [ ! -d "/data/repo/HEAD" ]; then
+    if [ -n "$GIT_URL" ]; then
         git clone --bare "$GIT_URL" /data/repo || {
             echo "[entrypoint] Git clone failed — exiting for restart"
             exit 1
         }
     else
+        git init --bare /data/repo
+        # Create an initial empty commit so worktrees have something to branch from.
+        git -C /data/repo commit --allow-empty -m "init" \
+            --author="mclaude <mclaude@local>" 2>/dev/null || true
+    fi
+else
+    if [ -n "$GIT_URL" ]; then
         git -C /data/repo fetch --all --prune || true
     fi
-    mkdir -p /data/worktrees
 fi
+mkdir -p /data/worktrees
 
 # Shared memory — symlink each worktree's memory dir to /data/shared-memory/
 mkdir -p /data/shared-memory
