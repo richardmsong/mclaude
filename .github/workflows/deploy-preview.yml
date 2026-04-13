@@ -144,11 +144,14 @@ jobs:
 
       - name: Helm deploy preview
         run: |
+          # Preview deploys only the SPA (static frontend) — no control-plane/NATS/postgres needed
           helm upgrade --install "mclaude-preview-${BRANCH_SLUG}" ./charts/mclaude \
-            --set controlPlane.image.tag="${CP_TAG}" \
             --set spa.image.tag="${SPA_TAG}" \
-            --set sessionAgent.image.tag="${SA_TAG}" \
             --set namespace.create=false \
+            --set nats.enabled=false \
+            --set postgres.enabled=false \
+            --set controlPlane.enabled=false \
+            --set sessionAgent.enabled=false \
             --namespace "preview-${BRANCH_SLUG}" \
             --create-namespace \
             --wait --timeout 5m
