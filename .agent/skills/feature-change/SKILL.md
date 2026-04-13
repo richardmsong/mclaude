@@ -191,6 +191,10 @@ statement and describe what the code does or doesn't do.
 Do NOT list things the spec is silent about. Only list cases where spec says X and code
 does not implement X.
 
+**Every gap is required to be fixed. Do not categorize any gap as "deferred", "low priority",
+"optional", or "future work". If the spec says it, it must be implemented. The only exception
+is if the spec explicitly marks something as optional or future.**
+
 Output format:
   CLEAN                  (if zero gaps)
   GAP: <spec quote> → <what code is missing or wrong>
@@ -202,6 +206,8 @@ Output format:
 - The evaluator must read both the spec AND the code — not just one
 - One failing evaluator gap = one more dev-harness pass
 - Evaluator runs after EVERY dev-harness, not just the first
+- **Never deprioritize any gap** — every gap in the evaluator output goes to dev-harness immediately
+- If a gap cannot be implemented due to environment constraints (e.g., RWX PVC on a cluster that only supports RWO), update the spec to reflect the constraint, then re-evaluate
 
 ---
 
