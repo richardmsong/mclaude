@@ -120,4 +120,4 @@ Future: Figma designs linked per feature.
 
 | # | Feature | Description |
 |---|---------|-------------|
-| I1 | Tailscale ExternalDNS | ExternalDNS with Tailscale provider; preview Ingresses get MagicDNS hostnames resolving on any Tailnet device. See `docs/spec-tailscale-dns.md`. |
+| I1 | Preview DNS via CoreDNS | CoreDNS container on the k3d host bound to the Tailscale IP serves zone `mclaude.internal.`; Tailscale split DNS routes `*.mclaude.internal` from any Tailnet device (including cellular) to it. See `docs/spec-tailscale-dns.md`. |
