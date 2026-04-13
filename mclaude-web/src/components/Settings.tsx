@@ -8,9 +8,10 @@ interface SettingsProps {
   sessionCount: number
   onBack: () => void
   onLogout: () => void
+  onCacheReset?: () => void
 }
 
-export function Settings({ userId, serverUrl, connected, sessionCount, onBack, onLogout }: SettingsProps) {
+export function Settings({ userId, serverUrl, connected, sessionCount, onBack, onLogout, onCacheReset }: SettingsProps) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg)' }}>
       <NavBar title="Settings" onBack={onBack} connected={connected} />
@@ -55,6 +56,28 @@ export function Settings({ userId, serverUrl, connected, sessionCount, onBack, o
             </span>
           </div>
         </div>
+
+        {/* Cache reset */}
+        {onCacheReset && (
+          <div style={{ marginTop: 20 }}>
+            <div style={sectionLabel}>ADVANCED</div>
+            <div style={card}>
+              <button
+                onClick={onCacheReset}
+                style={{
+                  ...row,
+                  width: '100%',
+                  background: 'none',
+                  textAlign: 'left',
+                  color: 'var(--text)',
+                }}
+              >
+                <span style={{ color: 'var(--text2)' }}>Reset Client Cache</span>
+                <span style={{ color: 'var(--text3)', fontSize: 12 }}>Clear all local state and re-subscribe</span>
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Sign out */}
         <div style={{ marginTop: 20 }}>
