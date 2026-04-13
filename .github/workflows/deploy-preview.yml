@@ -17,6 +17,7 @@ jobs:
       spa: ${{ steps.filter.outputs.spa }}
       session-agent: ${{ steps.filter.outputs.session-agent }}
       branch_slug: ${{ steps.slug.outputs.value }}
+      image_tag: ${{ steps.slug.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -24,8 +25,10 @@ jobs:
         id: slug
         run: |
           slug="${GITHUB_REF_NAME//\//-}"
+          short_sha="${GITHUB_SHA::7}"
           echo "value=${slug}" >> "$GITHUB_OUTPUT"
-          echo "Branch slug: ${slug}"
+          echo "image_tag=${slug}-${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "Branch slug: ${slug}  Image tag: ${slug}-${short_sha}"
 
       - uses: dorny/paths-filter@v3
         id: filter
@@ -47,7 +50,7 @@ jobs:
       contents: read
       packages: write
     outputs:
-      tag: ${{ needs.changes.outputs.branch_slug }}
+      tag: ${{ needs.changes.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -75,7 +78,7 @@ jobs:
           context: ./mclaude-control-plane
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/mclaude-project/mclaude-control-plane:${{ needs.changes.outputs.branch_slug }}
+          tags: ghcr.io/mclaude-project/mclaude-control-plane:${{ needs.changes.outputs.image_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -88,7 +91,7 @@ jobs:
       contents: read
       packages: write
     outputs:
-      tag: ${{ needs.changes.outputs.branch_slug }}
+      tag: ${{ needs.changes.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
@@ -103,7 +106,7 @@ jobs:
           context: ./mclaude-web
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/mclaude-project/mclaude-spa:${{ needs.changes.outputs.branch_slug }}
+          tags: ghcr.io/mclaude-project/mclaude-spa:${{ needs.changes.outputs.image_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -116,7 +119,7 @@ jobs:
       contents: read
       packages: write
     outputs:
-      tag: ${{ needs.changes.outputs.branch_slug }}
+      tag: ${{ needs.changes.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -146,7 +149,7 @@ jobs:
           context: ./mclaude-session-agent
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/mclaude-project/mclaude-session-agent:${{ needs.changes.outputs.branch_slug }}
+          tags: ghcr.io/mclaude-project/mclaude-session-agent:${{ needs.changes.outputs.image_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -158,9 +161,10 @@ jobs:
     runs-on: [self-hosted, tailscale]
     env:
       BRANCH_SLUG: ${{ needs.changes.outputs.branch_slug }}
-      CP_TAG: ${{ needs.build-control-plane.outputs.tag || 'latest' }}
-      SPA_TAG: ${{ needs.build-spa.outputs.tag || 'latest' }}
-      SA_TAG: ${{ needs.build-session-agent.outputs.tag || 'latest' }}
+      # If a build job was skipped (no changes), fall back to branch-slug tag (previous build).
+      CP_TAG: ${{ needs.build-control-plane.outputs.tag || needs.changes.outputs.branch_slug }}
+      SPA_TAG: ${{ needs.build-spa.outputs.tag || needs.changes.outputs.branch_slug }}
+      SA_TAG: ${{ needs.build-session-agent.outputs.tag || needs.changes.outputs.branch_slug }}
     steps:
       - uses: actions/checkout@v4
 
