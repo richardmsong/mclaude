@@ -132,7 +132,7 @@ describe('monitoring — structured pino logs', () => {
     it('logs debug with component=session-store and sessionId on KV update', () => {
       // Trigger a KV update after the store is already watching
       mockLogLines.length = 0
-      mockNats.kvSet('mclaude-sessions', 'user-1/session-2', makeSessionKVState({ id: 'session-2' }))
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-2', makeSessionKVState({ id: 'session-2' }))
 
       const lines = logsForComponent('session-store')
       expect(lines.length).toBeGreaterThanOrEqual(1)

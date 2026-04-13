@@ -173,20 +173,24 @@ export class MockNATSClient implements INATSClient {
 
   private _matchKVKey(pattern: string, key: string): boolean {
     if (pattern === key) return true
-    // Handle > wildcard: matches one or more path segments
-    // Supports both "prefix/>" and "prefix>"
+    // Detect separator: use '.' unless pattern contains '/' (supports both)
+    const sep = pattern.includes('/') ? '/' : '.'
+
+    // Handle > wildcard: matches one or more path segments after prefix
     if (pattern.endsWith('>')) {
-      const prefix = pattern.endsWith('/>') ? pattern.slice(0, -1) : pattern.slice(0, -1)
-      return key.startsWith(prefix)
+      // "prefix.>" matches "prefix.anything" or "prefix.a.b.c"
+      const prefixWithSep = pattern.slice(0, -1) // removes '>' but keeps trailing sep
+      return key.startsWith(prefixWithSep)
     }
-    // Handle * wildcard: matches exactly one path segment
+
+    // Handle * wildcard: matches exactly one segment (no sub-separators)
     if (pattern.includes('*')) {
-      const sep = pattern.includes('/') ? '/' : '.'
       const patParts = pattern.split(sep)
       const keyParts = key.split(sep)
       if (patParts.length !== keyParts.length) return false
       return patParts.every((p, i) => p === '*' || p === keyParts[i])
     }
+
     return false
   }
 }
