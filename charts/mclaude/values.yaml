@@ -109,14 +109,14 @@ controlPlane:
     ## Never enable in production.
     devSeed: false
   ## Name of existing Secret containing:
-  ##   admin-token       — break-glass bearer token
-  ##   nats-operator-jwt — NATS operator JWT
+  ##   admin-token        — break-glass bearer token
+  ##   database-url       — Postgres connection string
+  ##   nats-operator-jwt  — NATS operator JWT
   ##   nats-operator-seed — NATS operator NKey seed
-  ##   dev-oauth-token   — (optional) OAuth token provisioned into per-user user-secrets
   existingSecret: "mclaude-control-plane"
   ## OAuth token for the control-plane to provision into per-user user-secrets Secrets.
-  ## When non-empty, a dev-oauth-token key is added to the control-plane Secret and
-  ## DEV_OAUTH_TOKEN is set on the control-plane container.
+  ## When non-empty, DEV_OAUTH_TOKEN is set on the control-plane container.
+  ## The reconciler then writes it as oauth-token into each user's user-secrets Secret.
   devOAuthToken: ""
   ## Override container command (e.g. for e2e stubs)
   command: []
