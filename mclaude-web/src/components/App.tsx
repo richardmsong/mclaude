@@ -201,36 +201,57 @@ export function App() {
   const [eventStore, setEventStore] = useState<EventStore | null>(null)
   const [conversationVM, setConversationVM] = useState<ConversationVM | null>(null)
 
+  // Resolve projectId from session KV once, without recreating the EventStore
+  // on every subsequent KV update (which would lose accumulated conversation data).
+  const [resolvedProjectId, setResolvedProjectId] = useState<string | null>(null)
+
+  // Reset resolved projectId when leaving the session screen or switching sessions
   useEffect(() => {
-    if (route.screen !== 'session' || !route.sessionId || !authState.userId || !sessionStore) {
+    if (route.screen !== 'session' || !route.sessionId) {
+      setResolvedProjectId(null)
+    }
+  }, [route.screen, route.sessionId])
+
+  // Resolve projectId from session KV — re-runs when session data arrives (sessionVersion)
+  // but uses functional update to only set it once per session (never overwrite once resolved).
+  useEffect(() => {
+    if (route.screen !== 'session' || !route.sessionId || !sessionStore) return
+    const session = sessionStore.sessions.get(route.sessionId)
+    if (session) {
+      setResolvedProjectId(prev => prev ?? session.projectId)
+    }
+  }, [route.screen, route.sessionId, sessionStore, sessionVersion])
+
+  // Per-session EventStore + ConversationVM — created ONCE per sessionId+projectId.
+  // Does NOT depend on sessionVersion so KV updates (idle→running→idle) don't destroy
+  // and recreate the store, which would lose all accumulated conversation data.
+  useEffect(() => {
+    if (!route.sessionId || !authState.userId || !resolvedProjectId || !sessionStore) {
       setEventStore(null)
       setConversationVM(null)
       return
     }
-    const session = sessionStore.sessions.get(route.sessionId)
-    // Wait until the session appears in KV — avoids publishing to 'unknown' projectId
-    // and ensures the title shows the real name. Re-runs when sessionVersion increments.
-    if (!session) return
-    const projectId = session.projectId
     const store = new EventStore({
       natsClient,
       userId: authState.userId,
-      projectId,
+      projectId: resolvedProjectId,
       sessionId: route.sessionId,
     })
     // Start from replayFromSeq in KV — skips events before last clear/compaction (spec: plan-client-architecture.md)
-    const replayFromSeq = session.replayFromSeq ?? undefined
+    const session = sessionStore.sessions.get(route.sessionId)
+    const replayFromSeq = session?.replayFromSeq ?? undefined
     store.start(replayFromSeq)
-    const vm = new ConversationVM(store, sessionStore, natsClient, authState.userId, projectId, route.sessionId)
+    const vm = new ConversationVM(store, sessionStore, natsClient, authState.userId, resolvedProjectId, route.sessionId)
     setEventStore(store)
     setConversationVM(vm)
     return () => {
       store.stop()
       vm.destroy()
     }
-  // sessionVersion causes re-run when KV watch fires with the session data
+  // resolvedProjectId is set once per session (functional update), so this effect fires
+  // exactly once when the projectId is first resolved, and again only if sessionId changes.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [route.screen, route.sessionId, authState.userId, sessionStore, sessionVersion])
+  }, [route.sessionId, authState.userId, resolvedProjectId])
 
   // ── Version poller ───────────────────────────────────────────────────
   const { updateAvailable } = useVersionPoller()
@@ -263,7 +284,9 @@ export function App() {
       sessionStore.startWatching()
       heartbeatMonitor.start()
     }
-    // Force re-render of event store by bumping session version
+    // Reset resolvedProjectId so the EventStore effect re-runs and rebuilds from scratch.
+    // sessionVersion bump causes the projectId-resolver effect to re-fire and set it again.
+    setResolvedProjectId(null)
     setSessionVersion(v => v + 1)
   }
 
