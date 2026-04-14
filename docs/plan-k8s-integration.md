@@ -585,6 +585,21 @@ Each step is idempotent. The reconciler **owns** all resources it creates via `c
 
 **Integration with dev-seed**: `seedDev` creates MCProject CRs for seed projects. The reconciler provisions them.
 
+### Session Pod Upgrades (future work)
+
+When helm deploys a new chart, the `session-agent-template` ConfigMap gets the new image tag. The reconciler must propagate that to existing session-agent Deployments in user namespaces.
+
+**Planned approach:**
+
+1. Reconciler watches the `session-agent-template` ConfigMap in the control-plane namespace. On change, re-enqueues all MCProject CRs.
+2. `reconcileDeployment` compares the template image against the live Deployment image. On mismatch, updates the Deployment spec. K8s handles the rolling restart.
+3. Restarts are effectively free — all state lives on PVC (JSONL history, git repo, worktrees) and NATS KV (session metadata). The new pod's entrypoint reseeds `.claude` from the ConfigMap/PVC, and any interrupted session resumes via `claude --resume`.
+4. `terminationGracePeriodSeconds` gives the current Claude turn time to finish before SIGTERM kills the process.
+
+**Version pinning (future work):**
+
+Users may want to pin a specific session-agent image (and therefore Claude Code version) per project. Planned: add `spec.imageOverride` to the MCProject CRD. When set, the reconciler uses it instead of the fleet-wide template. When empty, follows the template. The SPA exposes this as "Pin Claude version" in project settings.
+
 ### Endpoints
 
 **Auth**
