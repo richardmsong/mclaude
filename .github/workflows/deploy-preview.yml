@@ -36,10 +36,13 @@ jobs:
           filters: |
             control-plane:
               - 'mclaude-control-plane/**'
+              - '.github/workflows/deploy-preview.yml'
             spa:
               - 'mclaude-web/**'
+              - '.github/workflows/deploy-preview.yml'
             session-agent:
               - 'mclaude-session-agent/**'
+              - '.github/workflows/deploy-preview.yml'
 
   build-control-plane:
     name: Build control-plane (branch)
@@ -158,23 +161,51 @@ jobs:
     runs-on: [self-hosted, tailscale]
     env:
       BRANCH_SLUG: ${{ needs.changes.outputs.branch_slug }}
-      # If a build job was skipped (no changes), fall back to branch-slug tag (previous build).
-      CP_TAG: ${{ needs.build-control-plane.outputs.tag || needs.changes.outputs.branch_slug }}
-      SPA_TAG: ${{ needs.build-spa.outputs.tag || needs.changes.outputs.branch_slug }}
-      SA_TAG: ${{ needs.build-session-agent.outputs.tag || needs.changes.outputs.branch_slug }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve images and URL
+      - name: Resolve image tags
+        id: tags
         run: |
+          RELEASE="mclaude-preview-${BRANCH_SLUG}"
+
+          resolve_tag() {
+            local component="$1" new_tag="$2"
+            if [ -n "$new_tag" ]; then
+              echo "$new_tag"
+            else
+              helm get values "$RELEASE" -n mclaude-system -o json 2>/dev/null \
+                | jq -r ".${component}.image.tag // empty" || true
+            fi
+          }
+
+          CP_TAG=$(resolve_tag "controlPlane" "${{ needs.build-control-plane.outputs.tag }}")
+          SPA_TAG=$(resolve_tag "spa" "${{ needs.build-spa.outputs.tag }}")
+          SA_TAG=$(resolve_tag "sessionAgent" "${{ needs.build-session-agent.outputs.tag }}")
+
+          # Final fallback for first deploy: use slug-sha tag (forces build next time)
+          CP_TAG="${CP_TAG:-${{ needs.changes.outputs.image_tag }}}"
+          SPA_TAG="${SPA_TAG:-${{ needs.changes.outputs.image_tag }}}"
+          SA_TAG="${SA_TAG:-${{ needs.changes.outputs.image_tag }}}"
+
+          echo "cp=$CP_TAG" >> "$GITHUB_OUTPUT"
+          echo "spa=$SPA_TAG" >> "$GITHUB_OUTPUT"
+          echo "sa=$SA_TAG" >> "$GITHUB_OUTPUT"
+
+          PREVIEW_HOST="preview-${BRANCH_SLUG}.mclaude.internal"
+          echo "host=$PREVIEW_HOST" >> "$GITHUB_OUTPUT"
+
           echo "control-plane: ghcr.io/mclaude-project/mclaude-control-plane:${CP_TAG}"
           echo "spa:           ghcr.io/mclaude-project/mclaude-spa:${SPA_TAG}"
           echo "session-agent: ghcr.io/mclaude-project/mclaude-session-agent:${SA_TAG}"
-          PREVIEW_HOST="preview-${BRANCH_SLUG}.mclaude.internal"
           echo "preview URL:   http://${PREVIEW_HOST}"
-          echo "PREVIEW_HOST=${PREVIEW_HOST}" >> "$GITHUB_ENV"
 
       - name: Helm deploy preview
+        env:
+          CP_TAG: ${{ steps.tags.outputs.cp }}
+          SPA_TAG: ${{ steps.tags.outputs.spa }}
+          SA_TAG: ${{ steps.tags.outputs.sa }}
+          PREVIEW_HOST: ${{ steps.tags.outputs.host }}
         run: |
           helm upgrade --install "mclaude-preview-${BRANCH_SLUG}" ./charts/mclaude \
             --set controlPlane.image.tag="${CP_TAG}" \
@@ -191,4 +222,4 @@ jobs:
             --force-conflicts
 
       - name: Preview URL
-        run: echo "✓ Preview live at http://${PREVIEW_HOST}"
+        run: echo "✓ Preview live at http://${{ steps.tags.outputs.host }}"
