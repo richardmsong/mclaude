@@ -151,8 +151,10 @@ mclaude.{userId}.{location}.{projectId}.api.sessions.input
 mclaude.{userId}.{location}.{projectId}.api.sessions.control    → permission responses, interrupts
 mclaude.{userId}.{location}.{projectId}.api.sessions.restart
 mclaude.{userId}.api.projects.create    → control-plane (global, not location-scoped)
+mclaude.{userId}.api.projects.update    → control-plane
 mclaude.{userId}.api.projects.delete    → control-plane
 mclaude.{userId}.api.projects.list      → control-plane
+mclaude.{userId}.api.projects.updated   → control-plane broadcasts (project state changed)
 ```
 
 ### Events (JetStream, append-only)
@@ -578,8 +580,9 @@ status:
 6. Ensure imagePullSecrets copied from control-plane namespace
 7. Ensure project PVC (project-{projectId}) in user namespace
 8. Ensure nix PVC (nix-store) in user namespace (shared across all projects)
-9. Ensure Deployment (project-{projectId}) in user namespace with correct spec
-10. Update MCProject status conditions and phase
+9. Ensure project-config ConfigMap (project-{projectId}-config) with GIT_URL from spec.gitUrl
+10. Ensure Deployment (project-{projectId}) in user namespace with correct spec (mounts project-config ConfigMap at /etc/mclaude/config)
+11. Update MCProject status conditions and phase
 ```
 
 Each step is idempotent. The reconciler **owns** all resources it creates via `controllerutil.SetControllerReference` — when an MCProject is deleted, owned resources in the user namespace are garbage-collected (except PVCs, which require explicit `?purge=true`).
