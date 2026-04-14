@@ -9,8 +9,6 @@ metadata:
     app.kubernetes.io/component: control-plane
 spec:
   replicas: {{ .Values.controlPlane.replicas }}
-  strategy:
-    type: Recreate
   selector:
     matchLabels:
       {{- include "mclaude.selectorLabels" . | nindent 6 }}
