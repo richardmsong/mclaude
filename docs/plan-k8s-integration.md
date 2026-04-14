@@ -59,7 +59,7 @@ Clients (browser, laptop agent) connect to NATS via `/nats` WebSocket proxy thro
 
 ### Claude Code Integration
 
-The session agent spawns Claude Code headless with `--bare` (skips hooks, LSP, memory walk, keychain — hermetic container mode):
+The session agent spawns Claude Code headless:
 
 ```bash
 claude --print --verbose \
@@ -100,6 +100,8 @@ Claude Code still writes JSONL internally (its own persistence for `--resume`). 
 {"type": "control_request", "request_id": "abc", "request": {"subtype": "can_use_tool", "tool_name": "Bash", ...}}
 {"type": "tool_progress", "tool_use_id": "...", "tool_name": "Bash", "elapsed_time_seconds": 30}
 {"type": "result", "subtype": "success", "usage": {...}, "duration_ms": 1234}
+{"type": "clear"}
+{"type": "compact_boundary"}
 ```
 
 **Input (stdin)** — session agent writes:
@@ -112,6 +114,7 @@ Claude Code still writes JSONL internally (its own persistence for `--resume`). 
 {"type": "control_request", "request": {"subtype": "interrupt"}}
 {"type": "control_request", "request": {"subtype": "reload_plugins"}}
 {"type": "control_request", "request": {"subtype": "set_model", "model": "claude-opus-4-6"}}
+{"type": "control_request", "request": {"subtype": "set_max_thinking_tokens", "max_thinking_tokens": 10000}}
 ```
 
 Skills work via plain text `/commit` messages in user content. Capabilities are queryable at runtime via `reload_plugins` control request. Images/files sent via standard Anthropic content arrays with base64-encoded data.
@@ -133,15 +136,21 @@ The SPA uses `parent_tool_use_id` to render subagent events nested under the par
 
 ## NATS Subject Structure
 
+### Location segment
+
+All session-scoped subjects include a `{location}` segment identifying where the session runs. Location is a user-assigned name set during cluster or laptop registration (e.g., `macbook`, `home-lab`, `work-k8s`). Must be unique per user. Stored in the `mclaude-locations` KV bucket as `{userId}/{location}` → `{"type": "k8s"|"laptop", "machineId": "...", "ts": "..."}`.
+
+This enables multi-cluster and hybrid (K8s + laptop) deployments under a single user namespace. The SPA subscribes with a wildcard on location to receive events from all locations: `mclaude.{userId}.*.{projectId}.events.>`.
+
 ### API (request/reply)
 
 ```
-mclaude.{userId}.{projectId}.api.sessions.create
-mclaude.{userId}.{projectId}.api.sessions.delete
-mclaude.{userId}.{projectId}.api.sessions.input
-mclaude.{userId}.{projectId}.api.sessions.control    → permission responses, interrupts
-mclaude.{userId}.{projectId}.api.sessions.restart
-mclaude.{userId}.api.projects.create    → control-plane
+mclaude.{userId}.{location}.{projectId}.api.sessions.create
+mclaude.{userId}.{location}.{projectId}.api.sessions.delete
+mclaude.{userId}.{location}.{projectId}.api.sessions.input
+mclaude.{userId}.{location}.{projectId}.api.sessions.control    → permission responses, interrupts
+mclaude.{userId}.{location}.{projectId}.api.sessions.restart
+mclaude.{userId}.api.projects.create    → control-plane (global, not location-scoped)
 mclaude.{userId}.api.projects.delete    → control-plane
 mclaude.{userId}.api.projects.list      → control-plane
 ```
@@ -149,16 +158,16 @@ mclaude.{userId}.api.projects.list      → control-plane
 ### Events (JetStream, append-only)
 
 ```
-mclaude.{userId}.{projectId}.events.{sessionId}       → Claude Code stream-json events
-mclaude.{userId}.{projectId}.lifecycle.{sessionId}     → session agent lifecycle events
+mclaude.{userId}.{location}.{projectId}.events.{sessionId}       → Claude Code stream-json events
+mclaude.{userId}.{location}.{projectId}.lifecycle.{sessionId}     → session agent lifecycle events
 ```
 
 `events` carries raw stream-json objects from Claude Code stdout — no envelope, the subject encodes the routing metadata. `lifecycle` carries session agent's own events (created, stopped, resumed, debug attached/detached).
 
 Separate subjects so clients can subscribe to one or both. Stream-json events are high-volume; lifecycle events are low-volume state transitions.
 
-Stream `MCLAUDE_EVENTS` captures all `mclaude.*.*.events.*` subjects. Retained 30 days.
-Stream `MCLAUDE_LIFECYCLE` captures all `mclaude.*.*.lifecycle.*` subjects. Retained 30 days.
+Stream `MCLAUDE_EVENTS` captures all `mclaude.*.*.*.events.*` subjects. Retained 30 days.
+Stream `MCLAUDE_LIFECYCLE` captures all `mclaude.*.*.*.lifecycle.*` subjects. Retained 30 days.
 
 **NATS message size**: default limit is 1MB. Large tool results (file reads, big diffs) can exceed this. Set `max_payload: 8388608` (8MB) in NATS server config. If a single event still exceeds 8MB, the session agent truncates the `content` field and sets a `truncated: true` flag — the full content is in Claude's JSONL if needed.
 
@@ -166,16 +175,16 @@ Stream `MCLAUDE_LIFECYCLE` captures all `mclaude.*.*.lifecycle.*` subjects. Reta
 
 ```
 KV bucket: mclaude-sessions
-  key: {userId}/{projectId}/{sessionId}  → Session JSON (see below)
+  key: {userId}/{location}/{projectId}/{sessionId}  → Session JSON (see below)
 
 KV bucket: mclaude-projects
   key: {userId}/{projectId}              → Project JSON (see below)
 
 KV bucket: mclaude-heartbeats
-  key: {userId}/{projectId}             → {"ts": "..."}
+  key: {userId}/{location}/{projectId}  → {"ts": "..."}
 
-KV bucket: mclaude-laptops
-  key: {userId}/{hostname}              → {"machineId": "...", "ts": "..."}
+KV bucket: mclaude-locations
+  key: {userId}/{location}              → {"type": "k8s"|"laptop", "machineId": "...", "ts": "..."}
 ```
 
 Watching a KV key gives real-time state updates to any subscriber. Clients watch their own user's keys.
@@ -222,8 +231,8 @@ Watching a KV key gives real-time state updates to any subscriber. Clients watch
 ```json
 {
   "nats": {
-    "pub": { "allow": ["mclaude.{userId}.>"] },
-    "sub": { "allow": ["mclaude.{userId}.>"] }
+    "pub": { "allow": ["mclaude.{userId}.>", "_INBOX.>"] },
+    "sub": { "allow": ["mclaude.{userId}.>", "_INBOX.>"] }
   }
 }
 ```
@@ -242,7 +251,7 @@ Single Go binary. Runs as a container inside each K8s project pod, or as a stand
 
 ### What it does
 
-- Subscribes to `mclaude.{userId}.{projectId}.api.>` — handles session CRUD, input, and control messages
+- Subscribes to `mclaude.{userId}.{location}.{projectId}.api.>` — handles session CRUD, input, and control messages
 - Spawns Claude Code as child processes with `--print --verbose --output-format stream-json --input-format stream-json`
 - Routes stdout JSON events → NATS JetStream (raw, no envelope — subject encodes userId/projectId/sessionId)
 - Routes NATS input/control messages → Claude stdin
@@ -391,15 +400,15 @@ On a laptop, **one session-agent per project** — same scoping as K8s. A lightw
 - `mclaude-launcher` runs as a launchd/systemd daemon
 - On `projects.create` NATS message (or `mclaude start <project>` CLI), launcher spawns a session-agent for that project
 - Each session-agent connects to NATS via `wss://mclaude.example.com/nats` (outbound, works behind NAT/firewall)
-- Each subscribes to `mclaude.{userId}.laptop.{hostname}.{projectId}.api.>` — same scoping as K8s
+- Each subscribes to `mclaude.{userId}.{location}.{projectId}.api.>` — same subject structure as K8s (location is the user-assigned name for this laptop)
 - NATS JWT issued by control-plane on first setup, stored in `~/.config/mclaude/creds` (shared by all agents)
 - Launcher monitors child agents, restarts on crash
 
-**Hostname collision**: on startup, launcher checks NATS KV for an existing `mclaude-laptops/{userId}/{hostname}` entry. If one exists with a different machine ID, launcher exits with an error: `hostname "{hostname}" is already registered to another machine — set a unique hostname with: mclaude config hostname <name>`. If the entry matches this machine ID (e.g. crash recovery), launcher proceeds normally and overwrites the entry.
+**Location collision**: on startup, launcher checks NATS KV for an existing `mclaude-locations/{userId}/{location}` entry. If one exists with a different machine ID, launcher exits with an error: `location "{location}" is already registered to another machine — set a unique name with: mclaude config location <name>`. If the entry matches this machine ID (e.g. crash recovery), launcher proceeds normally and overwrites the entry.
 
 **JWT refresh**: launcher runs a background goroutine that decodes the `exp` claim from `~/.config/mclaude/creds` every 60s. When TTL falls below 15 minutes, it calls `POST /auth/refresh` and writes the new credential file. All child session-agents share the same file and reload it on their next NATS reconnect. If refresh fails (network down, server error), launcher retries with exponential backoff and logs a warning — child agents continue with the existing JWT until it expires, then reconnect with whatever credential is current.
 
-The browser connects to the same NATS and subscribes to `mclaude.{userId}.laptop.{hostname}.events.>` — same flow as K8s sessions.
+The browser connects to the same NATS and subscribes to `mclaude.{userId}.*.{projectId}.events.>` — wildcard on location to receive events from any cluster or laptop.
 
 ### Worktrees
 
@@ -449,7 +458,7 @@ On session delete:
 
 Claude Code's stream-json protocol is the canonical event schema. No protobuf translation layer. Events flow from Claude Code → NATS → clients unchanged.
 
-Events are published as raw stream-json bytes — no envelope. The NATS subject (`mclaude.{userId}.{projectId}.events.{sessionId}`) encodes all routing metadata. JetStream adds its own timestamp. Clients parse the raw stream-json directly.
+Events are published as raw stream-json bytes — no envelope. The NATS subject (`mclaude.{userId}.{location}.{projectId}.events.{sessionId}`) encodes all routing metadata. JetStream adds its own timestamp. Clients parse the raw stream-json directly.
 
 ### Session state (NATS KV)
 
@@ -507,7 +516,7 @@ Events are published as raw stream-json bytes — no envelope. The NATS subject 
 
 ### Session agent lifecycle events
 
-Published on `mclaude.{userId}.{projectId}.lifecycle.{sessionId}` — separate from the stream-json event stream:
+Published on `mclaude.{userId}.{location}.{projectId}.lifecycle.{sessionId}` — separate from the stream-json event stream:
 
 ```json
 {"type": "session_created", "sessionId": "abc-123", "ts": "..."}
@@ -568,7 +577,7 @@ status:
 5. Ensure user-secrets Secret with NATS creds in user namespace
 6. Ensure imagePullSecrets copied from control-plane namespace
 7. Ensure project PVC (project-{projectId}) in user namespace
-8. Ensure nix PVC (nix-{projectId}) in user namespace
+8. Ensure nix PVC (nix-store) in user namespace (shared across all projects)
 9. Ensure Deployment (project-{projectId}) in user namespace with correct spec
 10. Update MCProject status conditions and phase
 ```
@@ -682,12 +691,11 @@ JWT revocation is NATS-native: control-plane holds the account NKey and can push
 ```
 1. Client publishes mclaude.{userId}.api.projects.create
 2. control-plane receives via NATS request/reply
-3. INSERT into Postgres projects table
-4. Create MCProject CR in mclaude-system namespace
-5. Write Project JSON to NATS KV mclaude-projects/{userId}/{projectId}
-6. Reply with projectId immediately (don't wait for provisioning)
-7. Reconciler picks up MCProject CR → creates namespace, RBAC, secrets, PVCs, Deployment
-8. Pod starts, session-agent connects to NATS, begins subscriptions
+3. Create MCProject CR in mclaude-system namespace
+4. Write Project JSON to NATS KV mclaude-projects/{userId}/{projectId}
+5. Reply with projectId immediately (don't wait for provisioning)
+6. Reconciler picks up MCProject CR → creates namespace, RBAC, secrets, PVCs, Deployment
+7. Pod starts, session-agent connects to NATS, begins subscriptions
 ```
 
 The SPA can watch MCProject status conditions (via NATS KV or direct status) to show provisioning progress.
@@ -948,11 +956,11 @@ Mobile browser first — enterprise constraint requires the client to work in a 
 - **Desktop browser** — same SPA
 - No iOS app, no Electron, no Flutter (deferred)
 
-**Framework**: TBD — React, Solid, or Svelte. Must be decided before Phase 4.
+**Framework**: React 18 (chosen).
 
 **PTT**: WebSpeech API. On iOS Safari this calls `SFSpeechRecognizer` natively — same quality as a native iOS app. On Android Chrome, Google's speech recognition. Requires HTTPS + mic permission.
 
-**Real-time events**: client connects to NATS via `/nats` WebSocket proxy. Subscribes directly to `mclaude.{userId}.>.events.>`. Events are raw stream-json from Claude Code — the client renders them directly.
+**Real-time events**: client connects to NATS via `/nats` WebSocket proxy. Subscribes to `mclaude.{userId}.*.{projectId}.events.>` (wildcard on location). Events are raw stream-json from Claude Code — the client renders them directly.
 
 **Rendering**: the SPA consumes stream-json event types:
 - `stream_event` (content_block_delta) → live streaming text as Claude types (token-by-token)
@@ -973,7 +981,7 @@ Mobile browser first — enterprise constraint requires the client to work in a 
 
 **State**: client watches NATS KV buckets `mclaude-sessions` and `mclaude-projects` for live updates.
 
-**Event replay**: on reconnect or tab foreground, client re-subscribes from `max(lastSeenSeq + 1, replayFromSeq)`. On fresh load, reads `replayFromSeq` from session KV and subscribes from there — avoids replaying events from before the last `/clear` or compaction. No stale cache ��� client always knows its position in the stream.
+**Event replay**: on reconnect or tab foreground, client re-subscribes from `max(lastSeenSeq + 1, replayFromSeq)`. On fresh load, reads `replayFromSeq` from session KV and subscribes from there — avoids replaying events from before the last `/clear` or compaction. No stale cache — client always knows its position in the stream.
 
 **Deduplication**: delivery is at-least-once — a session agent reconnecting to NATS after an outage may re-publish events the client already received. Client must deduplicate by JetStream sequence number: skip any event whose sequence number is ≤ `lastSeenSeq`.
 
@@ -1004,9 +1012,9 @@ The session agent manages two types of sessions:
 Terminal sessions are spawned via the same NATS API:
 
 ```
-mclaude.{userId}.{projectId}.api.terminal.create    → spawn shell
-mclaude.{userId}.{projectId}.api.terminal.delete     → kill terminal
-mclaude.{userId}.{projectId}.api.terminal.resize     → resize PTY
+mclaude.{userId}.{location}.{projectId}.api.terminal.create    → spawn shell
+mclaude.{userId}.{location}.{projectId}.api.terminal.delete     → kill terminal
+mclaude.{userId}.{location}.{projectId}.api.terminal.resize     → resize PTY
 ```
 
 The session agent spawns a shell using `creack/pty` (Go PTY library):
@@ -1038,8 +1046,8 @@ go func() {
 NATS subjects for terminal I/O:
 
 ```
-mclaude.{userId}.{projectId}.terminal.{termId}.output    → raw PTY output bytes
-mclaude.{userId}.{projectId}.terminal.{termId}.input     → raw keyboard input bytes
+mclaude.{userId}.{location}.{projectId}.terminal.{termId}.output    → raw PTY output bytes
+mclaude.{userId}.{location}.{projectId}.terminal.{termId}.input     → raw keyboard input bytes
 ```
 
 These are **not** JetStream — raw terminal I/O is ephemeral, no replay needed. Use core NATS pub/sub for low latency.
@@ -1199,7 +1207,7 @@ Recovery sequence on startup after ungraceful termination:
 7. Sessions that fail to start within 30s: mark state: "failed", publish session_failed
 ```
 
-Clearing `pendingControl` in step 2 is safe: on `--resume`, Claude Code sees the interrupted tool call in its conversation history and re-emits the `control_request` naturally. The client receives a fresh prompt and responds normally.
+Clearing `pendingControls` in step 2 is safe: on `--resume`, Claude Code sees the interrupted tool call in its conversation history and re-emits the `control_request` naturally. The client receives a fresh prompt and responds normally.
 
 This is the same sequence as a graceful restart — the agent doesn't distinguish between the two. It always re-derives state from Claude Code on startup.
 
@@ -1280,7 +1288,7 @@ OTEL stack is already on the cluster. All components export to it.
 
 | Resource | Monthly cost |
 |----------|-------------|
-| Project pod ×2 (350m CPU, 900Mi) | ~$12 |
+| Project pod ×2 (200m CPU, 512Mi request / 4 CPU, 8Gi limit) | ~$12 |
 | Project PVC ×2 (20Gi premium) | ~$6 |
 | Nix store PVC (20Gi Azure Files) | ~$1.20 |
 | NATS share (per-user estimate) | ~$1 |
@@ -1542,6 +1550,9 @@ kind: ClusterRole
 metadata:
   name: mclaude-control-plane
 rules:
+  - apiGroups: ["mclaude.io"]
+    resources: ["mcprojects", "mcprojects/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "create", "delete"]
@@ -1605,7 +1616,7 @@ All project pods set `HTTPS_PROXY` env var. Claude Code respects it natively. Om
 15. Laptop mode (standalone daemon, same binary)
 
 **Phase 4 — Web SPA:**
-16. Framework decision (React / Solid / Svelte)
+16. ~~Framework decision~~ (React 18 — decided)
 17. Auth flow — login → NATS JWT
 18. NATS direct subscription — stream-json events + KV state watches
 19. Stream-json renderer (assistant text, tool use, control requests, thinking)
@@ -1629,7 +1640,7 @@ All project pods set `HTTPS_PROXY` env var. Claude Code respects it natively. Om
 3. SCIM push from IdP → user provisioned automatically
 
 **Session lifecycle:**
-4. `mclaude.{userId}.{projectId}.api.sessions.create` → Claude process spawned, Session in NATS KV, `init` event received
+4. `mclaude.{userId}.{location}.{projectId}.api.sessions.create` → Claude process spawned, Session in NATS KV, `init` event received
 5. Send input via NATS → appears as user message in stream-json output
 6. `session_state_changed` events flow through NATS → client updates status
 7. `control_request` for tool approval → client shows approve/deny → `control_response` sent → tool executes
@@ -1681,9 +1692,10 @@ mclaude-cli/
   main.go               Debug attach REPL — connects to session agent unix socket
 
 mclaude-control-plane/
-  main.go               Auth, user CRUD, K8s provisioning
+  main.go               Auth, user CRUD, controller-runtime Manager
   auth.go               Login, JWT issuance, SSO, SCIM
-  provisioner.go        Namespace + Deployment + PVC management
+  reconciler.go         MCProject reconciler — namespace, RBAC, secrets, PVCs, Deployment
+  api/v1alpha1/         MCProject CRD types
   migrations/           dbmate SQL files
   Dockerfile
 ```
@@ -1732,7 +1744,7 @@ The skill is the gatekeeper. A Claude Code release is never deployed to pods unt
 
 ## Open Questions
 
-- **Web UI framework**: React vs Solid vs Svelte. Must be decided before Phase 4.
+- ~~**Web UI framework**~~: React 18 (decided).
 - **Idle scale-to-zero**: deferred. Project pods stay running when idle. Relay replaced by nginx so the original tunnel wake-up problem is gone — revisit with NATS request/reply as the wake mechanism.
 - **Config change UX**: auto-restart sessions on user config change, or prompt? Leaning toward auto-restart with toast (--resume preserves conversation).
 - **PVC resize**: 20Gi default. `managed-csi-premium` supports online expansion — add monitoring alert.
