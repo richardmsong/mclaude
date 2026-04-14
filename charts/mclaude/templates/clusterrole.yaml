@@ -40,4 +40,8 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  ## MCProject CRD (controller-runtime reconciler)
+  - apiGroups: ["mclaude.io"]
+    resources: ["mcprojects", "mcprojects/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 {{- end }}
