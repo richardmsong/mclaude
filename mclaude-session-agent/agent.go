@@ -76,6 +76,21 @@ func NewAgent(nc *nats.Conn, userID, projectID, claudePath, dataDir string, log 
 		return nil, fmt.Errorf("heartbeats KV bucket not found (control-plane not started?): %w", err)
 	}
 
+	// Ensure the MCLAUDE_EVENTS stream exists. CreateOrUpdateStream is
+	// idempotent: if the stream already exists with compatible config it is a
+	// no-op; if it exists with different config it is updated; if it does not
+	// exist it is created. The session-agent is authoritative for this stream.
+	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:      "MCLAUDE_EVENTS",
+		Subjects:  []string{"mclaude.*.*.events.*"},
+		Retention: jetstream.LimitsPolicy,
+		MaxAge:    30 * 24 * time.Hour,
+		Storage:   jetstream.FileStorage,
+		Discard:   jetstream.DiscardOld,
+	}); err != nil {
+		return nil, fmt.Errorf("ensure MCLAUDE_EVENTS stream: %w", err)
+	}
+
 	agent := &Agent{
 		sessions:   make(map[string]*Session),
 		terminals:  make(map[string]*TerminalSession),
