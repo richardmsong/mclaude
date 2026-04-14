@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/rs/zerolog"
 	testutil "mclaude-session-agent/testutil"
 )
 
@@ -249,3 +251,76 @@ func TestNATSReconnect(t *testing.T) {
 		t.Fatal("expected connection to be live")
 	}
 }
+
+// TestNewAgentCreatesEventStream verifies that NewAgent creates the MCLAUDE_EVENTS
+// stream with the correct spec configuration (idempotent call).
+func TestNewAgentCreatesEventStream(t *testing.T) {
+	skipIfNoDocker(t)
+	deps := testutil.StartDeps(t)
+
+	// NewAgent should be able to create or confirm the MCLAUDE_EVENTS stream.
+	// StartDeps pre-creates the KV buckets; we re-use the connection.
+	logger := zerolog.New(io.Discard)
+	agent, err := NewAgent(deps.NATSConn, "integ-user", "integ-proj", "claude", logger, nil)
+	if err != nil {
+		t.Fatalf("NewAgent: %v", err)
+	}
+	_ = agent
+
+	ctx := context.Background()
+	js := deps.JetStream
+
+	// Verify the MCLAUDE_EVENTS stream has the spec-required config.
+	stream, err := js.Stream(ctx, "MCLAUDE_EVENTS")
+	if err != nil {
+		t.Fatalf("MCLAUDE_EVENTS stream not found after NewAgent: %v", err)
+	}
+	info, err := stream.Info(ctx)
+	if err != nil {
+		t.Fatalf("stream info: %v", err)
+	}
+
+	if info.Config.Retention != jetstream.LimitsPolicy {
+		t.Errorf("retention: got %v, want LimitsPolicy", info.Config.Retention)
+	}
+	if info.Config.MaxAge != 30*24*time.Hour {
+		t.Errorf("max_age: got %v, want 30d", info.Config.MaxAge)
+	}
+	if info.Config.Storage != jetstream.FileStorage {
+		t.Errorf("storage: got %v, want FileStorage", info.Config.Storage)
+	}
+	if info.Config.Discard != jetstream.DiscardOld {
+		t.Errorf("discard: got %v, want DiscardOld", info.Config.Discard)
+	}
+	found := false
+	for _, subj := range info.Config.Subjects {
+		if subj == "mclaude.*.*.events.*" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("subjects: %v does not include mclaude.*.*.events.*", info.Config.Subjects)
+	}
+}
+
+// TestNewAgentEventStreamIdempotent verifies that calling NewAgent twice
+// (stream already exists) succeeds without error.
+func TestNewAgentEventStreamIdempotent(t *testing.T) {
+	skipIfNoDocker(t)
+	deps := testutil.StartDeps(t)
+
+	logger := zerolog.New(io.Discard)
+
+	// First call — creates the stream.
+	_, err := NewAgent(deps.NATSConn, "integ-user", "integ-proj", "claude", logger, nil)
+	if err != nil {
+		t.Fatalf("first NewAgent: %v", err)
+	}
+
+	// Second call on the same connection — stream already exists, must not error.
+	_, err = NewAgent(deps.NATSConn, "integ-user", "integ-proj-2", "claude", logger, nil)
+	if err != nil {
+		t.Fatalf("second NewAgent (idempotent): %v", err)
+	}
+}
+
