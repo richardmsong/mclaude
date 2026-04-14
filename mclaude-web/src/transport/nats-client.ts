@@ -1,4 +1,4 @@
-import { connect, jwtAuthenticator, headers as natsHeaders, Events } from 'nats.ws'
+import { connect, jwtAuthenticator, headers as natsHeaders, Events, consumerOpts } from 'nats.ws'
 import type { NatsConnection, KvEntry as NatsKvEntry } from 'nats.ws'
 import type { INATSClient, NATSConnectionOptions, NATSMessage, KVEntry } from '@/types'
 
@@ -76,6 +76,42 @@ export class NATSClient implements INATSClient {
       }
     })()
     return () => sub.unsubscribe()
+  }
+
+  async jsSubscribe(
+    _stream: string,
+    subject: string,
+    startSeq: number,
+    callback: (msg: NATSMessage) => void,
+  ): Promise<() => void> {
+    const nc = this._nc
+    if (!nc) throw new Error('NATSClient: not connected')
+    const js = nc.jetstream()
+    const opts = consumerOpts()
+    opts.orderedConsumer()
+    opts.filterSubject(subject)
+    if (startSeq > 0) {
+      opts.startSequence(startSeq)
+    } else {
+      opts.deliverAll()
+    }
+    const sub = await js.subscribe(subject, opts)
+    let stopped = false
+    ;(async () => {
+      try {
+        for await (const m of sub) {
+          if (stopped) break
+          callback({ subject: m.subject, data: m.data, seq: m.seq })
+          m.ack()
+        }
+      } catch (_err) {
+        // Expected when subscription is stopped or connection closes
+      }
+    })()
+    return () => {
+      stopped = true
+      sub.unsubscribe()
+    }
   }
 
   publish(subject: string, data: Uint8Array, headerMap?: Record<string, string>): void {
