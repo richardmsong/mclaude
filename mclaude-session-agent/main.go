@@ -25,19 +25,12 @@ func main() {
 		Timestamp().
 		Logger()
 
-	// Health / readiness probe mode — used by K8s liveness and readiness probes.
-	// session-agent --health  → exit 0 if process is alive (liveness)
-	// session-agent --ready   → exit 0 if NATS is reachable (readiness)
+	// Health / readiness probe mode.
 	if len(os.Args) == 2 {
 		switch os.Args[1] {
 		case "--health":
-			// Liveness: just being alive is enough.
-			// The health check verifies the binary can be executed and the Go runtime
-			// is not deadlocked. No NATS check — NATS outage must not kill the pod
-			// (the break-glass admin port must stay reachable).
 			os.Exit(0)
 		case "--ready":
-			// Readiness: verify NATS is reachable.
 			natsURL := os.Getenv("NATS_URL")
 			if natsURL == "" {
 				natsURL = nats.DefaultURL
@@ -53,16 +46,19 @@ func main() {
 		}
 	}
 
-	// CLI flags — accepted from entrypoint.sh or direct invocation.
-	// All flags also fall back to env vars for backward compatibility.
+	// CLI flags.
 	var (
 		flagNATSURL    = flag.String("nats-url", os.Getenv("NATS_URL"), "NATS server URL")
 		flagNATSCreds  = flag.String("nats-creds", os.Getenv("NATS_CREDS_FILE"), "Path to NATS credentials file")
 		flagUserID     = flag.String("user-id", os.Getenv("USER_ID"), "User ID (required)")
-		flagProjectID  = flag.String("project-id", os.Getenv("PROJECT_ID"), "Project ID (required)")
+		flagProjectID  = flag.String("project-id", os.Getenv("PROJECT_ID"), "Project ID (required in standalone mode)")
 		flagClaudePath = flag.String("claude-path", os.Getenv("CLAUDE_PATH"), "Path to claude binary")
 		flagDataDir    = flag.String("data-dir", "/data", "Data directory (project PVC mount: repo + worktrees)")
-		_              = flag.String("mode", "standalone", "Run mode: k8s | standalone")
+		flagMode       = flag.String("mode", "standalone", "Run mode: k8s | standalone")
+		flagDaemon     = flag.Bool("daemon", false, "Run as laptop daemon launcher (spawns one child agent per project)")
+		flagHostname   = flag.String("hostname", os.Getenv("HOSTNAME"), "Hostname for laptop collision detection (--daemon only)")
+		flagMachineID  = flag.String("machine-id", os.Getenv("MACHINE_ID"), "Machine ID for laptop collision detection (--daemon only)")
+		flagRefreshURL = flag.String("refresh-url", os.Getenv("REFRESH_URL"), "POST /auth/refresh URL for JWT refresh (--daemon only)")
 	)
 	flag.Parse()
 
@@ -78,8 +74,9 @@ func main() {
 	}
 	natsCredsFile := *flagNATSCreds
 	dataDir := *flagDataDir
+	_ = *flagMode
 
-	// Observability setup — must run before anything that emits spans/metrics.
+	// Observability.
 	SetupPropagator()
 	m := NewMetrics(prometheus.DefaultRegisterer)
 	metricsAddr := os.Getenv("METRICS_ADDR")
@@ -95,20 +92,67 @@ func main() {
 	}
 	defer nc.Close()
 
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	if *flagDaemon {
+		// Laptop daemon mode: spawn one session-agent child per project.
+		hostname := *flagHostname
+		if hostname == "" {
+			h, _ := os.Hostname()
+			hostname = h
+		}
+		machineID := *flagMachineID
+		if machineID == "" {
+			// Use hostname as a fallback machine ID when not explicitly set.
+			machineID = hostname
+		}
+
+		cfg := DaemonConfig{
+			NATSCredsFile: natsCredsFile,
+			RefreshURL:    *flagRefreshURL,
+			UserID:        userID,
+			Hostname:      hostname,
+			MachineID:     machineID,
+			AgentBinary:   os.Args[0],
+			// Pass through all flags except --daemon itself so children get the
+			// same NATS config, claude path, data dir, etc.
+			AgentArgs: []string{
+				"--nats-url", natsURL,
+				"--nats-creds", natsCredsFile,
+				"--claude-path", claudePath,
+				"--data-dir", dataDir,
+			},
+			Log: log.Logger,
+		}
+
+		daemon, err := NewDaemon(nc, cfg)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to create daemon")
+		}
+
+		log.Info().Str("user_id", userID).Str("hostname", hostname).Msg("laptop daemon started")
+		if err := daemon.Run(ctx); err != nil {
+			log.Fatal().Err(err).Msg("daemon run failed")
+		}
+		log.Info().Msg("laptop daemon stopped")
+		return
+	}
+
+	// Standalone (K8s or single-project laptop) mode.
+	if projectID == "" {
+		log.Fatal().Msg("--project-id is required in standalone mode")
+	}
+
 	agent, err := NewAgent(nc, userID, projectID, claudePath, dataDir, log.Logger, m)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create agent")
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-
 	log.Info().Str("user_id", userID).Str("project_id", projectID).Msg("session agent started")
-
 	if err := agent.Run(ctx); err != nil {
 		log.Fatal().Err(err).Msg("agent run failed")
 	}
-
 	log.Info().Msg("session agent stopped")
 }
 
