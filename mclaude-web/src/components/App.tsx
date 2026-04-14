@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, Fragment } from 'react'
+import { useVersionPoller } from '@/hooks/useVersionPoller'
 import { AuthClient } from '@/transport/auth-client'
 import { NATSClient } from '@/transport/nats-client'
 import { AuthStore } from '@/stores/auth-store'
@@ -12,6 +13,7 @@ import { DashboardScreen } from './DashboardScreen'
 import { SessionDetailScreen } from './SessionDetailScreen'
 import { Settings } from './Settings'
 import { TokenUsage } from './TokenUsage'
+import { UserManagement } from './UserManagement'
 import type { UsageStats } from '@/types'
 
 // ── Hash routing ──────────────────────────────────────────────────────────
@@ -20,6 +22,7 @@ function getRoute(): { screen: string; sessionId?: string } {
   if (!hash || hash === '/') return { screen: 'dashboard' }
   if (hash === 'settings') return { screen: 'settings' }
   if (hash === 'usage') return { screen: 'usage' }
+  if (hash === 'users') return { screen: 'users' }
   const sessionMatch = /^s\/(.+)$/.exec(hash)
   if (sessionMatch) return { screen: 'session', sessionId: sessionMatch[1] }
   return { screen: 'dashboard' }
@@ -27,6 +30,33 @@ function getRoute(): { screen: string; sessionId?: string } {
 
 function navigate(hash: string) {
   window.location.hash = hash
+}
+
+// ── Update banner ─────────────────────────────────────────────────────────
+function UpdateBanner() {
+  return (
+    <div
+      onClick={() => window.location.reload()}
+      style={{
+        position: 'fixed',
+        bottom: 72,  // above FAB (56px) + some gap
+        left: '50%',
+        transform: 'translateX(-50%)',
+        zIndex: 9999,
+        background: 'var(--surf2)',
+        border: '1px solid var(--border)',
+        borderRadius: 10,
+        padding: '8px 16px',
+        fontSize: 13,
+        color: 'var(--text2)',
+        cursor: 'pointer',
+        whiteSpace: 'nowrap',
+        boxShadow: '0 2px 12px rgba(0,0,0,0.4)',
+      }}
+    >
+      New version available — tap to reload
+    </div>
+  )
 }
 
 // ── Global singleton ──────────────────────────────────────────────────────
@@ -59,12 +89,57 @@ export function App() {
     return () => { unsub1(); unsub2() }
   }, [])
 
+  // On mount: restore session from localStorage so refresh doesn't log the user out
+  useEffect(() => {
+    const ac = new AuthClient(window.location.origin)
+    const tokens = ac.loadFromStorage()
+    if (!tokens) return
+    const serverUrl = window.location.origin
+    const natsUrl = tokens.natsUrl
+      ?? serverUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:') + '/nats'
+    const freshStore = new AuthStore(ac, natsClient)
+    freshStore.restoreTokens(tokens)
+    natsClient.connect({ url: natsUrl, jwt: tokens.jwt, nkeySeed: tokens.nkeySeed })
+      .then(() => {
+        setConnected(true)
+        freshStore.startRefreshLoop()
+        setAuthStore(freshStore)
+      })
+      .catch(() => {
+        // Stored tokens invalid/expired — clear and show login
+        ac.clearTokens()
+      })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Hash routing
   useEffect(() => {
     const handler = () => setRoute(getRoute())
     window.addEventListener('hashchange', handler)
     return () => window.removeEventListener('hashchange', handler)
   }, [])
+
+  // X3: Background reconnect — mobile browsers (iOS Safari) kill the WebSocket
+  // when the tab is backgrounded. On visibility restore, reconnect NATS so
+  // the session store and event store resume without a full page reload.
+  useEffect(() => {
+    const handler = () => {
+      if (document.visibilityState !== 'visible') return
+      if (!natsClient.isConnected()) {
+        natsClient.reconnect('').catch(() => {
+          // Reconnect failure is handled by the NATS disconnect/reconnect listeners
+          // which update the connected state and eventually trigger auth refresh
+        })
+      }
+    }
+    document.addEventListener('visibilitychange', handler)
+    return () => document.removeEventListener('visibilitychange', handler)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Track session store version — increments whenever any session changes so
+  // App re-renders and picks up fresh session data (name, projectId, state).
+  const [sessionVersion, setSessionVersion] = useState(0)
 
   // Bootstrap session store after login
   useEffect(() => {
@@ -73,9 +148,11 @@ export function App() {
       const hb = new HeartbeatMonitor(natsClient, authState.userId)
       store.startWatching()
       hb.start()
+      const unsub = store.onSessionChanged(() => setSessionVersion(v => v + 1))
       setSessionStore(store)
       setHeartbeatMonitor(hb)
       return () => {
+        unsub()
         store.stopWatching()
         hb.stop()
       }
@@ -89,14 +166,19 @@ export function App() {
     return new SessionListVM(sessionStore, heartbeatMonitor, natsClient, authState.userId)
   }, [sessionStore, heartbeatMonitor, authState.userId])
 
-  // First-run: auto-create default project + session
+  // First-run: auto-create session if no sessions exist (handles seeded projects with no sessions)
   const [initialMessage, setInitialMessage] = useState<string | null>(null)
   useEffect(() => {
     if (!sessionListVM) return
     const timer = setTimeout(async () => {
-      if (sessionListVM.projects.length > 0) return
+      const projs = sessionListVM.projects
+      const totalSessions = projs.reduce((sum, p) => sum + p.sessions.length, 0)
+      if (totalSessions > 0) return  // sessions already exist — nothing to do
       try {
-        const projectId = await sessionListVM.createProject('Default')
+        // Use existing project or create a default one
+        const projectId = projs.length > 0
+          ? projs[0]!.id
+          : await sessionListVM.createProject('Default')
         const sessionId = await sessionListVM.createSession(projectId, 'main', 'Getting Started')
         setInitialMessage(
           "Hi! I'm Claude. You're in MClaude — a real-time coding environment powered by Claude Code.\n\n" +
@@ -109,7 +191,7 @@ export function App() {
         )
         navigate(`s/${sessionId}`)
       } catch {
-        // server unavailable — user can create manually
+        // server unavailable (e.g. no session-agent) — user can create manually
       }
     }, 1000)
     return () => clearTimeout(timer)
@@ -119,36 +201,67 @@ export function App() {
   const [eventStore, setEventStore] = useState<EventStore | null>(null)
   const [conversationVM, setConversationVM] = useState<ConversationVM | null>(null)
 
+  // Resolve projectId from session KV once, without recreating the EventStore
+  // on every subsequent KV update (which would lose accumulated conversation data).
+  const [resolvedProjectId, setResolvedProjectId] = useState<string | null>(null)
+
+  // Reset resolved projectId when leaving the session screen or switching sessions
   useEffect(() => {
-    if (route.screen !== 'session' || !route.sessionId || !authState.userId || !sessionStore) {
+    if (route.screen !== 'session' || !route.sessionId) {
+      setResolvedProjectId(null)
+    }
+  }, [route.screen, route.sessionId])
+
+  // Resolve projectId from session KV — re-runs when session data arrives (sessionVersion)
+  // but uses functional update to only set it once per session (never overwrite once resolved).
+  useEffect(() => {
+    if (route.screen !== 'session' || !route.sessionId || !sessionStore) return
+    const session = sessionStore.sessions.get(route.sessionId)
+    if (session) {
+      setResolvedProjectId(prev => prev ?? session.projectId)
+    }
+  }, [route.screen, route.sessionId, sessionStore, sessionVersion])
+
+  // Per-session EventStore + ConversationVM — created ONCE per sessionId+projectId.
+  // Does NOT depend on sessionVersion so KV updates (idle→running→idle) don't destroy
+  // and recreate the store, which would lose all accumulated conversation data.
+  useEffect(() => {
+    if (!route.sessionId || !authState.userId || !resolvedProjectId || !sessionStore) {
       setEventStore(null)
       setConversationVM(null)
       return
     }
-    const session = sessionStore.sessions.get(route.sessionId)
-    const projectId = session?.projectId ?? 'unknown'
     const store = new EventStore({
       natsClient,
       userId: authState.userId,
-      projectId,
+      projectId: resolvedProjectId,
       sessionId: route.sessionId,
     })
-    store.start()
-    const vm = new ConversationVM(store, sessionStore, natsClient, authState.userId, projectId, route.sessionId)
+    // Start from replayFromSeq in KV — skips events before last clear/compaction (spec: plan-client-architecture.md)
+    const session = sessionStore.sessions.get(route.sessionId)
+    const replayFromSeq = session?.replayFromSeq ?? undefined
+    store.start(replayFromSeq)
+    const vm = new ConversationVM(store, sessionStore, natsClient, authState.userId, resolvedProjectId, route.sessionId)
     setEventStore(store)
     setConversationVM(vm)
     return () => {
       store.stop()
       vm.destroy()
     }
-  }, [route.screen, route.sessionId, authState.userId, sessionStore])
+  // resolvedProjectId is set once per session (functional update), so this effect fires
+  // exactly once when the projectId is first resolved, and again only if sessionId changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [route.sessionId, authState.userId, resolvedProjectId])
+
+  // ── Version poller ───────────────────────────────────────────────────
+  const { updateAvailable } = useVersionPoller()
 
   // ── Login handler ─────────────────────────────────────────────────────
   const handleConnect = async (email: string, password: string) => {
     const serverUrl = window.location.origin
     const ac = new AuthClient(serverUrl)
     const freshStore = new AuthStore(ac, natsClient)
-    await freshStore.login(email || 'user', password)
+    await freshStore.login(email, password)
     const tokens = ac.getStoredTokens()
     if (!tokens) throw new Error('Login did not return tokens')
     // Use natsUrl from login response; fall back to ws(s)://host/nats
@@ -158,6 +271,23 @@ export function App() {
     setConnected(true)
     freshStore.startRefreshLoop()
     setAuthStore(freshStore)
+  }
+
+  // ── Cache reset ───────────────────────────────────────────────────────
+  const handleCacheReset = () => {
+    // X1: Clear all client-side caches and re-subscribe from scratch
+    // Stop all watches/subscriptions
+    sessionStore?.stopWatching()
+    heartbeatMonitor?.stop()
+    // Re-start to re-subscribe from scratch (replayFromSeq = 0)
+    if (sessionStore && heartbeatMonitor) {
+      sessionStore.startWatching()
+      heartbeatMonitor.start()
+    }
+    // Reset resolvedProjectId so the EventStore effect re-runs and rebuilds from scratch.
+    // sessionVersion bump causes the projectId-resolver effect to re-fire and set it again.
+    setResolvedProjectId(null)
+    setSessionVersion(v => v + 1)
   }
 
   // ── Logout ────────────────────────────────────────────────────────────
@@ -185,72 +315,108 @@ export function App() {
 
   // ── Auth gate ─────────────────────────────────────────────────────────
   if (authState.status === 'unauthenticated' || authState.status === 'expired') {
-    return <AuthScreen onConnect={handleConnect} />
+    return (
+      <Fragment>
+        <AuthScreen onConnect={handleConnect} />
+        {updateAvailable && <UpdateBanner />}
+      </Fragment>
+    )
   }
 
   // ── Route rendering ───────────────────────────────────────────────────
   if (route.screen === 'settings') {
     return (
-      <Settings
-        userId={authState.userId ?? ''}
-        serverUrl={window.location.origin}
-        connected={connected}
-        sessionCount={sessionStore?.sessions.size ?? 0}
-        onBack={() => navigate('/')}
-        onLogout={handleLogout}
-      />
+      <Fragment>
+        <Settings
+          userId={authState.userId ?? ''}
+          serverUrl={window.location.origin}
+          connected={connected}
+          sessionCount={sessionStore?.sessions.size ?? 0}
+          onBack={() => navigate('/')}
+          onLogout={handleLogout}
+          onCacheReset={handleCacheReset}
+        />
+        {updateAvailable && <UpdateBanner />}
+      </Fragment>
     )
   }
 
   if (route.screen === 'usage') {
     return (
-      <TokenUsage
-        usage={totalUsage}
-        onBack={() => navigate('/')}
-        connected={connected}
-      />
+      <Fragment>
+        <TokenUsage
+          usage={totalUsage}
+          onBack={() => navigate('/')}
+          connected={connected}
+        />
+        {updateAvailable && <UpdateBanner />}
+      </Fragment>
+    )
+  }
+
+  if (route.screen === 'users') {
+    return (
+      <Fragment>
+        <UserManagement
+          connected={connected}
+          onBack={() => navigate('/')}
+        />
+        {updateAvailable && <UpdateBanner />}
+      </Fragment>
     )
   }
 
   if (route.screen === 'session' && route.sessionId && conversationVM && eventStore && sessionStore) {
     const session = sessionStore.sessions.get(route.sessionId)
+    const project = session ? sessionStore.projects.get(session.projectId) : undefined
     return (
-      <SessionDetailScreen
-        sessionId={route.sessionId}
-        sessionName={session?.name ?? route.sessionId.slice(0, 8)}
-        sessionState={session?.state ?? 'idle'}
-        conversationVM={conversationVM}
-        onBack={() => navigate('/')}
-        connected={connected}
-        initialMessage={initialMessage ?? undefined}
-        onInitialMessageSent={() => setInitialMessage(null)}
-      />
+      <Fragment>
+        <SessionDetailScreen
+          sessionId={route.sessionId}
+          sessionName={project?.name ?? session?.name ?? route.sessionId.slice(0, 8)}
+          sessionState={session?.state ?? 'idle'}
+          sessionModel={session?.model}
+          sessionUsage={session?.usage}
+          conversationVM={conversationVM}
+          onBack={() => navigate('/')}
+          connected={connected}
+          initialMessage={initialMessage ?? undefined}
+          onInitialMessageSent={() => setInitialMessage(null)}
+        />
+        {updateAvailable && <UpdateBanner />}
+      </Fragment>
     )
   }
 
   if (sessionListVM) {
     return (
-      <DashboardScreen
-        sessionListVM={sessionListVM}
-        connected={connected}
-        onSelectSession={id => navigate(`s/${id}`)}
-        onSettings={() => navigate('settings')}
-        onUsage={() => navigate('usage')}
-      />
+      <Fragment>
+        <DashboardScreen
+          sessionListVM={sessionListVM}
+          connected={connected}
+          onSelectSession={id => navigate(`s/${id}`)}
+          onSettings={() => navigate('settings')}
+          onUsage={() => navigate('usage')}
+        />
+        {updateAvailable && <UpdateBanner />}
+      </Fragment>
     )
   }
 
   // Loading state
   return (
-    <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      height: '100vh',
-      color: 'var(--text2)',
-      fontSize: 14,
-    }}>
-      Connecting…
-    </div>
+    <Fragment>
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: '100vh',
+        color: 'var(--text2)',
+        fontSize: 14,
+      }}>
+        Connecting…
+      </div>
+      {updateAvailable && <UpdateBanner />}
+    </Fragment>
   )
 }

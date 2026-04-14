@@ -1,0 +1,26 @@
+name: Cleanup preview
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  cleanup:
+    name: Remove preview environment
+    runs-on: [self-hosted, tailscale]
+    steps:
+      - name: Compute branch slug
+        id: slug
+        run: |
+          slug="${{ github.head_ref }}"
+          slug="${slug//\//-}"
+          echo "value=${slug}" >> "$GITHUB_OUTPUT"
+          echo "Branch slug: ${slug}"
+
+      - name: Helm uninstall preview
+        run: |
+          RELEASE="mclaude-preview-${slug}"
+          echo "Uninstalling release: ${RELEASE}"
+          helm uninstall "${RELEASE}" -n mclaude-system 2>/dev/null || echo "Release ${RELEASE} not found — already cleaned up"
+        env:
+          slug: ${{ steps.slug.outputs.value }}

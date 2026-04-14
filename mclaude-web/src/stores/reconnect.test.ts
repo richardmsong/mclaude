@@ -20,6 +20,7 @@ describe('EventStore reconnect', () => {
   beforeEach(() => {
     mockNats = new MockNATSClient()
     store = makeStore(mockNats)
+    mockNats.clearRecorded()
   })
 
   it('noGapsAfterReconnect: events before and after reconnect all present', () => {
@@ -137,5 +138,35 @@ describe('EventStore reconnect', () => {
 
     mockNats.simulateReceive(SUBJECT, { type: 'user', message: { role: 'user', content: 'msg 3' } }, 21)
     expect(store.conversation.turns).toHaveLength(3)
+  })
+
+  it('jsSubscribe is used with startSeq=0 on fresh start', () => {
+    store.start()
+    expect(mockNats.jsSubscribeCalls).toHaveLength(1)
+    expect(mockNats.jsSubscribeCalls[0].startSeq).toBe(0)
+    expect(mockNats.jsSubscribeCalls[0].subject).toBe(SUBJECT)
+  })
+
+  it('jsSubscribe is called with provided replayFromSeq on start', () => {
+    store.start(7)
+    expect(mockNats.jsSubscribeCalls).toHaveLength(1)
+    expect(mockNats.jsSubscribeCalls[0].startSeq).toBe(7)
+  })
+
+  it('jsSubscribe called with max(lastSeq+1, replayFromSeq) on reconnect', () => {
+    store.start()
+    for (let i = 1; i <= 5; i++) {
+      mockNats.simulateReceive(SUBJECT, { type: 'user', message: { role: 'user', content: `msg ${i}` } }, i)
+    }
+    expect(store.lastSequence).toBe(5)
+    mockNats.clearRecorded()
+
+    // Reconnect with replayFromSeq=3; max(5+1, 3) = 6
+    store.stop()
+    const startSeq = Math.max(store.lastSequence + 1, 3)
+    store.start(startSeq)
+
+    expect(mockNats.jsSubscribeCalls).toHaveLength(1)
+    expect(mockNats.jsSubscribeCalls[0].startSeq).toBe(6)
   })
 })

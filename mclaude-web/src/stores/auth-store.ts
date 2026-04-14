@@ -32,6 +32,11 @@ export class AuthStore {
     this._setState({ userId: tokens.userId, jwt: tokens.jwt, status: 'authenticated' })
   }
 
+  restoreTokens(tokens: AuthTokens): void {
+    this._tokens = tokens
+    this._setState({ userId: tokens.userId, jwt: tokens.jwt, status: 'authenticated' })
+  }
+
   async loginSSO(provider: string): Promise<string> {
     return this.authClient.loginSSO(provider)
   }

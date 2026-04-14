@@ -6,6 +6,20 @@ import (
 	"time"
 )
 
+// PermissionPolicy controls how the session agent responds to control_request
+// events (tool-use permission prompts).
+//
+//   - PermissionPolicyManaged  — forward to NATS client (default)
+//   - PermissionPolicyAuto     — auto-approve all tools without forwarding
+//   - PermissionPolicyAllowlist — auto-approve listed tools; forward the rest
+type PermissionPolicy string
+
+const (
+	PermissionPolicyManaged   PermissionPolicy = "managed"
+	PermissionPolicyAuto      PermissionPolicy = "auto"
+	PermissionPolicyAllowlist PermissionPolicy = "allowlist"
+)
+
 // SessionState is the materialised view of a session stored in the
 // mclaude-sessions NATS KV bucket.
 type SessionState struct {
@@ -43,15 +57,16 @@ type UsageStats struct {
 }
 
 // sessionKVKey returns the NATS KV key for a session.
-// Format: {userId}/{projectId}/{sessionId}
+// Format: {userId}.{projectId}.{sessionId} — dots are the NATS token separator,
+// required for wildcard matching (">" and "*" only work across dot-separated tokens).
 func sessionKVKey(userID, projectID, sessionID string) string {
-	return fmt.Sprintf("%s/%s/%s", userID, projectID, sessionID)
+	return fmt.Sprintf("%s.%s.%s", userID, projectID, sessionID)
 }
 
 // heartbeatKVKey returns the NATS KV key for a project heartbeat.
-// Format: {userId}/{projectId}
+// Format: {userId}.{projectId}
 func heartbeatKVKey(userID, projectID string) string {
-	return fmt.Sprintf("%s/%s", userID, projectID)
+	return fmt.Sprintf("%s.%s", userID, projectID)
 }
 
 // addPendingControl adds a control request to the session's pending map.

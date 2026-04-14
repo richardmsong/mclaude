@@ -72,6 +72,21 @@ export class PermissionPromptVM {
   }
 
   private _notify(): void {
-    for (const l of this._listeners) l(this.pending)
+    const pending = this.pending
+    // R2: Desktop notification when a new permission request arrives
+    // and the page is not in focus. Only fires when permission is newly pending.
+    if (pending && typeof Notification !== 'undefined') {
+      if (Notification.permission === 'granted' && document.visibilityState !== 'visible') {
+        new Notification('MClaude needs permission', {
+          body: `Allow ${pending.toolName}?`,
+          tag: `mclaude-permission-${pending.requestId}`,
+          requireInteraction: true,
+        })
+      } else if (Notification.permission === 'default') {
+        // Request permission silently; fire next time if granted
+        void Notification.requestPermission()
+      }
+    }
+    for (const l of this._listeners) l(pending)
   }
 }

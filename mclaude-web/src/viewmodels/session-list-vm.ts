@@ -8,6 +8,7 @@ export interface SessionVM {
   state: string
   model: string
   branch: string
+  cwd: string
   costUsd: number
   hasPendingPermission: boolean
 }
@@ -51,6 +52,7 @@ export class SessionListVM {
         state: s.state,
         model: s.model,
         branch: s.branch,
+        cwd: s.cwd,
         costUsd: s.usage.costUsd,
         hasPendingPermission: Object.keys(s.pendingControls).length > 0,
       })),
@@ -62,16 +64,18 @@ export class SessionListVM {
     const payload: Record<string, string> = { name }
     if (gitUrl) payload['gitUrl'] = gitUrl
     const reply = await this.natsClient.request(subject, new TextEncoder().encode(JSON.stringify(payload)))
-    const { id } = JSON.parse(new TextDecoder().decode(reply.data)) as { id: string }
-    return id
+    const result = JSON.parse(new TextDecoder().decode(reply.data)) as { id?: string; error?: string }
+    if (!result.id) throw new Error(result.error ?? 'createProject: no id in reply')
+    return result.id
   }
 
   async createSession(projectId: string, branch: string, name: string): Promise<string> {
     const subject = `mclaude.${this.userId}.${projectId}.api.sessions.create`
     const payload = { projectId, branch, name }
     const reply = await this.natsClient.request(subject, new TextEncoder().encode(JSON.stringify(payload)))
-    const { id } = JSON.parse(new TextDecoder().decode(reply.data)) as { id: string }
-    return id
+    const result = JSON.parse(new TextDecoder().decode(reply.data)) as { id?: string; error?: string }
+    if (!result.id) throw new Error(result.error ?? 'createSession: no id in reply')
+    return result.id
   }
 
   async deleteSession(sessionId: string): Promise<void> {

@@ -27,8 +27,9 @@ export class SessionStore {
   startWatching(): void {
     this._stopWatching()
 
-    // Watch sessions
-    const sessionKey = `${this.userId}/>` // wildcard for all user sessions
+    // Watch sessions — keys are {userId}.{projectId}.{sessionId} (dot separator, NATS token format)
+    // Use > wildcard for multi-level match across all projects and sessions for this user
+    const sessionKey = `${this.userId}.>`
     const unwatch1 = this.natsClient.kvWatch('mclaude-sessions', sessionKey, (entry) => {
       try {
         const state = JSON.parse(new TextDecoder().decode(entry.value)) as SessionKVState
@@ -36,26 +37,30 @@ export class SessionStore {
         logger.debug({ component: 'session-store', sessionId: state.id, userId: this.userId }, 'session updated')
         this._notifySessions()
       } catch {
-        // Deleted key or malformed
-        const parts = entry.key.split('/')
+        // Deleted key or malformed — extract sessionId from key {userId}.{projectId}.{sessionId}
+        const parts = entry.key.split('.')
         const sessionId = parts[parts.length - 1]
-        this._sessions.delete(sessionId)
+        if (sessionId) {
+          this._sessions.delete(sessionId)
+        }
         this._notifySessions()
       }
     })
     this._unwatchers.push(unwatch1)
 
-    // Watch projects
-    const projectKey = `${this.userId}/>`
+    // Watch projects — key format: "{userId}.{projectId}"
+    const projectKey = `${this.userId}.*`
     const unwatch2 = this.natsClient.kvWatch('mclaude-projects', projectKey, (entry) => {
       try {
         const state = JSON.parse(new TextDecoder().decode(entry.value)) as ProjectKVState
         this._projects.set(state.id, state)
         this._notifyProjects()
       } catch {
-        const parts = entry.key.split('/')
+        const parts = entry.key.split('.')
         const projectId = parts[parts.length - 1]
-        this._projects.delete(projectId)
+        if (projectId) {
+          this._projects.delete(projectId)
+        }
         this._notifyProjects()
       }
     })

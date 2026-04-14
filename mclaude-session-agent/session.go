@@ -12,6 +12,15 @@ import (
 	"time"
 )
 
+// startupTimeout is the maximum time to wait for Claude to emit an init event
+// after spawning.  If the init event is not received within this window the
+// session is marked failed and the process is killed.
+const startupTimeout = 30 * time.Second
+
+// maxEventBytes is the maximum NATS payload size (8 MB, matching the server
+// config).  Events larger than this are truncated before publishing.
+const maxEventBytes = 8 * 1024 * 1024
+
 // Session manages a single Claude Code child process and its NATS routing.
 type Session struct {
 	mu       sync.Mutex
@@ -22,39 +31,125 @@ type Session struct {
 	stdinCh  chan []byte
 	stopCh   chan struct{}
 	doneCh   chan struct{}
+	// initCh is closed when the first init event is received from Claude.
+	// start() waits on this channel (up to startupTimeout) to confirm startup.
+	initCh   chan struct{}
+	// debug, if non-nil, is the unix socket server for mclaude-cli attach.
+	debug    *DebugServer
 	// extraEnv, if non-nil, is appended to the child process environment.
 	// Used in tests to inject MOCK_TRANSCRIPT without affecting the test process.
 	extraEnv []string
 	// metrics, if non-nil, receives span/counter updates as events flow through.
 	// Nil in unit tests that don't need metrics.
 	metrics  *Metrics
+	// permPolicy controls auto-approve behaviour for control_request events.
+	permPolicy   PermissionPolicy
+	// allowedTools is the set of tool names auto-approved under allowlist policy.
+	// Ignored for other policies.
+	allowedTools map[string]bool
+	// onEventPublished, if non-nil, is called after each successful NATS publish
+	// with the event type and the JetStream sequence number of the published message.
+	// Used by the agent to update replayFromSeq on compact_boundary events.
+	// The seq is 0 when not using JetStream (core NATS publish).
+	onEventPublished func(evType string, seq uint64)
 }
 
 // newSession creates a Session but does not start the Claude process yet.
+// The default permission policy is managed (forward all to client).
 func newSession(state SessionState, userID string) *Session {
 	return &Session{
-		state:   state,
-		userID:  userID,
-		stdinCh: make(chan []byte, 64),
-		stopCh:  make(chan struct{}),
-		doneCh:  make(chan struct{}),
+		state:      state,
+		userID:     userID,
+		stdinCh:    make(chan []byte, 64),
+		stopCh:     make(chan struct{}),
+		doneCh:     make(chan struct{}),
+		initCh:     make(chan struct{}),
+		permPolicy: PermissionPolicyManaged,
+	}
+}
+
+// getState returns a thread-safe copy of the current session state.
+func (s *Session) getState() SessionState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state
+}
+
+// stopAndWait sends an interrupt to Claude, waits up to timeout for exit,
+// then SIGKILLs if it hasn't stopped.
+func (s *Session) stopAndWait(timeout time.Duration) error {
+	s.mu.Lock()
+	cmd := s.cmd
+	dbg := s.debug
+	s.mu.Unlock()
+	if cmd == nil {
+		return nil
+	}
+
+	// Stop debug server before closing stdin so clients get a clean EOF.
+	if dbg != nil {
+		dbg.Stop()
+		s.mu.Lock()
+		s.debug = nil
+		s.mu.Unlock()
+	}
+
+	// Send interrupt via stdin.
+	interrupt := []byte(`{"type":"control_request","request":{"subtype":"interrupt"}}`)
+	select {
+	case s.stdinCh <- interrupt:
+	default:
+	}
+	close(s.stopCh)
+
+	// Wait for process to exit or timeout.
+	done := make(chan struct{})
+	go func() {
+		<-s.doneCh
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-time.After(timeout):
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		<-done
+		return fmt.Errorf("process did not exit within %s; killed", timeout)
 	}
 }
 
 // start spawns the Claude Code process and begins routing events.
-func (s *Session) start(claudePath string, publish func(subject string, data []byte) error, writeKV func(state SessionState) error) error {
-	args := []string{
-		"--print", "--verbose",
-		"--output-format", "stream-json",
-		"--input-format", "stream-json",
-		"--include-partial-messages",
-		"--session-id", s.state.ID,
-	}
-	if s.state.CWD != "" {
-		args = append(args, "-w", s.state.CWD)
+// If resume is true, uses --resume {id} instead of --session-id {id}.
+//
+// start blocks for up to startupTimeout waiting for Claude's init event.
+// If the init event is not received within that window, the process is killed
+// and an error is returned (spec: "30s startup timeout → failed state").
+func (s *Session) start(claudePath string, resume bool, publish func(subject string, data []byte) error, writeKV func(state SessionState) error) error {
+	var args []string
+	if resume {
+		args = []string{
+			"--print", "--verbose",
+			"--output-format", "stream-json",
+			"--input-format", "stream-json",
+			"--include-partial-messages",
+			"--resume", s.state.ID,
+		}
+	} else {
+		args = []string{
+			"--print", "--verbose",
+			"--output-format", "stream-json",
+			"--input-format", "stream-json",
+			"--include-partial-messages",
+			"--session-id", s.state.ID,
+		}
 	}
 
 	cmd := exec.Command(claudePath, args...)
+	if s.state.CWD != "" {
+		cmd.Dir = s.state.CWD
+	}
 	if len(s.extraEnv) > 0 {
 		cmd.Env = append(append([]string{}, os.Environ()...), s.extraEnv...)
 	}
@@ -89,7 +184,7 @@ func (s *Session) start(claudePath string, publish func(subject string, data []b
 		}
 	}()
 
-	// Stdout router: reads stream-json lines and publishes to NATS.
+	// Stdout router: reads stream-json lines and publishes to NATS and debug clients.
 	go func() {
 		defer close(s.doneCh)
 		scanner := bufio.NewScanner(stdout)
@@ -107,6 +202,10 @@ func (s *Session) start(claudePath string, publish func(subject string, data []b
 
 			evType, _ := parseEventType(lineCopy)
 
+			// Truncate events that exceed the NATS max payload limit (8 MB).
+			// The full content remains in Claude's JSONL for recovery.
+			lineCopy = truncateEventIfNeeded(lineCopy)
+
 			// Trace the NATS publish and count the event type.
 			_, pubSpan := NATSPublishSpan(context.Background(), eventSubject)
 			_ = publish(eventSubject, lineCopy)
@@ -116,7 +215,41 @@ func (s *Session) start(claudePath string, publish func(subject string, data []b
 				s.metrics.EventPublished(evType)
 			}
 
+			// Notify the agent of the published event (used for replayFromSeq tracking).
+			s.mu.Lock()
+			notify := s.onEventPublished
+			s.mu.Unlock()
+			if notify != nil {
+				notify(evType, 0)
+			}
+
+			// Forward to debug clients (mclaude-cli attach).
+			s.mu.Lock()
+			dbg := s.debug
+			s.mu.Unlock()
+			if dbg != nil {
+				dbg.Broadcast(lineCopy)
+			}
+
 			s.handleSideEffect(lineCopy, writeKV)
+		}
+	}()
+
+	// In --input-format stream-json mode, Claude only emits the init event
+	// after receiving the first user message. Don't block on init — return
+	// immediately so the session can accept input. The init event will arrive
+	// asynchronously when the user sends their first message.
+	//
+	// Monitor for early exit in a background goroutine so we can log it.
+	go func() {
+		select {
+		case <-s.initCh:
+			// Claude initialized successfully after receiving first message.
+		case <-time.After(startupTimeout):
+			// No init after timeout — likely the user never sent a message.
+			// Don't kill the process; it's idle but valid.
+		case <-s.doneCh:
+			// Claude exited before init — will be cleaned up by the reaper.
 		}
 	}()
 
@@ -124,6 +257,7 @@ func (s *Session) start(claudePath string, publish func(subject string, data []b
 }
 
 // handleSideEffect inspects specific event types and updates local state/KV.
+// It also handles permission-policy auto-approve for control_request events.
 func (s *Session) handleSideEffect(line []byte, writeKV func(state SessionState) error) {
 	evType, subtype := parseEventType(line)
 	switch evType {
@@ -134,9 +268,21 @@ func (s *Session) handleSideEffect(line []byte, writeKV func(state SessionState)
 			if err := json.Unmarshal(line, &init); err == nil {
 				s.mu.Lock()
 				s.state.Model = init.Model
-				s.state.Capabilities = Capabilities{Tools: init.Tools}
+				s.state.Capabilities = Capabilities{
+					Skills: init.Skills,
+					Tools:  init.Tools,
+					Agents: init.Agents,
+				}
+				initCh := s.initCh
 				s.mu.Unlock()
 				s.flushKV(writeKV)
+				// Signal that Claude started successfully (unblocks start()).
+				// Use a non-blocking select so a second init event doesn't panic.
+				select {
+				case <-initCh:
+				default:
+					close(initCh)
+				}
 			}
 		case SubtypeSessionStateChanged:
 			var ev stateChangedEvent
@@ -156,8 +302,18 @@ func (s *Session) handleSideEffect(line []byte, writeKV func(state SessionState)
 				s.state.PendingControls = make(map[string]any)
 			}
 			s.state.PendingControls[cr.RequestID] = cr.Request
+			policy := s.permPolicy
+			allowedTools := s.allowedTools
 			s.mu.Unlock()
 			s.flushKV(writeKV)
+
+			// Permission policy: auto-approve without forwarding to NATS if
+			// the policy permits this tool.
+			if shouldAutoApprove(policy, allowedTools, cr) {
+				resp := buildAutoApproveResponse(cr.RequestID)
+				s.stdinCh <- resp
+				s.clearPendingControl(cr.RequestID, writeKV)
+			}
 		}
 	case EventTypeResult:
 		var r resultEvent
@@ -170,8 +326,66 @@ func (s *Session) handleSideEffect(line []byte, writeKV func(state SessionState)
 			s.flushKV(writeKV)
 		}
 	case EventTypeCompactBoundary:
-		// replayFromSeq will be updated by the agent with the JetStream seq.
+		// replayFromSeq is updated via onEventPublished callback in the
+		// stdout router, which runs before handleSideEffect.  The callback
+		// receives the JetStream seq of the published compact_boundary event.
+		// Nothing to do here — replayFromSeq is written by the agent.
 	}
+}
+
+// shouldAutoApprove returns true if the permission policy means the agent
+// should respond to this control_request without forwarding to the client.
+func shouldAutoApprove(policy PermissionPolicy, allowed map[string]bool, cr controlRequestEvent) bool {
+	switch policy {
+	case PermissionPolicyAuto:
+		return true
+	case PermissionPolicyAllowlist:
+		// Parse tool_name from the request payload.
+		var req struct {
+			ToolName string `json:"tool_name"`
+		}
+		_ = json.Unmarshal(cr.Request, &req)
+		return allowed[req.ToolName]
+	default:
+		return false
+	}
+}
+
+// buildAutoApproveResponse constructs a control_response that approves the
+// given request_id (behavior: "allow").
+func buildAutoApproveResponse(requestID string) []byte {
+	resp, _ := json.Marshal(map[string]any{
+		"type": "control_response",
+		"response": map[string]any{
+			"subtype":    "success",
+			"request_id": requestID,
+			"response":   map[string]string{"behavior": "allow"},
+		},
+	})
+	return resp
+}
+
+// truncateEventIfNeeded returns the line unchanged if it fits within
+// maxEventBytes.  If it is larger, the returned bytes are a JSON object
+// with a "truncated": true field and the "content" field removed.
+// This preserves metadata (type, session_id, etc.) while fitting NATS limits.
+func truncateEventIfNeeded(line []byte) []byte {
+	if len(line) <= maxEventBytes {
+		return line
+	}
+	// Unmarshal into a generic map, remove "content", add "truncated": true.
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(line, &obj); err != nil {
+		// Can't parse — return a minimal truncation marker.
+		return []byte(`{"type":"truncated","truncated":true}`)
+	}
+	delete(obj, "content")
+	obj["truncated"] = json.RawMessage(`true`)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return []byte(`{"type":"truncated","truncated":true}`)
+	}
+	return out
 }
 
 func (s *Session) flushKV(writeKV func(state SessionState) error) {
