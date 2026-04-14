@@ -2,6 +2,7 @@
 name: dev-harness
 description: Implementation loop for any mclaude component. Reads the spec, audits gaps, implements production code + tests, and commits. Invoked by the master session after /spec-change has updated the spec. Run repeatedly — converges to fully-implemented, fully-tested.
 model: claude-sonnet-4-6
+maxTurns: 500
 tools:
   - "*"
 ---
@@ -248,3 +249,16 @@ Done when:
 5. At least one E2E test exists and passes
 
 Open a PR only when all five criteria are met.
+
+---
+
+## CRITICAL: Do Not Stop Early
+
+**You must keep implementing until ALL spec gaps are closed.** Do not stop after fixing one or two categories and report a summary. The loop (step 2 → 11) repeats until the re-audit in step 11 finds zero gaps.
+
+If you are running low on context, prioritize:
+1. Commit what you have so far (so progress is saved)
+2. Push to remote
+3. Continue implementing the next gap
+
+**Never return to the master session with gaps remaining.** The master session will re-invoke you if you hit a hard limit, but you must exhaust your capacity first. Every gap left open is a gap the user has to wait for another agent run to fix.

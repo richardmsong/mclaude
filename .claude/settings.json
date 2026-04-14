@@ -11,7 +11,8 @@
       "Bash",
       "WebFetch",
       "WebSearch",
-      "Agent"
+      "Agent",
+      "mcp__playwright__*"
     ],
     "deny": []
   },

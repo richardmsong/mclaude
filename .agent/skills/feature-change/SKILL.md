@@ -144,38 +144,29 @@ Never bundle spec and code in the same commit. The commit message must say what 
 
 ---
 
-## Step 5 — dev-harness agent per component
+## Step 5 — dev-harness agent per component (exhaustive loop)
 
-For each affected component, invoke the dev-harness agent:
-
-```
-Agent(subagent_type="dev-harness", prompt="<component> — <brief description of what was specced>")
-```
-
-The agent reads the spec, audits Phase 1 (spec → code) and Phase 2 (code → tests), implements gaps, runs tests, and commits. It runs to convergence independently.
-
----
-
-## Step 5b — Spec evaluator loop (mandatory after every dev-harness pass)
-
-After the dev-harness agent completes, run the spec-evaluator to exhaustively compare the spec against the actual code. Loop until the evaluator returns CLEAN.
+For each affected component, invoke the dev-harness agent **and keep re-invoking until all gaps are closed**:
 
 ```
 Loop:
-  1. /spec-evaluator <component>
-     - Output: list of gaps (or "CLEAN" if none)
-  2. If gaps found:
-     → Agent(subagent_type="dev-harness", prompt="<component> — fix these gaps: <list>")
-     → go to step 1
-  3. If CLEAN: proceed to Step 6
+  1. Agent(subagent_type="dev-harness", prompt="<component> — <description>. Fix ALL spec gaps.")
+  2. When the agent returns, run /spec-evaluator <component>
+  3. If gaps remain:
+     → Agent(subagent_type="dev-harness", prompt="<component> — fix these remaining gaps: <list from evaluator>")
+     → go to step 2
+  4. If CLEAN: proceed to Step 6
 ```
 
+The dev-harness agent has maxTurns=500 and is instructed to keep going until all gaps are closed. But if it hits context limits and returns with gaps remaining, **you must re-invoke it immediately** with the remaining gap list. Each re-invocation picks up from the last commit and continues.
+
 **Rules:**
-- Never report a task complete until the evaluator returns CLEAN
+- **Never report a task complete until the spec-evaluator returns CLEAN**
 - One failing evaluator gap = one more dev-harness agent pass
 - Evaluator runs after EVERY dev-harness pass, not just the first
 - **Never deprioritize any gap** — every gap goes to dev-harness immediately
 - If a gap cannot be implemented due to environment constraints, run `/spec-change` to update the spec, then re-evaluate
+- Running the dev-harness agent once and summarizing results is NOT acceptable — the loop must close
 
 ---
 
