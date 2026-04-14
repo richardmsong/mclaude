@@ -1,5 +1,8 @@
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates curl \
+    && curl -fsSL -o /usr/local/bin/dbmate https://github.com/amacneil/dbmate/releases/download/v2.24.2/dbmate-linux-arm64 \
+    && chmod +x /usr/local/bin/dbmate \
+    && apk del curl
 
 RUN addgroup -g 1000 app && adduser -u 1000 -G app -s /bin/sh -D app
 USER 1000
