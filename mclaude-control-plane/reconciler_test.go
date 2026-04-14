@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/config"
 )
 
 // startTestEnv starts an envtest environment with the MCProject CRD registered.
@@ -53,7 +54,8 @@ func startTestEnv(t *testing.T) (client.Client, context.CancelFunc) {
 	}
 
 	env := &envtest.Environment{
-		Scheme: scheme,
+		Scheme:            scheme,
+		CRDDirectoryPaths: []string{"testdata"},
 	}
 
 	cfg, err := env.Start()
@@ -67,10 +69,12 @@ func startTestEnv(t *testing.T) (client.Client, context.CancelFunc) {
 		}
 	})
 
+	skipNameVal := true
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                     scheme,
 		Metrics:                    metricsserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress:     "0",
+		Controller:                 config.Controller{SkipNameValidation: &skipNameVal},
 	})
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
@@ -497,17 +501,19 @@ func TestReconciler_DevOAuthTokenInjected(t *testing.T) {
 		t.Fatalf("add appsv1 scheme: %v", err)
 	}
 
-	env := &envtest.Environment{Scheme: scheme}
+	env := &envtest.Environment{Scheme: scheme, CRDDirectoryPaths: []string{"testdata"}}
 	cfg, err := env.Start()
 	if err != nil {
 		t.Fatalf("envtest.Start: %v", err)
 	}
 	t.Cleanup(func() { _ = env.Stop() })
 
+	skipNameValToken := true
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress: "0",
+		Controller:             config.Controller{SkipNameValidation: &skipNameValToken},
 	})
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
@@ -589,5 +595,149 @@ func TestReconciler_DevOAuthTokenInjected(t *testing.T) {
 	}
 	if got := string(secret.Data["oauth-token"]); got != testOAuthToken {
 		t.Errorf("oauth-token = %q; want %q", got, testOAuthToken)
+	}
+}
+
+// TestReconciler_DevOAuthTokenInjectedIntoExistingSecret verifies that when a
+// user-secrets Secret already exists WITH nats-creds but WITHOUT oauth-token,
+// the reconciler still injects oauth-token on the next reconcile cycle.
+// This covers the bug where oauth-token injection was nested inside the
+// nats-creds-missing branch and was therefore skipped after first provisioning.
+func TestReconciler_DevOAuthTokenInjectedIntoExistingSecret(t *testing.T) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Skip("KUBEBUILDER_ASSETS not set — run setup-envtest first")
+	}
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := AddToScheme(scheme); err != nil {
+		t.Fatalf("add MCProject scheme: %v", err)
+	}
+	if err := rbacv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add rbacv1 scheme: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add appsv1 scheme: %v", err)
+	}
+
+	env := &envtest.Environment{Scheme: scheme, CRDDirectoryPaths: []string{"testdata"}}
+	cfg, err := env.Start()
+	if err != nil {
+		t.Fatalf("envtest.Start: %v", err)
+	}
+	t.Cleanup(func() { _ = env.Stop() })
+
+	skipNameValidation := true
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme:                 scheme,
+		Metrics:                metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "0",
+		Controller:             config.Controller{SkipNameValidation: &skipNameValidation},
+	})
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+
+	accountKP, err := GenerateAccountNKey()
+	if err != nil {
+		t.Fatalf("GenerateAccountNKey: %v", err)
+	}
+
+	const testOAuthToken = "test-oauth-token-existing-secret"
+	reconciler := &MCProjectReconciler{
+		client:              mgr.GetClient(),
+		scheme:              mgr.GetScheme(),
+		controlPlaneNs:      "mclaude-system",
+		releaseName:         "mclaude",
+		sessionAgentNATSURL: "nats://nats.mclaude-system.svc.cluster.local:4222",
+		accountKP:           accountKP.KeyPair,
+		devOAuthToken:       testOAuthToken,
+		logger:              testLogger(t),
+	}
+	if err := reconciler.SetupWithManager(mgr); err != nil {
+		t.Fatalf("SetupWithManager: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		if err := mgr.Start(ctx); err != nil {
+			t.Logf("manager stopped: %v", err)
+		}
+	}()
+
+	if !mgr.GetCache().WaitForCacheSync(ctx) {
+		t.Fatal("cache sync timeout")
+	}
+
+	c := mgr.GetClient()
+
+	// Create control-plane namespace
+	cpNs := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "mclaude-system"}}
+	_ = c.Create(ctx, cpNs)
+
+	userID := "oauth-existing-user"
+	projectID := "oauth-existing-proj"
+	userNs := "mclaude-" + userID
+
+	// Pre-create the user namespace and a user-secrets Secret that already has
+	// nats-creds but is missing oauth-token. This simulates the state after the
+	// very first provisioning run before oauth-token support was added.
+	if err := c.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: userNs}}); err != nil {
+		t.Fatalf("create user namespace: %v", err)
+	}
+	preExistingSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "user-secrets", Namespace: userNs},
+		Data: map[string][]byte{
+			"nats-creds": []byte("NATS-CREDS-PLACEHOLDER"),
+		},
+	}
+	if err := c.Create(ctx, preExistingSecret); err != nil {
+		t.Fatalf("create pre-existing user-secrets: %v", err)
+	}
+
+	// Create the MCProject CR — this triggers reconciliation.
+	mcp := &MCProject{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: SchemeGroupVersion.String(),
+			Kind:       "MCProject",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      projectID,
+			Namespace: "mclaude-system",
+		},
+		Spec: MCProjectSpec{
+			UserID:    userID,
+			ProjectID: projectID,
+		},
+	}
+	if err := c.Create(ctx, mcp); err != nil {
+		t.Fatalf("create MCProject: %v", err)
+	}
+
+	// Wait for the reconciler to inject oauth-token into the existing Secret.
+	// nats-creds must remain intact (existing value preserved since it was non-empty).
+	waitForCondition(t, 15*time.Second, "oauth-token injected into existing secret", func() bool {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, types.NamespacedName{Name: "user-secrets", Namespace: userNs}, secret); err != nil {
+			return false
+		}
+		return string(secret.Data["oauth-token"]) == testOAuthToken
+	})
+
+	// Final assertions
+	secret := &corev1.Secret{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "user-secrets", Namespace: userNs}, secret); err != nil {
+		t.Fatalf("get user-secrets: %v", err)
+	}
+	if got := string(secret.Data["oauth-token"]); got != testOAuthToken {
+		t.Errorf("oauth-token = %q; want %q", got, testOAuthToken)
+	}
+	// nats-creds must not have been overwritten (it was already non-empty)
+	if got := string(secret.Data["nats-creds"]); got != "NATS-CREDS-PLACEHOLDER" {
+		t.Errorf("nats-creds = %q; want %q (should not be overwritten)", got, "NATS-CREDS-PLACEHOLDER")
 	}
 }

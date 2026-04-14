@@ -226,18 +226,23 @@ func (r *MCProjectReconciler) reconcileSecrets(ctx context.Context, mcp *MCProje
 	existingSecret := &corev1.Secret{}
 	err := r.client.Get(ctx, types.NamespacedName{Name: "user-secrets", Namespace: userNs}, existingSecret)
 	if err == nil {
+		needsUpdate := false
+		if existingSecret.Data == nil {
+			existingSecret.Data = make(map[string][]byte)
+		}
 		if len(existingSecret.Data["nats-creds"]) == 0 {
 			jwtStr, seed, issueErr := IssueSessionAgentJWT(mcp.Spec.UserID, r.accountKP)
 			if issueErr != nil {
 				return fmt.Errorf("issue session-agent jwt: %w", issueErr)
 			}
-			if existingSecret.Data == nil {
-				existingSecret.Data = make(map[string][]byte)
-			}
 			existingSecret.Data["nats-creds"] = FormatNATSCredentials(jwtStr, seed)
-			if r.devOAuthToken != "" && len(existingSecret.Data["oauth-token"]) == 0 {
-				existingSecret.Data["oauth-token"] = []byte(r.devOAuthToken)
-			}
+			needsUpdate = true
+		}
+		if r.devOAuthToken != "" && string(existingSecret.Data["oauth-token"]) != r.devOAuthToken {
+			existingSecret.Data["oauth-token"] = []byte(r.devOAuthToken)
+			needsUpdate = true
+		}
+		if needsUpdate {
 			if updateErr := r.client.Update(ctx, existingSecret); updateErr != nil {
 				return fmt.Errorf("patch user-secrets: %w", updateErr)
 			}
