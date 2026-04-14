@@ -116,8 +116,9 @@ controlPlane:
   ## Override container command (e.g. for e2e stubs)
   command: []
   ## Whether to run dbmate schema migrations as an init container
+  ## Disabled by default — enable once db/migrations/ directory exists
   migrations:
-    enabled: true
+    enabled: false
   ## Health probe paths
   probe:
     liveness:
