@@ -408,12 +408,14 @@ Branch slugification: `feature/auth` → `feature-auth` (replace `/` and non-alp
 Session create request payload:
 ```json
 {
+  "name": "Fix auth bug",
   "branch": "feature/auth",
   "cwd": "packages/api",
-  "name": "optional display name",
   "joinWorktree": false
 }
 ```
+
+`branch` is optional. If omitted, the session agent derives it from `name` via slugification (`"Fix auth bug"` → `fix-auth-bug`). If both `name` and `branch` are omitted, the agent generates a default: `session-{shortId}`. Git-savvy users can specify `branch` explicitly; the SPA hides it by default and only shows the `name` field.
 
 `joinWorktree` controls behaviour when a worktree for the branch already exists (git only allows one worktree per branch):
 
@@ -425,13 +427,16 @@ Session create request payload:
 | `true` | Yes | Skip `git worktree add`, reuse `/data/worktrees/{branchSlug}`, spawn Claude |
 
 On session create:
-1. Compute `branchSlug = slugify(branch)`
-2. Scan KV for any session in this projectId with the same `worktree` slug
-3. If found and `joinWorktree: false` → reply with error
-4. If found and `joinWorktree: true` → skip to step 6
-5. If not found → `git -C /data/repo worktree add /data/worktrees/{branchSlug} {branch}`
-6. Set cwd to `/data/worktrees/{branchSlug}/{cwd}`
-7. Write to NATS KV with `branch` (raw), `worktree` (slug), `joinWorktree` (bool)
+1. Derive branch: if `branch` is empty, slugify `name`; if `name` is also empty, use `session-{shortId}`
+2. Compute `branchSlug = slugify(branch)`
+3. Scan KV for any session in this projectId with the same `worktree` slug
+4. If found and `joinWorktree: false` → reply with error
+5. If found and `joinWorktree: true` → skip to step 7
+6. If not found → `git -C /data/repo worktree add /data/worktrees/{branchSlug} {branch}`
+7. Set cwd to `/data/worktrees/{branchSlug}/{cwd}`
+8. Write to NATS KV with `branch` (raw), `worktree` (slug), `joinWorktree` (bool)
+
+Every project has a bare repo at `/data/repo` — the entrypoint initializes one via `git init --bare` for scratch projects (no GIT_URL) and `git clone --bare` for git-backed projects. The session agent does not need to check whether the repo exists; it always does.
 
 On session delete:
 1. Send interrupt → wait for Claude exit
@@ -520,7 +525,80 @@ Clients subscribe to lifecycle for session list updates (new sessions appearing,
 
 ## mclaude-control-plane
 
-Single Go service in `mclaude-system`. The platform control plane — owns user identity, K8s resource provisioning, and NATS credential management. ClusterRole for cross-namespace operations. Owns Postgres (users only). Issues NATS JWTs.
+Single Go service in `mclaude-system`. The platform control plane — owns user identity, NATS credential management, and K8s resource provisioning via a kubebuilder reconciliation controller. ClusterRole for cross-namespace operations. Owns Postgres (users only). Issues NATS JWTs.
+
+### Reconciliation Controller
+
+The control-plane runs a controller-runtime Manager with a reconciler that continuously ensures K8s resources match the desired state in Postgres. This replaces fire-and-forget imperative provisioning — if a resource is deleted, drifted, or missing, the reconciler recreates it.
+
+**CRD: `MCProject`** (`mclaude.io/v1alpha1`)
+
+```yaml
+apiVersion: mclaude.io/v1alpha1
+kind: MCProject
+metadata:
+  name: {projectId}
+  namespace: mclaude-system
+spec:
+  userId: "user-abc"
+  projectId: "proj-1"
+  gitUrl: "git@github.com:org/repo.git"   # empty for scratch projects
+status:
+  phase: "Ready"           # Pending | Provisioning | Ready | Failed
+  userNamespace: "mclaude-user-abc"
+  conditions:
+    - type: NamespaceReady
+      status: "True"
+    - type: RBACReady
+      status: "True"
+    - type: SecretsReady
+      status: "True"
+    - type: DeploymentReady
+      status: "True"
+  lastReconciledAt: "2026-04-13T10:00:00Z"
+```
+
+**Reconcile loop** — on any MCProject create/update/delete, or on any owned resource change:
+
+```
+1. Read MCProject spec (userId, projectId, gitUrl)
+2. Ensure user namespace mclaude-{userId} exists with labels
+3. Ensure ServiceAccount, Role, RoleBinding in user namespace
+4. Ensure user-config ConfigMap in user namespace
+5. Ensure user-secrets Secret with NATS creds in user namespace
+6. Ensure imagePullSecrets copied from control-plane namespace
+7. Ensure project PVC (project-{projectId}) in user namespace
+8. Ensure nix PVC (nix-{projectId}) in user namespace
+9. Ensure Deployment (project-{projectId}) in user namespace with correct spec
+10. Update MCProject status conditions and phase
+```
+
+Each step is idempotent. The reconciler **owns** all resources it creates via `controllerutil.SetControllerReference` — when an MCProject is deleted, owned resources in the user namespace are garbage-collected (except PVCs, which require explicit `?purge=true`).
+
+**Watches**: the controller watches MCProject CRs directly. It also watches Deployments, Secrets, ConfigMaps, and ServiceAccounts in user namespaces (filtered by owner reference) — any drift triggers re-reconciliation.
+
+**Resync**: controller-runtime's informer cache resyncs every 10 minutes by default, catching any missed events.
+
+**Startup**: the control-plane Manager starts alongside the HTTP server. On first boot, the reconciler processes all existing MCProject CRs — this handles crash recovery and catches any resources that drifted while the control-plane was down.
+
+**Integration with NATS API**: when `projects.create` fires, the handler creates the MCProject CR (instead of calling `ProvisionProject` directly). The reconciler picks it up and provisions resources. The NATS handler replies immediately with the projectId — it does not wait for provisioning to complete. The SPA shows project status from the MCProject status conditions.
+
+**Integration with dev-seed**: `seedDev` creates MCProject CRs for seed projects. The reconciler provisions them.
+
+### Session Pod Upgrades (future work)
+
+When helm deploys a new chart, the `session-agent-template` ConfigMap gets the new image tag. The reconciler must propagate that to existing session-agent Deployments in user namespaces.
+
+**Planned approach:**
+
+1. Reconciler watches the `session-agent-template` ConfigMap in the control-plane namespace. On change, re-enqueues all MCProject CRs.
+2. `reconcileDeployment` compares the template image against the live Deployment image. On mismatch, updates the Deployment spec. K8s handles the rolling restart.
+3. Restarts are effectively free — all state lives on PVC (JSONL history, git repo, worktrees) and NATS KV (session metadata). The new pod's entrypoint reseeds `.claude` from the ConfigMap/PVC, and any interrupted session resumes via `claude --resume`.
+4. `terminationGracePeriodSeconds` gives the current Claude turn time to finish before SIGTERM kills the process.
+
+**Version pinning (future work):**
+
+Users may want to pin a specific session-agent image (and therefore Claude Code version) per project. Planned: add `spec.imageOverride` to the MCProject CRD. When set, the reconciler uses it instead of the fleet-wide template. When empty, follows the template. The SPA exposes this as "Pin Claude version" in project settings.
 
 ### Endpoints
 
@@ -581,12 +659,10 @@ These endpoints bind to a separate port (`:9090`) that is never referenced in th
 ```
 1. User created (local POST /users, SSO first login, or SCIM push)
 2. INSERT into Postgres users table
-3. Generate NATS NKey credentials for session agent
-4. kubectl create namespace mclaude-{userId}
-5. kubectl apply ServiceAccount, Role, RoleBinding in namespace
-6. Store NATS creds in K8s Secret user-secrets in namespace
-7. Publish mclaude.admin.users.created to NATS  ← fire-and-forget, non-fatal
+3. (User namespace, RBAC, secrets are created by the reconciler when the first MCProject CR is created for this user)
 ```
+
+User-level K8s resources (namespace, ServiceAccount, Role, RoleBinding, user-config, user-secrets) are provisioned by the reconciliation controller as a side effect of reconciling the user's first MCProject. This avoids creating empty namespaces for users who never create a project.
 
 ### User deprovision flow
 
@@ -595,7 +671,8 @@ These endpoints bind to a separate port (`:9090`) that is never referenced in th
 2. Revoke user's NATS JWT: add user NKey to account JWT revocations, push updated account JWT to NATS server
 3. NATS broker terminates all active connections for that user immediately
 4. DELETE from Postgres users table (cascades to nats_credentials)
-5. kubectl delete namespace mclaude-{userId}  ← deletes all pods, PVCs, secrets
+5. Delete all MCProject CRs for the user — reconciler garbage-collects owned resources
+6. kubectl delete namespace mclaude-{userId}  ← catches anything the reconciler didn't own
 ```
 
 JWT revocation is NATS-native: control-plane holds the account NKey and can push a signed revocation to the NATS server at any time. Existing connections are dropped within one server tick. No 8h window.
@@ -605,11 +682,15 @@ JWT revocation is NATS-native: control-plane holds the account NKey and can push
 ```
 1. Client publishes mclaude.{userId}.api.projects.create
 2. control-plane receives via NATS request/reply
-3. kubectl apply Deployment + PVC in mclaude-{userId}
-4. Write Project JSON to NATS KV mclaude-projects/{userId}/{projectId}
-5. Reply with projectId
-6. Pod starts, session-agent connects to NATS, begins subscriptions
+3. INSERT into Postgres projects table
+4. Create MCProject CR in mclaude-system namespace
+5. Write Project JSON to NATS KV mclaude-projects/{userId}/{projectId}
+6. Reply with projectId immediately (don't wait for provisioning)
+7. Reconciler picks up MCProject CR → creates namespace, RBAC, secrets, PVCs, Deployment
+8. Pod starts, session-agent connects to NATS, begins subscriptions
 ```
+
+The SPA can watch MCProject status conditions (via NATS KV or direct status) to show provisioning progress.
 
 ### Postgres schema
 
@@ -807,17 +888,27 @@ ln -sf /data/projects "$HOME/.claude/projects"
 echo '{"hasCompletedOnboarding":true,"bypassPermissions":true}' > "$HOME/.claude.json"
 
 # Git setup (bare repo — worktrees created by session agent)
-if [ -n "$GIT_URL" ]; then
-    if [ ! -d "/data/repo/HEAD" ]; then
+# Every project gets a bare repo. Git-backed projects clone from GIT_URL;
+# scratch projects (no GIT_URL) get an empty bare repo initialized in place.
+# This means the session agent's worktree machinery works uniformly for all projects.
+if [ ! -d "/data/repo/HEAD" ]; then
+    if [ -n "$GIT_URL" ]; then
         git clone --bare "$GIT_URL" /data/repo || {
             echo "[entrypoint] Git clone failed — exiting for restart"
             exit 1
         }
     else
+        git init --bare /data/repo
+        # Create an initial empty commit so worktrees have something to branch from.
+        git -C /data/repo commit --allow-empty -m "init" \
+            --author="mclaude <mclaude@local>" 2>/dev/null || true
+    fi
+else
+    if [ -n "$GIT_URL" ]; then
         git -C /data/repo fetch --all --prune || true
     fi
-    mkdir -p /data/worktrees
 fi
+mkdir -p /data/worktrees
 
 # Shared memory — symlink each worktree's memory dir to /data/shared-memory/
 mkdir -p /data/shared-memory

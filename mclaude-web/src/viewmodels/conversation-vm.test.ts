@@ -180,4 +180,32 @@ describe('ConversationVM', () => {
       expect(payload.request.subtype).toBe('reload_plugins')
     })
   })
+
+  describe('setMaxThinkingTokens', () => {
+    it('publishes set_max_thinking_tokens control request with budget', () => {
+      mockNats.clearRecorded()
+      vm.setMaxThinkingTokens(8000)
+      expect(mockNats.published).toHaveLength(1)
+      const msg = mockNats.published[0]
+      expect(msg.subject).toBe('mclaude.user-1.project-1.api.sessions.control')
+      const payload = parsePublished(msg.data) as {
+        type: string
+        request: { subtype: string; budget: number }
+      }
+      expect(payload.type).toBe('control_request')
+      expect(payload.request.subtype).toBe('set_max_thinking_tokens')
+      expect(payload.request.budget).toBe(8000)
+    })
+
+    it('publishes budget=0 to disable thinking', () => {
+      mockNats.clearRecorded()
+      vm.setMaxThinkingTokens(0)
+      const msg = mockNats.published[0]
+      const payload = parsePublished(msg.data) as {
+        type: string
+        request: { subtype: string; budget: number }
+      }
+      expect(payload.request.budget).toBe(0)
+    })
+  })
 })

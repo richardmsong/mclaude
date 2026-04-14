@@ -8,7 +8,7 @@ on:
 jobs:
   changes:
     name: Detect changes
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
       pull-requests: read
@@ -17,6 +17,7 @@ jobs:
       spa: ${{ steps.filter.outputs.spa }}
       session-agent: ${{ steps.filter.outputs.session-agent }}
       branch_slug: ${{ steps.slug.outputs.value }}
+      image_tag: ${{ steps.slug.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -24,8 +25,10 @@ jobs:
         id: slug
         run: |
           slug="${GITHUB_REF_NAME//\//-}"
+          short_sha="${GITHUB_SHA::7}"
           echo "value=${slug}" >> "$GITHUB_OUTPUT"
-          echo "Branch slug: ${slug}"
+          echo "image_tag=${slug}-${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "Branch slug: ${slug}  Image tag: ${slug}-${short_sha}"
 
       - uses: dorny/paths-filter@v3
         id: filter
@@ -42,85 +45,110 @@ jobs:
     name: Build control-plane (branch)
     needs: changes
     if: needs.changes.outputs.control-plane == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
       packages: write
     outputs:
-      tag: ${{ needs.changes.outputs.branch_slug }}
+      tag: ${{ needs.changes.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - name: Authenticate to GHCR
+        run: |
+          mkdir -p "$RUNNER_TEMP/docker"
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
+            "$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64)" \
+            > "$RUNNER_TEMP/docker/config.json"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@v5
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          go-version-file: mclaude-control-plane/go.mod
+          cache: false
+
+      - name: Build binary
+        working-directory: mclaude-control-plane
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o control-plane .
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
       - uses: docker/build-push-action@v6
         with:
           context: ./mclaude-control-plane
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/arm64
           push: true
-          tags: ghcr.io/mclaude-project/mclaude-control-plane:${{ needs.changes.outputs.branch_slug }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ghcr.io/mclaude-project/mclaude-control-plane:${{ needs.changes.outputs.image_tag }}
 
   build-spa:
     name: Build spa (branch)
     needs: changes
     if: needs.changes.outputs.spa == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
       packages: write
     outputs:
-      tag: ${{ needs.changes.outputs.branch_slug }}
+      tag: ${{ needs.changes.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
+      - name: Authenticate to GHCR
+        run: |
+          mkdir -p "$RUNNER_TEMP/docker"
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
+            "$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64)" \
+            > "$RUNNER_TEMP/docker/config.json"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          driver: docker
       - uses: docker/build-push-action@v6
         with:
           context: ./mclaude-web
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/arm64
           push: true
-          tags: ghcr.io/mclaude-project/mclaude-spa:${{ needs.changes.outputs.branch_slug }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ghcr.io/mclaude-project/mclaude-spa:${{ needs.changes.outputs.image_tag }}
 
   build-session-agent:
     name: Build session-agent (branch)
     needs: changes
     if: needs.changes.outputs.session-agent == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: read
       packages: write
     outputs:
-      tag: ${{ needs.changes.outputs.branch_slug }}
+      tag: ${{ needs.changes.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - name: Authenticate to GHCR
+        run: |
+          mkdir -p "$RUNNER_TEMP/docker"
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
+            "$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64)" \
+            > "$RUNNER_TEMP/docker/config.json"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@v5
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          go-version-file: mclaude-session-agent/go.mod
+          cache: false
+
+      - name: Build binary
+        working-directory: mclaude-session-agent
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o session-agent .
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
       - uses: docker/build-push-action@v6
         with:
           context: ./mclaude-session-agent
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/arm64
           push: true
-          tags: ghcr.io/mclaude-project/mclaude-session-agent:${{ needs.changes.outputs.branch_slug }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ghcr.io/mclaude-project/mclaude-session-agent:${{ needs.changes.outputs.image_tag }}
 
   deploy:
     name: Deploy preview
@@ -130,17 +158,21 @@ jobs:
     runs-on: [self-hosted, tailscale]
     env:
       BRANCH_SLUG: ${{ needs.changes.outputs.branch_slug }}
-      CP_TAG: ${{ needs.build-control-plane.outputs.tag || 'latest' }}
-      SPA_TAG: ${{ needs.build-spa.outputs.tag || 'latest' }}
-      SA_TAG: ${{ needs.build-session-agent.outputs.tag || 'latest' }}
+      # If a build job was skipped (no changes), fall back to branch-slug tag (previous build).
+      CP_TAG: ${{ needs.build-control-plane.outputs.tag || needs.changes.outputs.branch_slug }}
+      SPA_TAG: ${{ needs.build-spa.outputs.tag || needs.changes.outputs.branch_slug }}
+      SA_TAG: ${{ needs.build-session-agent.outputs.tag || needs.changes.outputs.branch_slug }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve images
+      - name: Resolve images and URL
         run: |
           echo "control-plane: ghcr.io/mclaude-project/mclaude-control-plane:${CP_TAG}"
           echo "spa:           ghcr.io/mclaude-project/mclaude-spa:${SPA_TAG}"
           echo "session-agent: ghcr.io/mclaude-project/mclaude-session-agent:${SA_TAG}"
+          PREVIEW_HOST="preview-${BRANCH_SLUG}.mclaude.internal"
+          echo "preview URL:   http://${PREVIEW_HOST}"
+          echo "PREVIEW_HOST=${PREVIEW_HOST}" >> "$GITHUB_ENV"
 
       - name: Helm deploy preview
         run: |
@@ -148,6 +180,15 @@ jobs:
             --set controlPlane.image.tag="${CP_TAG}" \
             --set spa.image.tag="${SPA_TAG}" \
             --set sessionAgent.image.tag="${SA_TAG}" \
-            --namespace "preview-${BRANCH_SLUG}" \
-            --create-namespace \
-            --wait --timeout 5m
+            --set namespace.create=false \
+            --set "global.imagePullSecrets[0]=ghcr-pull-secret" \
+            --set controlPlane.migrations.enabled=false \
+            --set controlPlane.config.devSeed=true \
+            --set ingress.className=traefik \
+            --set ingress.host="${PREVIEW_HOST}" \
+            --namespace "mclaude-system" \
+            --wait --timeout 5m \
+            --force-conflicts
+
+      - name: Preview URL
+        run: echo "✓ Preview live at http://${PREVIEW_HOST}"

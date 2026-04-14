@@ -14,8 +14,8 @@ func TestKVKeyConstruction(t *testing.T) {
 		sessionID string
 		want      string
 	}{
-		{"user-1", "proj-1", "sess-1", "user-1/proj-1/sess-1"},
-		{"alice", "myproject", "abc-123-def", "alice/myproject/abc-123-def"},
+		{"user-1", "proj-1", "sess-1", "user-1.proj-1.sess-1"},
+		{"alice", "myproject", "abc-123-def", "alice.myproject.abc-123-def"},
 	}
 	for _, tc := range cases {
 		got := sessionKVKey(tc.userID, tc.projectID, tc.sessionID)
@@ -28,7 +28,7 @@ func TestKVKeyConstruction(t *testing.T) {
 
 func TestHeartbeatKVKey(t *testing.T) {
 	got := heartbeatKVKey("user-1", "proj-1")
-	want := "user-1/proj-1"
+	want := "user-1.proj-1"
 	if got != want {
 		t.Errorf("heartbeatKVKey = %q, want %q", got, want)
 	}

@@ -34,7 +34,7 @@ func TestAdminMux_MetricsEndpoint(t *testing.T) {
 // ---- Admin bearer token enforcement ----
 
 func TestAdminMux_TokenRequired(t *testing.T) {
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", 0, "my-secret-token")
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0, "my-secret-token", nil, nil, "", "")
 	mux := srv.AdminMux()
 
 	cases := []struct {
@@ -92,7 +92,7 @@ func TestAdminMux_TokenRequired(t *testing.T) {
 // ---- Create user validation ----
 
 func TestAdminCreateUser_MissingFields(t *testing.T) {
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", 0, "token")
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0, "token", nil, nil, "", "")
 
 	cases := []struct {
 		name string
@@ -123,7 +123,7 @@ func TestAdminCreateUser_MissingFields(t *testing.T) {
 // ---- Delete user ----
 
 func TestAdminDeleteUser_NilDB(t *testing.T) {
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", 0, "token")
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0, "token", nil, nil, "", "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/admin/users/some-user-id", nil)
 	req.Header.Set("Authorization", "Bearer token")
@@ -136,7 +136,7 @@ func TestAdminDeleteUser_NilDB(t *testing.T) {
 // ---- Session stop ----
 
 func TestAdminStopSession_MissingFields(t *testing.T) {
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", 0, "token")
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0, "token", nil, nil, "", "")
 	cases := []struct {
 		name string
 		body string
@@ -163,7 +163,7 @@ func TestAdminStopSession_MissingFields(t *testing.T) {
 
 func TestAdminStopSession_ValidRequest(t *testing.T) {
 	// Valid request with nil DB → 202 (best-effort break-glass).
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", 0, "token")
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0, "token", nil, nil, "", "")
 	body := `{"userId":"u1","projectId":"p1","sessionId":"s1"}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/admin/sessions/stop",
@@ -178,7 +178,7 @@ func TestAdminStopSession_ValidRequest(t *testing.T) {
 // ---- Unknown route on admin mux ----
 
 func TestAdminMux_UnknownRoute(t *testing.T) {
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", 0, "token")
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0, "token", nil, nil, "", "")
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin/unknown", nil)
 	req.Header.Set("Authorization", "Bearer token")

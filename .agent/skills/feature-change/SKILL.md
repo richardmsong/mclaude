@@ -1,6 +1,6 @@
 ---
 name: feature-change
-description: Universal entry point for any change to the mclaude app — new features, bug fixes, refactors, config changes, anything. Always starts with the spec. If the spec already describes correct behavior, skip to /dev-harness. If not, update the spec first.
+description: Universal entry point for any change to the mclaude app — new features, bug fixes, refactors, config changes, anything. Always starts with the spec. If the spec already describes correct behavior, skip to the dev-harness agent. If not, run /spec-change first.
 ---
 
 # Feature Change
@@ -28,6 +28,19 @@ Examples:
 ```
 1. Read the relevant spec docs
 2. Determine the spec relationship:
+<<<<<<< HEAD
+   A. Spec is correct, code is wrong (bug)      → skip to step 5
+   B. Spec doesn't describe this yet (feature)  → run /spec-change (step 3)
+   C. Spec needs updating (behavior change)     → run /spec-change (step 3)
+   D. Spec and code will both change (refactor) → run /spec-change if behavior changes, otherwise skip to step 5
+3. /spec-change <description> — updates spec docs and commits them
+4. (handled by /spec-change)
+5. Invoke the dev-harness agent for each affected component:
+   Agent(subagent_type="dev-harness", prompt="<component> — <brief description>")
+```
+
+This order is mandatory. The spec always reflects intended behavior. If the code doesn't match the spec, the code is wrong — fix the code. If the spec doesn't describe the desired behavior, run `/spec-change` first, then invoke the dev-harness agent.
+=======
    A. Spec is correct, code is wrong (bug)     → skip to step 5
    B. Spec doesn't describe this yet (feature) → update spec first (step 3)
    C. Spec needs updating (behavior change)    → update spec first (step 3)
@@ -39,6 +52,7 @@ Examples:
 ```
 
 This order is mandatory. The spec always reflects intended behavior. If the code doesn't match the spec, the code is wrong — fix the code. If the spec doesn't describe the desired behavior, fix the spec first, then fix the code.
+>>>>>>> origin/main
 
 ---
 
@@ -144,6 +158,31 @@ Never bundle spec and code in the same commit. The commit message must say what 
 
 ---
 
+<<<<<<< HEAD
+## Step 5 — dev-harness agent per component (exhaustive loop)
+
+For each affected component, invoke the dev-harness agent **and keep re-invoking until all gaps are closed**:
+
+```
+Loop:
+  1. Agent(subagent_type="dev-harness", prompt="<component> — <description>. Fix ALL spec gaps.")
+  2. When the agent returns, run /spec-evaluator <component>
+  3. If gaps remain:
+     → Agent(subagent_type="dev-harness", prompt="<component> — fix these remaining gaps: <list from evaluator>")
+     → go to step 2
+  4. If CLEAN: proceed to Step 6
+```
+
+The dev-harness agent has maxTurns=500 and is instructed to keep going until all gaps are closed. But if it hits context limits and returns with gaps remaining, **you must re-invoke it immediately** with the remaining gap list. Each re-invocation picks up from the last commit and continues.
+
+**Rules:**
+- **Never report a task complete until the spec-evaluator returns CLEAN**
+- One failing evaluator gap = one more dev-harness agent pass
+- Evaluator runs after EVERY dev-harness pass, not just the first
+- **Never deprioritize any gap** — every gap goes to dev-harness immediately
+- If a gap cannot be implemented due to environment constraints, run `/spec-change` to update the spec, then re-evaluate
+- Running the dev-harness agent once and summarizing results is NOT acceptable — the loop must close
+=======
 ## Step 5 — /dev-harness per component
 
 For each affected component:
@@ -202,6 +241,7 @@ Output format:
 - The evaluator must read both the spec AND the code — not just one
 - One failing evaluator gap = one more dev-harness pass
 - Evaluator runs after EVERY dev-harness, not just the first
+>>>>>>> origin/main
 
 ---
 
@@ -211,7 +251,11 @@ After CI deploys the preview, use the **Playwright MCP** to validate the golden 
 
 ```
 Validation checklist for spa changes:
+<<<<<<< HEAD
+1. Navigate to the preview URL (format: http://preview-{branch-slug}.{tailscale-ip}.sslip.io)
+=======
 1. Navigate to the preview URL (format: http://preview-{branch-slug}.{tailscale-ip}.nip.io)
+>>>>>>> origin/main
 2. Log in as dev@mclaude.local / dev
 3. Assert the changed screen/behavior matches the spec
 4. Assert the previous state (before the fix/feature) is gone

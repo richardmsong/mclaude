@@ -1,14 +1,24 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import { NavBar } from './NavBar'
 import { StatusDot } from './StatusDot'
 import { EventList } from './events/EventList'
 import type { Turn, SessionState } from '@/types'
 import type { ConversationVM, ConversationVMState } from '@/viewmodels/conversation-vm'
 
+interface SessionUsage {
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  costUsd: number
+}
+
 interface SessionDetailScreenProps {
   sessionId: string
   sessionName: string
   sessionState: SessionState
+  sessionModel?: string
+  sessionUsage?: SessionUsage
   conversationVM: ConversationVM
   onBack: () => void
   connected: boolean
@@ -19,15 +29,62 @@ interface SessionDetailScreenProps {
 const STATE_LABELS: Record<string, string> = {
   running: 'Working',
   requires_action: 'Needs permission',
+  plan_mode: 'Plan mode',
   idle: 'Idle',
   restarting: 'Restarting',
   failed: 'Failed',
+  unknown: 'Unknown',
+  waiting_for_input: 'Waiting for input',
+}
+
+// Tab memory: persist active tab across navigation
+const TAB_STORAGE_KEY = 'mclaude.activeTab'
+
+function getStoredTab(): 'events' | 'terminal' {
+  try {
+    const stored = sessionStorage.getItem(TAB_STORAGE_KEY)
+    if (stored === 'terminal') return 'terminal'
+  } catch {}
+  return 'events'
+}
+
+function storeTab(tab: 'events' | 'terminal'): void {
+  try {
+    sessionStorage.setItem(TAB_STORAGE_KEY, tab)
+  } catch {}
+}
+
+// Scroll persistence: save/restore scroll position across navigation
+function getScrollKey(sessionId: string): string {
+  return `mclaude.scroll.${sessionId}`
+}
+
+function saveScrollPosition(sessionId: string, position: number): void {
+  try {
+    sessionStorage.setItem(getScrollKey(sessionId), String(position))
+  } catch {}
+}
+
+function getScrollPosition(sessionId: string): number | null {
+  try {
+    const stored = sessionStorage.getItem(getScrollKey(sessionId))
+    return stored !== null ? Number(stored) : null
+  } catch {}
+  return null
+}
+
+// Skills autocomplete: filter skills by query
+function filterSkills(skills: string[], query: string): string[] {
+  const lq = query.toLowerCase()
+  return skills.filter(s => s.toLowerCase().includes(lq))
 }
 
 export function SessionDetailScreen({
   sessionId,
   sessionName,
   sessionState,
+  sessionModel,
+  sessionUsage,
   conversationVM,
   onBack,
   connected,
@@ -35,17 +92,27 @@ export function SessionDetailScreen({
   onInitialMessageSent,
 }: SessionDetailScreenProps) {
   const [vmState, setVmState] = useState<ConversationVMState>(conversationVM.state)
-  const [activeTab, setActiveTab] = useState<'events' | 'terminal'>('events')
+  const [activeTab, setActiveTab] = useState<'events' | 'terminal'>(getStoredTab)
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  const [showMenu, setShowMenu] = useState(false)
+  const [showSkills, setShowSkills] = useState(false)
+  const [showUsageOverlay, setShowUsageOverlay] = useState(false)
+  const [showRawOutput, setShowRawOutput] = useState(false)
+  const [stagedImage, setStagedImage] = useState<{ base64: string; mimeType: string; previewUrl: string } | null>(null)
+  const [pttRecording, setPttRecording] = useState(false)
+  const [pttSupported, setPttSupported] = useState<boolean | null>(null)  // null = not yet checked
+  const pttRecognitionRef = useRef<{ stop(): void } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const atBottomRef = useRef(true)
   const initialMessageSentRef = useRef(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   // Send pre-seeded onboarding message once the session is ready
   useEffect(() => {
     if (!initialMessage || initialMessageSentRef.current) return
-    // Wait a tick for the EventStore to subscribe before publishing
     const timer = setTimeout(() => {
       initialMessageSentRef.current = true
       conversationVM.sendMessage(initialMessage)
@@ -69,7 +136,43 @@ export function SessionDetailScreen({
     return unsub
   }, [conversationVM])
 
+  // Restore scroll position when session changes
+  useEffect(() => {
+    const saved = getScrollPosition(sessionId)
+    if (saved !== null && scrollRef.current) {
+      requestAnimationFrame(() => {
+        if (scrollRef.current) {
+          scrollRef.current.scrollTop = saved
+          atBottomRef.current =
+            scrollRef.current.scrollHeight - saved - scrollRef.current.clientHeight < 100
+        }
+      })
+    }
+  }, [sessionId])
+
+  // Save scroll position on unmount
+  useEffect(() => {
+    return () => {
+      if (scrollRef.current) {
+        saveScrollPosition(sessionId, scrollRef.current.scrollTop)
+      }
+    }
+  }, [sessionId])
+
+  // Close menu on outside click
+  useEffect(() => {
+    if (!showMenu) return
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setShowMenu(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showMenu])
+
   const turns: Turn[] = vmState.turns
+  const skills: string[] = vmState.skills ?? []
 
   const handleScroll = () => {
     if (!scrollRef.current) return
@@ -82,14 +185,23 @@ export function SessionDetailScreen({
     if (!text || sending) return
     setInput('')
     setSending(true)
+    setShowSkills(false)
     try {
-      conversationVM.sendMessage(text)
+      if (stagedImage) {
+        conversationVM.sendMessageWithImage(text, stagedImage.base64, stagedImage.mimeType)
+        setStagedImage(null)
+      } else {
+        conversationVM.sendMessage(text)
+      }
     } finally {
       setSending(false)
     }
     // Scroll to bottom after send
     requestAnimationFrame(() => {
-      if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+      if (scrollRef.current) {
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+        atBottomRef.current = true
+      }
     })
   }
 
@@ -98,17 +210,398 @@ export function SessionDetailScreen({
       e.preventDefault()
       void handleSend()
     }
+    // Close skills popup on Escape
+    if (e.key === 'Escape') {
+      setShowSkills(false)
+    }
+    // Navigate skills popup with arrow keys
+    if (showSkills && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      e.preventDefault()
+    }
   }
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value
+    setInput(val)
+    // Show skills autocomplete when input starts with /
+    if (val.startsWith('/') && !val.includes(' ')) {
+      setShowSkills(true)
+    } else {
+      setShowSkills(false)
+    }
+  }
+
+  const handleSkillSelect = (skillName: string) => {
+    setInput(`/${skillName} `)
+    setShowSkills(false)
+    textareaRef.current?.focus()
+  }
+
+  const handleAttach = () => {
+    fileInputRef.current?.click()
+  }
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const result = ev.target?.result as string
+      // result is "data:image/png;base64,..."
+      const [header, base64] = result.split(',')
+      const mimeType = header?.match(/data:([^;]+)/)?.[1] ?? 'image/png'
+      setStagedImage({ base64: base64 ?? '', mimeType, previewUrl: result })
+    }
+    reader.readAsDataURL(file)
+    // Reset so same file can be picked again
+    e.target.value = ''
+  }
+
+  const handleTabChange = (tab: 'events' | 'terminal') => {
+    setActiveTab(tab)
+    storeTab(tab)
+  }
+
+  // PTT: check Speech API availability on mount
+  useEffect(() => {
+    type SpeechRecAPI = {
+      new(): {
+        lang: string
+        interimResults: boolean
+        maxAlternatives: number
+        onresult: ((event: Event) => void) | null
+        onerror: (() => void) | null
+        onend: (() => void) | null
+        start(): void
+        stop(): void
+      }
+    }
+    const win = window as Window & typeof globalThis & {
+      SpeechRecognition?: SpeechRecAPI
+      webkitSpeechRecognition?: SpeechRecAPI
+    }
+    const SpeechRecognitionCtor = win.SpeechRecognition ?? win.webkitSpeechRecognition
+    const supported = !!SpeechRecognitionCtor && location.protocol !== 'http:'
+    setPttSupported(supported)
+  }, [])
+
+  const handlePttStart = () => {
+    if (!pttSupported) {
+      const isHttp = location.protocol === 'http:'
+      alert(isHttp
+        ? 'Voice input requires HTTPS. Connect via a secure URL.'
+        : 'Voice input is not supported in this browser.'
+      )
+      return
+    }
+    if (pttRecording) return
+
+    type SpeechRecAPI2 = {
+      new(): {
+        lang: string
+        interimResults: boolean
+        maxAlternatives: number
+        onresult: ((event: Event) => void) | null
+        onerror: (() => void) | null
+        onend: (() => void) | null
+        start(): void
+        stop(): void
+      }
+    }
+    const win2 = window as Window & typeof globalThis & {
+      SpeechRecognition?: SpeechRecAPI2
+      webkitSpeechRecognition?: SpeechRecAPI2
+    }
+    const SpeechRecognitionCtor = win2.SpeechRecognition ?? win2.webkitSpeechRecognition
+    if (!SpeechRecognitionCtor) return
+
+    const recognition = new SpeechRecognitionCtor()
+    recognition.lang = 'en-US'
+    recognition.interimResults = false
+    recognition.maxAlternatives = 1
+
+    recognition.onresult = (event: Event) => {
+      const e = event as unknown as { results: Array<Array<{ transcript: string }>> }
+      const transcript = e.results[0]?.[0]?.transcript
+      if (transcript) {
+        conversationVM.sendMessage(transcript)
+        // Scroll to bottom after PTT send
+        requestAnimationFrame(() => {
+          if (scrollRef.current) {
+            scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+            atBottomRef.current = true
+          }
+        })
+      }
+    }
+
+    recognition.onerror = () => {
+      setPttRecording(false)
+      pttRecognitionRef.current = null
+    }
+
+    recognition.onend = () => {
+      setPttRecording(false)
+      pttRecognitionRef.current = null
+    }
+
+    pttRecognitionRef.current = recognition
+    recognition.start()
+    setPttRecording(true)
+  }
+
+  const handlePttStop = () => {
+    if (pttRecognitionRef.current) {
+      pttRecognitionRef.current.stop()
+      pttRecognitionRef.current = null
+    }
+    setPttRecording(false)
+  }
+
+  const handleApprove = useCallback(() => {
+    // Find the first pending control request
+    const pending = turns
+      .flatMap(t => t.blocks)
+      .find(b => b.type === 'control_request' && (b as { status: string }).status === 'pending')
+    if (pending && 'requestId' in pending) {
+      conversationVM.approvePermission(pending.requestId as string)
+    }
+  }, [turns, conversationVM])
+
+  const handleDeny = useCallback(() => {
+    const pending = turns
+      .flatMap(t => t.blocks)
+      .find(b => b.type === 'control_request' && (b as { status: string }).status === 'pending')
+    if (pending && 'requestId' in pending) {
+      conversationVM.denyPermission(pending.requestId as string)
+    }
+  }, [turns, conversationVM])
 
   const isWorking = sessionState === 'running'
   const needsPermission = sessionState === 'requires_action'
+  const isPlanMode = sessionState === 'plan_mode'
+  const showActionBar = needsPermission || isPlanMode
+
+  // Skills autocomplete filtered list
+  const skillQuery = input.startsWith('/') ? input.slice(1) : ''
+  const filteredSkills = showSkills ? filterSkills(skills, skillQuery) : []
+
+  // Three-dot menu for session detail
+  const menuButton = (
+    <div ref={menuRef} style={{ position: 'relative' }}>
+      <button
+        onClick={() => setShowMenu(v => !v)}
+        style={{ fontSize: 16, color: 'var(--text2)', padding: '0 2px' }}
+      >
+        ⋯
+      </button>
+      {showMenu && (
+        <div style={{
+          position: 'absolute',
+          top: 'calc(100% + 8px)',
+          right: 0,
+          background: 'var(--surf)',
+          border: '1px solid var(--border)',
+          borderRadius: 10,
+          minWidth: 180,
+          zIndex: 300,
+          overflow: 'hidden',
+          boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+        }}>
+          {/* Model switcher */}
+          <div style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+            <div style={{ padding: '4px 16px 8px', color: 'var(--text3)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Model
+            </div>
+            {['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'].map(model => (
+              <button
+                key={model}
+                onClick={() => {
+                  conversationVM.switchModel(model)
+                  setShowMenu(false)
+                }}
+                style={{
+                  width: '100%',
+                  padding: '8px 16px',
+                  textAlign: 'left',
+                  color: vmState.model === model ? 'var(--blue)' : 'var(--text)',
+                  fontSize: 13,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                }}
+              >
+                {vmState.model === model ? '✓' : ' '} {model.replace('claude-', '')}
+              </button>
+            ))}
+          </div>
+          {/* Effort switcher */}
+          <div style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+            <div style={{ padding: '4px 16px 8px', color: 'var(--text3)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Thinking Budget
+            </div>
+            {([
+              { label: 'None', budget: 0 },
+              { label: 'Low', budget: 2000 },
+              { label: 'Medium', budget: 8000 },
+              { label: 'High', budget: 20000 },
+            ] as Array<{ label: string; budget: number }>).map(({ label, budget }) => (
+              <button
+                key={label}
+                onClick={() => {
+                  conversationVM.setMaxThinkingTokens(budget)
+                  setShowMenu(false)
+                }}
+                style={{
+                  width: '100%',
+                  padding: '8px 16px',
+                  textAlign: 'left',
+                  color: 'var(--text)',
+                  fontSize: 13,
+                }}
+              >
+                {label} {budget > 0 ? `(${(budget / 1000).toFixed(0)}K)` : ''}
+              </button>
+            ))}
+          </div>
+          {/* Token Usage */}
+          <button
+            onClick={() => { setShowMenu(false); setShowUsageOverlay(true) }}
+            style={{
+              width: '100%',
+              padding: '12px 16px',
+              textAlign: 'left',
+              color: 'var(--text)',
+              fontSize: 14,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              borderBottom: '1px solid var(--border)',
+            }}
+          >
+            <span>📊</span> Token Usage
+          </button>
+          {/* Raw Output */}
+          <button
+            onClick={() => { setShowMenu(false); setShowRawOutput(true) }}
+            style={{
+              width: '100%',
+              padding: '12px 16px',
+              textAlign: 'left',
+              color: 'var(--text)',
+              fontSize: 14,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+            }}
+          >
+            <span>📜</span> Raw Output
+          </button>
+        </div>
+      )}
+    </div>
+  )
+
+  // Helpers for usage overlay
+  const PRICE_PER_M = { input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 }
+
+  function formatTokens(n: number): string {
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
+    return String(n)
+  }
+
+  function formatCost(usd: number): string {
+    return `$${usd.toFixed(3)}`
+  }
+
+  const usageTiles = sessionUsage ? [
+    { label: 'Input', tokens: sessionUsage.inputTokens, color: 'var(--blue)', cost: sessionUsage.inputTokens / 1_000_000 * PRICE_PER_M.input },
+    { label: 'Output', tokens: sessionUsage.outputTokens, color: 'var(--green)', cost: sessionUsage.outputTokens / 1_000_000 * PRICE_PER_M.output },
+    { label: 'Cache W', tokens: sessionUsage.cacheWriteTokens, color: 'var(--orange)', cost: sessionUsage.cacheWriteTokens / 1_000_000 * PRICE_PER_M.cacheWrite },
+    { label: 'Cache R', tokens: sessionUsage.cacheReadTokens, color: 'var(--purple)', cost: sessionUsage.cacheReadTokens / 1_000_000 * PRICE_PER_M.cacheRead },
+  ] : []
+  const totalUsageCost = usageTiles.reduce((s, t) => s + t.cost, 0)
+  const totalUsageTokens = usageTiles.reduce((s, t) => s + t.tokens, 0)
+
+  // Raw output: extract all assistant text from turns
+  const rawTextLines = vmState.turns
+    .filter(t => t.type === 'assistant')
+    .flatMap(t => t.blocks)
+    .filter(b => b.type === 'text' || b.type === 'streaming_text')
+    .map(b => b.type === 'text' ? b.text : (b as { chunks: string[] }).chunks.join(''))
+    .join('\n')
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg)' }}>
+      {/* Token Usage overlay */}
+      {showUsageOverlay && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 500, display: 'flex', flexDirection: 'column', background: 'var(--bg)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', padding: '14px 16px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+            <button onClick={() => setShowUsageOverlay(false)} style={{ color: 'var(--blue)', fontSize: 15, marginRight: 12 }}>‹ Back</button>
+            <span style={{ fontWeight: 600, fontSize: 17 }}>Token Usage</span>
+          </div>
+          <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
+            <div style={{ color: 'var(--text2)', fontSize: 13, marginBottom: 16 }}>
+              {sessionModel ?? vmState.model} · {vmState.turns.filter(t => t.type === 'assistant').length} turns
+            </div>
+            {sessionUsage ? (
+              <>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 16 }}>
+                  {usageTiles.map(tile => (
+                    <div key={tile.label} style={{ background: 'var(--surf)', border: '1px solid var(--border)', borderRadius: 12, padding: 14 }}>
+                      <div style={{ color: 'var(--text2)', fontSize: 12, marginBottom: 4 }}>{tile.label}</div>
+                      <div style={{ fontSize: 22, fontWeight: 700, color: tile.color }}>{formatTokens(tile.tokens)}</div>
+                      <div style={{ color: 'var(--text2)', fontSize: 12, marginTop: 2 }}>{formatCost(tile.cost)}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ background: 'var(--surf)', border: '1px solid var(--border)', borderRadius: 12, padding: 16 }}>
+                  <div style={{ color: 'var(--text2)', fontSize: 12, marginBottom: 4 }}>Estimated Cost</div>
+                  <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--text)' }}>{formatCost(totalUsageCost)}</div>
+                  <div style={{ color: 'var(--text2)', fontSize: 13, marginTop: 4 }}>{formatTokens(totalUsageTokens)} total tokens</div>
+                  <div style={{ color: 'var(--text3)', fontSize: 11, marginTop: 8 }}>
+                    Prices: input ${PRICE_PER_M.input}/M · output ${PRICE_PER_M.output}/M
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div style={{ color: 'var(--text2)', fontSize: 14 }}>No usage data available.</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Raw Output overlay */}
+      {showRawOutput && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 500, display: 'flex', flexDirection: 'column', background: '#0d1117' }}>
+          <div style={{ display: 'flex', alignItems: 'center', padding: '14px 16px', borderBottom: '1px solid rgba(255,255,255,0.1)', flexShrink: 0 }}>
+            <button onClick={() => setShowRawOutput(false)} style={{ color: 'var(--blue)', fontSize: 15, marginRight: 12 }}>‹ Back</button>
+            <span style={{ fontWeight: 600, fontSize: 17, color: '#eee' }}>Raw Output</span>
+          </div>
+          <div style={{ flex: 1, overflowY: 'auto', padding: 12 }}>
+            <pre style={{
+              fontFamily: "'Menlo','Courier New',monospace",
+              fontSize: 12,
+              color: '#eee',
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-all',
+              lineHeight: 1.5,
+            }}>
+              {rawTextLines || '(no output yet)'}
+            </pre>
+          </div>
+        </div>
+      )}
       <NavBar
         title={sessionName}
         onBack={onBack}
         connected={connected}
+        right={menuButton}
+        onRefresh={() => {
+          // Scroll to top to show refresh
+          if (scrollRef.current) scrollRef.current.scrollTop = 0
+        }}
       />
 
       {/* Det-meta row */}
@@ -127,8 +620,35 @@ export function SessionDetailScreen({
         </span>
       </div>
 
-      {/* Action bar (needs_permission) */}
-      {needsPermission && (
+      {/* Plan card (plan_mode only) */}
+      {isPlanMode && (
+        <div style={{
+          margin: '8px 16px 0',
+          background: 'var(--surf)',
+          border: '1px solid rgba(191,90,242,0.4)',
+          borderRadius: 12,
+          overflow: 'hidden',
+          flexShrink: 0,
+        }}>
+          <div style={{
+            padding: '10px 14px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            color: 'var(--purple)',
+            fontWeight: 500,
+            fontSize: 13,
+            cursor: 'pointer',
+          }}>
+            <span>📋</span>
+            <span>View Plan</span>
+            <span style={{ marginLeft: 'auto', fontSize: 11 }}>▶</span>
+          </div>
+        </div>
+      )}
+
+      {/* Action bar (needs_permission or plan_mode) */}
+      {showActionBar && (
         <div style={{
           display: 'flex',
           gap: 8,
@@ -136,16 +656,10 @@ export function SessionDetailScreen({
           borderBottom: '1px solid var(--border)',
           background: 'var(--surf)',
           flexShrink: 0,
+          marginTop: isPlanMode ? 8 : 0,
         }}>
           <button
-            onClick={() => {
-              const pending = turns
-                .flatMap(t => t.blocks)
-                .find(b => b.type === 'control_request' && (b as { status: string }).status === 'pending')
-              if (pending && 'requestId' in pending) {
-                conversationVM.approvePermission(pending.requestId as string)
-              }
-            }}
+            onClick={handleApprove}
             style={{
               flex: 1,
               padding: '8px 0',
@@ -153,26 +667,21 @@ export function SessionDetailScreen({
               color: '#000',
               borderRadius: 8,
               fontWeight: 600,
+              fontSize: 14,
             }}
           >
             ✓ Approve
           </button>
           <button
-            onClick={() => {
-              const pending = turns
-                .flatMap(t => t.blocks)
-                .find(b => b.type === 'control_request' && (b as { status: string }).status === 'pending')
-              if (pending && 'requestId' in pending) {
-                conversationVM.denyPermission(pending.requestId as string)
-              }
-            }}
+            onClick={handleDeny}
             style={{
               flex: 1,
               padding: '8px 0',
-              background: 'var(--surf2)',
-              color: 'var(--red)',
+              background: 'var(--red)',
+              color: '#fff',
               borderRadius: 8,
               fontWeight: 600,
+              fontSize: 14,
             }}
           >
             ✕ Cancel
@@ -190,7 +699,7 @@ export function SessionDetailScreen({
         {(['events', 'terminal'] as const).map(tab => (
           <button
             key={tab}
-            onClick={() => setActiveTab(tab)}
+            onClick={() => handleTabChange(tab)}
             style={{
               flex: 1,
               padding: '10px 0',
@@ -240,75 +749,200 @@ export function SessionDetailScreen({
         <div style={{
           background: 'var(--surf)',
           borderTop: '1px solid var(--border)',
-          padding: '8px 12px',
-          display: 'flex',
-          alignItems: 'flex-end',
-          gap: 8,
           flexShrink: 0,
+          position: 'relative',
         }}>
-          {/* Stop button */}
-          {isWorking && (
+          {/* Screenshot preview strip */}
+          {stagedImage && (
+            <div style={{
+              padding: '8px 12px',
+              borderBottom: '1px solid var(--border)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              background: 'var(--surf)',
+            }}>
+              <img
+                src={stagedImage.previewUrl}
+                alt="staged screenshot"
+                style={{ width: 48, height: 36, objectFit: 'cover', borderRadius: 6, flexShrink: 0 }}
+              />
+              <span style={{ color: 'var(--text2)', fontSize: 13, flex: 1 }}>Screenshot ready</span>
+              <button
+                onClick={() => setStagedImage(null)}
+                style={{ color: 'var(--text3)', fontSize: 16, padding: 4 }}
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
+          {/* Skills autocomplete popup */}
+          {showSkills && filteredSkills.length > 0 && (
+            <div style={{
+              position: 'absolute',
+              bottom: '100%',
+              left: 0,
+              right: 0,
+              background: 'var(--surf)',
+              border: '1px solid var(--border)',
+              borderRadius: 10,
+              margin: '0 8px 4px',
+              maxHeight: 200,
+              overflowY: 'auto',
+              boxShadow: '0 -4px 16px rgba(0,0,0,0.4)',
+              zIndex: 200,
+            }}>
+              {filteredSkills.map(skill => (
+                <button
+                  key={skill}
+                  onClick={() => handleSkillSelect(skill)}
+                  style={{
+                    width: '100%',
+                    padding: '10px 14px',
+                    textAlign: 'left',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    borderBottom: '1px solid var(--border)',
+                    color: 'var(--text)',
+                    fontSize: 13,
+                  }}
+                >
+                  <span style={{ color: 'var(--blue)', fontFamily: 'monospace' }}>/{skill}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Input row */}
+          <div style={{
+            padding: '8px 12px',
+            display: 'flex',
+            alignItems: 'flex-end',
+            gap: 8,
+          }}>
+            {/* Stop button (only when working) */}
+            {isWorking && (
+              <button
+                onClick={() => conversationVM.interrupt()}
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: '50%',
+                  background: 'rgba(255,69,58,0.15)',
+                  color: 'var(--red)',
+                  flexShrink: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 12,
+                  border: '1px solid rgba(255,69,58,0.3)',
+                }}
+              >
+                ✕
+              </button>
+            )}
+
+            {/* Attach button */}
             <button
-              onClick={() => conversationVM.interrupt()}
+              onClick={handleAttach}
               style={{
                 width: 32,
                 height: 32,
                 borderRadius: '50%',
                 background: 'var(--surf2)',
-                color: 'var(--red)',
+                color: 'var(--text2)',
                 flexShrink: 0,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
+                fontSize: 15,
+              }}
+              title="Attach image"
+            >
+              📷
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              style={{ display: 'none' }}
+              onChange={handleFileChange}
+            />
+
+            {/* PTT button */}
+            <button
+              onPointerDown={handlePttStart}
+              onPointerUp={handlePttStop}
+              onPointerLeave={handlePttStop}
+              style={{
+                width: 32,
+                height: 32,
+                borderRadius: '50%',
+                background: pttRecording ? 'var(--red)' : 'var(--surf2)',
+                color: pttRecording ? '#fff' : (pttSupported === false ? 'var(--text3)' : 'var(--text2)'),
+                flexShrink: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 15,
+                opacity: pttSupported === false ? 0.4 : 1,
+                animation: pttRecording ? 'pulse-opacity 1.2s ease-in-out infinite' : undefined,
+                transition: 'background 0.15s, color 0.15s',
+              }}
+              title={pttRecording ? 'Recording… release to send' : 'Hold to record (push-to-talk)'}
+            >
+              🎙
+            </button>
+
+            {/* Textarea */}
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={handleInputChange}
+              onKeyDown={handleKeyDown}
+              placeholder="Message… or / for skills"
+              rows={1}
+              style={{
+                flex: 1,
+                background: 'var(--surf2)',
+                border: '1px solid var(--border)',
+                borderRadius: 20,
+                padding: '7px 14px',
+                color: 'var(--text)',
+                WebkitTextFillColor: 'var(--text)',
+                WebkitAppearance: 'none',
+                fontSize: 15,
+                resize: 'none',
+                minHeight: 36,
+                maxHeight: 120,
+                overflowY: 'auto',
+                lineHeight: 1.4,
+              }}
+            />
+
+            {/* Send button */}
+            <button
+              onClick={() => void handleSend()}
+              disabled={!input.trim() || sending}
+              style={{
+                width: 32,
+                height: 32,
+                borderRadius: '50%',
+                background: input.trim() ? 'var(--blue)' : 'var(--surf3)',
+                color: '#fff',
+                flexShrink: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 16,
+                transition: 'background 0.15s',
               }}
             >
-              ✕
+              ↑
             </button>
-          )}
-
-          {/* Textarea */}
-          <textarea
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Message… or / for skills"
-            rows={1}
-            style={{
-              flex: 1,
-              background: 'var(--surf2)',
-              border: '1px solid var(--border)',
-              borderRadius: 20,
-              padding: '7px 14px',
-              color: 'var(--text)',
-              fontSize: 15,
-              resize: 'none',
-              minHeight: 36,
-              maxHeight: 120,
-              overflowY: 'auto',
-              lineHeight: 1.4,
-            }}
-          />
-
-          {/* Send button */}
-          <button
-            onClick={() => void handleSend()}
-            disabled={!input.trim() || sending}
-            style={{
-              width: 32,
-              height: 32,
-              borderRadius: '50%',
-              background: input.trim() ? 'var(--blue)' : 'var(--surf3)',
-              color: '#fff',
-              flexShrink: 0,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontSize: 16,
-              transition: 'background 0.15s',
-            }}
-          >
-            ↑
-          </button>
+          </div>
         </div>
       )}
     </div>

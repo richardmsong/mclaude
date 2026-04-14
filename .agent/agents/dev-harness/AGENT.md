@@ -1,16 +1,21 @@
 ---
 name: dev-harness
-description: Implementation loop for any mclaude component. Reads the spec, audits gaps, implements production code + tests, and commits. Called after /feature-change has updated the spec. Run repeatedly — converges to fully-implemented, fully-tested.
+description: Implementation loop for any mclaude component. Reads the spec, audits gaps, implements production code + tests, and commits. Invoked by the master session after /spec-change has updated the spec. Run repeatedly — converges to fully-implemented, fully-tested.
+model: claude-sonnet-4-6
+maxTurns: 500
+tools:
+  - "*"
 ---
 
 # Dev Harness
 
-Implements and tests a component against its spec. Always called after `/feature-change` has updated the spec. Run repeatedly — each session audits what's implemented vs what the spec requires, implements the next gap, runs tests, and commits.
+Implements and tests a component against its spec. Always invoked after the master session has updated the spec via `/spec-change`. Run repeatedly — each session audits what's implemented vs what the spec requires, implements the next gap, runs tests, and commits.
 
 ## Usage
 
+This agent is invoked by the master session via the Agent tool:
 ```
-/dev-harness [component] [--audit-only] [--category <category>]
+Agent(subagent_type="dev-harness", prompt="/dev-harness <component> [--audit-only] [--category <category>]")
 ```
 
 **component**: `control-plane` | `session-agent` | `spa` | `cli` | `helm` | `all`
@@ -34,16 +39,30 @@ Read these in full before writing any code. The spec is the source of truth — 
 | `docs/plan-client-architecture.md` | Stores, viewmodels, protocol contract, accumulation algorithm |
 | `docs/ui-spec.md` | Screens, wireframes, components, interactions |
 | `docs/feature-list.md` | Feature IDs and platform support matrix |
-| `docs/spec-*.md` | Any feature-specific spec created by `/feature-change` |
+| `docs/spec-*.md` | Any feature-specific spec created by `/spec-change` |
 
 ---
 
 ## Spec Discipline
 
 - Implement exactly what the spec says. If behavior isn't in the spec, don't build it.
-- If you find something in the code that isn't in the spec, that's fine — don't remove it. Only new work must be spec-bounded.
 - If the spec is ambiguous, implement the minimal interpretation and note the ambiguity in the commit message.
-- **If you discover the spec is missing something required** — stop, go back to `/feature-change` to update the spec first, then return here.
+- **If you discover the spec is missing something required** — stop, notify the master session to run `/spec-change` to update the spec first, then re-invoke this agent.
+
+### Undocumented behavior in existing code
+
+When you find code behavior that isn't mentioned in the spec, make a judgment call before proceeding:
+
+**Clearly intentional** (deliberate design, fits the architecture, non-trivial to have been accidental):
+→ Stop. Tell the master session: "Found undocumented behavior in `<file>`: `<description>`. Looks intentional — run `/spec-change` to document it before I continue."
+→ Do not remove or change it. Do not proceed past this point until the spec is updated.
+
+**Clearly unintended** (looks like a bug, contradicts other spec'd behavior, obviously wrong):
+→ Treat it as a spec violation. Implement the spec-correct behavior and note the fix in the commit message.
+
+**Ambiguous** (could be either):
+→ Stop. Surface it to the user directly with your reasoning: "Found `<behavior>` in `<file>`. Could be intentional (because `<reason>`) or a bug (because `<reason>`). Which is it?"
+→ Wait for a decision before touching that code.
 
 ---
 
@@ -214,9 +233,9 @@ git worktree add worktrees/cli           harness/cli
 git worktree add worktrees/helm          harness/helm
 ```
 
-Spawn a mclaude session on each worktree with `/dev-harness <component>` as the initial prompt. Sessions run independently. When all reach audit-clean, open one PR per branch.
+Spawn a dev-harness agent on each worktree with `/dev-harness <component>` as the initial prompt. Agents run independently. When all reach audit-clean, open one PR per branch.
 
-If a session dies: re-create on the same worktree — it re-audits from last push and continues.
+If an agent dies: re-invoke on the same worktree — it re-audits from last push and continues.
 
 ---
 
@@ -230,3 +249,16 @@ Done when:
 5. At least one E2E test exists and passes
 
 Open a PR only when all five criteria are met.
+
+---
+
+## CRITICAL: Do Not Stop Early
+
+**You must keep implementing until ALL spec gaps are closed.** Do not stop after fixing one or two categories and report a summary. The loop (step 2 → 11) repeats until the re-audit in step 11 finds zero gaps.
+
+If you are running low on context, prioritize:
+1. Commit what you have so far (so progress is saved)
+2. Push to remote
+3. Continue implementing the next gap
+
+**Never return to the master session with gaps remaining.** The master session will re-invoke you if you hit a hard limit, but you must exhaust your capacity first. Every gap left open is a gap the user has to wait for another agent run to fix.

@@ -14,13 +14,17 @@ type NATSPermissions struct {
 }
 
 // UserSubjectPermissions returns the NATS pub/sub permissions for a user.
-// Clients may only operate on their own mclaude.{userId}.> namespace plus
-// the _INBOX.> namespace required for request/reply.
+// Clients may operate on their own mclaude.{userId}.> namespace, the
+// _INBOX.> namespace (required for request/reply), and the KV buckets
+// scoped to their user ID ($KV.mclaude-projects.{userId}.> and
+// $KV.mclaude-sessions.{userId}.>).
 func UserSubjectPermissions(userID string) NATSPermissions {
 	prefix := fmt.Sprintf("mclaude.%s.>", userID)
+	kvProjects := fmt.Sprintf("$KV.mclaude-projects.%s.>", userID)
+	kvSessions := fmt.Sprintf("$KV.mclaude-sessions.%s.>", userID)
 	return NATSPermissions{
 		PubAllow: []string{prefix, "_INBOX.>"},
-		SubAllow: []string{prefix, "_INBOX.>"},
+		SubAllow: []string{prefix, "_INBOX.>", kvProjects, kvSessions},
 	}
 }
 
@@ -111,6 +115,52 @@ func IssueUserJWT(userID string, accountKP nkeys.KeyPair, expirySecs int64) (jwt
 	}
 
 	return encoded, userSeed, nil
+}
+
+// IssueSessionAgentJWT issues a long-lived NATS user JWT for a session-agent,
+// scoped to mclaude.{userID}.> with no _INBOX.> (session-agents don't use
+// request/reply). No expiry — these are service credentials.
+//
+// Returns the encoded JWT string and the NKey seed. Both are written into the
+// K8s user-secrets Secret as a NATS credentials file.
+func IssueSessionAgentJWT(userID string, accountKP nkeys.KeyPair) (jwt string, seed []byte, err error) {
+	userKP, userSeed, err := GenerateUserNKey()
+	if err != nil {
+		return "", nil, fmt.Errorf("generate session-agent nkey: %w", err)
+	}
+
+	perms := SessionAgentSubjectPermissions(userID)
+
+	claims := natsjwt.NewUserClaims(userKP.PublicKey)
+	claims.Name = "session-agent-" + userID
+	// Expires = 0 means no expiry for session-agent service credentials.
+	claims.Permissions.Pub.Allow = perms.PubAllow
+	claims.Permissions.Sub.Allow = perms.SubAllow
+
+	encoded, err := claims.Encode(accountKP)
+	if err != nil {
+		return "", nil, fmt.Errorf("encode session-agent jwt: %w", err)
+	}
+
+	return encoded, userSeed, nil
+}
+
+// FormatNATSCredentials formats a NATS credentials file from a JWT and NKey seed.
+// The format is the standard NATS .creds file format understood by nats.UserCredentials().
+func FormatNATSCredentials(jwt string, seed []byte) []byte {
+	return []byte("-----BEGIN NATS USER JWT-----\n" +
+		jwt + "\n" +
+		"------END NATS USER JWT------\n" +
+		"\n" +
+		"************************* IMPORTANT *************************\n" +
+		"NKEY Seed printed below can be used to sign and prove identity.\n" +
+		"NKEYs are sensitive and should be treated as secrets.\n" +
+		"\n" +
+		"-----BEGIN USER NKEY SEED-----\n" +
+		string(seed) + "\n" +
+		"------END USER NKEY SEED------\n" +
+		"\n" +
+		"*************************************************************\n")
 }
 
 // DecodeUserJWT decodes and validates a NATS user JWT.

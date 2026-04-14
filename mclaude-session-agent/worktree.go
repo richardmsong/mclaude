@@ -35,3 +35,4 @@ func worktreeExists(sessions map[string]*SessionState, projectID, slug string) b
 	}
 	return false
 }
+

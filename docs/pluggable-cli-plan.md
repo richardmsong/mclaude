@@ -158,6 +158,168 @@ Reference these from `SKILL.md` so the agent knows they exist. They load on dema
 
 The `InitEvent.Skills` field carries the union of discovered skills regardless of backend. The SPA populates the skills picker from this list. Skill invocation is sent as a plain text message prefixed with `/` — all backends handle this identically (the user types `/deploy-server`, the session agent sends it as a user message, the CLI expands it).
 
+## Hooks
+
+### Cross-Tool Landscape
+
+No formal standard exists for hooks, but Claude Code's format has become the dominant pattern. Hooks are shell commands that fire on specific lifecycle events, with a stdin/stdout JSON protocol for context and control.
+
+| | Claude Code | Factory Droid | Cursor | Codex | Gemini CLI | Devin CLI |
+|---|---|---|---|---|---|---|
+| **Config location** | `settings.json` (`hooks:`) | `settings.json` (`hooks:`) | `hooks.json` (standalone) | `codex.json` (`hooks:`) | `settings.json` (JS functions) | N/A |
+| **Config format** | JSON array of `{matcher, hooks}` | JSON array of `{matcher, hooks}` | JSON array of `{event, command, ...}` | JSON object per event name | JavaScript function bodies | — |
+| **Event naming** | `snake_case` (`pre_tool_use`, `post_tool_use`, `notification`) | `snake_case` (identical to Claude Code) | `camelCase` (`preToolUse`, `postToolUse`, `onNotification`) | `snake_case` (`on_agent_message`, `on_tool_start`) | `snake_case` (`pre_tool_use`, `post_tool_use`) | — |
+| **Execution** | Shell command (any language) | Shell command (any language) | Shell command (any language) | Bash only | JavaScript function (in-process) | — |
+| **Matchers** | `tool_name`, `tool_input` regex, `event` type | `tool_name`, `tool_input` regex, `event` type | `tool_name`, `tool_input` regex | Event name only (no matchers) | `tool_name` regex | — |
+| **Context protocol** | JSON on stdin → JSON on stdout | JSON on stdin → JSON on stdout | JSON on stdin → JSON on stdout | Limited (env vars + args) | Function args (JS objects) | — |
+| **Exit code semantics** | 0=proceed, non-0=block | 0=proceed, non-0=block | 0=proceed, non-0=block | 0=proceed, non-0=block | Return value (truthy/falsy) | — |
+| **Output control** | `{"decision":"block","reason":"..."}` | `{"decision":"block","reason":"..."}` | `{"action":"block","message":"..."}` | No structured output | Return `{block: true, reason: "..."}` | — |
+
+### Hook Events
+
+| Event | Claude Code | Droid | Cursor | Codex | Gemini CLI |
+|---|---|---|---|---|---|
+| **Before tool execution** | `pre_tool_use` | `pre_tool_use` | `preToolUse` | `on_tool_start` | `pre_tool_use` |
+| **After tool execution** | `post_tool_use` | `post_tool_use` | `postToolUse` | `on_tool_end` | `post_tool_use` |
+| **Agent message** | `notification` | `notification` | `onNotification` | `on_agent_message` | — |
+| **Session start** | — | — | `onSessionStart` | `on_start` | — |
+| **Session end** | — | — | `onSessionEnd` | `on_finish` | — |
+| **Stop signal** | `stop` (post-only) | `stop` (post-only) | — | — | — |
+| **Subagent spawn** | `subagent` (post-only) | — | — | — | — |
+
+### stdin/stdout Protocol (Claude Code / Droid)
+
+Hooks receive context as JSON on stdin and can respond on stdout:
+
+**Pre-tool-use stdin:**
+```json
+{
+  "hook_type": "pre_tool_use",
+  "tool_name": "Bash",
+  "tool_input": {"command": "rm -rf /tmp/build"},
+  "session_id": "abc123"
+}
+```
+
+**Pre-tool-use stdout (to block):**
+```json
+{
+  "decision": "block",
+  "reason": "Destructive command detected — rm -rf is not allowed"
+}
+```
+
+**Post-tool-use stdin:**
+```json
+{
+  "hook_type": "post_tool_use",
+  "tool_name": "Bash",
+  "tool_input": {"command": "npm test"},
+  "tool_output": "Tests passed: 42/42",
+  "session_id": "abc123"
+}
+```
+
+Exit code 0 with no stdout = allow. Exit code non-0 = block with stderr as reason.
+
+### Key Observations
+
+1. **Claude Code and Droid are identical** — same config format, same events, same stdin/stdout protocol, same exit code semantics. This is because Droid explicitly adopted Claude Code's hooks format.
+2. **Cursor adopted the same wire protocol** but uses a separate `hooks.json` file and `camelCase` event names. Translation is trivial.
+3. **Codex is the simplest** — only 5 events, Bash-only execution, no structured output on stdout.
+4. **Gemini CLI uses JavaScript** instead of shell commands — hooks are functions in the settings file, not external processes. This is a fundamentally different execution model.
+5. **Devin has no hooks system** at all.
+6. **No vendor-neutral path exists** — hooks live in tool-specific settings files. There's no `.agent/hooks/` equivalent.
+
+### Hooks in the Pluggable CLI Architecture
+
+Hooks run locally (they're shell commands on the machine running the CLI). In the mclaude architecture:
+
+- **Laptop mode**: Hooks fire inside the CLI process. The session agent doesn't need to know about them — the driver's underlying CLI handles hook execution natively.
+- **K8s mode**: Hooks fire inside the session agent pod. The pod's filesystem has the project checkout, so hooks can read project state. Hook configs come from the project's settings file, which the session agent mounts.
+- **Cross-backend**: Since Claude Code and Droid use identical formats, hooks written for one work on the other. For Cursor, a thin translation layer (camelCase ↔ snake_case, `decision` ↔ `action`) would enable shared hooks.
+
+The canonical event schema doesn't need hook-specific events — hooks are transparent to the event stream. A `pre_tool_use` hook that blocks a tool call simply prevents the `tool_call` event from being emitted. A `post_tool_use` hook runs after the `tool_result` event.
+
+## Subagents
+
+### Cross-Tool Landscape
+
+No formal standard exists for subagents, but there's tight convergence on markdown + YAML frontmatter format across the major tools. Unlike skills (which have the Agent Skills standard and `.agent/skills/` vendor-neutral path), subagents have no formalized specification and no vendor-neutral discovery path.
+
+| | Claude Code | Factory Droid | Cursor | Codex | Devin CLI |
+|---|---|---|---|---|---|
+| **Config format** | Markdown + YAML frontmatter | Markdown + YAML frontmatter | Markdown + YAML frontmatter | TOML | N/A |
+| **Project path** | `.claude/agents/*.md` | `.factory/droids/*.md` | `.cursor/agents/*.md` | `.codex/agents/*.toml` | — |
+| **Personal path** | `~/.claude/agents/*.md` | `~/.factory/droids/*.md` | `~/.cursor/agents/*.md` | `~/.codex/agents/*.toml` | — |
+| **Required fields** | `name`, `description` | `name` (description recommended) | `name` (description recommended) | `name`, `description`, `developer_instructions` | — |
+| **System prompt** | Markdown body after frontmatter | Markdown body after frontmatter | Markdown body after frontmatter | `developer_instructions` TOML field | — |
+| **Model control** | `model: sonnet/opus/haiku/inherit/ID` | `model: inherit` or model ID | `model: fast/inherit/ID` | `model` TOML field | — |
+| **Tool restriction** | `tools: Read, Grep, Glob` or `disallowedTools` | `tools: read-only` (category) or array | `readonly: true` | Inherits from config | — |
+| **Permission mode** | `permissionMode: acceptEdits/auto/plan/...` | N/A | N/A | `sandbox_mode` TOML field | — |
+| **Hooks** | `hooks:` in frontmatter | N/A | N/A | N/A | — |
+| **Skills preloading** | `skills: [api-conventions]` | N/A | N/A | `skills.config` TOML | — |
+| **MCP servers** | `mcpServers:` in frontmatter | N/A | N/A | `mcp_servers` TOML | — |
+| **Memory** | `memory: user/project/local` | N/A | N/A | N/A | — |
+| **Background mode** | `background: true` | N/A | `is_background: true` | N/A | — |
+| **Isolation** | `isolation: worktree` | N/A | N/A | N/A | — |
+| **Cross-tool discovery** | Own path only | Own path + imports from `.claude/agents/` | `.cursor/agents/` + `.claude/agents/` + `.codex/agents/` | Own path only | — |
+| **Built-in agents** | Explore, Plan, general-purpose | None | Explore, Bash, Browser | default, worker, explorer | — |
+| **Nesting** | No (subagents cannot spawn subagents) | No | Yes (since 2.5, tree of subagents) | Yes (`agents.max_depth`) | — |
+
+### Subagent Frontmatter Fields
+
+The markdown + YAML frontmatter format is shared across Claude Code, Droid, and Cursor. Here's the union of all fields:
+
+| Field | Claude Code | Droid | Cursor | Purpose |
+|---|---|---|---|---|
+| `name` | Required | Required | Required | Identifier. Lowercase + hyphens. |
+| `description` | Required | Recommended | Recommended | When to spawn this agent. Used for auto-selection. |
+| `model` | Optional | Optional | Optional | Model alias or ID. `inherit` = use parent's model. |
+| `tools` | Optional | Optional | N/A | Allow-list of tools. Can be categories (`read-only`) or specific names. |
+| `disallowedTools` | Optional | N/A | N/A | Deny-list of tools (inverse of `tools`). |
+| `readonly` | N/A | N/A | Optional | Shorthand for read-only tool access. |
+| `permissionMode` | Optional | N/A | N/A | `acceptEdits`, `auto`, `plan`, `bypassPermissions`. |
+| `hooks` | Optional | N/A | N/A | Hook overrides specific to this agent. |
+| `skills` | Optional | N/A | N/A | Skills to preload when this agent runs. |
+| `mcpServers` | Optional | N/A | N/A | MCP servers scoped to this agent. |
+| `memory` | Optional | N/A | N/A | Memory scope: `user`, `project`, or `local`. |
+| `background` | Optional | N/A | Optional | Run without streaming output to the parent. |
+| `isolation` | Optional | N/A | N/A | `worktree` = run in a separate git worktree. |
+| `is_background` | N/A | N/A | Optional | Cursor's equivalent of `background`. |
+
+### Key Observations
+
+1. **Three of four use the same format** — Claude Code, Droid, and Cursor all use markdown + YAML frontmatter with the markdown body as the system prompt. Codex is the outlier with TOML.
+2. **Claude Code is the richest** — it has hooks, skills preloading, MCP server scoping, persistent memory, worktree isolation, and permission modes per subagent. Droid and Cursor are much simpler (name + description + model + tools).
+3. **Cursor does cross-tool discovery** — it scans `.cursor/agents/`, `.claude/agents/`, AND `.codex/agents/`. This is the most aggressive interop approach.
+4. **Droid imports from Claude Code** — the `/droids` command can import from `.claude/agents/` with automatic tool/model mapping, acknowledging Claude Code as the upstream format.
+5. **No vendor-neutral path** — unlike skills where `.agent/skills/` is the standard, there's no `.agent/agents/` path. Each tool looks in its own directory (with Cursor scanning others as a courtesy).
+6. **Devin has no subagent system** — consistent with its lack of hooks.
+7. **Nesting varies** — Claude Code and Droid prohibit subagent nesting (flat hierarchy). Cursor (since 2.5) and Codex allow tree-shaped subagent hierarchies with configurable depth limits.
+
+### Subagents in the Pluggable CLI Architecture
+
+Subagents are managed by the CLI backend, not the session agent. The driver doesn't need to understand subagent internals — it just needs to relay the events:
+
+- **Claude Code**: Subagent events carry `parentToolUseId` — the canonical `MessageEvent` and `ToolCallEvent` already have this field. The SPA can render nested agent trees.
+- **Droid**: Missions are Droid's equivalent of complex multi-agent work, but they're architecturally different (server-side orchestration, not client-side spawning). Mission events go through `backendSpecific`.
+- **Cursor**: Tree-shaped subagent hierarchies would need `parentAgentId` tracking if we ever build a Cursor driver.
+- **Devin/Codex**: No subagent streaming events to handle.
+
+The `DriverCapabilities.HasSubagents` flag tells the SPA whether to show subagent nesting in the conversation view. Only `claude_code` sets this to `true` currently.
+
+### Cross-Tool Subagent Compatibility
+
+For projects that want subagents to work across multiple tools, the pragmatic approach is:
+
+1. **Write agents in Claude Code format** (`.claude/agents/*.md`) — it's the richest and most widely recognized.
+2. **Cursor picks them up automatically** via cross-tool discovery.
+3. **Droid imports them** via its `.claude/agents/` compatibility path.
+4. **Codex requires manual conversion** to TOML — the format gap is too large for automatic translation.
+
+If a vendor-neutral `.agent/agents/` path emerges (following the Agent Skills precedent), migration would be straightforward since the file format is already identical across Claude Code, Droid, and Cursor.
+
 ## Canonical Event Schema
 
 The driver translates native protocol events into a canonical schema that flows through NATS. This is NOT Claude Code's stream-json — it's a superset designed to represent all three protocols.
@@ -687,3 +849,9 @@ See [Managing Skills](#managing-skills) for add/edit/remove procedures.
 3. **Model switching mid-session**: Claude Code supports `set_model` control request. Droid supports `updateSettings`. Devin supports `session/set_config_option`. Should model switching be part of the canonical `CLIDriver` interface, or handled per-backend?
 
 4. **Gemini CLI**: Gemini CLI is adding `--output-format stream-json` (google-gemini/gemini-cli#8203) and has experimental ACP support (`--experimental-acp`). Wait for ACP to stabilize, or write a GeminiDriver against stream-json?
+
+5. **Hook forwarding in K8s**: Hooks run inside the CLI process (or session agent pod). Should the session agent expose hook execution results as canonical events for observability? Currently hooks are transparent — a blocked tool call simply never emits a `tool_call` event. But operators may want audit logs of hook decisions.
+
+6. **Subagent vendor-neutral path**: The Agent Skills standard established `.agent/skills/` as a vendor-neutral path. Should mclaude advocate for `.agent/agents/` as a vendor-neutral subagent path? Cursor's cross-tool discovery shows demand, but no tool scans `.agent/agents/` today.
+
+7. **Cross-tool hook compatibility**: Claude Code and Droid hooks are identical, Cursor is trivially translatable (camelCase ↔ snake_case). Should the session agent normalize hook configs across backends, or leave hooks as backend-specific config?

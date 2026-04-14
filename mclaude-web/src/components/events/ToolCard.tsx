@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import type { ToolUseBlock } from '@/types'
+import type { ToolUseBlock, Turn } from '@/types'
 import { DiffView } from './DiffView'
+import { EventDetailModal } from './EventDetailModal'
 
 const TOOL_ICONS: Record<string, string> = {
   Bash: '💻',
@@ -18,18 +19,85 @@ function toolIcon(name: string): string {
   return TOOL_ICONS[name] ?? '🛠'
 }
 
-// Minimal bash syntax highlighting
+// Bash keywords that should be highlighted in purple
+const BASH_KEYWORDS = new Set([
+  'if', 'then', 'else', 'elif', 'fi',
+  'for', 'do', 'done', 'while', 'until',
+  'case', 'esac', 'in',
+  'function', 'return', 'exit', 'break', 'continue',
+  'echo', 'printf', 'export', 'local', 'readonly', 'declare',
+  'cd', 'pwd', 'ls', 'cp', 'mv', 'rm', 'mkdir', 'touch',
+  'grep', 'sed', 'awk', 'cut', 'sort', 'uniq', 'head', 'tail',
+  'cat', 'find', 'xargs', 'tr', 'wc',
+  'true', 'false', 'test', 'source', '.', 'exec',
+])
+
+// Bash operators — pipe, redirects, logical
+const BASH_OPERATORS = /^(\|\||&&|[|&;><]|>>|<<|2>|2>>)$/
+
+// Tokenize a bash command into typed segments for syntax highlighting
+type BashToken = { kind: 'command' | 'keyword' | 'operator' | 'string' | 'flag' | 'variable' | 'plain'; text: string }
+
+function tokenizeBash(cmd: string): BashToken[] {
+  // Split preserving whitespace, strings, operators, flags, variables, and words
+  const re = /("(?:[^"\\]|\\.)*"|'[^']*'|`[^`]*`|\$\{[^}]*\}|\$\w+|&&|\|\||>>|<<|2>>|2>|[|&;><]|--?\w[\w-]*|\S+)/g
+  const tokens: BashToken[] = []
+  let lastIndex = 0
+  let isFirst = true
+  let match: RegExpExecArray | null
+
+  while ((match = re.exec(cmd)) !== null) {
+    // Add whitespace before token
+    if (match.index > lastIndex) {
+      tokens.push({ kind: 'plain', text: cmd.slice(lastIndex, match.index) })
+    }
+    lastIndex = match.index + match[0].length
+    const t = match[0]
+
+    if (t.startsWith('"') || t.startsWith("'") || t.startsWith('`')) {
+      tokens.push({ kind: 'string', text: t })
+      isFirst = false
+    } else if (t.startsWith('$')) {
+      tokens.push({ kind: 'variable', text: t })
+    } else if (BASH_OPERATORS.test(t)) {
+      tokens.push({ kind: 'operator', text: t })
+      isFirst = true // token after operator is a new command
+    } else if (t.startsWith('--') || (t.startsWith('-') && t.length > 1 && /^-[a-zA-Z]/.test(t))) {
+      tokens.push({ kind: 'flag', text: t })
+    } else if (isFirst) {
+      tokens.push({ kind: BASH_KEYWORDS.has(t) ? 'keyword' : 'command', text: t })
+      isFirst = false
+    } else if (BASH_KEYWORDS.has(t)) {
+      tokens.push({ kind: 'keyword', text: t })
+    } else {
+      tokens.push({ kind: 'plain', text: t })
+    }
+  }
+  if (lastIndex < cmd.length) {
+    tokens.push({ kind: 'plain', text: cmd.slice(lastIndex) })
+  }
+  return tokens
+}
+
+const TOKEN_COLORS: Record<BashToken['kind'], string | undefined> = {
+  command: 'var(--blue)',
+  keyword: 'var(--purple)',
+  operator: 'var(--orange)',
+  string: 'var(--green)',
+  flag: '#57c0ff', // cyan
+  variable: '#ffd60a', // yellow
+  plain: undefined,
+}
+
 function highlightBash(cmd: string): React.ReactNode {
-  // Highlight first word as command, flags as cyan, strings as green
-  const parts = cmd.split(/(\s+|"[^"]*"|'[^']*'|--?\w+|\$\w+)/g)
+  const tokens = tokenizeBash(cmd)
   return (
     <>
-      {parts.map((part, i) => {
-        if (i === 0) return <span key={i} style={{ color: 'var(--blue)' }}>{part}</span>
-        if (part.startsWith('"') || part.startsWith("'")) return <span key={i} style={{ color: 'var(--green)' }}>{part}</span>
-        if (part.startsWith('--') || part.startsWith('-')) return <span key={i} style={{ color: '#57c0ff' }}>{part}</span>
-        if (part.startsWith('$')) return <span key={i} style={{ color: 'var(--orange)' }}>{part}</span>
-        return <span key={i}>{part}</span>
+      {tokens.map((tok, i) => {
+        const color = TOKEN_COLORS[tok.kind]
+        return color
+          ? <span key={i} style={{ color }}>{tok.text}</span>
+          : <span key={i}>{tok.text}</span>
       })}
     </>
   )
@@ -73,15 +141,21 @@ function formatInput(toolName: string, input: unknown): { summary: string; isDif
 
 interface ToolCardProps {
   block: ToolUseBlock
+  turn?: Turn
 }
 
-export function ToolCard({ block }: ToolCardProps) {
+export function ToolCard({ block, turn }: ToolCardProps) {
   const [showDetail, setShowDetail] = useState(false)
+  const [showModal, setShowModal] = useState(false)
   const { summary, isDiff, diff } = formatInput(block.name, block.fullInput)
   const isBash = block.name === 'Bash' || block.name === '!'
   const isError = block.result?.isError
 
   return (
+    <>
+    {showModal && turn && (
+      <EventDetailModal block={block} turn={turn} onClose={() => setShowModal(false)} />
+    )}
     <div style={{
       background: 'var(--surf)',
       border: '1px solid var(--border)',
@@ -89,9 +163,9 @@ export function ToolCard({ block }: ToolCardProps) {
       overflow: 'hidden',
       margin: '4px 0',
     }}>
-      {/* Tool header + body */}
+      {/* Tool header + body — tap to open detail modal */}
       <div
-        onClick={() => setShowDetail(s => !s)}
+        onClick={() => turn ? setShowModal(true) : setShowDetail(s => !s)}
         style={{
           padding: '8px 12px',
           cursor: 'pointer',
@@ -165,5 +239,6 @@ export function ToolCard({ block }: ToolCardProps) {
         </div>
       )}
     </div>
+    </>
   )
 }

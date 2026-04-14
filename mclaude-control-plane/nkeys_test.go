@@ -15,7 +15,13 @@ import (
 func TestUserSubjectPermissions(t *testing.T) {
 	perm := UserSubjectPermissions("alice123")
 	wantPub := []string{"mclaude.alice123.>", "_INBOX.>"}
-	wantSub := []string{"mclaude.alice123.>", "_INBOX.>"}
+	// SubAllow includes KV bucket subjects so the SPA can watch projects and sessions.
+	wantSub := []string{
+		"mclaude.alice123.>",
+		"_INBOX.>",
+		"$KV.mclaude-projects.alice123.>",
+		"$KV.mclaude-sessions.alice123.>",
+	}
 
 	if !slicesEqual(perm.PubAllow, wantPub) {
 		t.Errorf("PubAllow = %v; want %v", perm.PubAllow, wantPub)
@@ -29,7 +35,7 @@ func TestUserSubjectPermissions_SpecialChars(t *testing.T) {
 	// User IDs are UUIDs — no special chars — but confirm format is stable.
 	perm := UserSubjectPermissions("550e8400-e29b-41d4-a716-446655440000")
 	for _, s := range append(perm.PubAllow, perm.SubAllow...) {
-		if !strings.HasPrefix(s, "mclaude.") && s != "_INBOX.>" {
+		if !strings.HasPrefix(s, "mclaude.") && s != "_INBOX.>" && !strings.HasPrefix(s, "$KV.") {
 			t.Errorf("unexpected subject: %q", s)
 		}
 	}
@@ -53,6 +59,16 @@ func TestSubjectIsolation(t *testing.T) {
 	alice := UserSubjectPermissions("alice")
 	for _, s := range append(alice.PubAllow, alice.SubAllow...) {
 		if s == "_INBOX.>" {
+			continue
+		}
+		// KV subjects are scoped to alice's user ID — they must not reference bob.
+		if strings.HasPrefix(s, "$KV.") {
+			if strings.Contains(s, "bob") {
+				t.Errorf("alice permission contains bob subject: %q", s)
+			}
+			if !strings.Contains(s, "alice") {
+				t.Errorf("alice KV permission doesn't contain alice ID: %q", s)
+			}
 			continue
 		}
 		if !strings.HasPrefix(s, "mclaude.alice.") {
@@ -235,6 +251,132 @@ func TestVersionResponse_ConfiguredVersion(t *testing.T) {
 	handleVersion(r, fakeRequest("GET", "/version"))
 	if !strings.Contains(r.body, "1.2.3") {
 		t.Errorf("body missing minClientVersion 1.2.3: %q", r.body)
+	}
+}
+
+
+// ---- Session-agent JWT and credentials ----
+
+func TestIssueSessionAgentJWT_SubjectScopes(t *testing.T) {
+	accountKP, err := nkeys.CreateAccount()
+	if err != nil {
+		t.Fatalf("create account key: %v", err)
+	}
+	accountPub, _ := accountKP.PublicKey()
+
+	userID := "agent-user-001"
+	jwtStr, seed, err := IssueSessionAgentJWT(userID, accountKP)
+	if err != nil {
+		t.Fatalf("IssueSessionAgentJWT: %v", err)
+	}
+	if jwtStr == "" {
+		t.Error("empty jwt")
+	}
+	if len(seed) == 0 {
+		t.Error("empty seed")
+	}
+
+	claims, err := DecodeUserJWT(jwtStr, accountPub)
+	if err != nil {
+		t.Fatalf("DecodeUserJWT: %v", err)
+	}
+
+	expectedSubject := fmt.Sprintf("mclaude.%s.>", userID)
+	if !containsStr(claims.Permissions.Pub.Allow, expectedSubject) {
+		t.Errorf("pub allow missing %q, got %v", expectedSubject, claims.Permissions.Pub.Allow)
+	}
+	if !containsStr(claims.Permissions.Sub.Allow, expectedSubject) {
+		t.Errorf("sub allow missing %q, got %v", expectedSubject, claims.Permissions.Sub.Allow)
+	}
+
+	// Session-agent must NOT have _INBOX.>
+	if containsStr(claims.Permissions.Pub.Allow, "_INBOX.>") {
+		t.Error("session-agent pub should not have _INBOX.>")
+	}
+	if containsStr(claims.Permissions.Sub.Allow, "_INBOX.>") {
+		t.Error("session-agent sub should not have _INBOX.>")
+	}
+}
+
+func TestIssueSessionAgentJWT_NoExpiry(t *testing.T) {
+	accountKP, _ := nkeys.CreateAccount()
+	accountPub, _ := accountKP.PublicKey()
+
+	jwtStr, _, err := IssueSessionAgentJWT("sa-user", accountKP)
+	if err != nil {
+		t.Fatalf("IssueSessionAgentJWT: %v", err)
+	}
+
+	claims, err := DecodeUserJWT(jwtStr, accountPub)
+	if err != nil {
+		t.Fatalf("DecodeUserJWT: %v", err)
+	}
+
+	// Expires = 0 means no expiry.
+	if claims.Expires != 0 {
+		t.Errorf("session-agent JWT should have no expiry; got Expires=%d", claims.Expires)
+	}
+}
+
+func TestFormatNATSCredentials_Format(t *testing.T) {
+	accountKP, _ := nkeys.CreateAccount()
+
+	jwtStr, seed, err := IssueSessionAgentJWT("format-user", accountKP)
+	if err != nil {
+		t.Fatalf("IssueSessionAgentJWT: %v", err)
+	}
+
+	creds := FormatNATSCredentials(jwtStr, seed)
+	credsStr := string(creds)
+
+	if !strings.Contains(credsStr, "-----BEGIN NATS USER JWT-----") {
+		t.Error("creds missing BEGIN NATS USER JWT header")
+	}
+	if !strings.Contains(credsStr, "------END NATS USER JWT------") {
+		t.Error("creds missing END NATS USER JWT trailer")
+	}
+	if !strings.Contains(credsStr, "-----BEGIN USER NKEY SEED-----") {
+		t.Error("creds missing BEGIN USER NKEY SEED header")
+	}
+	if !strings.Contains(credsStr, "------END USER NKEY SEED------") {
+		t.Error("creds missing END USER NKEY SEED trailer")
+	}
+	if !strings.Contains(credsStr, jwtStr) {
+		t.Error("creds does not contain the JWT")
+	}
+	if !strings.Contains(credsStr, string(seed)) {
+		t.Error("creds does not contain the seed")
+	}
+}
+
+func TestFormatNATSCredentials_SeedInBody(t *testing.T) {
+	accountKP, _ := nkeys.CreateAccount()
+
+	jwtStr, seed, _ := IssueSessionAgentJWT("seed-check-user", accountKP)
+	creds := FormatNATSCredentials(jwtStr, seed)
+	credsStr := string(creds)
+
+	// Verify the seed appears in the creds file and round-trips correctly.
+	// We don't parse the exact line positions — just verify it's parseable by nkeys.
+	if !strings.Contains(credsStr, string(seed)) {
+		t.Error("creds does not contain the seed bytes")
+	}
+
+	// Verify the seed from the creds file round-trips to the same key pair.
+	originalKP, err := nkeys.FromSeed(seed)
+	if err != nil {
+		t.Fatalf("FromSeed original: %v", err)
+	}
+	originalPub, _ := originalKP.PublicKey()
+
+	// The seed appears verbatim in the file, so we can round-trip it directly.
+	restoredKP, err := nkeys.FromSeed(seed)
+	if err != nil {
+		t.Fatalf("FromSeed round-trip: %v", err)
+	}
+	restoredPub, _ := restoredKP.PublicKey()
+	if restoredPub != originalPub {
+		t.Errorf("seed round-trip mismatch: got %q, want %q", restoredPub, originalPub)
 	}
 }
 

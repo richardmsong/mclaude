@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestParseEventType(t *testing.T) {
@@ -88,7 +89,7 @@ func TestParseEventType(t *testing.T) {
 }
 
 func TestInitEventParsing(t *testing.T) {
-	line := `{"type":"system","subtype":"init","session_id":"s1","tools":["Bash","Read","Edit"],"mcp_servers":[],"model":"claude-sonnet-4-6","permissionMode":"managed"}`
+	line := `{"type":"system","subtype":"init","session_id":"s1","skills":["commit","review-pr"],"tools":["Bash","Read","Edit"],"agents":["general-purpose","Explore"],"mcp_servers":[],"model":"claude-sonnet-4-6","permissionMode":"managed"}`
 	var ev initEvent
 	if err := json.Unmarshal([]byte(line), &ev); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -105,6 +106,56 @@ func TestInitEventParsing(t *testing.T) {
 	if len(ev.Tools) != 3 {
 		t.Errorf("tools count: got %d, want 3", len(ev.Tools))
 	}
+	if len(ev.Skills) != 2 {
+		t.Errorf("skills count: got %d, want 2", len(ev.Skills))
+	}
+	if len(ev.Agents) != 2 {
+		t.Errorf("agents count: got %d, want 2", len(ev.Agents))
+	}
+}
+
+// TestInitEventPopulatesCapabilities verifies that a session's Capabilities
+// struct is populated with skills, tools, and agents from the init event.
+func TestInitEventPopulatesCapabilities(t *testing.T) {
+	sess, _, kc := startTestSession(t, "simple_message.jsonl", "sess-caps")
+
+	// Wait for KV write with model set (init event processed).
+	if !kc.waitFor(func(states []SessionState) bool {
+		for _, s := range states {
+			if s.Model != "" {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second) {
+		t.Fatal("KV never written after init event")
+	}
+
+	// Find the first KV state that has Capabilities set.
+	var found *SessionState
+	for _, s := range kc.all() {
+		s := s
+		if s.Model != "" {
+			found = &s
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("no KV state with model set")
+	}
+
+	if len(found.Capabilities.Skills) != 2 {
+		t.Errorf("skills: got %v, want [commit review-pr]", found.Capabilities.Skills)
+	}
+	if len(found.Capabilities.Tools) != 6 {
+		t.Errorf("tools: got %v, want 6 tools", found.Capabilities.Tools)
+	}
+	if len(found.Capabilities.Agents) != 2 {
+		t.Errorf("agents: got %v, want [general-purpose Explore]", found.Capabilities.Agents)
+	}
+
+	// Suppress unused sess variable warning.
+	_ = sess
 }
 
 func TestStateChangedEventParsing(t *testing.T) {

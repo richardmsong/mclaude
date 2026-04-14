@@ -105,6 +105,9 @@ controlPlane:
     logLevel: info
     jwtExpirySeconds: 28800
     jwtRefreshThresholdSeconds: 900
+    ## devSeed: when true, creates dev@mclaude.local/dev on startup if no user exists.
+    ## Never enable in production.
+    devSeed: false
   ## Name of existing Secret containing:
   ##   admin-token       — break-glass bearer token
   ##   nats-operator-jwt — NATS operator JWT
@@ -143,9 +146,8 @@ spa:
   service:
     type: ClusterIP
     port: 80
-  ## Override containerPort (defaults to service.port). Set for e2e stubs
-  ## that can't bind port 80 without root.
-  containerPort: 80
+  ## Container port — nginx runs as non-root on 8080; service maps 80→8080.
+  containerPort: 8080
   ## Override container command (e.g. for e2e stubs)
   command: []
 
@@ -160,7 +162,7 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-body-size: "8m"
-  ## Hostname for the platform (e.g. mclaude.example.com)
+  ## Hostname for the platform (e.g. preview-foo.mclaude.internal)
   host: ""
   tls: []
   # tls:

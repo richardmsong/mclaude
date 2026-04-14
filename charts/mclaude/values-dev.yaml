@@ -24,6 +24,9 @@ controlPlane:
   ## Migrate() runs on startup — no init container needed
   migrations:
     enabled: false
+  config:
+    ## Create dev@mclaude.local / dev on first startup
+    devSeed: true
   probe:
     liveness:
       path: /healthz

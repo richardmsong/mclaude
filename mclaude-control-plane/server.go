@@ -2,6 +2,8 @@ package main
 
 import (
 	"net/http"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // RegisterRoutes wires all HTTP handlers onto the given mux.
@@ -54,4 +56,10 @@ func (s *Server) adminAuthMiddleware(next http.Handler) http.Handler {
 // handleMetrics serves Prometheus metrics from MetricsRegistry.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	metricsHandler().ServeHTTP(w, r)
+}
+
+// k8sClientWrapper is nil-safe: it holds a controller-runtime client.Client.
+// When nil, MCProject CR creation is skipped (not running in cluster).
+type k8sClientWrapper struct {
+	c client.Client
 }
