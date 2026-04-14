@@ -1,5 +1,6 @@
 $ORIGIN mclaude.internal.
 @   300 IN SOA dns.mclaude.internal. admin.mclaude.internal. 1 3600 900 604800 300
 @   300 IN NS  dns.mclaude.internal.
+@   300 IN A   TAILSCALE_IP_PLACEHOLDER
 dns 300 IN A   TAILSCALE_IP_PLACEHOLDER
 *   300 IN A   TAILSCALE_IP_PLACEHOLDER
