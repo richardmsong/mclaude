@@ -20,6 +20,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 func main() {
@@ -93,6 +94,8 @@ func main() {
 		restCfg := ctrl.GetConfigOrDie()
 		mgr, err = ctrl.NewManager(restCfg, ctrl.Options{
 			Scheme: scheme,
+			Metrics: metricsserver.Options{BindAddress: "0"}, // disabled — control-plane has its own metrics
+			HealthProbeBindAddress:                    "0",   // disabled — control-plane has its own health probes
 		})
 		if err != nil {
 			logger.Fatal().Err(err).Msg("create controller-runtime manager")
