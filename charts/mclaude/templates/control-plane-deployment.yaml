@@ -103,6 +103,13 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.controlPlane.existingSecret }}
                   key: nats-operator-seed
+            {{- if .Values.controlPlane.devOAuthToken }}
+            - name: DEV_OAUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.controlPlane.existingSecret }}
+                  key: dev-oauth-token
+            {{- end }}
           livenessProbe:
             httpGet:
               path: {{ .Values.controlPlane.probe.liveness.path }}
