@@ -6,7 +6,7 @@ Preview deployments need hostnames that resolve on any Tailnet device, including
 on cellular. This subsystem runs a CoreDNS container on the k3d host, bound to the
 host's Tailscale IP. It serves zone `mclaude.internal.` with a wildcard A record pointing
 to that same IP. Tailscale split DNS routes all `*.mclaude.internal` queries from any
-Tailnet device to this server — no public DNS dependency, no sslip.io.
+Tailnet device to this server — no public DNS dependency, no wildcard DNS workarounds.
 
 ## Spec
 
@@ -86,7 +86,7 @@ host's Tailscale IP; Traefik routes by hostname to the correct preview release.
 PREVIEW_HOST="preview-${BRANCH_SLUG}.mclaude.internal"
 ```
 
-No Tailscale IP lookup, no sslip.io.
+No Tailscale IP lookup, no external DNS services.
 
 ### Helm chart changes
 

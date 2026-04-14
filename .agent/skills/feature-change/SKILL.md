@@ -1,6 +1,7 @@
 ---
 name: feature-change
-description: Universal entry point for any change to the mclaude app — new features, bug fixes, refactors, config changes, anything. Always starts with the spec. If the spec already describes correct behavior, skip to the dev-harness agent. If not, run /spec-change first.
+description: Universal entry point for any change to the mclaude app — new features, bug fixes, refactors, config changes, anything. Reads design docs as the spec. Runs dev-harness → spec-evaluator loop until CLEAN. Handles spec backpressure via /plan-feature rules.
+user_invocable: true
 ---
 
 # Feature Change
@@ -23,143 +24,83 @@ Examples:
 
 ---
 
-## The Loop
+## Design docs are the spec
 
-```
-1. Read the relevant spec docs
-2. Determine the spec relationship:
-<<<<<<< HEAD
-   A. Spec is correct, code is wrong (bug)      → skip to step 5
-   B. Spec doesn't describe this yet (feature)  → run /spec-change (step 3)
-   C. Spec needs updating (behavior change)     → run /spec-change (step 3)
-   D. Spec and code will both change (refactor) → run /spec-change if behavior changes, otherwise skip to step 5
-3. /spec-change <description> — updates spec docs and commits them
-4. (handled by /spec-change)
-5. Invoke the dev-harness agent for each affected component:
-   Agent(subagent_type="dev-harness", prompt="<component> — <brief description>")
-```
+Design docs (`docs/plan-*.md`) are the canonical spec for mclaude. There is no separate spec layer.
 
-This order is mandatory. The spec always reflects intended behavior. If the code doesn't match the spec, the code is wrong — fix the code. If the spec doesn't describe the desired behavior, run `/spec-change` first, then invoke the dev-harness agent.
-=======
-   A. Spec is correct, code is wrong (bug)     → skip to step 5
-   B. Spec doesn't describe this yet (feature) → update spec first (step 3)
-   C. Spec needs updating (behavior change)    → update spec first (step 3)
-   D. Spec and code will both change (refactor) → update spec if behavior changes, otherwise skip to step 5
-3. Update the spec doc (see below)
-4. Commit: spec only, no code
-   git commit -m "spec(<area>): <what changed and why>"
-5. /dev-harness <component> for each affected component
-```
-
-This order is mandatory. The spec always reflects intended behavior. If the code doesn't match the spec, the code is wrong — fix the code. If the spec doesn't describe the desired behavior, fix the spec first, then fix the code.
->>>>>>> origin/main
-
----
-
-## Step 1 — Read the relevant spec
-
-| What's changing | Read these |
+| What's changing | Read these design docs |
 |----------------|-----------|
 | Control-plane (auth, provisioning, NATS subjects, HTTP endpoints) | `docs/plan-k8s-integration.md` |
 | Session-agent (session lifecycle, Claude process, KV, failure modes) | `docs/plan-k8s-integration.md` |
 | SPA / client (screens, stores, viewmodels, NATS pub/sub) | `docs/ui-spec.md`, `docs/plan-client-architecture.md` |
-| Cross-cutting (new NATS subject, new KV bucket, new shared API) | both `plan-k8s-integration.md` and `plan-client-architecture.md` |
-| New subsystem with no existing doc | Create `docs/spec-<name>.md` (see below) |
+| Cross-cutting (new NATS subject, new KV bucket, new shared API) | `docs/plan-k8s-integration.md` + `docs/plan-client-architecture.md` |
+| Feature-specific subsystem | `docs/plan-<feature>.md` |
 
-Always read the full section, not just the specific line. Context matters.
-
----
-
-## Step 2 — Spec relationship
-
-**A — Bug (spec correct, code wrong):**
-The spec describes the desired behavior. The code doesn't match. Skip to step 5 — the spec doesn't need updating, just the code. Example: spec says `natsUrl` is omitted when empty, code was returning the internal cluster URL.
-
-**B — New feature (spec missing):**
-The spec doesn't mention this at all. You must add it before writing code. Example: `projects.create → control-plane` wasn't in the spec, it needed to be added.
-
-**C — Behavior change (spec needs updating):**
-The spec describes the old behavior. You're changing the behavior. Update the spec to describe the new behavior, then update the code. Example: changing JWT expiry from 8h to 24h needs a spec update if expiry is documented.
-
-**D — Refactor (behavior unchanged):**
-The spec describes the correct behavior already. The code is restructured but externally identical. Skip to step 5 if no behavior changes. If the refactor exposes a spec gap (something was undocumented), add it now.
+Also check `docs/feature-list.md` for feature IDs and platform support matrix.
 
 ---
 
-## Step 3 — Update or create the spec
+## The Loop
 
-**Which doc to update:**
-
-| Doc | Owns |
-|-----|------|
-| `docs/plan-k8s-integration.md` | NATS subjects, KV schema, session lifecycle, provisioning, failure modes, HTTP endpoints |
-| `docs/plan-client-architecture.md` | Stores, viewmodels, protocol contract, accumulation algorithm, NATS pub/sub from client |
-| `docs/ui-spec.md` | Screens, wireframes, fields, labels, interactions, visual states |
-| `docs/feature-list.md` | Feature IDs and platform support matrix |
-
-**If the change doesn't fit any existing doc** (new subsystem, new protocol, new integration), create `docs/spec-<name>.md`:
-
-```markdown
-# <Feature Name>
-
-## Overview
-One paragraph: what this is, why it exists, what problem it solves.
-
-## Spec
-
-[Subjects, endpoints, payloads, schemas, behavior, failure modes.
- Write exactly what will be built. No future work.]
-
-## Component Responsibilities
-
-| Component | Responsibility |
-|-----------|---------------|
+```
+1. Read the relevant design docs
+2. Classify the change:
+   A. Design doc correct, code wrong (bug)         → skip to step 4
+   B. No design doc covers this (new feature)       → run /plan-feature first
+   C. Design doc needs updating (behavior change)   → update design doc (step 3)
+   D. Refactor (behavior unchanged)                 → skip to step 4
+3. Update the design doc, commit spec separately
+4. dev-harness → spec-evaluator loop per component (until CLEAN)
+5. Validate (SPA changes only)
 ```
 
-Then add a one-line entry to `docs/feature-list.md`.
-
-**Rules for editing any spec doc:**
-
-Adding something:
-- Add it to the right section with full payload/schema/wireframe
-- Describe inputs, outputs, error cases, failure modes
-- If it's a NATS subject: add to the subjects table with the owning component
-- If it's a UI element: add to the wireframe and add a behavior bullet
-
-Removing something:
-- Delete it entirely — no stale text, no "deprecated" markers
-- Remove every reference to it across all spec docs
-
-Changing something:
-- Update in place — old text out, new text in
-- Update every place it appears
-
-Never:
-- Leave spec and implementation out of sync
-- Write implementation details (function names, file paths) in the spec
-- Describe future/intended behavior — only what will be built now
-
-**UI-specific rules** (when editing `docs/ui-spec.md`):
-- Wireframes: update ASCII art to match what will be rendered exactly
-- Every interactive element has a behavior bullet: label, validation, default, on-submit behavior
-- Removing a field: delete from wireframe, delete behavior bullet, note in commit if any store value it drove is still used elsewhere
-- Adding a field: add to wireframe, add behavior bullet, update `plan-client-architecture.md` if it needs a new store value
+This order is mandatory. The design doc always reflects intended behavior. If the code doesn't match the design doc, the code is wrong — fix the code. If the design doc doesn't describe the desired behavior, fix the design doc first, then fix the code.
 
 ---
 
-## Step 4 — Commit spec only
+## Step 1 — Read the relevant design docs
 
+Read the full section of every design doc that covers the area being changed. Context matters — don't just search for a keyword.
+
+---
+
+## Step 2 — Classify the change
+
+**A — Bug (design doc correct, code wrong):**
+The design doc describes the desired behavior. The code doesn't match. Skip to step 4. Example: design doc says `natsUrl` is omitted when empty, code was returning the internal cluster URL.
+
+**B — New feature (no design doc):**
+No design doc covers this feature. The user must run `/plan-feature` first to create the design doc. Do not write code without a spec. Tell the user:
+```
+No design doc covers this feature. Run /plan-feature <description> to create one, then re-run /feature-change.
+```
+
+**C — Behavior change (design doc needs updating):**
+The design doc describes the old behavior. You're changing it. Update the design doc to describe the new behavior following the editing rules in `/plan-feature`, commit separately, then proceed to step 4. For non-trivial changes, ask the user to confirm before committing.
+
+**D — Refactor (behavior unchanged):**
+The design doc already describes the correct behavior. The code is restructured but externally identical. Skip to step 4. If the refactor reveals a spec gap (something undocumented), update the design doc first.
+
+---
+
+## Step 3 — Update the design doc
+
+Follow the design doc editing rules defined in `/plan-feature`:
+
+- Add to the right section with full payload/schema/behavior
+- Remove entirely — no stale text
+- Change in place — old text out, new text in
+- Never leave design doc and code out of sync
+
+Commit spec changes separately from code:
 ```bash
 git add docs/
 git commit -m "spec(<area>): <what changed and why>"
 ```
 
-Never bundle spec and code in the same commit. The commit message must say what changed and why — not what file was edited.
-
 ---
 
-<<<<<<< HEAD
-## Step 5 — dev-harness agent per component (exhaustive loop)
+## Step 4 — dev-harness → spec-evaluator loop (exhaustive)
 
 For each affected component, invoke the dev-harness agent **and keep re-invoking until all gaps are closed**:
 
@@ -168,94 +109,44 @@ Loop:
   1. Agent(subagent_type="dev-harness", prompt="<component> — <description>. Fix ALL spec gaps.")
   2. When the agent returns, run /spec-evaluator <component>
   3. If gaps remain:
-     → Agent(subagent_type="dev-harness", prompt="<component> — fix these remaining gaps: <list from evaluator>")
-     → go to step 2
-  4. If CLEAN: proceed to Step 6
+     a. CODE gap (spec says X, code doesn't do X):
+        → Agent(subagent_type="dev-harness", prompt="<component> — fix these gaps: <list>")
+        → go to step 2
+     b. SPEC gap (design doc is ambiguous/incomplete/wrong):
+        → Handle backpressure (see below)
+        → go to step 1
+  4. If CLEAN: proceed to Step 5
 ```
 
 The dev-harness agent has maxTurns=500 and is instructed to keep going until all gaps are closed. But if it hits context limits and returns with gaps remaining, **you must re-invoke it immediately** with the remaining gap list. Each re-invocation picks up from the last commit and continues.
 
-**Rules:**
+### Handling backpressure
+
+When dev-harness or spec-evaluator reports a gap that is actually a spec problem (ambiguity, missing detail, contradiction in the design doc), follow the backpressure rules from `/plan-feature`:
+
+1. **Classify**: factual error → fix directly. Missing detail with obvious answer → fill in. Design decision needed → ask the user via AskUserQuestion.
+2. **Edit** the design doc following `/plan-feature` editing rules.
+3. **Commit** spec change separately from code.
+4. **Re-invoke** dev-harness with the updated spec.
+
+### Rules
+
 - **Never report a task complete until the spec-evaluator returns CLEAN**
-- One failing evaluator gap = one more dev-harness agent pass
+- One failing evaluator gap = one more dev-harness pass (or one spec update)
 - Evaluator runs after EVERY dev-harness pass, not just the first
-- **Never deprioritize any gap** — every gap goes to dev-harness immediately
-- If a gap cannot be implemented due to environment constraints, run `/spec-change` to update the spec, then re-evaluate
+- **Never deprioritize any gap** — every gap gets handled immediately
+- If a gap cannot be implemented due to environment constraints, update the design doc to reflect reality, then re-evaluate
 - Running the dev-harness agent once and summarizing results is NOT acceptable — the loop must close
-=======
-## Step 5 — /dev-harness per component
-
-For each affected component:
-```
-/dev-harness <component>
-```
-
-dev-harness reads the spec, audits Phase 1 (spec → code) and Phase 2 (code → tests), implements gaps, runs tests, and commits. See the dev-harness skill.
 
 ---
 
-## Step 5b — Spec evaluator loop (mandatory after every dev-harness)
-
-After each dev-harness run, spin up a spec evaluator agent to exhaustively compare the spec against the actual code. The evaluator loops until it finds zero differences.
-
-```
-Loop:
-  1. Launch spec evaluator agent:
-     - Read all relevant spec docs in full
-     - Read all relevant component code in full
-     - Produce an exhaustive diff: for every spec statement, does the code implement it?
-     - Include: missing features, wrong behavior, missing env vars, missing K8s resources,
-       missing NATS subjects/handlers, wrong field names, wrong error handling, etc.
-     - Output: list of gaps (or "CLEAN" if none)
-  2. If gaps found:
-     → /dev-harness <component> targeting each gap
-     → go to step 1
-  3. If CLEAN: proceed to Step 6
-```
-
-**Evaluator agent prompt template:**
-
-```
-You are a spec compliance auditor for the mclaude project.
-
-Read the spec doc(s) for <component>:
-  <list spec docs>
-
-Read all source files under <component root>.
-
-Produce an exhaustive list of gaps — places where the spec says something should exist
-or behave a certain way, but the code does not implement it. Be specific: quote the spec
-statement and describe what the code does or doesn't do.
-
-Do NOT list things the spec is silent about. Only list cases where spec says X and code
-does not implement X.
-
-Output format:
-  CLEAN                  (if zero gaps)
-  GAP: <spec quote> → <what code is missing or wrong>
-  GAP: ...
-```
-
-**Rules:**
-- Never report a task complete until the evaluator returns CLEAN
-- The evaluator must read both the spec AND the code — not just one
-- One failing evaluator gap = one more dev-harness pass
-- Evaluator runs after EVERY dev-harness, not just the first
->>>>>>> origin/main
-
----
-
-## Step 6 — Validate (SPA changes only)
+## Step 5 — Validate (SPA changes only)
 
 After CI deploys the preview, use the **Playwright MCP** to validate the golden path directly in the browser. Do not stop at "build passes" — drive the browser through the actual user flow.
 
 ```
 Validation checklist for spa changes:
-<<<<<<< HEAD
-1. Navigate to the preview URL (format: http://preview-{branch-slug}.{tailscale-ip}.sslip.io)
-=======
-1. Navigate to the preview URL (format: http://preview-{branch-slug}.{tailscale-ip}.nip.io)
->>>>>>> origin/main
+1. Navigate to the preview URL
 2. Log in as dev@mclaude.local / dev
 3. Assert the changed screen/behavior matches the spec
 4. Assert the previous state (before the fix/feature) is gone
@@ -283,5 +174,6 @@ Do not report the task complete until Playwright confirms the acceptance criteri
 - `docs/plan-k8s-integration.md` — backend architecture, NATS subjects, KV
 - `docs/plan-client-architecture.md` — client architecture, stores, viewmodels
 - `docs/ui-spec.md` — UI wireframes and behavior
+- `docs/plan-*.md` — feature-specific design docs (each is a spec)
 - `docs/feature-list.md` — feature IDs
 - Component roots: `mclaude-control-plane/`, `mclaude-web/`, `mclaude-session-agent/`, `mclaude-cli/`, `charts/mclaude/`
