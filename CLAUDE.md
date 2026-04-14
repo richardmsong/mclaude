@@ -42,6 +42,11 @@ Examples of work that should run in parallel via `Agent(run_in_background=true)`
 
 Launch multiple agents in a single message when their work is independent. Don't serialize tasks that can overlap.
 
+## DNS — mclaude.internal via CoreDNS, never sslip.io
+
+**Never suggest sslip.io, nip.io, or any external wildcard DNS service.**
+All URLs use `*.mclaude.internal`. DNS is served by the CoreDNS container on the k3d host via Tailscale split DNS. If DNS doesn't resolve, debug CoreDNS (`charts/coredns-preview/deploy.sh`) — don't suggest external DNS workarounds.
+
 ## Before debugging a config mismatch — read the source
 
 Before guessing at a port, command, or env var, read the relevant Dockerfile / config file first. The answer is always there.
