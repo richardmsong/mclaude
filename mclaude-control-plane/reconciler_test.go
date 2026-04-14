@@ -475,3 +475,119 @@ func TestReconciler_GitURLPropagated(t *testing.T) {
 		return false
 	})
 }
+
+// TestReconciler_DevOAuthTokenInjected verifies that when devOAuthToken is set on the
+// reconciler, the oauth-token key is included in the user-secrets Secret.
+func TestReconciler_DevOAuthTokenInjected(t *testing.T) {
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		t.Skip("KUBEBUILDER_ASSETS not set — run setup-envtest first")
+	}
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatalf("add client-go scheme: %v", err)
+	}
+	if err := AddToScheme(scheme); err != nil {
+		t.Fatalf("add MCProject scheme: %v", err)
+	}
+	if err := rbacv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add rbacv1 scheme: %v", err)
+	}
+	if err := appsv1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add appsv1 scheme: %v", err)
+	}
+
+	env := &envtest.Environment{Scheme: scheme}
+	cfg, err := env.Start()
+	if err != nil {
+		t.Fatalf("envtest.Start: %v", err)
+	}
+	t.Cleanup(func() { _ = env.Stop() })
+
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme:                 scheme,
+		Metrics:                metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "0",
+	})
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+
+	accountKP, err := GenerateAccountNKey()
+	if err != nil {
+		t.Fatalf("GenerateAccountNKey: %v", err)
+	}
+
+	const testOAuthToken = "test-oauth-token-value"
+	reconciler := &MCProjectReconciler{
+		client:              mgr.GetClient(),
+		scheme:              mgr.GetScheme(),
+		controlPlaneNs:      "mclaude-system",
+		releaseName:         "mclaude",
+		sessionAgentNATSURL: "nats://nats.mclaude-system.svc.cluster.local:4222",
+		accountKP:           accountKP.KeyPair,
+		devOAuthToken:       testOAuthToken,
+		logger:              testLogger(t),
+	}
+	if err := reconciler.SetupWithManager(mgr); err != nil {
+		t.Fatalf("SetupWithManager: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		if err := mgr.Start(ctx); err != nil {
+			t.Logf("manager stopped: %v", err)
+		}
+	}()
+
+	if !mgr.GetCache().WaitForCacheSync(ctx) {
+		t.Fatal("cache sync timeout")
+	}
+
+	c := mgr.GetClient()
+	// Create control-plane namespace
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "mclaude-system"}}
+	_ = c.Create(ctx, ns)
+
+	userID := "oauth-test-user"
+	projectID := "oauth-test-proj"
+	userNs := "mclaude-" + userID
+
+	mcp := &MCProject{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: SchemeGroupVersion.String(),
+			Kind:       "MCProject",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      projectID,
+			Namespace: "mclaude-system",
+		},
+		Spec: MCProjectSpec{
+			UserID:    userID,
+			ProjectID: projectID,
+		},
+	}
+	if err := c.Create(ctx, mcp); err != nil {
+		t.Fatalf("create MCProject: %v", err)
+	}
+
+	// Wait for user-secrets with both nats-creds and oauth-token
+	waitForCondition(t, 15*time.Second, "user-secrets with oauth-token", func() bool {
+		secret := &corev1.Secret{}
+		if err := c.Get(ctx, types.NamespacedName{Name: "user-secrets", Namespace: userNs}, secret); err != nil {
+			return false
+		}
+		return len(secret.Data["nats-creds"]) > 0 && string(secret.Data["oauth-token"]) == testOAuthToken
+	})
+
+	// Final assertion
+	secret := &corev1.Secret{}
+	if err := c.Get(ctx, types.NamespacedName{Name: "user-secrets", Namespace: userNs}, secret); err != nil {
+		t.Fatalf("get user-secrets: %v", err)
+	}
+	if got := string(secret.Data["oauth-token"]); got != testOAuthToken {
+		t.Errorf("oauth-token = %q; want %q", got, testOAuthToken)
+	}
+}

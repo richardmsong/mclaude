@@ -40,6 +40,7 @@ type MCProjectReconciler struct {
 	releaseName         string
 	sessionAgentNATSURL string
 	accountKP           nkeys.KeyPair
+	devOAuthToken       string // optional: injected into user-secrets when DEV_OAUTH_TOKEN is set
 	logger              zerolog.Logger
 }
 
@@ -234,6 +235,9 @@ func (r *MCProjectReconciler) reconcileSecrets(ctx context.Context, mcp *MCProje
 				existingSecret.Data = make(map[string][]byte)
 			}
 			existingSecret.Data["nats-creds"] = FormatNATSCredentials(jwtStr, seed)
+			if r.devOAuthToken != "" && len(existingSecret.Data["oauth-token"]) == 0 {
+				existingSecret.Data["oauth-token"] = []byte(r.devOAuthToken)
+			}
 			if updateErr := r.client.Update(ctx, existingSecret); updateErr != nil {
 				return fmt.Errorf("patch user-secrets: %w", updateErr)
 			}
@@ -248,6 +252,9 @@ func (r *MCProjectReconciler) reconcileSecrets(ctx context.Context, mcp *MCProje
 			Data: map[string][]byte{
 				"nats-creds": FormatNATSCredentials(jwtStr, seed),
 			},
+		}
+		if r.devOAuthToken != "" {
+			secret.Data["oauth-token"] = []byte(r.devOAuthToken)
 		}
 		if createErr := r.client.Create(ctx, secret); createErr != nil && !k8serrors.IsAlreadyExists(createErr) {
 			return fmt.Errorf("create user-secrets: %w", createErr)

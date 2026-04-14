@@ -36,6 +36,7 @@ func main() {
 	natsWsURL := envOr("NATS_WS_URL", "") // external WebSocket URL for browser clients; empty = client derives from origin
 	adminToken := envOr("ADMIN_TOKEN", "")
 	helmReleaseName := envOr("HELM_RELEASE_NAME", "mclaude")
+	devOAuthToken := os.Getenv("DEV_OAUTH_TOKEN")
 
 	jwtExpiry := 8 * time.Hour
 	if v := os.Getenv("JWT_EXPIRY_SECONDS"); v != "" {
@@ -109,6 +110,7 @@ func main() {
 			releaseName:         helmReleaseName,
 			sessionAgentNATSURL: sessionAgentNATSURL(natsURL, controlPlaneNs),
 			accountKP:           accountKP,
+			devOAuthToken:       devOAuthToken,
 			logger:              logger.With().Str("reconciler", "mcproject").Logger(),
 		}
 		if err := reconciler.SetupWithManager(mgr); err != nil {
