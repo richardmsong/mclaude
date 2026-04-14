@@ -16,7 +16,7 @@ on:
 jobs:
   tag:
     name: Create tag and version branch
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: write
     outputs:

@@ -114,3 +114,10 @@ Future: Figma designs linked per feature.
 | mclaude-cli | Print `mclaude: server requires client version ≥ {min}, you have {current}. Run: brew upgrade mclaude` and exit 1. |
 
 `minClientVersion` is set in control-plane config and returned on the auth login response and on a `GET /version` endpoint (no auth required). Clients check it on startup and on every reconnect. When a breaking mclaude version ships, bump `minClientVersion` in the control-plane deployment.
+
+
+## Infrastructure
+
+| # | Feature | Description |
+|---|---------|-------------|
+| I1 | Preview DNS via CoreDNS | CoreDNS container on the k3d host bound to the Tailscale IP serves zone `mclaude.internal.`; Tailscale split DNS routes `*.mclaude.internal` from any Tailnet device (including cellular) to it. See `docs/spec-tailscale-dns.md`. |

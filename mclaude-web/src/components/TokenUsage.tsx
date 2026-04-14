@@ -22,6 +22,24 @@ const PRICE_PER_M = {
   cacheWrite: 3.75,
 }
 
+const CALIBRATION_KEY = 'mclaude.costCalibration'
+
+function loadCalibration(): number {
+  try {
+    const stored = localStorage.getItem(CALIBRATION_KEY)
+    const val = stored !== null ? parseFloat(stored) : NaN
+    return isNaN(val) || val <= 0 ? 1.0 : val
+  } catch {
+    return 1.0
+  }
+}
+
+function saveCalibration(factor: number): void {
+  try {
+    localStorage.setItem(CALIBRATION_KEY, String(factor))
+  } catch {}
+}
+
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
@@ -36,17 +54,39 @@ type TimeRange = '1H' | '6H' | '24H' | '7D' | '30D'
 
 export function TokenUsage({ usage, onBack, connected }: TokenUsageProps) {
   const [range, setRange] = useState<TimeRange>('24H')
+  const [calibration, setCalibration] = useState<number>(loadCalibration)
+  const [showCalibration, setShowCalibration] = useState(false)
+  const [calibrationInput, setCalibrationInput] = useState('')
   const ranges: TimeRange[] = ['1H', '6H', '24H', '7D', '30D']
 
-  const tiles = [
+  const rawTiles = [
     { label: 'Input', tokens: usage.inputTokens, color: 'var(--blue)', cost: usage.inputTokens / 1_000_000 * PRICE_PER_M.input },
     { label: 'Output', tokens: usage.outputTokens, color: 'var(--green)', cost: usage.outputTokens / 1_000_000 * PRICE_PER_M.output },
     { label: 'Cache W', tokens: usage.cacheWriteTokens, color: 'var(--orange)', cost: usage.cacheWriteTokens / 1_000_000 * PRICE_PER_M.cacheWrite },
     { label: 'Cache R', tokens: usage.cacheReadTokens, color: 'var(--purple)', cost: usage.cacheReadTokens / 1_000_000 * PRICE_PER_M.cacheRead },
   ]
 
+  // Apply calibration multiplier to costs
+  const tiles = rawTiles.map(t => ({ ...t, cost: t.cost * calibration }))
+
   const totalTokens = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
   const totalCost = tiles.reduce((s, t) => s + t.cost, 0)
+
+  const handleSaveCalibration = () => {
+    const val = parseFloat(calibrationInput)
+    if (!isNaN(val) && val > 0) {
+      setCalibration(val)
+      saveCalibration(val)
+    }
+    setShowCalibration(false)
+    setCalibrationInput('')
+  }
+
+  const handleResetCalibration = () => {
+    setCalibration(1.0)
+    saveCalibration(1.0)
+    setShowCalibration(false)
+  }
 
   // Bar chart: just show tiles as stacked bar proportions
   const barSegments = tiles.filter(t => t.tokens > 0)
@@ -137,8 +177,23 @@ export function TokenUsage({ usage, onBack, connected }: TokenUsageProps) {
           border: '1px solid var(--border)',
           borderRadius: 12,
           padding: 16,
+          marginBottom: 12,
         }}>
-          <div style={{ color: 'var(--text2)', fontSize: 12, marginBottom: 4 }}>Estimated Cost</div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+            <div style={{ color: 'var(--text2)', fontSize: 12 }}>Estimated Cost</div>
+            {calibration !== 1.0 && (
+              <span style={{
+                background: 'var(--surf2)',
+                color: 'var(--orange)',
+                fontSize: 11,
+                padding: '2px 6px',
+                borderRadius: 8,
+                fontWeight: 600,
+              }}>
+                ×{calibration.toFixed(2)}
+              </span>
+            )}
+          </div>
           <div style={{ fontSize: 28, fontWeight: 700, color: 'var(--text)' }}>
             {formatCost(totalCost)}
           </div>
@@ -148,7 +203,92 @@ export function TokenUsage({ usage, onBack, connected }: TokenUsageProps) {
           <div style={{ color: 'var(--text3)', fontSize: 11, marginTop: 8 }}>
             Prices: input ${PRICE_PER_M.input}/M · output ${PRICE_PER_M.output}/M
           </div>
+          <button
+            onClick={() => {
+              setCalibrationInput(calibration !== 1.0 ? String(calibration) : '')
+              setShowCalibration(true)
+            }}
+            style={{
+              marginTop: 10,
+              color: 'var(--blue)',
+              fontSize: 12,
+            }}
+          >
+            Calibrate
+          </button>
         </div>
+
+        {/* Calibration sheet */}
+        {showCalibration && (
+          <div style={{
+            background: 'var(--surf)',
+            border: '1px solid var(--border)',
+            borderRadius: 12,
+            padding: 16,
+          }}>
+            <div style={{ fontWeight: 600, marginBottom: 8 }}>Calibrate Cost Estimates</div>
+            <div style={{ color: 'var(--text2)', fontSize: 13, marginBottom: 12 }}>
+              Enter a multiplier to match Anthropic Console actuals. E.g., 1.2 = 20% higher than estimated.
+            </div>
+            <input
+              type="number"
+              step="0.01"
+              min="0.01"
+              value={calibrationInput}
+              onChange={e => setCalibrationInput(e.target.value)}
+              placeholder={String(calibration)}
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                background: 'var(--surf2)',
+                border: '1px solid var(--border)',
+                borderRadius: 8,
+                color: 'var(--text)',
+                fontSize: 15,
+                marginBottom: 12,
+              }}
+            />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={handleSaveCalibration}
+                style={{
+                  flex: 1,
+                  padding: '8px 0',
+                  background: 'var(--blue)',
+                  color: '#fff',
+                  borderRadius: 8,
+                  fontWeight: 600,
+                }}
+              >
+                Save
+              </button>
+              {calibration !== 1.0 && (
+                <button
+                  onClick={handleResetCalibration}
+                  style={{
+                    padding: '8px 16px',
+                    background: 'var(--surf2)',
+                    color: 'var(--text2)',
+                    borderRadius: 8,
+                  }}
+                >
+                  Reset
+                </button>
+              )}
+              <button
+                onClick={() => setShowCalibration(false)}
+                style={{
+                  padding: '8px 16px',
+                  background: 'var(--surf2)',
+                  color: 'var(--text2)',
+                  borderRadius: 8,
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

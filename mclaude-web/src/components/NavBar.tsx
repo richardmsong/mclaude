@@ -8,9 +8,10 @@ interface NavBarProps {
   badge?: number
   onSettings?: () => void
   onUsage?: () => void
+  onRefresh?: () => void
 }
 
-export function NavBar({ title, onBack, right, connected, badge, onSettings, onUsage }: NavBarProps) {
+export function NavBar({ title, onBack, right, connected, badge, onSettings, onUsage, onRefresh }: NavBarProps) {
   const connState = connected === undefined ? 'disconnected' : connected ? 'connected' : 'disconnected'
 
   return (
@@ -69,6 +70,9 @@ export function NavBar({ title, onBack, right, connected, badge, onSettings, onU
       {/* Right */}
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12 }}>
         {right}
+        {onRefresh && (
+          <button onClick={onRefresh} style={{ fontSize: 16, color: 'var(--text2)' }} title="Refresh">↻</button>
+        )}
         {onUsage && (
           <button onClick={onUsage} style={{ fontSize: 16 }}>📊</button>
         )}

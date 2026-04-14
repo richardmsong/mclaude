@@ -1,0 +1,180 @@
+name: Deploy main
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      control-plane: ${{ steps.filter.outputs.control-plane }}
+      spa: ${{ steps.filter.outputs.spa }}
+      session-agent: ${{ steps.filter.outputs.session-agent }}
+      image_tag: ${{ steps.tag.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          echo "value=main-${short_sha}" >> "$GITHUB_OUTPUT"
+          echo "Image tag: main-${short_sha}"
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            control-plane:
+              - 'mclaude-control-plane/**'
+            spa:
+              - 'mclaude-web/**'
+            session-agent:
+              - 'mclaude-session-agent/**'
+
+  build-control-plane:
+    name: Build control-plane
+    needs: changes
+    if: needs.changes.outputs.control-plane == 'true'
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ needs.changes.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authenticate to GHCR
+        run: |
+          mkdir -p "$RUNNER_TEMP/docker"
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
+            "$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64)" \
+            > "$RUNNER_TEMP/docker/config.json"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mclaude-control-plane/go.mod
+          cache: false
+
+      - name: Build binary
+        working-directory: mclaude-control-plane
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o control-plane .
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./mclaude-control-plane
+          platforms: linux/arm64
+          push: true
+          tags: ghcr.io/mclaude-project/mclaude-control-plane:${{ needs.changes.outputs.image_tag }}
+
+  build-spa:
+    name: Build spa
+    needs: changes
+    if: needs.changes.outputs.spa == 'true'
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ needs.changes.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authenticate to GHCR
+        run: |
+          mkdir -p "$RUNNER_TEMP/docker"
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
+            "$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64)" \
+            > "$RUNNER_TEMP/docker/config.json"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./mclaude-web
+          platforms: linux/arm64
+          push: true
+          tags: ghcr.io/mclaude-project/mclaude-spa:${{ needs.changes.outputs.image_tag }}
+
+  build-session-agent:
+    name: Build session-agent
+    needs: changes
+    if: needs.changes.outputs.session-agent == 'true'
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ needs.changes.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authenticate to GHCR
+        run: |
+          mkdir -p "$RUNNER_TEMP/docker"
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
+            "$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64)" \
+            > "$RUNNER_TEMP/docker/config.json"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mclaude-session-agent/go.mod
+          cache: false
+
+      - name: Build binary
+        working-directory: mclaude-session-agent
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o session-agent .
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./mclaude-session-agent
+          platforms: linux/arm64
+          push: true
+          tags: ghcr.io/mclaude-project/mclaude-session-agent:${{ needs.changes.outputs.image_tag }}
+
+  deploy:
+    name: Deploy main
+    needs: [changes, build-control-plane, build-spa, build-session-agent]
+    if: always() && !failure() && !cancelled()
+    runs-on: [self-hosted, tailscale]
+    env:
+      CP_TAG: ${{ needs.build-control-plane.outputs.tag || 'main' }}
+      SPA_TAG: ${{ needs.build-spa.outputs.tag || 'main' }}
+      SA_TAG: ${{ needs.build-session-agent.outputs.tag || 'main' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve images
+        run: |
+          echo "control-plane: ghcr.io/mclaude-project/mclaude-control-plane:${CP_TAG}"
+          echo "spa:           ghcr.io/mclaude-project/mclaude-spa:${SPA_TAG}"
+          echo "session-agent: ghcr.io/mclaude-project/mclaude-session-agent:${SA_TAG}"
+
+      - name: Helm deploy main
+        run: |
+          helm upgrade --install "mclaude" ./charts/mclaude \
+            --set controlPlane.image.tag="${CP_TAG}" \
+            --set spa.image.tag="${SPA_TAG}" \
+            --set sessionAgent.image.tag="${SA_TAG}" \
+            --set namespace.create=false \
+            --set "global.imagePullSecrets[0]=ghcr-pull-secret" \
+            --set controlPlane.config.devSeed=true \
+            --set ingress.className=traefik \
+            --set ingress.host="mclaude.internal" \
+            --namespace "mclaude-system" \
+            --wait --timeout 5m \
+            --force-conflicts
