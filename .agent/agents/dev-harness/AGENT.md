@@ -1,6 +1,6 @@
 ---
 name: dev-harness
-description: Implementation loop for any mclaude component. Reads the spec, audits gaps, implements production code + tests, and commits. Invoked by the master session after /spec-change has updated the spec. Run repeatedly — converges to fully-implemented, fully-tested.
+description: Implementation loop for any mclaude component. Reads design docs (the spec), audits gaps, implements production code + tests, and commits. Invoked by the master session via /feature-change. Run repeatedly — converges to fully-implemented, fully-tested.
 model: claude-sonnet-4-6
 maxTurns: 500
 tools:
@@ -9,7 +9,7 @@ tools:
 
 # Dev Harness
 
-Implements and tests a component against its spec. Always invoked after the master session has updated the spec via `/spec-change`. Run repeatedly — each session audits what's implemented vs what the spec requires, implements the next gap, runs tests, and commits.
+Implements and tests a component against its spec. Design docs (`docs/plan-*.md`) are the canonical spec — there is no separate spec layer. Run repeatedly — each session audits what's implemented vs what the spec requires, implements the next gap, runs tests, and commits.
 
 ## Usage
 
@@ -39,7 +39,7 @@ Read these in full before writing any code. The spec is the source of truth — 
 | `docs/plan-client-architecture.md` | Stores, viewmodels, protocol contract, accumulation algorithm |
 | `docs/ui-spec.md` | Screens, wireframes, components, interactions |
 | `docs/feature-list.md` | Feature IDs and platform support matrix |
-| `docs/spec-*.md` | Any feature-specific spec created by `/spec-change` |
+| `docs/plan-*.md` | Feature-specific design docs — each is a spec for its feature |
 
 ---
 
@@ -47,15 +47,15 @@ Read these in full before writing any code. The spec is the source of truth — 
 
 - Implement exactly what the spec says. If behavior isn't in the spec, don't build it.
 - If the spec is ambiguous, implement the minimal interpretation and note the ambiguity in the commit message.
-- **If you discover the spec is missing something required** — stop, notify the master session to run `/spec-change` to update the spec first, then re-invoke this agent.
+- **If you discover the spec is missing something required** — stop, notify the master session. The master session will update the design doc (the spec) and re-invoke this agent.
 
 ### Undocumented behavior in existing code
 
 When you find code behavior that isn't mentioned in the spec, make a judgment call before proceeding:
 
 **Clearly intentional** (deliberate design, fits the architecture, non-trivial to have been accidental):
-→ Stop. Tell the master session: "Found undocumented behavior in `<file>`: `<description>`. Looks intentional — run `/spec-change` to document it before I continue."
-→ Do not remove or change it. Do not proceed past this point until the spec is updated.
+→ Stop. Tell the master session: "Found undocumented behavior in `<file>`: `<description>`. Looks intentional — update the design doc to document it before I continue."
+→ Do not remove or change it. Do not proceed past this point until the design doc is updated.
 
 **Clearly unintended** (looks like a bug, contradicts other spec'd behavior, obviously wrong):
 → Treat it as a spec violation. Implement the spec-correct behavior and note the fix in the commit message.
