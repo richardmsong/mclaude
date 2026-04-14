@@ -15,6 +15,7 @@ export class MockNATSClient implements INATSClient {
   // Published messages are recorded for assertions
   readonly published: Array<{ subject: string; data: Uint8Array; headers?: Record<string, string> }> = []
   readonly requests: Array<{ subject: string; data: Uint8Array }> = []
+  readonly jsSubscribeCalls: Array<{ subject: string; startSeq: number }> = []
 
   // Request handlers — set in tests to return canned replies
   requestHandlers = new Map<string, (data: Uint8Array) => Uint8Array>()
@@ -40,6 +41,19 @@ export class MockNATSClient implements INATSClient {
       const cbs = this._subs.get(subject) ?? []
       this._subs.set(subject, cbs.filter(c => c !== callback))
     }
+  }
+
+  async jsSubscribe(
+    _stream: string,
+    subject: string,
+    startSeq: number,
+    callback: (msg: NATSMessage) => void,
+  ): Promise<() => void> {
+    // In tests, jsSubscribe delegates to plain subscribe.
+    // Messages delivered via simulateReceive include seq for deduplication.
+    // startSeq is recorded so tests can assert it was passed correctly.
+    this.jsSubscribeCalls.push({ subject, startSeq })
+    return this.subscribe(subject, callback)
   }
 
   publish(subject: string, data: Uint8Array, headers?: Record<string, string>): void {
@@ -154,6 +168,7 @@ export class MockNATSClient implements INATSClient {
   clearRecorded(): void {
     this.published.length = 0
     this.requests.length = 0
+    this.jsSubscribeCalls.length = 0
   }
 
   private _matchSubject(pattern: string, subject: string): boolean {

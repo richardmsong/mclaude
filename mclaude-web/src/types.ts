@@ -24,6 +24,8 @@ export interface INATSClient {
   connect(opts: NATSConnectionOptions): Promise<void>
   reconnect(newJwt: string): Promise<void>
   subscribe(subject: string, callback: (msg: NATSMessage) => void): () => void
+  /** Subscribe via JetStream ordered consumer with replay from startSeq. */
+  jsSubscribe(stream: string, subject: string, startSeq: number, callback: (msg: NATSMessage) => void): Promise<() => void>
   publish(subject: string, data: Uint8Array, headers?: Record<string, string>): void
   request(subject: string, data: Uint8Array, timeoutMs?: number): Promise<NATSMessage>
   kvWatch(bucket: string, key: string, callback: (entry: KVEntry) => void): () => void

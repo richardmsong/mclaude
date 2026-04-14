@@ -15,7 +15,7 @@ describe('NATSClient class structure', () => {
   it('implements every INATSClient method', () => {
     const client = new NATSClient()
     const methods: Array<keyof INATSClient> = [
-      'connect', 'reconnect', 'subscribe', 'publish', 'request',
+      'connect', 'reconnect', 'subscribe', 'jsSubscribe', 'publish', 'request',
       'kvWatch', 'kvGet', 'onDisconnect', 'onReconnect', 'isConnected', 'close',
     ]
     for (const m of methods) {
@@ -189,5 +189,41 @@ describe('INATSClient contract (MockNATSClient)', () => {
     client.requestHandlers.set('rpc.add', _data => new TextEncoder().encode('42'))
     const reply = await client.request('rpc.add', new TextEncoder().encode('input'))
     expect(new TextDecoder().decode(reply.data)).toBe('42')
+  })
+
+  // ── jsSubscribe ─────────────────────────────────────────────────────────────
+
+  it('jsSubscribe receives message via simulateReceive with seq', async () => {
+    const msgs: Array<{ data: string; seq: number | undefined }> = []
+    await client.jsSubscribe('MCLAUDE_EVENTS', 'test.subject', 0, msg => {
+      msgs.push({ data: new TextDecoder().decode(msg.data), seq: msg.seq })
+    })
+    client.simulateReceive('test.subject', { hello: 'world' }, 42)
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0].data).toContain('hello')
+    expect(msgs[0].seq).toBe(42)
+  })
+
+  it('jsSubscribe records call with startSeq', async () => {
+    await client.jsSubscribe('MCLAUDE_EVENTS', 'events.subject', 5, () => {})
+    expect(client.jsSubscribeCalls).toHaveLength(1)
+    expect(client.jsSubscribeCalls[0].subject).toBe('events.subject')
+    expect(client.jsSubscribeCalls[0].startSeq).toBe(5)
+  })
+
+  it('jsSubscribe returns unsubscribe function that stops delivery', async () => {
+    const msgs: string[] = []
+    const unsub = await client.jsSubscribe('MCLAUDE_EVENTS', 'test.subj', 0, msg => {
+      msgs.push(new TextDecoder().decode(msg.data))
+    })
+    unsub()
+    client.simulateReceive('test.subj', { after: 'unsub' }, 1)
+    expect(msgs).toHaveLength(0)
+  })
+
+  it('clearRecorded resets jsSubscribeCalls', async () => {
+    await client.jsSubscribe('MCLAUDE_EVENTS', 'x', 0, () => {})
+    client.clearRecorded()
+    expect(client.jsSubscribeCalls).toHaveLength(0)
   })
 })
