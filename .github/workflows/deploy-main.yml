@@ -202,6 +202,7 @@ jobs:
           CP_TAG: ${{ steps.tags.outputs.cp }}
           SPA_TAG: ${{ steps.tags.outputs.spa }}
           SA_TAG: ${{ steps.tags.outputs.sa }}
+          DEV_OAUTH_TOKEN: ${{ secrets.DEV_OAUTH_TOKEN }}
         run: |
           helm upgrade --install "mclaude" ./charts/mclaude \
             --set controlPlane.image.tag="${CP_TAG}" \
@@ -210,6 +211,7 @@ jobs:
             --set namespace.create=false \
             --set "global.imagePullSecrets[0]=ghcr-pull-secret" \
             --set controlPlane.config.devSeed=true \
+            --set controlPlane.devOAuthToken="${DEV_OAUTH_TOKEN}" \
             --set ingress.className=traefik \
             --set ingress.host="mclaude.internal" \
             --namespace "mclaude-system" \
