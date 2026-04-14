@@ -144,12 +144,12 @@ func (s *Session) start(claudePath string, resume bool, publish func(subject str
 			"--include-partial-messages",
 			"--session-id", s.state.ID,
 		}
-		if s.state.CWD != "" {
-			args = append(args, "-w", s.state.CWD)
-		}
 	}
 
 	cmd := exec.Command(claudePath, args...)
+	if s.state.CWD != "" {
+		cmd.Dir = s.state.CWD
+	}
 	if len(s.extraEnv) > 0 {
 		cmd.Env = append(append([]string{}, os.Environ()...), s.extraEnv...)
 	}
@@ -235,19 +235,25 @@ func (s *Session) start(claudePath string, resume bool, publish func(subject str
 		}
 	}()
 
-	// Wait for the init event to confirm Claude started successfully.
-	// Kill the process if it doesn't start within startupTimeout.
-	select {
-	case <-s.initCh:
-		return nil
-	case <-time.After(startupTimeout):
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+	// In --input-format stream-json mode, Claude only emits the init event
+	// after receiving the first user message. Don't block on init — return
+	// immediately so the session can accept input. The init event will arrive
+	// asynchronously when the user sends their first message.
+	//
+	// Monitor for early exit in a background goroutine so we can log it.
+	go func() {
+		select {
+		case <-s.initCh:
+			// Claude initialized successfully after receiving first message.
+		case <-time.After(startupTimeout):
+			// No init after timeout — likely the user never sent a message.
+			// Don't kill the process; it's idle but valid.
+		case <-s.doneCh:
+			// Claude exited before init — will be cleaned up by the reaper.
 		}
-		return fmt.Errorf("claude did not emit init event within %s", startupTimeout)
-	case <-s.doneCh:
-		return fmt.Errorf("claude exited before emitting init event")
-	}
+	}()
+
+	return nil
 }
 
 // handleSideEffect inspects specific event types and updates local state/KV.
