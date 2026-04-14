@@ -1,5 +1,6 @@
 import type {
   INATSClient,
+  NATSMessage,
   StreamJsonEvent,
   ConversationModel,
   Turn,
@@ -73,11 +74,12 @@ export class EventStore {
         userId: this.opts.userId,
         projectId: this.opts.projectId,
         subject,
+        startSeq,
       },
-      'subscribing to event stream',
+      'subscribing to event stream via JetStream ordered consumer',
     )
 
-    this._unsubscribe = this.opts.natsClient.subscribe(subject, (msg) => {
+    const onMsg = (msg: NATSMessage) => {
       // Deduplication: skip events at or before lastSequence
       if (msg.seq !== undefined && msg.seq <= this._lastSequence) return
 
@@ -101,10 +103,42 @@ export class EventStore {
           'malformed event: failed to parse',
         )
       }
+    }
+
+    // Use JetStream ordered consumer for replay and deduplication.
+    // jsSubscribe is async; we wrap the callback with a stopped guard so that
+    // stop() immediately ceases event processing even before the consumer resolves.
+    let stopped = false
+    const guardedOnMsg = (msg: NATSMessage) => {
+      if (stopped) return
+      onMsg(msg)
+    }
+
+    let innerUnsub: (() => void) | null = null
+    this.opts.natsClient.jsSubscribe('MCLAUDE_EVENTS', subject, startSeq, guardedOnMsg).then((unsub) => {
+      if (stopped) {
+        // stop() was called before the consumer was ready
+        unsub()
+      } else {
+        innerUnsub = unsub
+      }
+    }).catch((err) => {
+      logger.warn(
+        {
+          component: 'event-store',
+          sessionId: this.opts.sessionId,
+          userId: this.opts.userId,
+          projectId: this.opts.projectId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'failed to create JetStream ordered consumer; events will not flow',
+      )
     })
 
-    // Signal to the NATS client the desired start sequence (clients that support it)
-    void startSeq
+    this._unsubscribe = () => {
+      stopped = true
+      if (innerUnsub) innerUnsub()
+    }
   }
 
   stop(): void {
