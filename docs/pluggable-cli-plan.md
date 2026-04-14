@@ -678,7 +678,7 @@ func (sa *SessionAgent) runSession(driver CLIDriver, sessionID string, opts Laun
 Events on NATS are canonical `SessionEvent` JSON — not raw backend protocol. The subject encodes routing:
 
 ```
-mclaude.{userId}.{projectId}.events.{sessionId}
+mclaude.{userId}.{location}.{projectId}.events.{sessionId}
 ```
 
 Clients parse canonical events. The `init` event tells the client which backend is active and what capabilities are available, enabling per-backend UI adaptation.
