@@ -15,8 +15,11 @@ Audits one component against its spec. Produces an exhaustive gap list, or CLEAN
 
 **component**: `control-plane` | `session-agent` | `spa` | `cli` | `helm`
 
+<<<<<<< HEAD
 Omit to audit **all** components in parallel. Each component runs as a separate subagent so they finish concurrently.
 
+=======
+>>>>>>> origin/main
 ---
 
 ## What it does
@@ -39,7 +42,11 @@ Reports only real gaps — spec says X, code doesn't do X. Does not report thing
 
 ---
 
+<<<<<<< HEAD
 ## Algorithm — single component
+=======
+## Algorithm
+>>>>>>> origin/main
 
 ```
 1. Read all spec docs for the component in full
@@ -47,6 +54,7 @@ Reports only real gaps — spec says X, code doesn't do X. Does not report thing
 3. For each statement in the spec that describes behavior/structure:
    - Does corresponding code exist?
    - Does it behave as described?
+<<<<<<< HEAD
 4. Save to .agent/audits/spec-<component>-<YYYY-MM-DD>.md (append if exists)
 5. Output: CLEAN or one GAP: line per gap
 ```
@@ -63,6 +71,9 @@ Spawn one subagent per component in parallel, each running the single-component 
 ### helm:          N gaps
 
 See .agent/audits/ for full per-component reports.
+=======
+4. Output: CLEAN or one GAP: line per gap
+>>>>>>> origin/main
 ```
 
 ---
@@ -94,6 +105,7 @@ Every gap line must:
 
 ---
 
+<<<<<<< HEAD
 ## Saving results
 
 **Always** write the full output to `.agent/audits/spec-<component>-<YYYY-MM-DD>.md` before doing anything else with the result. Append if the file exists (multiple runs per day).
@@ -110,6 +122,8 @@ Create `.agent/audits/` if it doesn't exist. This is mandatory — auditing hist
 
 ---
 
+=======
+>>>>>>> origin/main
 ## After running
 
 If CLEAN: the component is spec-complete. Report to the calling skill.

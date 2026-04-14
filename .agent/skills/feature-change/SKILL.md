@@ -28,6 +28,7 @@ Examples:
 ```
 1. Read the relevant spec docs
 2. Determine the spec relationship:
+<<<<<<< HEAD
    A. Spec is correct, code is wrong (bug)      → skip to step 5
    B. Spec doesn't describe this yet (feature)  → run /spec-change (step 3)
    C. Spec needs updating (behavior change)     → run /spec-change (step 3)
@@ -39,6 +40,19 @@ Examples:
 ```
 
 This order is mandatory. The spec always reflects intended behavior. If the code doesn't match the spec, the code is wrong — fix the code. If the spec doesn't describe the desired behavior, run `/spec-change` first, then invoke the dev-harness agent.
+=======
+   A. Spec is correct, code is wrong (bug)     → skip to step 5
+   B. Spec doesn't describe this yet (feature) → update spec first (step 3)
+   C. Spec needs updating (behavior change)    → update spec first (step 3)
+   D. Spec and code will both change (refactor) → update spec if behavior changes, otherwise skip to step 5
+3. Update the spec doc (see below)
+4. Commit: spec only, no code
+   git commit -m "spec(<area>): <what changed and why>"
+5. /dev-harness <component> for each affected component
+```
+
+This order is mandatory. The spec always reflects intended behavior. If the code doesn't match the spec, the code is wrong — fix the code. If the spec doesn't describe the desired behavior, fix the spec first, then fix the code.
+>>>>>>> origin/main
 
 ---
 
@@ -144,6 +158,7 @@ Never bundle spec and code in the same commit. The commit message must say what 
 
 ---
 
+<<<<<<< HEAD
 ## Step 5 — dev-harness agent per component (exhaustive loop)
 
 For each affected component, invoke the dev-harness agent **and keep re-invoking until all gaps are closed**:
@@ -167,6 +182,66 @@ The dev-harness agent has maxTurns=500 and is instructed to keep going until all
 - **Never deprioritize any gap** — every gap goes to dev-harness immediately
 - If a gap cannot be implemented due to environment constraints, run `/spec-change` to update the spec, then re-evaluate
 - Running the dev-harness agent once and summarizing results is NOT acceptable — the loop must close
+=======
+## Step 5 — /dev-harness per component
+
+For each affected component:
+```
+/dev-harness <component>
+```
+
+dev-harness reads the spec, audits Phase 1 (spec → code) and Phase 2 (code → tests), implements gaps, runs tests, and commits. See the dev-harness skill.
+
+---
+
+## Step 5b — Spec evaluator loop (mandatory after every dev-harness)
+
+After each dev-harness run, spin up a spec evaluator agent to exhaustively compare the spec against the actual code. The evaluator loops until it finds zero differences.
+
+```
+Loop:
+  1. Launch spec evaluator agent:
+     - Read all relevant spec docs in full
+     - Read all relevant component code in full
+     - Produce an exhaustive diff: for every spec statement, does the code implement it?
+     - Include: missing features, wrong behavior, missing env vars, missing K8s resources,
+       missing NATS subjects/handlers, wrong field names, wrong error handling, etc.
+     - Output: list of gaps (or "CLEAN" if none)
+  2. If gaps found:
+     → /dev-harness <component> targeting each gap
+     → go to step 1
+  3. If CLEAN: proceed to Step 6
+```
+
+**Evaluator agent prompt template:**
+
+```
+You are a spec compliance auditor for the mclaude project.
+
+Read the spec doc(s) for <component>:
+  <list spec docs>
+
+Read all source files under <component root>.
+
+Produce an exhaustive list of gaps — places where the spec says something should exist
+or behave a certain way, but the code does not implement it. Be specific: quote the spec
+statement and describe what the code does or doesn't do.
+
+Do NOT list things the spec is silent about. Only list cases where spec says X and code
+does not implement X.
+
+Output format:
+  CLEAN                  (if zero gaps)
+  GAP: <spec quote> → <what code is missing or wrong>
+  GAP: ...
+```
+
+**Rules:**
+- Never report a task complete until the evaluator returns CLEAN
+- The evaluator must read both the spec AND the code — not just one
+- One failing evaluator gap = one more dev-harness pass
+- Evaluator runs after EVERY dev-harness, not just the first
+>>>>>>> origin/main
 
 ---
 
@@ -176,7 +251,11 @@ After CI deploys the preview, use the **Playwright MCP** to validate the golden 
 
 ```
 Validation checklist for spa changes:
+<<<<<<< HEAD
 1. Navigate to the preview URL (format: http://preview-{branch-slug}.{tailscale-ip}.sslip.io)
+=======
+1. Navigate to the preview URL (format: http://preview-{branch-slug}.{tailscale-ip}.nip.io)
+>>>>>>> origin/main
 2. Log in as dev@mclaude.local / dev
 3. Assert the changed screen/behavior matches the spec
 4. Assert the previous state (before the fix/feature) is gone
