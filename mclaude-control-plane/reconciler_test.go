@@ -25,6 +25,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 // startTestEnv starts an envtest environment with the MCProject CRD registered.
@@ -67,7 +68,9 @@ func startTestEnv(t *testing.T) (client.Client, context.CancelFunc) {
 	})
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme: scheme,
+		Scheme:                     scheme,
+		Metrics:                    metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress:     "0",
 	})
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
