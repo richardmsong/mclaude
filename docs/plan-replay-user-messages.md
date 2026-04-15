@@ -65,16 +65,26 @@ Enable Claude Code's `--replay-user-messages` flag so that all user messages —
 
 ### Session-agent
 
-**Spawn args**: Add `--replay-user-messages` to the Claude Code exec.Command:
+**Spawn args**: Add `--replay-user-messages` to the args slice in `session.go start()`. Working directory is set via `cmd.Dir`, not a CLI flag. The full args for new sessions:
 
 ```
-claude --print --verbose --output-format stream-json --input-format stream-json --replay-user-messages --session-id {id} -w {cwd}
+"--print", "--verbose",
+"--output-format", "stream-json",
+"--input-format", "stream-json",
+"--include-partial-messages",
+"--replay-user-messages",
+"--session-id", {id}
 ```
 
-Also add to `--resume` invocations:
+For resume:
 
 ```
-claude --print --verbose --output-format stream-json --input-format stream-json --replay-user-messages --resume {sessionId}
+"--print", "--verbose",
+"--output-format", "stream-json",
+"--input-format", "stream-json",
+"--include-partial-messages",
+"--replay-user-messages",
+"--resume", {sessionId}
 ```
 
 **handleInput**: Remove the manual `js.Publish()` to the events stream. Claude's replay echo flows through the existing stdout scanner → `publish(eventSubject, lineCopy)` path. `handleInput` only strips `session_id` and writes to stdin — all other fields (including `uuid`) are preserved.
@@ -252,7 +262,7 @@ Synthetic replay:
 |---------|----------|
 | Message sent but no replay arrives within 30s | Pending message stays visible with "sending..." indicator. No timeout — user can send another message or interrupt. |
 | Claude process crashes mid-turn with pending messages | Pending messages remain visible. On session restart/resume, they won't be replayed (they were never processed). User sees them stuck as pending and can resend. |
-| uuid missing from replay (older Claude version) | Fall back to text-matching dedup against pending messages. If no match, create inline turn normally. |
+| uuid missing from replay (older Claude version) | No pending matching possible — the event creates a normal inline turn. No duplicate risk because `addUserTurn()` is removed, so there is no optimistic turn to conflict with. The pending message stays visible until a matching uuid replay arrives or the user refreshes. |
 | JetStream replay delivers user events from before clear/compact | Handled by existing `replayFromSeq` logic — events before the boundary are skipped. |
 
 ## Scope
