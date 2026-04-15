@@ -8,6 +8,7 @@
 # which allows everything, so they can edit/build/test freely.
 
 exec claude \
+  --model opus \
   --disallowedTools \
     "Edit(mclaude-control-plane/**/*.go)" \
     "Write(mclaude-control-plane/**/*.go)" \

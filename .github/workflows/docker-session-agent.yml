@@ -23,6 +23,12 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mclaude-session-agent/go.mod
+      - name: Build binary
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o session-agent .
+        working-directory: mclaude-session-agent
       - name: Authenticate to GHCR
         run: |
           mkdir -p "$RUNNER_TEMP/docker"
