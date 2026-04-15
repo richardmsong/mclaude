@@ -394,6 +394,21 @@ export class EventStore {
         }
 
         if (turn.blocks.length > 0) {
+          // Dedup: if the last turn is an optimistic user turn with matching text, skip
+          const lastTurn = this._conversation.turns[this._conversation.turns.length - 1]
+          if (lastTurn && lastTurn.type === 'user') {
+            const lastText = lastTurn.blocks
+              .filter((b): b is TextBlock => b.type === 'text')
+              .map(b => b.text)
+              .join('')
+            const newText = turn.blocks
+              .filter((b): b is TextBlock => b.type === 'text')
+              .map(b => b.text)
+              .join('')
+            if (lastText === newText) {
+              break // Skip duplicate — optimistic turn already exists
+            }
+          }
           this._conversation.turns.push(turn)
         }
         break
