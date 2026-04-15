@@ -81,7 +81,7 @@ func StartDeps(t *testing.T) *Deps {
 		"mclaude-heartbeats",
 		"mclaude-laptops",
 	} {
-		if _, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
+		if _, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
 			Bucket: bucket,
 		}); err != nil {
 			t.Fatalf("create KV bucket %s: %v", bucket, err)
@@ -98,7 +98,7 @@ func StartDeps(t *testing.T) *Deps {
 			Subjects: []string{"mclaude.*.*.lifecycle.*"},
 		},
 	} {
-		if _, err := js.CreateStream(ctx, cfg); err != nil {
+		if _, err := js.CreateOrUpdateStream(ctx, cfg); err != nil {
 			t.Fatalf("create stream %s: %v", cfg.Name, err)
 		}
 	}

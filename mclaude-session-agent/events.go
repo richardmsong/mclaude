@@ -26,6 +26,7 @@ const (
 	StateIdle           = "idle"
 	StateRunning        = "running"
 	StateRequiresAction = "requires_action"
+	StateUpdating       = "updating" // pod is draining for a graceful upgrade
 )
 
 // eventHeader holds the minimum fields needed to dispatch an event.

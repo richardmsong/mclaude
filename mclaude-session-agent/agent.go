@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,9 +45,19 @@ type Agent struct {
 	dataDir    string
 	log        zerolog.Logger
 	metrics    *Metrics
-	// subs holds all active API NATS subscriptions so they can be drained on
-	// graceful shutdown (stop accepting new sessions before stopping active ones).
+	// subs holds all active core NATS subscriptions (terminal API) so they can
+	// be drained on graceful shutdown.
 	subs       []*nats.Subscription
+	// cmdConsumer and ctlConsumer are the JetStream pull consumers for API subjects.
+	cmdConsumer jetstream.Consumer
+	ctlConsumer jetstream.Consumer
+	// cmdCancel cancels the command consumer fetch loop.
+	cmdCancel context.CancelFunc
+	// ctlCancel cancels the control consumer fetch loop.
+	ctlCancel context.CancelFunc
+	// doExit is called at the end of gracefulShutdown. Defaults to os.Exit(0).
+	// Overridable in tests to prevent process exit.
+	doExit func(code int)
 }
 
 // NewAgent creates an Agent connected to the given NATS server.
@@ -91,6 +103,19 @@ func NewAgent(nc *nats.Conn, userID, projectID, claudePath, dataDir string, log 
 		return nil, fmt.Errorf("ensure MCLAUDE_EVENTS stream: %w", err)
 	}
 
+	// Ensure the MCLAUDE_API stream exists. This stream captures all session API
+	// subjects for at-least-once delivery. Created idempotently by each agent.
+	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:      "MCLAUDE_API",
+		Subjects:  []string{"mclaude.*.*.api.sessions.>"},
+		Retention: jetstream.LimitsPolicy,
+		MaxAge:    1 * time.Hour,
+		Storage:   jetstream.FileStorage,
+		Discard:   jetstream.DiscardOld,
+	}); err != nil {
+		return nil, fmt.Errorf("ensure MCLAUDE_API stream: %w", err)
+	}
+
 	agent := &Agent{
 		sessions:   make(map[string]*Session),
 		terminals:  make(map[string]*TerminalSession),
@@ -118,14 +143,20 @@ func NewAgent(nc *nats.Conn, userID, projectID, claudePath, dataDir string, log 
 	return agent, nil
 }
 
-// Run starts session recovery, NATS subscriptions, and the heartbeat loop.
-// Blocks until ctx is cancelled, then performs graceful shutdown.
+// Run starts session recovery, JetStream consumers, terminal NATS subscriptions,
+// the heartbeat loop, and waits for ctx cancellation before graceful shutdown.
 func (a *Agent) Run(ctx context.Context) error {
 	if err := a.recoverSessions(); err != nil {
 		a.log.Warn().Err(err).Msg("session recovery failed — continuing without recovery")
 	}
-	if err := a.subscribeAPI(); err != nil {
+	if err := a.createJetStreamConsumers(); err != nil {
 		return err
+	}
+	if err := a.subscribeTerminalAPI(); err != nil {
+		return err
+	}
+	if err := a.clearUpdatingState(); err != nil {
+		a.log.Warn().Err(err).Msg("clearUpdatingState failed — continuing")
 	}
 	a.runHeartbeat(ctx)
 	<-ctx.Done()
@@ -135,6 +166,8 @@ func (a *Agent) Run(ctx context.Context) error {
 
 // recoverSessions reads all existing sessions for this project from NATS KV
 // and resumes each with --resume {sessionId}.
+// Sessions in "updating" state are resumed but their KV entry is NOT updated yet
+// (the "updating" banner stays visible in the UI until clearUpdatingState() runs).
 func (a *Agent) recoverSessions() error {
 	ctx := context.Background()
 	watcher, err := a.sessKV.WatchAll(ctx)
@@ -161,11 +194,22 @@ func (a *Agent) recoverSessions() error {
 		if st.ProjectID != a.projectID || st.ID == "" {
 			continue
 		}
+
+		wasUpdating := st.State == StateUpdating
+
 		// Clear transient state before resuming.
 		clearPendingControlsForResume(&st)
-		if wErr := a.writeSessionKV(st); wErr != nil {
-			a.log.Warn().Err(wErr).Str("sessionId", st.ID).Msg("failed to clear pending controls")
+
+		// Write the cleared state to KV — but only if the session was NOT in
+		// "updating" state. For "updating" sessions we keep the KV entry as-is
+		// so the UI banner remains visible. clearUpdatingState() will write
+		// state:"idle" later, after consumers are attached and the agent is ready.
+		if !wasUpdating {
+			if wErr := a.writeSessionKV(st); wErr != nil {
+				a.log.Warn().Err(wErr).Str("sessionId", st.ID).Msg("failed to clear pending controls")
+			}
 		}
+
 		sess := newSession(st, a.userID)
 		sess.metrics = a.metrics
 
@@ -201,26 +245,172 @@ func (a *Agent) recoverSessions() error {
 	return nil
 }
 
-// gracefulShutdown implements the spec shutdown sequence:
-//
-//  1. Stop accepting new sessions (drain all API subscriptions)
-//  2. For each active Claude process: interrupt → wait up to 10s → kill
-//  3. Publish session_stopped lifecycle events
-func (a *Agent) gracefulShutdown() {
-	// Step 1: stop accepting new sessions by draining API subscriptions.
-	// Draining flushes any in-flight message handlers before unsubscribing.
-	a.mu.RLock()
-	subs := make([]*nats.Subscription, len(a.subs))
-	copy(subs, a.subs)
-	a.mu.RUnlock()
-
-	for _, sub := range subs {
-		if err := sub.Drain(); err != nil {
-			a.log.Warn().Err(err).Str("subject", sub.Subject).Msg("subscription drain failed")
-		}
+// createJetStreamConsumers creates (or attaches to existing) durable pull consumers
+// for the command and control API subjects, then starts their fetch goroutines.
+func (a *Agent) createJetStreamConsumers() error {
+	ctx := context.Background()
+	stream, err := a.js.Stream(ctx, "MCLAUDE_API")
+	if err != nil {
+		return fmt.Errorf("MCLAUDE_API stream lookup: %w", err)
 	}
 
-	// Step 2 & 3: stop each active session and publish lifecycle events.
+	cmdName := fmt.Sprintf("sa-cmd-%s-%s", a.userID, a.projectID)
+	ctlName := fmt.Sprintf("sa-ctl-%s-%s", a.userID, a.projectID)
+	prefix := fmt.Sprintf("mclaude.%s.%s.api.sessions.", a.userID, a.projectID)
+
+	cmdCons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
+		Durable:        cmdName,
+		AckPolicy:      jetstream.AckExplicitPolicy,
+		AckWait:        60 * time.Second,
+		MaxDeliver:     5,
+		FilterSubjects: []string{
+			prefix + "create",
+			prefix + "delete",
+			prefix + "input",
+			prefix + "restart",
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create cmd consumer: %w", err)
+	}
+
+	ctlCons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
+		Durable:        ctlName,
+		AckPolicy:      jetstream.AckExplicitPolicy,
+		AckWait:        60 * time.Second,
+		MaxDeliver:     5,
+		FilterSubjects: []string{prefix + "control"},
+	})
+	if err != nil {
+		return fmt.Errorf("create ctl consumer: %w", err)
+	}
+
+	a.cmdConsumer = cmdCons
+	a.ctlConsumer = ctlCons
+
+	cmdCtx, cmdCancel := context.WithCancel(context.Background())
+	ctlCtx, ctlCancel := context.WithCancel(context.Background())
+	a.cmdCancel = cmdCancel
+	a.ctlCancel = ctlCancel
+
+	go a.runConsumer(cmdCtx, cmdCons, a.dispatchCmd)
+	go a.runConsumer(ctlCtx, ctlCons, a.dispatchCtl)
+
+	return nil
+}
+
+// runConsumer runs a pull-based JetStream fetch loop, dispatching each message.
+// Stops when ctx is cancelled.
+func (a *Agent) runConsumer(ctx context.Context, cons jetstream.Consumer, dispatch func(jetstream.Msg)) {
+	backoff := 100 * time.Millisecond
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		msgs, err := cons.Fetch(10, jetstream.FetchMaxWait(5*time.Second))
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			a.log.Warn().Err(err).Msg("JetStream fetch error — backing off")
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if backoff < 5*time.Second {
+				backoff *= 2
+			}
+			continue
+		}
+		backoff = 100 * time.Millisecond
+		for msg := range msgs.Messages() {
+			dispatch(msg)
+			if err := msg.Ack(); err != nil {
+				a.log.Warn().Err(err).Str("subject", msg.Subject()).Msg("JetStream ack failed")
+			}
+		}
+	}
+}
+
+// jsToNatsMsg wraps a jetstream.Msg into a *nats.Msg for handler compatibility.
+// The wrapped msg has .Data, .Subject, and .Header populated.
+// .Reply is empty — handlers must not call msg.Respond() (reply() is a no-op
+// when msg.Reply == "").
+func jsToNatsMsg(jm jetstream.Msg) *nats.Msg {
+	return &nats.Msg{
+		Subject: jm.Subject(),
+		Data:    jm.Data(),
+		Header:  jm.Headers(),
+	}
+}
+
+// dispatchCmd routes a command consumer message to the appropriate handler.
+func (a *Agent) dispatchCmd(jm jetstream.Msg) {
+	msg := jsToNatsMsg(jm)
+	switch {
+	case strings.HasSuffix(jm.Subject(), ".create"):
+		a.handleCreate(msg)
+	case strings.HasSuffix(jm.Subject(), ".delete"):
+		a.handleDelete(msg)
+	case strings.HasSuffix(jm.Subject(), ".input"):
+		a.handleInput(msg)
+	case strings.HasSuffix(jm.Subject(), ".restart"):
+		a.handleRestart(msg)
+	default:
+		a.log.Warn().Str("subject", jm.Subject()).Msg("dispatchCmd: unrecognised subject")
+	}
+}
+
+// dispatchCtl routes a control consumer message to the handleControl handler.
+func (a *Agent) dispatchCtl(jm jetstream.Msg) {
+	a.handleControl(jsToNatsMsg(jm))
+}
+
+// clearUpdatingState writes state:"idle" to KV for all sessions currently
+// in "updating" state. Called after JetStream consumers are attached and the
+// agent is ready to process queued messages.
+func (a *Agent) clearUpdatingState() error {
+	a.mu.RLock()
+	sessions := make([]*Session, 0, len(a.sessions))
+	for _, s := range a.sessions {
+		sessions = append(sessions, s)
+	}
+	a.mu.RUnlock()
+
+	for _, sess := range sessions {
+		st := sess.getState()
+		if st.State == StateUpdating {
+			st.State = StateIdle
+			st.StateSince = time.Now().UTC()
+			// Update in-memory state too.
+			sess.mu.Lock()
+			sess.state.State = StateIdle
+			sess.state.StateSince = st.StateSince
+			sess.mu.Unlock()
+			if err := a.writeSessionKV(st); err != nil {
+				a.log.Warn().Err(err).Str("sessionId", st.ID).Msg("clearUpdatingState: KV write failed")
+			}
+		}
+	}
+	return nil
+}
+
+// gracefulShutdown implements the spec shutdown sequence for SIGTERM:
+//
+//  1. Write state:"updating" to session KV for all sessions.
+//  2. Cancel command consumer context (stops cmd fetch loop; messages queue in JetStream).
+//  3. Drain core NATS subscriptions (terminal API).
+//  4. Keep control consumer running.
+//  5. Poll 1s: wait for all sessions to be idle or updating.
+//  6. Cancel control consumer context.
+//  7. Publish lifecycle "session_upgrading" for each session.
+//  8. Exit(0).
+func (a *Agent) gracefulShutdown() {
+	// Step 1: write state:"updating" for all sessions.
 	a.mu.RLock()
 	ids := make([]string, 0, len(a.sessions))
 	for id := range a.sessions {
@@ -235,17 +425,75 @@ func (a *Agent) gracefulShutdown() {
 		if !ok {
 			continue
 		}
-		if err := sess.stopAndWait(sessionDeleteTimeout); err != nil {
-			a.log.Warn().Err(err).Str("sessionId", id).Msg("session did not stop cleanly")
+		st := sess.getState()
+		st.State = StateUpdating
+		st.StateSince = time.Now().UTC()
+		sess.mu.Lock()
+		sess.state.State = StateUpdating
+		sess.state.StateSince = st.StateSince
+		sess.mu.Unlock()
+		if err := a.writeSessionKV(st); err != nil {
+			a.log.Warn().Err(err).Str("sessionId", id).Msg("gracefulShutdown: failed to write updating state")
 		}
-		a.publishLifecycle(id, "session_stopped")
 	}
+
+	// Step 2: stop the command consumer (new work queues in JetStream).
+	if a.cmdCancel != nil {
+		a.cmdCancel()
+	}
+
+	// Step 3: drain core NATS subscriptions (terminal API).
+	a.mu.RLock()
+	subs := make([]*nats.Subscription, len(a.subs))
+	copy(subs, a.subs)
+	a.mu.RUnlock()
+
+	for _, sub := range subs {
+		if err := sub.Drain(); err != nil {
+			a.log.Warn().Err(err).Str("subject", sub.Subject).Msg("subscription drain failed")
+		}
+	}
+
+	// Step 4 & 5: keep control consumer running; poll until all sessions idle/updating.
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		a.mu.RLock()
+		allDone := true
+		for _, sess := range a.sessions {
+			st := sess.getState()
+			if st.State != StateIdle && st.State != StateUpdating {
+				allDone = false
+				break
+			}
+		}
+		a.mu.RUnlock()
+		if allDone {
+			break
+		}
+	}
+
+	// Step 6: stop the control consumer.
+	if a.ctlCancel != nil {
+		a.ctlCancel()
+	}
+
+	// Step 7: publish lifecycle "session_upgrading" for each session.
+	for _, id := range ids {
+		a.publishLifecycle(id, "session_upgrading")
+	}
+
+	// Step 8: exit.
+	exitFn := a.doExit
+	if exitFn == nil {
+		exitFn = os.Exit
+	}
+	exitFn(0)
 }
 
-// subscribeAPI sets up NATS subscriptions for session CRUD, I/O, and terminal management.
-// The subscriptions are stored in a.subs so they can be drained on graceful shutdown.
-func (a *Agent) subscribeAPI() error {
-	sessPrefix := fmt.Sprintf("mclaude.%s.%s.api.sessions.", a.userID, a.projectID)
+// subscribeTerminalAPI sets up core NATS subscriptions for terminal management.
+// Terminal I/O is latency-sensitive and stays on core NATS (ephemeral).
+func (a *Agent) subscribeTerminalAPI() error {
 	termPrefix := fmt.Sprintf("mclaude.%s.%s.api.terminal.", a.userID, a.projectID)
 
 	type entry struct {
@@ -253,13 +501,6 @@ func (a *Agent) subscribeAPI() error {
 		handler nats.MsgHandler
 	}
 	entries := []entry{
-		// Session API
-		{sessPrefix + "create", a.handleCreate},
-		{sessPrefix + "delete", a.handleDelete},
-		{sessPrefix + "input", a.handleInput},
-		{sessPrefix + "control", a.handleControl},
-		{sessPrefix + "restart", a.handleRestart},
-		// Terminal API
 		{termPrefix + "create", a.handleTerminalCreate},
 		{termPrefix + "delete", a.handleTerminalDelete},
 		{termPrefix + "resize", a.handleTerminalResize},
@@ -277,19 +518,35 @@ func (a *Agent) subscribeAPI() error {
 	return nil
 }
 
-// handleCreate processes a sessions.create request/reply.
-// Payload: {name, branch, cwd, joinWorktree}
-// Reply:   {id} or {error}
+// publishAPIError publishes an api_error event to the project-level _api subject.
+// Used when a create/delete/restart handler encounters an error.
+func (a *Agent) publishAPIError(requestID, operation, errMsg string) {
+	subject := fmt.Sprintf("mclaude.%s.%s.events._api", a.userID, a.projectID)
+	payload, _ := json.Marshal(map[string]string{
+		"type":       "api_error",
+		"request_id": requestID,
+		"operation":  operation,
+		"error":      errMsg,
+	})
+	_ = a.nc.Publish(subject, payload)
+}
+
+// handleCreate processes a sessions.create request.
+// Payload: {name, branch, cwd, joinWorktree, requestId}
+// Success: session appears in KV (SPA watches KV).
+// Error: publish api_error event to mclaude.{userId}.{projectId}.events._api.
 func (a *Agent) handleCreate(msg *nats.Msg) {
 	var req struct {
 		Name         string `json:"name"`
 		Branch       string `json:"branch"`
 		CWD          string `json:"cwd"`
 		JoinWorktree bool   `json:"joinWorktree"`
+		RequestID    string `json:"requestId"`
 	}
 	if len(msg.Data) > 0 {
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
 			a.reply(msg, nil, "invalid request: "+err.Error())
+			a.publishAPIError(req.RequestID, "create", "invalid request: "+err.Error())
 			return
 		}
 	}
@@ -329,7 +586,9 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 
 	if collision && !req.JoinWorktree {
 		// Step 5: error if not joining.
-		a.reply(msg, nil, "worktree already in use for branch "+req.Branch)
+		errMsg := "worktree already in use for branch " + req.Branch
+		a.reply(msg, nil, errMsg)
+		a.publishAPIError(req.RequestID, "create", errMsg)
 		return
 	}
 
@@ -340,7 +599,9 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 				Str("branch", branch).
 				Str("worktreePath", worktreePath).
 				Msg("git worktree add failed")
-			a.reply(msg, nil, "git worktree add: "+err.Error())
+			errMsg := "git worktree add: " + err.Error()
+			a.reply(msg, nil, errMsg)
+			a.publishAPIError(req.RequestID, "create", errMsg)
 			return
 		}
 	}
@@ -362,7 +623,9 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 
 	if err := a.writeSessionKV(state); err != nil {
 		a.log.Error().Err(err).Str("sessionId", sessionID).Msg("failed to write initial session KV")
-		a.reply(msg, nil, "KV write failed: "+err.Error())
+		errMsg := "KV write failed: " + err.Error()
+		a.reply(msg, nil, errMsg)
+		a.publishAPIError(req.RequestID, "create", errMsg)
 		return
 	}
 
@@ -408,7 +671,9 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 		dbg.Stop()
 		a.log.Error().Err(err).Str("sessionId", sessionID).Msg("failed to start claude")
 		a.publishLifecycleFailed(sessionID, err.Error())
-		a.reply(msg, nil, "start claude: "+err.Error())
+		errMsg := "start claude: " + err.Error()
+		a.reply(msg, nil, errMsg)
+		a.publishAPIError(req.RequestID, "create", errMsg)
 		return
 	}
 
@@ -432,15 +697,19 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 	a.reply(msg, map[string]string{"id": sessionID}, "")
 }
 
-// handleDelete processes a sessions.delete request/reply.
-// Payload: {sessionId}
-// Reply:   {} or {error}
+// handleDelete processes a sessions.delete request.
+// Payload: {sessionId, requestId}
+// Success: session disappears from KV (SPA watches KV).
+// Error: publish api_error event.
 func (a *Agent) handleDelete(msg *nats.Msg) {
 	var req struct {
 		SessionID string `json:"sessionId"`
+		RequestID string `json:"requestId"`
 	}
 	if err := json.Unmarshal(msg.Data, &req); err != nil || req.SessionID == "" {
-		a.reply(msg, nil, "invalid request: missing sessionId")
+		errMsg := "invalid request: missing sessionId"
+		a.reply(msg, nil, errMsg)
+		a.publishAPIError(req.RequestID, "delete", errMsg)
 		return
 	}
 
@@ -452,7 +721,9 @@ func (a *Agent) handleDelete(msg *nats.Msg) {
 	a.mu.Unlock()
 
 	if !ok {
-		a.reply(msg, nil, "session not found: "+req.SessionID)
+		errMsg := "session not found: " + req.SessionID
+		a.reply(msg, nil, errMsg)
+		a.publishAPIError(req.RequestID, "delete", errMsg)
 		return
 	}
 
@@ -553,7 +824,9 @@ func (a *Agent) handleInput(msg *nats.Msg) {
 // handleControl routes a control message (permission response, interrupt, model
 // change) to the appropriate session's stdin.
 // Payload: {type: "control_response", response: {request_id, ...}} or
-//          {type: "control_request", request: {subtype: "interrupt"/"set_model"}}
+//
+//	{type: "control_request", request: {subtype: "interrupt"/"set_model"}}
+//
 // No reply — fire and forget.
 func (a *Agent) handleControl(msg *nats.Msg) {
 	var envelope struct {
@@ -597,14 +870,18 @@ func (a *Agent) handleControl(msg *nats.Msg) {
 }
 
 // handleRestart stops a session and relaunches it with --resume.
-// Payload: {sessionId}
-// Reply:   {} or {error}
+// Payload: {sessionId, requestId}
+// Success: session state transitions through "restarting" in KV.
+// Error: publish api_error event.
 func (a *Agent) handleRestart(msg *nats.Msg) {
 	var req struct {
 		SessionID string `json:"sessionId"`
+		RequestID string `json:"requestId"`
 	}
 	if err := json.Unmarshal(msg.Data, &req); err != nil || req.SessionID == "" {
-		a.reply(msg, nil, "invalid request: missing sessionId")
+		errMsg := "invalid request: missing sessionId"
+		a.reply(msg, nil, errMsg)
+		a.publishAPIError(req.RequestID, "restart", errMsg)
 		return
 	}
 
@@ -613,7 +890,9 @@ func (a *Agent) handleRestart(msg *nats.Msg) {
 	a.mu.Unlock()
 
 	if !ok {
-		a.reply(msg, nil, "session not found: "+req.SessionID)
+		errMsg := "session not found: " + req.SessionID
+		a.reply(msg, nil, errMsg)
+		a.publishAPIError(req.RequestID, "restart", errMsg)
 		return
 	}
 
@@ -656,7 +935,9 @@ func (a *Agent) handleRestart(msg *nats.Msg) {
 	if err := newSess.start(a.claudePath, true, publish, a.writeSessionKV); err != nil {
 		newDbg.Stop()
 		a.log.Error().Err(err).Str("sessionId", req.SessionID).Msg("failed to resume session")
-		a.reply(msg, nil, "resume failed: "+err.Error())
+		errMsg := "resume failed: " + err.Error()
+		a.reply(msg, nil, errMsg)
+		a.publishAPIError(req.RequestID, "restart", errMsg)
 		return
 	}
 
@@ -775,6 +1056,7 @@ func (a *Agent) updateReplayFromSeq(sessionID string) {
 
 // reply sends a NATS reply. If errMsg is non-empty, sends {error: errMsg}.
 // If data is nil and errMsg is empty, sends {}.
+// This is a no-op when msg.Reply == "" (JetStream messages have no Reply).
 func (a *Agent) reply(msg *nats.Msg, data any, errMsg string) {
 	if msg.Reply == "" {
 		return
@@ -824,18 +1106,19 @@ type controlResponse struct {
 // Returns nil if the command succeeds.
 func (a *Agent) gitWorktreeAdd(repoPath, worktreePath, branch string) error {
 	cmd := exec.Command("git", "-C", repoPath, "worktree", "add", worktreePath, branch)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git worktree add: %w — %s", err, out)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, out)
 	}
 	return nil
 }
 
-// gitWorktreeRemove runs `git -C {repoPath} worktree remove {worktreePath}`.
-// Returns nil if the command succeeds or if the worktree doesn't exist.
+// gitWorktreeRemove runs `git -C {repoPath} worktree remove --force {worktreePath}`.
 func (a *Agent) gitWorktreeRemove(repoPath, worktreePath string) error {
-	cmd := exec.Command("git", "-C", repoPath, "worktree", "remove", worktreePath)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git worktree remove: %w — %s", err, out)
+	cmd := exec.Command("git", "-C", repoPath, "worktree", "remove", "--force", worktreePath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, out)
 	}
 	return nil
 }
