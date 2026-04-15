@@ -121,6 +121,7 @@ func fetchQuotaStatus(credentialsPath string) QuotaStatus {
 		R5:      r5,
 		U7:      int(apiResp.SevenDay.Utilization * 100),
 		R7:      r7,
+		TS:      time.Now().UTC(),
 	}
 }
 
@@ -612,12 +613,17 @@ func (d *Daemon) processDispatch(ctx context.Context, quota QuotaStatus, changed
 
 		if anyExceeded {
 			// Sort by priority ascending (lowest priority first = first to be paused).
+			// Spec: stop jobs in ascending priority order, applying 5% hysteresis —
+			// stop enough sessions that accumulated headroom drops below threshold-5.
+			// Since each job carries its own Threshold (no shared headroom to sum),
+			// exact headroom cannot be computed; per the spec fallback we stop all
+			// running jobs whose per-job threshold is exceeded (u5 >= job.Threshold).
 			sort.Slice(running, func(i, j int) bool {
 				return running[i].Priority < running[j].Priority
 			})
 			for _, job := range running {
 				if quota.U5 < job.Threshold {
-					break // remaining jobs have higher threshold; leave them running
+					break // this job's threshold not exceeded; higher-threshold jobs also safe
 				}
 				// Send graceful stop.
 				inputSubject := fmt.Sprintf("mclaude.%s.%s.api.sessions.input", d.cfg.UserID, job.ProjectID)
@@ -723,11 +729,9 @@ func (d *Daemon) runJobsHTTP(ctx context.Context) {
 
 // handleJobsRoute handles POST /jobs and GET /jobs.
 func (d *Daemon) handleJobsRoute(w http.ResponseWriter, r *http.Request) {
-	userID := r.Header.Get("X-User-ID")
-	if userID == "" {
-		http.Error(w, "missing X-User-ID header", http.StatusBadRequest)
-		return
-	}
+	// The server is loopback-only; use the daemon's own userId from DaemonConfig.
+	// No auth header required per spec (plan-quota-aware-scheduling.md §Daemon Jobs HTTP Server).
+	userID := d.cfg.UserID
 
 	switch r.Method {
 	case http.MethodPost:
@@ -805,11 +809,9 @@ func (d *Daemon) handleJobsRoute(w http.ResponseWriter, r *http.Request) {
 
 // handleJobByID handles GET /jobs/{id} and DELETE /jobs/{id}.
 func (d *Daemon) handleJobByID(w http.ResponseWriter, r *http.Request) {
-	userID := r.Header.Get("X-User-ID")
-	if userID == "" {
-		http.Error(w, "missing X-User-ID header", http.StatusBadRequest)
-		return
-	}
+	// The server is loopback-only; use the daemon's own userId from DaemonConfig.
+	// No auth header required per spec (plan-quota-aware-scheduling.md §Daemon Jobs HTTP Server).
+	userID := d.cfg.UserID
 
 	// Extract job ID from path: /jobs/{id}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/jobs/"), "/")
@@ -860,11 +862,9 @@ func (d *Daemon) handleJobsProjects(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	userID := r.Header.Get("X-User-ID")
-	if userID == "" {
-		http.Error(w, "missing X-User-ID header", http.StatusBadRequest)
-		return
-	}
+	// The server is loopback-only; use the daemon's own userId from DaemonConfig.
+	// No auth header required per spec (plan-quota-aware-scheduling.md §Daemon Jobs HTTP Server).
+	userID := d.cfg.UserID
 
 	watcher, err := d.projectsKV.WatchAll(context.Background())
 	if err != nil {
