@@ -179,6 +179,26 @@ describe('EventStore', () => {
       store.applyEventForTest(clearEvent)
       expect(store.conversation.turns).toHaveLength(0)
     })
+
+    it('clears _pendingMessages on clear event', () => {
+      store.addPendingMessage('uuid-1', 'Hello')
+      store.addPendingMessage('uuid-2', 'World')
+      expect(store.pendingMessages).toHaveLength(2)
+
+      const clearEvent: StreamJsonEvent = { type: 'clear' }
+      store.applyEventForTest(clearEvent)
+      expect(store.pendingMessages).toHaveLength(0)
+    })
+  })
+
+  describe('compact_boundary clears pendingMessages', () => {
+    it('clears _pendingMessages on compact_boundary', () => {
+      store.addPendingMessage('uuid-1', 'In-flight message')
+      expect(store.pendingMessages).toHaveLength(1)
+
+      store.applyEventForTest(transcripts.compaction[0])
+      expect(store.pendingMessages).toHaveLength(0)
+    })
   })
 
   describe('deduplication', () => {
@@ -199,46 +219,36 @@ describe('EventStore', () => {
       expect(userTurns).toHaveLength(2)
     })
 
-    describe('optimistic user turn deduplication', () => {
-      it('skips a user event whose text matches the immediately preceding optimistic user turn', () => {
-        // Simulate: user sends "Hello" → addUserTurn adds optimistic turn,
-        // then session-agent publishes the same text as a stream event.
-        store.addUserTurn('Hello')
-        expect(store.conversation.turns.filter(t => t.type === 'user')).toHaveLength(1)
+    describe('uuid-based pending message matching', () => {
+      it('removes matching pending message when user event with same uuid arrives', () => {
+        store.addPendingMessage('uuid-1', 'Hello')
+        expect(store.pendingMessages).toHaveLength(1)
 
-        const event: StreamJsonEvent = { type: 'user', message: { role: 'user', content: 'Hello' } }
+        const event: StreamJsonEvent = { type: 'user', message: { role: 'user', content: 'Hello' }, uuid: 'uuid-1', isReplay: true }
         store.applyEventForTest(event, 2)
 
-        // Still only one user turn — the duplicate was skipped
+        // Pending message removed
+        expect(store.pendingMessages).toHaveLength(0)
+        // Inline user turn created
         const userTurns = store.conversation.turns.filter(t => t.type === 'user')
         expect(userTurns).toHaveLength(1)
         expect(userTurns[0].blocks[0].type === 'text' && userTurns[0].blocks[0].text).toBe('Hello')
       })
 
-      it('does NOT skip when the text differs from the last user turn', () => {
-        store.addUserTurn('Hello')
-        const event: StreamJsonEvent = { type: 'user', message: { role: 'user', content: 'Different text' } }
+      it('does NOT remove pending when uuid does not match', () => {
+        store.addPendingMessage('uuid-1', 'Hello')
+
+        const event: StreamJsonEvent = { type: 'user', message: { role: 'user', content: 'Hello' }, uuid: 'uuid-2', isReplay: true }
         store.applyEventForTest(event, 2)
 
+        // Pending message still present (uuid didn't match)
+        expect(store.pendingMessages).toHaveLength(1)
+        // But inline user turn still created
         const userTurns = store.conversation.turns.filter(t => t.type === 'user')
-        expect(userTurns).toHaveLength(2)
+        expect(userTurns).toHaveLength(1)
       })
 
-      it('does NOT skip when the last turn is an assistant turn (not a user turn)', () => {
-        // Process the full simpleMessage transcript so the last turn is assistant
-        for (const event of transcripts.simpleMessage) {
-          store.applyEventForTest(event)
-        }
-        const countBefore = store.conversation.turns.filter(t => t.type === 'user').length
-
-        const event: StreamJsonEvent = { type: 'user', message: { role: 'user', content: 'Hello' } }
-        store.applyEventForTest(event, 99)
-
-        const userTurns = store.conversation.turns.filter(t => t.type === 'user')
-        expect(userTurns).toHaveLength(countBefore + 1)
-      })
-
-      it('does NOT skip when there is no preceding turn at all', () => {
+      it('creates inline user turn when no uuid present', () => {
         const event: StreamJsonEvent = { type: 'user', message: { role: 'user', content: 'Hello' } }
         store.applyEventForTest(event, 1)
 
@@ -246,16 +256,24 @@ describe('EventStore', () => {
         expect(userTurns).toHaveLength(1)
       })
 
-      it('skips when optimistic turn has array content matching the event text', () => {
-        store.addUserTurn([{ type: 'text', text: 'Multi block' }])
+      it('creates system turn for synthetic replay', () => {
         const event: StreamJsonEvent = {
           type: 'user',
-          message: { role: 'user', content: [{ type: 'text', text: 'Multi block' }] },
+          message: { role: 'user', content: 'Background task completed' },
+          uuid: 'uuid-1',
+          isReplay: true,
+          isSynthetic: true,
         }
-        store.applyEventForTest(event, 2)
+        store.applyEventForTest(event, 1)
 
-        const userTurns = store.conversation.turns.filter(t => t.type === 'user')
-        expect(userTurns).toHaveLength(1)
+        const systemTurns = store.conversation.turns.filter(t => t.type === 'system')
+        expect(systemTurns).toHaveLength(1)
+        expect(systemTurns[0].blocks[0].type).toBe('system_message')
+        if (systemTurns[0].blocks[0].type === 'system_message') {
+          expect(systemTurns[0].blocks[0].text).toBe('Background task completed')
+        }
+        // No user turn for synthetic
+        expect(store.conversation.turns.filter(t => t.type === 'user')).toHaveLength(0)
       })
     })
   })

@@ -10,9 +10,11 @@ import type {
   TextBlock,
   ThinkingBlock,
   ControlRequestBlock,
+  SystemMessageBlock,
   SessionState,
   SystemInitEvent,
   SystemStateChangedEvent,
+  PendingMessage,
 } from '@/types'
 import { logger } from '@/logger'
 
@@ -35,6 +37,7 @@ export class EventStore {
   private _capabilities = { skills: [] as string[], tools: [] as string[], agents: [] as string[] }
   private _model = ''
   private _turnCounter = 0
+  private _pendingMessages: PendingMessage[] = []
 
   constructor(private readonly opts: EventStoreOptions) {}
 
@@ -165,24 +168,14 @@ export class EventStore {
     this._notify()
   }
 
-  addUserTurn(content: string | Array<{ type: string; text?: string }>): void {
-    const blocks: TextBlock[] = []
-    if (typeof content === 'string') {
-      blocks.push({ type: 'text', text: content })
-    } else {
-      for (const item of content) {
-        if (item.type === 'text' && item.text !== undefined) {
-          blocks.push({ type: 'text', text: item.text })
-        }
-      }
-    }
-    const turn: Turn = {
-      id: this._nextTurnId(),
-      type: 'user',
-      blocks,
-    }
-    this._conversation.turns.push(turn)
+  addPendingMessage(uuid: string, content: string | Array<{ type: string; text?: string }>): void {
+    const pending: PendingMessage = { uuid, content, sentAt: Date.now() }
+    this._pendingMessages.push(pending)
     this._notify()
+  }
+
+  get pendingMessages(): PendingMessage[] {
+    return this._pendingMessages
   }
 
   private _nextTurnId(): string {
@@ -222,6 +215,7 @@ export class EventStore {
           'processing clear event',
         )
         this._conversation = { turns: [] }
+        this._pendingMessages = []
         // Update replayFromSeq so reconnects skip events before this clear
         if (this._lastSequence > 0) {
           this._replayFromSeq = this._lastSequence
@@ -247,6 +241,7 @@ export class EventStore {
             blocks: [{ type: 'compaction', summary: event.summary }],
           }],
         }
+        this._pendingMessages = []
         // Update replayFromSeq — events before compaction are no longer relevant
         if (this._lastSequence > 0) {
           this._replayFromSeq = this._lastSequence
@@ -360,6 +355,65 @@ export class EventStore {
       }
 
       case 'user': {
+        // Step 1: If content is tool_result array → attach to ToolUseBlock and return early
+        if (Array.isArray(event.message.content)) {
+          const hasToolResult = event.message.content.some(c => c.type === 'tool_result')
+          if (hasToolResult) {
+            for (const c of event.message.content) {
+              if (c.type === 'tool_result' && c.tool_use_id) {
+                const toolUseBlock = this._findToolUseBlock(c.tool_use_id)
+                const resultBlock: ToolResultBlock = {
+                  type: 'tool_result',
+                  toolUseId: c.tool_use_id,
+                  content: typeof c.content === 'string' ? c.content : JSON.stringify(c.content),
+                  isError: c.is_error ?? false,
+                }
+                if (toolUseBlock) {
+                  toolUseBlock.result = resultBlock
+                } else {
+                  // Orphaned tool_result — no matching tool_use found
+                  const orphanTurn: Turn = {
+                    id: this._nextTurnId(),
+                    type: 'user',
+                    blocks: [resultBlock],
+                    parentToolUseId: event.parent_tool_use_id ?? undefined,
+                  }
+                  this._conversation.turns.push(orphanTurn)
+                }
+              }
+            }
+            return // Don't add user turn for tool_result
+          }
+        }
+
+        // Step 2: If event has uuid and matching pending message → remove from _pendingMessages
+        if (event.uuid) {
+          const idx = this._pendingMessages.findIndex(p => p.uuid === event.uuid)
+          if (idx !== -1) {
+            this._pendingMessages.splice(idx, 1)
+          }
+        }
+
+        // Step 3: If isSynthetic → create system turn with SystemMessageBlock
+        if (event.isSynthetic) {
+          const text = typeof event.message.content === 'string'
+            ? event.message.content
+            : event.message.content
+                .filter(c => c.type === 'text' && c.text)
+                .map(c => c.text ?? '')
+                .join('')
+          const block: SystemMessageBlock = { type: 'system_message', text }
+          const systemTurn: Turn = {
+            id: this._nextTurnId(),
+            type: 'system',
+            blocks: [block],
+            parentToolUseId: event.parent_tool_use_id ?? undefined,
+          }
+          this._conversation.turns.push(systemTurn)
+          break
+        }
+
+        // Step 4: Otherwise → create a normal user turn inline at current position
         const turn: Turn = {
           id: this._nextTurnId(),
           type: 'user',
@@ -368,47 +422,18 @@ export class EventStore {
         }
 
         if (typeof event.message.content === 'string') {
-          turn.blocks.push({ type: 'text', text: event.message.content })
+          if (event.message.content) {
+            turn.blocks.push({ type: 'text', text: event.message.content })
+          }
         } else if (Array.isArray(event.message.content)) {
           for (const c of event.message.content) {
             if (c.type === 'text' && c.text) {
               turn.blocks.push({ type: 'text', text: c.text })
-            } else if (c.type === 'tool_result' && c.tool_use_id) {
-              // Attach tool result to matching tool use block
-              const toolUseBlock = this._findToolUseBlock(c.tool_use_id)
-              const resultBlock: ToolResultBlock = {
-                type: 'tool_result',
-                toolUseId: c.tool_use_id,
-                content: typeof c.content === 'string' ? c.content : JSON.stringify(c.content),
-                isError: c.is_error ?? false,
-              }
-              if (toolUseBlock) {
-                toolUseBlock.result = resultBlock
-              } else {
-                // Orphaned tool_result — no matching tool_use found; add as standalone block
-                turn.blocks.push(resultBlock)
-              }
-              return // Don't add user turn for tool_result
             }
           }
         }
 
         if (turn.blocks.length > 0) {
-          // Dedup: if the last turn is an optimistic user turn with matching text, skip
-          const lastTurn = this._conversation.turns[this._conversation.turns.length - 1]
-          if (lastTurn && lastTurn.type === 'user') {
-            const lastText = lastTurn.blocks
-              .filter((b): b is TextBlock => b.type === 'text')
-              .map(b => b.text)
-              .join('')
-            const newText = turn.blocks
-              .filter((b): b is TextBlock => b.type === 'text')
-              .map(b => b.text)
-              .join('')
-            if (lastText === newText) {
-              break // Skip duplicate — optimistic turn already exists
-            }
-          }
           this._conversation.turns.push(turn)
         }
         break

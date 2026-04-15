@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { NavBar } from './NavBar'
 import { StatusDot } from './StatusDot'
 import { EventList } from './events/EventList'
-import type { Turn, SessionState } from '@/types'
+import type { Turn, SessionState, PendingMessage } from '@/types'
 import type { ConversationVM, ConversationVMState } from '@/viewmodels/conversation-vm'
 
 interface SessionUsage {
@@ -95,7 +95,6 @@ export function SessionDetailScreen({
   const [vmState, setVmState] = useState<ConversationVMState>(conversationVM.state)
   const [activeTab, setActiveTab] = useState<'events' | 'terminal'>(getStoredTab)
   const [input, setInput] = useState('')
-  const [sending, setSending] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
   const [showSkills, setShowSkills] = useState(false)
   const [showUsageOverlay, setShowUsageOverlay] = useState(false)
@@ -173,6 +172,7 @@ export function SessionDetailScreen({
   }, [showMenu])
 
   const turns: Turn[] = vmState.turns
+  const pendingMessages: PendingMessage[] = vmState.pendingMessages ?? []
   const skills: string[] = vmState.skills ?? []
 
   const handleScroll = () => {
@@ -181,21 +181,16 @@ export function SessionDetailScreen({
     atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100
   }
 
-  const handleSend = async () => {
+  const handleSend = () => {
     const text = input.trim()
-    if (!text || sending) return
+    if (!text) return
     setInput('')
-    setSending(true)
     setShowSkills(false)
-    try {
-      if (stagedImage) {
-        conversationVM.sendMessageWithImage(text, stagedImage.base64, stagedImage.mimeType)
-        setStagedImage(null)
-      } else {
-        conversationVM.sendMessage(text)
-      }
-    } finally {
-      setSending(false)
+    if (stagedImage) {
+      conversationVM.sendMessageWithImage(text, stagedImage.base64, stagedImage.mimeType)
+      setStagedImage(null)
+    } else {
+      conversationVM.sendMessage(text)
     }
     // Scroll to bottom after send
     requestAnimationFrame(() => {
@@ -209,7 +204,7 @@ export function SessionDetailScreen({
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      void handleSend()
+      handleSend()
     }
     // Close skills popup on Escape
     if (e.key === 'Escape') {
@@ -749,6 +744,7 @@ export function SessionDetailScreen({
         {activeTab === 'events' ? (
           <EventList
             turns={turns}
+            pendingMessages={pendingMessages}
             onApprove={id => conversationVM.approvePermission(id)}
             onDeny={id => conversationVM.denyPermission(id)}
           />
@@ -949,8 +945,8 @@ export function SessionDetailScreen({
 
             {/* Send button */}
             <button
-              onClick={() => void handleSend()}
-              disabled={!input.trim() || sending}
+              onClick={() => handleSend()}
+              disabled={!input.trim() || !connected}
               style={{
                 width: 32,
                 height: 32,

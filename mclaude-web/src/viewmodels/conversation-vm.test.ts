@@ -41,28 +41,50 @@ describe('ConversationVM', () => {
   })
 
   describe('sendMessage', () => {
-    it('publishes to the correct subject with correct payload', () => {
+    it('publishes to the correct subject with correct payload including uuid', () => {
       mockNats.clearRecorded()
       vm.sendMessage('hello')
       expect(mockNats.published).toHaveLength(1)
       const msg = mockNats.published[0]
       expect(msg.subject).toBe('mclaude.user-1.project-1.api.sessions.input')
-      const payload = parsePublished(msg.data) as { type: string; message: { role: string; content: string }; session_id: string }
+      const payload = parsePublished(msg.data) as { type: string; message: { role: string; content: string }; session_id: string; uuid: string }
       expect(payload.type).toBe('user')
       expect(payload.message.role).toBe('user')
       expect(payload.message.content).toBe('hello')
       expect(payload.session_id).toBe('session-1')
+      expect(typeof payload.uuid).toBe('string')
+      expect(payload.uuid).toMatch(/^[0-9a-f-]{36}$/)
     })
 
-    it('adds a user turn to the event store before publishing', () => {
+    it('adds a pending message to the event store (not a conversation turn)', () => {
       vm.sendMessage('hello world')
-      const turns = eventStore.conversation.turns
-      expect(turns).toHaveLength(1)
-      expect(turns[0].type).toBe('user')
-      expect(turns[0].blocks).toHaveLength(1)
-      const block = turns[0].blocks[0] as { type: string; text: string }
-      expect(block.type).toBe('text')
-      expect(block.text).toBe('hello world')
+      // No conversation turns — pending messages don't go to turns
+      expect(eventStore.conversation.turns).toHaveLength(0)
+      // Pending message added
+      expect(eventStore.pendingMessages).toHaveLength(1)
+      expect(eventStore.pendingMessages[0].content).toBe('hello world')
+      expect(typeof eventStore.pendingMessages[0].uuid).toBe('string')
+    })
+
+    it('pending message is removed when user event with matching uuid arrives', () => {
+      vm.sendMessage('hello world')
+      const uuid = eventStore.pendingMessages[0].uuid
+      // Simulate Claude echoing back the message
+      eventStore.applyEventForTest({
+        type: 'user',
+        message: { role: 'user', content: 'hello world' },
+        uuid,
+        isReplay: true,
+      })
+      expect(eventStore.pendingMessages).toHaveLength(0)
+      expect(eventStore.conversation.turns.filter(t => t.type === 'user')).toHaveLength(1)
+    })
+
+    it('vm.state includes pendingMessages', () => {
+      vm.sendMessage('pending text')
+      const state = vm.state
+      expect(state.pendingMessages).toHaveLength(1)
+      expect(state.pendingMessages[0].content).toBe('pending text')
     })
   })
 
