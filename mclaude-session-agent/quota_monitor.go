@@ -144,14 +144,16 @@ func (m *QuotaMonitor) publishExitLifecycle(stopReason string) {
 	switch {
 	case m.completionPR != "":
 		m.publishLifec(m.sessionID, "session_job_complete", map[string]string{
-			"prUrl": m.completionPR,
-			"jobId": m.cfg.JobID,
+			"prUrl":  m.completionPR,
+			"jobId":  m.cfg.JobID,
+			"branch": m.branch,
 		})
 	case stopReason == "quota":
 		m.publishLifec(m.sessionID, "session_quota_interrupted", map[string]string{
-			"jobId": m.cfg.JobID,
-			"u5":    fmt.Sprintf("%d", m.lastU5),
-			"r5":    m.lastR5.UTC().Format(time.RFC3339),
+			"jobId":     m.cfg.JobID,
+			"threshold": fmt.Sprintf("%d", m.cfg.Threshold),
+			"u5":        fmt.Sprintf("%d", m.lastU5),
+			"r5":        m.lastR5.UTC().Format(time.RFC3339),
 		})
 	case stopReason == "permDenied":
 		// session_permission_denied was already published synchronously by

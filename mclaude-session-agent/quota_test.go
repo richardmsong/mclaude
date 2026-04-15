@@ -381,6 +381,7 @@ func TestPublishExitLifecycleCompletion(t *testing.T) {
 	var published []event
 	m := &QuotaMonitor{
 		sessionID:    "sess-1",
+		branch:       "schedule/spa-abc12345",
 		cfg:          QuotaMonitorConfig{JobID: "job-1"},
 		completionPR: "https://github.com/pr/42",
 		publishLifec: func(sessionID, evType string, extra map[string]string) {
@@ -404,22 +405,38 @@ func TestPublishExitLifecycleCompletion(t *testing.T) {
 	if published[0].extra["jobId"] != "job-1" {
 		t.Errorf("jobId: got %q", published[0].extra["jobId"])
 	}
+	if published[0].extra["branch"] != "schedule/spa-abc12345" {
+		t.Errorf("branch: got %q, want schedule/spa-abc12345", published[0].extra["branch"])
+	}
 }
 
 func TestPublishExitLifecycleQuota(t *testing.T) {
-	var published []string
+	type event struct {
+		evType string
+		extra  map[string]string
+	}
+	var published []event
 	m := &QuotaMonitor{
 		sessionID: "sess-2",
-		cfg:       QuotaMonitorConfig{JobID: "job-2"},
+		cfg:       QuotaMonitorConfig{JobID: "job-2", Threshold: 75},
 		lastU5:    82,
 		lastR5:    time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC),
 		publishLifec: func(sessionID, evType string, extra map[string]string) {
-			published = append(published, evType)
+			published = append(published, event{evType, extra})
 		},
 	}
 	m.publishExitLifecycle("quota")
-	if len(published) != 1 || published[0] != "session_quota_interrupted" {
+	if len(published) != 1 || published[0].evType != "session_quota_interrupted" {
 		t.Errorf("expected session_quota_interrupted, got %v", published)
+	}
+	if published[0].extra["threshold"] != "75" {
+		t.Errorf("threshold: got %q, want 75", published[0].extra["threshold"])
+	}
+	if published[0].extra["u5"] != "82" {
+		t.Errorf("u5: got %q, want 82", published[0].extra["u5"])
+	}
+	if published[0].extra["jobId"] != "job-2" {
+		t.Errorf("jobId: got %q, want job-2", published[0].extra["jobId"])
 	}
 }
 
@@ -460,12 +477,14 @@ func TestPublishExitLifecycleFailed(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestQuotaStatusRoundtrip(t *testing.T) {
+	ts := time.Date(2026, 4, 15, 11, 0, 0, 0, time.UTC)
 	qs := QuotaStatus{
 		HasData: true,
 		U5:      42,
 		R5:      time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC),
 		U7:      15,
 		R7:      time.Date(2026, 4, 20, 0, 0, 0, 0, time.UTC),
+		TS:      ts,
 	}
 	data, err := json.Marshal(qs)
 	if err != nil {
@@ -477,6 +496,9 @@ func TestQuotaStatusRoundtrip(t *testing.T) {
 	}
 	if got.U5 != 42 || !got.HasData || got.U7 != 15 {
 		t.Errorf("roundtrip mismatch: %+v", got)
+	}
+	if !got.TS.Equal(ts) {
+		t.Errorf("TS roundtrip mismatch: got %v, want %v", got.TS, ts)
 	}
 }
 
