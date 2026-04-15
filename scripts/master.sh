@@ -21,4 +21,4 @@ exec claude \
     "Write(mclaude-connector/**/*.go)" \
     "Edit(mclaude-web/src/**)" \
     "Write(mclaude-web/src/**)" \
-  "$@"
+  $@
