@@ -124,4 +124,62 @@ describe('SessionStore', () => {
       expect(callCount).toBe(1)
     })
   })
+
+  describe('KV DEL → session removal', () => {
+    it('removes session from map on DEL operation', () => {
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({ id: 'session-1', projectId: 'project-1' }))
+      expect(store.sessions.has('session-1')).toBe(true)
+
+      mockNats.kvDelete('mclaude-sessions', 'user-1.project-1.session-1')
+      expect(store.sessions.has('session-1')).toBe(false)
+    })
+
+    it('notifies session listeners on DEL', () => {
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({ id: 'session-1', projectId: 'project-1' }))
+
+      const calls: number[] = []
+      store.onSessionChanged(sessions => calls.push(sessions.size))
+
+      mockNats.kvDelete('mclaude-sessions', 'user-1.project-1.session-1')
+      expect(calls).toEqual([0])
+    })
+  })
+
+  describe('onSessionAdded', () => {
+    it('fires callback when a new session appears in KV after registration', () => {
+      const added: string[] = []
+      store.onSessionAdded('project-1', session => added.push(session.id))
+
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({ id: 'session-1', projectId: 'project-1' }))
+      expect(added).toEqual(['session-1'])
+    })
+
+    it('does NOT fire for sessions already known at registration time', () => {
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-existing', makeSessionKVState({ id: 'session-existing', projectId: 'project-1' }))
+
+      const added: string[] = []
+      store.onSessionAdded('project-1', session => added.push(session.id))
+
+      // Re-delivering the same session (e.g. KV update) should not trigger onSessionAdded
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-existing', makeSessionKVState({ id: 'session-existing', projectId: 'project-1', state: 'running' }))
+      expect(added).toHaveLength(0)
+    })
+
+    it('does NOT fire for sessions in a different project', () => {
+      const added: string[] = []
+      store.onSessionAdded('project-1', session => added.push(session.id))
+
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-2.session-other', makeSessionKVState({ id: 'session-other', projectId: 'project-2' }))
+      expect(added).toHaveLength(0)
+    })
+
+    it('unsubscribe stops listener from firing', () => {
+      const added: string[] = []
+      const unsub = store.onSessionAdded('project-1', session => added.push(session.id))
+      unsub()
+
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({ id: 'session-1', projectId: 'project-1' }))
+      expect(added).toHaveLength(0)
+    })
+  })
 })

@@ -134,6 +134,23 @@ export class MockNATSClient implements INATSClient {
     }
   }
 
+  // Test helper: delete a KV entry and notify watchers with DEL operation
+  kvDelete(bucket: string, key: string): void {
+    if (!this._kvStore.has(bucket)) this._kvStore.set(bucket, new Map())
+    const bucketStore = this._kvStore.get(bucket)!
+    const existing = bucketStore.get(key)
+    const revision = (existing?.revision ?? 0) + 1
+    bucketStore.delete(key)
+
+    const watchers = this._kvWatchers.get(bucket) ?? []
+    const entry: KVEntry = { key, value: new Uint8Array(0), revision, operation: 'DEL' }
+    for (const w of watchers) {
+      if (this._matchKVKey(w.pattern, key)) {
+        w.callback(entry)
+      }
+    }
+  }
+
   // Test helper: simulate NATS disconnect
   simulateDisconnect(): void {
     this._connected = false

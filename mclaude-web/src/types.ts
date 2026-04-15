@@ -18,6 +18,7 @@ export interface KVEntry {
   key: string
   value: Uint8Array
   revision: number
+  operation?: 'PUT' | 'DEL' | 'PURGE'
 }
 
 export interface INATSClient {
@@ -82,6 +83,7 @@ export type SessionState =
   | 'plan_mode'
   | 'restarting'
   | 'failed'
+  | 'updating'
   | 'unknown'
   | 'waiting_for_input'
 
@@ -304,7 +306,7 @@ export interface ConversationModel {
 // ─── Lifecycle events ─────────────────────────────────────────────────────────
 
 export interface LifecycleEvent {
-  type: 'session_created' | 'session_stopped' | 'session_restarting' | 'session_failed'
+  type: 'session_created' | 'session_stopped' | 'session_restarting' | 'session_failed' | 'session_upgrading'
   sessionId: string
   projectId: string
   timestamp: string

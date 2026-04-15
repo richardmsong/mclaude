@@ -3,12 +3,14 @@ import { logger } from '@/logger'
 
 export type SessionStoreListener = (sessions: Map<string, SessionKVState>) => void
 export type ProjectStoreListener = (projects: Map<string, ProjectKVState>) => void
+export type SessionAddedListener = (id: string, session: SessionKVState) => void
 
 export class SessionStore {
   private _sessions = new Map<string, SessionKVState>()
   private _projects = new Map<string, ProjectKVState>()
   private _sessionListeners: SessionStoreListener[] = []
   private _projectListeners: ProjectStoreListener[] = []
+  private _addListeners: SessionAddedListener[] = []
   private _unwatchers: Array<() => void> = []
 
   constructor(
@@ -31,13 +33,21 @@ export class SessionStore {
     // Use > wildcard for multi-level match across all projects and sessions for this user
     const sessionKey = `${this.userId}.>`
     const unwatch1 = this.natsClient.kvWatch('mclaude-sessions', sessionKey, (entry) => {
+      if (entry.operation === 'DEL' || entry.operation === 'PURGE') {
+        const parts = entry.key.split('.')
+        const sessionId = parts[parts.length - 1]
+        if (sessionId) this._sessions.delete(sessionId)
+        this._notifySessions()
+        return
+      }
       try {
         const state = JSON.parse(new TextDecoder().decode(entry.value)) as SessionKVState
         this._sessions.set(state.id, state)
         logger.debug({ component: 'session-store', sessionId: state.id, userId: this.userId }, 'session updated')
         this._notifySessions()
+        this._notifyAddListeners(state.id, state)
       } catch {
-        // Deleted key or malformed — extract sessionId from key {userId}.{projectId}.{sessionId}
+        // Malformed value — extract sessionId from key {userId}.{projectId}.{sessionId}
         const parts = entry.key.split('.')
         const sessionId = parts[parts.length - 1]
         if (sessionId) {
@@ -100,5 +110,20 @@ export class SessionStore {
 
   private _notifyProjects(): void {
     for (const l of this._projectListeners) l(this._projects)
+  }
+
+  private _notifyAddListeners(id: string, session: SessionKVState): void {
+    for (const l of this._addListeners) l(id, session)
+  }
+
+  onSessionAdded(projectId: string, cb: (session: SessionKVState) => void): () => void {
+    const knownAtRegistration = new Set(this._sessions.keys())
+    const handler: SessionAddedListener = (id: string, session: SessionKVState) => {
+      if (session.projectId === projectId && !knownAtRegistration.has(id)) {
+        cb(session)
+      }
+    }
+    this._addListeners.push(handler)
+    return () => { this._addListeners = this._addListeners.filter(l => l !== handler) }
   }
 }

@@ -74,6 +74,7 @@ export function DashboardScreen({
     running: 'Working',
     requires_action: 'Needs permission',
     idle: 'Idle',
+    updating: 'Updating...',
     restarting: 'Restarting',
     failed: 'Failed',
     unknown: 'Unknown',
@@ -291,7 +292,7 @@ export function DashboardScreen({
                 gap: 12,
               }}
             >
-              <StatusDot state={session.state as 'idle' | 'running' | 'requires_action' | 'restarting' | 'failed'} size={12} />
+              <StatusDot state={session.state as 'idle' | 'running' | 'requires_action' | 'restarting' | 'failed' | 'updating'} size={12} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ color: 'var(--text)', fontWeight: 500, fontSize: 15, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {session.name || projectName}
