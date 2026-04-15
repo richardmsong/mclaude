@@ -87,19 +87,7 @@ function renderBlock(block: Block, turn: Turn, allTurns: Turn[], onApprove: (id:
       return <SystemEvent key={'compact' + turn.id} text="conversation compacted" variant="compaction" />
 
     case 'system_message':
-      return (
-        <div
-          key={'sysmsg' + turn.id + block.text.slice(0, 8)}
-          style={{
-            color: 'var(--text3)',
-            fontSize: 12,
-            padding: '4px 0',
-            fontStyle: 'italic',
-          }}
-        >
-          {block.text}
-        </div>
-      )
+      return <SystemEvent key={'sysmsg' + turn.id + block.text.slice(0, 8)} text={block.text} variant="compaction" />
 
     default:
       return null
