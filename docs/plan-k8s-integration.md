@@ -357,7 +357,7 @@ Set `terminationGracePeriodSeconds: 30` in pod spec to give enough time.
 |--------------|--------|
 | `…api.sessions.create` | `exec.Command("claude", "--print", "--verbose", "--output-format", "stream-json", "--input-format", "stream-json", "--session-id", id, "-w", cwd)` |
 | `…api.sessions.delete` | Send interrupt control request → wait for exit → kill if timeout |
-| `…api.sessions.input` | Publish user message to events stream, then write to stdin pipe |
+| `…api.sessions.input` | Strip `session_id`, write user message JSON to stdin pipe (user messages reach the events stream via Claude's `--replay-user-messages` stdout echo) |
 | `…api.sessions.control` | Write control_response JSON to stdin pipe (permission approvals, interrupts, model changes) |
 | `…api.sessions.restart` | Kill process → relaunch with `--resume {sessionId}` |
 
