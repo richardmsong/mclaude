@@ -53,6 +53,17 @@ describe('ConversationVM', () => {
       expect(payload.message.content).toBe('hello')
       expect(payload.session_id).toBe('session-1')
     })
+
+    it('adds a user turn to the event store before publishing', () => {
+      vm.sendMessage('hello world')
+      const turns = eventStore.conversation.turns
+      expect(turns).toHaveLength(1)
+      expect(turns[0].type).toBe('user')
+      expect(turns[0].blocks).toHaveLength(1)
+      const block = turns[0].blocks[0] as { type: string; text: string }
+      expect(block.type).toBe('text')
+      expect(block.text).toBe('hello world')
+    })
   })
 
   describe('approvePermission', () => {
