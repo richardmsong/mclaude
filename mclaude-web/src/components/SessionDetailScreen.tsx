@@ -31,6 +31,7 @@ const STATE_LABELS: Record<string, string> = {
   requires_action: 'Needs permission',
   plan_mode: 'Plan mode',
   idle: 'Idle',
+  updating: 'Updating...',
   restarting: 'Restarting',
   failed: 'Failed',
   unknown: 'Unknown',
@@ -378,6 +379,7 @@ export function SessionDetailScreen({
   }, [turns, conversationVM])
 
   const isWorking = sessionState === 'running'
+  const isUpdating = sessionState === 'updating'
   const needsPermission = sessionState === 'requires_action'
   const isPlanMode = sessionState === 'plan_mode'
   const showActionBar = needsPermission || isPlanMode
@@ -714,6 +716,29 @@ export function SessionDetailScreen({
           </button>
         ))}
       </div>
+
+      {/* Updating banner */}
+      {isUpdating && (
+        <div style={{
+          margin: '8px 16px 0',
+          background: 'rgba(10,132,255,0.1)',
+          border: '1px solid rgba(10,132,255,0.3)',
+          borderRadius: 10,
+          padding: '10px 14px',
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: 8,
+          flexShrink: 0,
+        }}>
+          <span style={{ color: 'var(--blue)', fontSize: 14, marginTop: 1 }}>↻</span>
+          <div>
+            <div style={{ color: 'var(--blue)', fontWeight: 500, fontSize: 13 }}>Updating</div>
+            <div style={{ color: 'var(--text2)', fontSize: 12, marginTop: 2 }}>
+              Your session will resume shortly. Messages are queued.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Content */}
       <div

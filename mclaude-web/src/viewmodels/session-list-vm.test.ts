@@ -117,27 +117,72 @@ describe('SessionListVM', () => {
   })
 
   describe('createSession', () => {
-    it('publishes to mclaude.{userId}.{projectId}.api.sessions.create and returns session id', async () => {
-      mockNats.requestHandlers.set(
-        'mclaude.user-1.project-1.api.sessions.create',
-        () => enc.encode(JSON.stringify({ id: 'sess-new' }))
-      )
+    it('publishes to mclaude.{userId}.{projectId}.api.sessions.create and resolves when session appears in KV', async () => {
+      // Start the createSession call which publishes and waits for KV
+      const createPromise = vm.createSession('project-1', 'main', 'My Session')
 
-      const sessionId = await vm.createSession('project-1', 'main', 'My Session')
-      expect(sessionId).toBe('sess-new')
+      // Verify publish happened
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.project-1.api.sessions.create')
+      expect(pub).toBeDefined()
+      const payload = parsePublished(pub!.data) as Record<string, unknown>
+      expect(payload).toMatchObject({ projectId: 'project-1', branch: 'main', name: 'My Session' })
+      expect(typeof payload['requestId']).toBe('string')
 
-      const req = mockNats.requests.find(r => r.subject === 'mclaude.user-1.project-1.api.sessions.create')
-      expect(req).toBeDefined()
-      expect(parsePublished(req!.data)).toMatchObject({
+      // Simulate session appearing in KV (what session-agent would do on success)
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.sess-new', makeSessionKVState({
+        id: 'sess-new',
         projectId: 'project-1',
-        branch: 'main',
-        name: 'My Session',
+      }))
+
+      const sessionId = await createPromise
+      expect(sessionId).toBe('sess-new')
+    })
+
+    it('rejects on api_error event matching requestId', async () => {
+      const createPromise = vm.createSession('project-1', 'main', 'My Session')
+
+      // Get the requestId from the published message
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.project-1.api.sessions.create')
+      expect(pub).toBeDefined()
+      const payload = parsePublished(pub!.data) as Record<string, unknown>
+      const requestId = payload['requestId'] as string
+
+      // Simulate api_error event on the _api subject
+      mockNats.simulateReceive('mclaude.user-1.project-1.events._api', {
+        type: 'api_error',
+        request_id: requestId,
+        operation: 'create',
+        error: 'session limit exceeded',
       })
+
+      await expect(createPromise).rejects.toThrow('session limit exceeded')
+    })
+
+    it('ignores api_error events with a different requestId', async () => {
+      // Start a create (will wait for KV)
+      const createPromise = vm.createSession('project-1', 'main', 'My Session')
+
+      // Send an error event for a DIFFERENT request
+      mockNats.simulateReceive('mclaude.user-1.project-1.events._api', {
+        type: 'api_error',
+        request_id: 'other-request-id',
+        operation: 'create',
+        error: 'should be ignored',
+      })
+
+      // Resolve via KV
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.sess-new', makeSessionKVState({
+        id: 'sess-new',
+        projectId: 'project-1',
+      }))
+
+      const sessionId = await createPromise
+      expect(sessionId).toBe('sess-new')
     })
   })
 
   describe('deleteSession', () => {
-    it('publishes to the session project delete subject', async () => {
+    it('publishes to the session project delete subject (fire-and-forget)', async () => {
       mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({
         id: 'session-1', projectId: 'project-1',
       }))
@@ -145,14 +190,14 @@ describe('SessionListVM', () => {
 
       await vm.deleteSession('session-1')
 
-      const req = mockNats.requests.find(r => r.subject === 'mclaude.user-1.project-1.api.sessions.delete')
-      expect(req).toBeDefined()
-      expect(parsePublished(req!.data)).toMatchObject({ sessionId: 'session-1' })
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.project-1.api.sessions.delete')
+      expect(pub).toBeDefined()
+      expect(parsePublished(pub!.data)).toMatchObject({ sessionId: 'session-1' })
     })
 
     it('does nothing when session not found', async () => {
       await vm.deleteSession('nonexistent')
-      expect(mockNats.requests).toHaveLength(0)
+      expect(mockNats.published.filter(p => p.subject.includes('.api.sessions.delete'))).toHaveLength(0)
     })
   })
 

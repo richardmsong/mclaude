@@ -20,11 +20,12 @@ const STATE_COLORS: Record<string, string> = {
   disconnected: 'var(--text3)',
   restarting: 'var(--orange)',
   failed: 'var(--red)',
+  updating: 'var(--blue)',
   unknown: 'var(--text3)',
   waiting_for_input: 'var(--text3)',
 }
 
-const PULSE_STATES = new Set(['working', 'running', 'connecting'])
+const PULSE_STATES = new Set(['working', 'running', 'connecting', 'updating'])
 
 export function StatusDot({ state, size = 8 }: StatusDotProps) {
   const color = STATE_COLORS[state] ?? 'var(--text3)'
