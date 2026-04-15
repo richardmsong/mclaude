@@ -24,9 +24,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -295,6 +297,8 @@ func (r *MCProjectReconciler) reconcileSecrets(ctx context.Context, mcp *MCProje
 }
 
 // reconcileDeployment ensures the project PVC, nix PVC, and Deployment exist.
+// Per docs/plan-graceful-upgrades.md, all Deployments use the Recreate strategy
+// so the old pod exits before the new pod starts during image upgrades.
 func (r *MCProjectReconciler) reconcileDeployment(ctx context.Context, mcp *MCProject, userNs string, tpl *sessionAgentTpl) error {
 	projectID := mcp.Spec.ProjectID
 	userID := mcp.Spec.UserID
@@ -311,8 +315,12 @@ func (r *MCProjectReconciler) reconcileDeployment(ctx context.Context, mcp *MCPr
 	existing := &appsv1.Deployment{}
 	err := r.client.Get(ctx, types.NamespacedName{Name: deployName, Namespace: userNs}, existing)
 	if err == nil {
+		// Update path: set image and migrate to Recreate strategy.
 		if len(existing.Spec.Template.Spec.Containers) > 0 {
 			existing.Spec.Template.Spec.Containers[0].Image = tpl.image
+		}
+		existing.Spec.Strategy = appsv1.DeploymentStrategy{
+			Type: appsv1.RecreateDeploymentStrategyType,
 		}
 		return r.client.Update(ctx, existing)
 	}
@@ -345,6 +353,7 @@ func (r *MCProjectReconciler) reconcileDeployment(ctx context.Context, mcp *MCPr
 		env = append(env, corev1.EnvVar{Name: "GIT_URL", Value: gitURL})
 	}
 
+	// Create path: Recreate strategy so old pod exits before new pod starts.
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      deployName,
@@ -356,6 +365,9 @@ func (r *MCProjectReconciler) reconcileDeployment(ctx context.Context, mcp *MCPr
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RecreateDeploymentStrategyType,
+			},
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"app":     "mclaude-project",
@@ -557,12 +569,19 @@ func (r *MCProjectReconciler) setCondition(ctx context.Context, mcp *MCProject, 
 // SetupWithManager registers the reconciler with the controller-runtime Manager.
 // Watches MCProject CRs directly. Also watches Deployments, Secrets, ConfigMaps,
 // and ServiceAccounts in user namespaces (via owner references) to detect drift.
+// Per docs/plan-graceful-upgrades.md: also watches the session-agent-template ConfigMap
+// in the control-plane namespace. When it changes (e.g., new image tag after Helm upgrade),
+// all MCProject CRs are re-enqueued so reconcileDeployment picks up the new image.
 func (r *MCProjectReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	enqueueForOwner := handler.EnqueueRequestForOwner(
 		mgr.GetScheme(),
 		mgr.GetRESTMapper(),
 		&MCProject{},
 	)
+
+	templateNs := r.controlPlaneNs
+	templateCMName := r.releaseName + "-session-agent-template"
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&MCProject{}).
 		Owns(&appsv1.Deployment{}).
@@ -570,6 +589,36 @@ func (r *MCProjectReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Secret{}, enqueueForOwner).
 		Watches(&corev1.ConfigMap{}, enqueueForOwner).
 		Watches(&corev1.ServiceAccount{}, enqueueForOwner).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []reconcile.Request {
+				if obj.GetName() != templateCMName {
+					return nil
+				}
+				if obj.GetNamespace() != templateNs {
+					return nil
+				}
+				var mcpList MCProjectList
+				if err := r.client.List(ctx, &mcpList); err != nil {
+					r.logger.Error().Err(err).Msg("list MCProjects for ConfigMap re-enqueue")
+					return nil
+				}
+				reqs := make([]reconcile.Request, 0, len(mcpList.Items))
+				for _, mcp := range mcpList.Items {
+					reqs = append(reqs, reconcile.Request{
+						NamespacedName: types.NamespacedName{
+							Name:      mcp.Name,
+							Namespace: mcp.Namespace,
+						},
+					})
+				}
+				return reqs
+			}),
+			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
+				return obj.GetName() == templateCMName &&
+					obj.GetNamespace() == templateNs
+			})),
+		).
 		Complete(r)
 }
 
