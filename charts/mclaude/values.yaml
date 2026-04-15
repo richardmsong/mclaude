@@ -192,7 +192,7 @@ sessionAgent:
     limits:
       cpu: 2000m
       memory: 2Gi
-  terminationGracePeriodSeconds: 30
+  terminationGracePeriodSeconds: 86400  # 24h — pod waits indefinitely for idle; this is a K8s safety net
   persistence:
     ## Storage class for project PVCs (RWO)
     storageClass: ""
