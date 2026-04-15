@@ -1,10 +1,11 @@
-import type { INATSClient, ConversationModel, SessionState } from '@/types'
+import type { INATSClient, ConversationModel, SessionState, PendingMessage } from '@/types'
 import type { EventStore } from '@/stores/event-store'
 import type { SessionStore } from '@/stores/session-store'
 import { logger } from '@/logger'
 
 export interface ConversationVMState {
   turns: ConversationModel['turns']
+  pendingMessages: PendingMessage[]
   state: SessionState
   model: string
   skills: string[]
@@ -37,6 +38,7 @@ export class ConversationVM {
     )
     return {
       turns: conversation.turns,
+      pendingMessages: this.eventStore.pendingMessages,
       state: this.eventStore.sessionState,
       model: this.eventStore.model,
       skills: session?.capabilities.skills ?? [],
@@ -45,12 +47,14 @@ export class ConversationVM {
   }
 
   sendMessage(text: string): void {
-    this.eventStore.addUserTurn(text)
+    const uuid = crypto.randomUUID()
+    this.eventStore.addPendingMessage(uuid, text)
     const subject = `mclaude.${this.userId}.${this.projectId}.api.sessions.input`
     const payload = {
       type: 'user',
       message: { role: 'user', content: text },
       session_id: this.sessionId,
+      uuid,
       parent_tool_use_id: null,
     }
     logger.info({ component: 'conversation-vm', sessionId: this.sessionId, userId: this.userId }, 'sendMessage')
@@ -58,11 +62,12 @@ export class ConversationVM {
   }
 
   sendMessageWithImage(text: string, imageBase64: string, mimeType: string): void {
+    const uuid = crypto.randomUUID()
     const content = [
       { type: 'text', text },
       { type: 'image', source: { type: 'base64', media_type: mimeType, data: imageBase64 } },
     ]
-    this.eventStore.addUserTurn(content)
+    this.eventStore.addPendingMessage(uuid, content)
     const subject = `mclaude.${this.userId}.${this.projectId}.api.sessions.input`
     const payload = {
       type: 'user',
@@ -71,6 +76,7 @@ export class ConversationVM {
         content,
       },
       session_id: this.sessionId,
+      uuid,
       parent_tool_use_id: null,
     }
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))

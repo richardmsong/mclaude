@@ -184,6 +184,9 @@ export interface UserEvent extends BaseEvent {
     role: 'user'
     content: string | ContentBlock[]
   }
+  uuid?: string         // round-tripped from stdin; present on --replay-user-messages echoes
+  isReplay?: boolean    // true for all echoed messages
+  isSynthetic?: boolean // true for task-notifications and coordinator messages
 }
 
 export interface ControlRequestEvent extends BaseEvent {
@@ -276,6 +279,11 @@ export interface ControlRequestBlock {
   status: 'pending' | 'approved' | 'denied'
 }
 
+export interface SystemMessageBlock {
+  type: 'system_message'
+  text: string
+}
+
 export interface CompactionBlock {
   type: 'compaction'
   summary: string
@@ -289,6 +297,13 @@ export type Block =
   | ThinkingBlock
   | ControlRequestBlock
   | CompactionBlock
+  | SystemMessageBlock
+
+export interface PendingMessage {
+  uuid: string
+  content: string | Array<{ type: string; text?: string }>
+  sentAt: number  // Date.now() for ordering
+}
 
 export interface Turn {
   id: string
