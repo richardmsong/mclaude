@@ -119,6 +119,7 @@ type QuotaStatus struct {
 	R5      time.Time `json:"r5"` // 5h reset time
 	U7      int       `json:"u7"` // 7-day utilization %
 	R7      time.Time `json:"r7"` // 7-day reset time
+	TS      time.Time `json:"ts"`  // timestamp of this fetch
 }
 
 // QuotaMonitorConfig is sent in sessions.create to activate quota monitoring
