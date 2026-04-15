@@ -1,4 +1,4 @@
-import type { Turn, Block, StreamingTextBlock } from '@/types'
+import type { Turn, Block, StreamingTextBlock, PendingMessage } from '@/types'
 import { UserMessage } from './UserMessage'
 import { AssistantText } from './AssistantText'
 import { ThinkingBlock } from './ThinkingBlock'
@@ -9,6 +9,7 @@ import { SystemEvent } from './SystemEvent'
 
 interface EventListProps {
   turns: Turn[]
+  pendingMessages?: PendingMessage[]
   onApprove: (requestId: string) => void
   onDeny: (requestId: string) => void
 }
@@ -85,12 +86,27 @@ function renderBlock(block: Block, turn: Turn, allTurns: Turn[], onApprove: (id:
     case 'compaction':
       return <SystemEvent key={'compact' + turn.id} text="conversation compacted" variant="compaction" />
 
+    case 'system_message':
+      return (
+        <div
+          key={'sysmsg' + turn.id + block.text.slice(0, 8)}
+          style={{
+            color: 'var(--text3)',
+            fontSize: 12,
+            padding: '4px 0',
+            fontStyle: 'italic',
+          }}
+        >
+          {block.text}
+        </div>
+      )
+
     default:
       return null
   }
 }
 
-export function EventList({ turns, onApprove, onDeny }: EventListProps) {
+export function EventList({ turns, pendingMessages = [], onApprove, onDeny }: EventListProps) {
   // Only render top-level turns (no parentToolUseId)
   const topLevelTurns = turns.filter(t => !t.parentToolUseId)
 
@@ -131,6 +147,28 @@ export function EventList({ turns, onApprove, onDeny }: EventListProps) {
 
         return null
       })}
+      {pendingMessages.map(pm => (
+        <div
+          key={pm.uuid}
+          style={{
+            opacity: 0.5,
+            padding: '6px 12px',
+            margin: '4px 0',
+            background: 'var(--surf)',
+            borderRadius: 12,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 2,
+          }}
+        >
+          <div style={{ color: 'var(--text)', fontSize: 15 }}>
+            {typeof pm.content === 'string'
+              ? pm.content
+              : pm.content.filter(c => c.type === 'text').map(c => c.text ?? '').join('')}
+          </div>
+          <div style={{ color: 'var(--text3)', fontSize: 11 }}>sending...</div>
+        </div>
+      ))}
     </div>
   )
 }
