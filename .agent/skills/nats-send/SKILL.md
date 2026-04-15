@@ -77,12 +77,12 @@ nats --creds /tmp/mclaude-nats.creds -s nats://localhost:4222 kv get mclaude-ses
 
 The input subject is: `mclaude.{userId}.{projectId}.api.sessions.input`
 
-The payload must use `session_id` (snake_case):
+The payload must include `session_id` (snake_case) and `type` (stream-json requires it):
 
 ```bash
 nats --creds /tmp/mclaude-nats.creds -s nats://localhost:4222 pub \
   "mclaude.${USER_ID}.${PROJECT_ID}.api.sessions.input" \
-  '{"session_id":"<sessionId>","message":{"role":"user","content":"<message>"}}'
+  '{"session_id":"<sessionId>","type":"user","message":{"role":"user","content":"<message>"}}'
 ```
 
 ### 5. Watch for response (if --watch)

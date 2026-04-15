@@ -3,6 +3,7 @@ name: dev-harness
 description: Implementation loop for any mclaude component. Reads design docs (the spec), audits gaps, implements production code + tests, and commits. Invoked by the master session via /feature-change. Run repeatedly — converges to fully-implemented, fully-tested.
 model: claude-sonnet-4-6
 maxTurns: 500
+background: true
 tools:
   - "*"
 ---

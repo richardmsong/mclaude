@@ -2,6 +2,7 @@
 name: design-evaluator
 description: Fresh-context design document evaluator. Reads only the design doc and codebase, reports ambiguities and blocking gaps. No conversation context inherited. Saves results to .agent/audits/.
 model: sonnet
+background: true
 tools:
   - Read
   - Glob

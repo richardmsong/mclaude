@@ -47,3 +47,13 @@ mclaude-relay/mclaude-relay
 mclaude-relay/mclaude-connector
 scripts/._*
 .claude/.feature-ok*
+
+# Worktrees (created by subagents)
+worktrees/
+.claude/worktrees/
+
+# Playwright MCP
+.playwright-mcp/
+
+# Claude project settings (local)
+.claude/projects/
