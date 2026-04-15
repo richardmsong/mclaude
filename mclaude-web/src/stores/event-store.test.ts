@@ -198,6 +198,66 @@ describe('EventStore', () => {
       const userTurns = store.conversation.turns.filter(t => t.type === 'user')
       expect(userTurns).toHaveLength(2)
     })
+
+    describe('optimistic user turn deduplication', () => {
+      it('skips a user event whose text matches the immediately preceding optimistic user turn', () => {
+        // Simulate: user sends "Hello" → addUserTurn adds optimistic turn,
+        // then session-agent publishes the same text as a stream event.
+        store.addUserTurn('Hello')
+        expect(store.conversation.turns.filter(t => t.type === 'user')).toHaveLength(1)
+
+        const event: StreamJsonEvent = { type: 'user', message: { role: 'user', content: 'Hello' } }
+        store.applyEventForTest(event, 2)
+
+        // Still only one user turn — the duplicate was skipped
+        const userTurns = store.conversation.turns.filter(t => t.type === 'user')
+        expect(userTurns).toHaveLength(1)
+        expect(userTurns[0].blocks[0].type === 'text' && userTurns[0].blocks[0].text).toBe('Hello')
+      })
+
+      it('does NOT skip when the text differs from the last user turn', () => {
+        store.addUserTurn('Hello')
+        const event: StreamJsonEvent = { type: 'user', message: { role: 'user', content: 'Different text' } }
+        store.applyEventForTest(event, 2)
+
+        const userTurns = store.conversation.turns.filter(t => t.type === 'user')
+        expect(userTurns).toHaveLength(2)
+      })
+
+      it('does NOT skip when the last turn is an assistant turn (not a user turn)', () => {
+        // Process the full simpleMessage transcript so the last turn is assistant
+        for (const event of transcripts.simpleMessage) {
+          store.applyEventForTest(event)
+        }
+        const countBefore = store.conversation.turns.filter(t => t.type === 'user').length
+
+        const event: StreamJsonEvent = { type: 'user', message: { role: 'user', content: 'Hello' } }
+        store.applyEventForTest(event, 99)
+
+        const userTurns = store.conversation.turns.filter(t => t.type === 'user')
+        expect(userTurns).toHaveLength(countBefore + 1)
+      })
+
+      it('does NOT skip when there is no preceding turn at all', () => {
+        const event: StreamJsonEvent = { type: 'user', message: { role: 'user', content: 'Hello' } }
+        store.applyEventForTest(event, 1)
+
+        const userTurns = store.conversation.turns.filter(t => t.type === 'user')
+        expect(userTurns).toHaveLength(1)
+      })
+
+      it('skips when optimistic turn has array content matching the event text', () => {
+        store.addUserTurn([{ type: 'text', text: 'Multi block' }])
+        const event: StreamJsonEvent = {
+          type: 'user',
+          message: { role: 'user', content: [{ type: 'text', text: 'Multi block' }] },
+        }
+        store.applyEventForTest(event, 2)
+
+        const userTurns = store.conversation.turns.filter(t => t.type === 'user')
+        expect(userTurns).toHaveLength(1)
+      })
+    })
   })
 
   describe('system.init event', () => {
