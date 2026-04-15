@@ -537,17 +537,27 @@ func (a *Agent) publishAPIError(requestID, operation, errMsg string) {
 	_ = a.nc.Publish(subject, payload)
 }
 
+// defaultDevHarnessAllowlist is the set of tools auto-approved in strict-allowlist
+// sessions when no explicit AllowedTools list is provided.
+var defaultDevHarnessAllowlist = []string{
+	"Read", "Write", "Edit", "Glob", "Grep", "Bash",
+	"Agent", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop",
+}
+
 // handleCreate processes a sessions.create request.
-// Payload: {name, branch, cwd, joinWorktree, requestId}
+// Payload: {name, branch, cwd, joinWorktree, requestId, permPolicy, allowedTools, quotaMonitor}
 // Success: session appears in KV (SPA watches KV).
 // Error: publish api_error event to mclaude.{userId}.{projectId}.events._api.
 func (a *Agent) handleCreate(msg *nats.Msg) {
 	var req struct {
-		Name         string `json:"name"`
-		Branch       string `json:"branch"`
-		CWD          string `json:"cwd"`
-		JoinWorktree bool   `json:"joinWorktree"`
-		RequestID    string `json:"requestId"`
+		Name         string             `json:"name"`
+		Branch       string             `json:"branch"`
+		CWD          string             `json:"cwd"`
+		JoinWorktree bool               `json:"joinWorktree"`
+		RequestID    string             `json:"requestId"`
+		PermPolicy   string             `json:"permPolicy"`
+		AllowedTools []string           `json:"allowedTools"`
+		QuotaMonitor *QuotaMonitorConfig `json:"quotaMonitor"`
 	}
 	if len(msg.Data) > 0 {
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
@@ -642,6 +652,23 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 	sess := newSession(state, a.userID)
 	sess.metrics = a.metrics
 
+	// Apply permission policy from request (backward-compatible: absent = managed).
+	if req.PermPolicy != "" {
+		sess.permPolicy = PermissionPolicy(req.PermPolicy)
+	}
+	// Build allowedTools set.
+	toolList := req.AllowedTools
+	if len(toolList) == 0 && (req.PermPolicy == string(PermissionPolicyAllowlist) || req.PermPolicy == string(PermissionPolicyStrictAllowlist)) {
+		toolList = defaultDevHarnessAllowlist
+	}
+	if len(toolList) > 0 {
+		set := make(map[string]bool, len(toolList))
+		for _, t := range toolList {
+			set[t] = true
+		}
+		sess.allowedTools = set
+	}
+
 	// Wire the onEventPublished callback so that compact_boundary events update
 	// replayFromSeq in KV.  The seq argument is the JetStream sequence number
 	// of the published message (0 for core NATS publishes that aren't ack'd).
@@ -656,6 +683,26 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 		// last sequence on the events stream for this session subject.
 		// This is a best-effort update; failures are non-fatal.
 		a.updateReplayFromSeq(sessIDForCB)
+	}
+
+	// Wire quota monitor if requested.
+	// Must be set before sess.start() so the goroutine can read the fields.
+	var monitor *QuotaMonitor
+	if req.QuotaMonitor != nil && req.QuotaMonitor.JobID != "" {
+		var monErr error
+		monitor, monErr = newQuotaMonitor(sessionID, a.userID, a.projectID, req.Branch, *req.QuotaMonitor, a.nc, sess, a.publishLifecycleExtra)
+		if monErr != nil {
+			a.log.Warn().Err(monErr).Str("sessionId", sessionID).Msg("quota monitor setup failed (non-fatal)")
+		} else {
+			jobID := req.QuotaMonitor.JobID
+			sess.mu.Lock()
+			sess.onStrictDeny = func(toolName string) {
+				a.publishPermDenied(sessionID, toolName, jobID)
+				monitor.signalPermDenied(toolName)
+			}
+			sess.onRawOutput = monitor.onRawOutput
+			sess.mu.Unlock()
+		}
 	}
 
 	// Start debug unix socket for mclaude-cli attach.
@@ -675,6 +722,9 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 
 	if err := sess.start(a.claudePath, false, publish, a.writeSessionKV); err != nil {
 		dbg.Stop()
+		if monitor != nil {
+			monitor.stop()
+		}
 		a.log.Error().Err(err).Str("sessionId", sessionID).Msg("failed to start claude")
 		a.publishLifecycleFailed(sessionID, err.Error())
 		errMsg := "start claude: " + err.Error()
@@ -1013,6 +1063,37 @@ func (a *Agent) publishLifecycleFailed(sessionID, errMsg string) {
 		"type":      "session_failed",
 		"sessionId": sessionID,
 		"error":     errMsg,
+		"ts":        time.Now().UTC().Format(time.RFC3339),
+	})
+	_ = a.nc.Publish(subject, payload)
+}
+
+// publishLifecycleExtra publishes a lifecycle event with additional fields
+// beyond type/sessionId/ts. Used by QuotaMonitor for events like
+// session_job_complete, session_quota_interrupted, session_job_failed.
+func (a *Agent) publishLifecycleExtra(sessionID, eventType string, extra map[string]string) {
+	subject := fmt.Sprintf("mclaude.%s.%s.lifecycle.%s", a.userID, a.projectID, sessionID)
+	payload := map[string]string{
+		"type":      eventType,
+		"sessionId": sessionID,
+		"ts":        time.Now().UTC().Format(time.RFC3339),
+	}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	out, _ := json.Marshal(payload)
+	_ = a.nc.Publish(subject, out)
+}
+
+// publishPermDenied publishes a session_permission_denied lifecycle event.
+// Called when a strict-allowlist session auto-denies a tool request.
+func (a *Agent) publishPermDenied(sessionID, toolName, jobID string) {
+	subject := fmt.Sprintf("mclaude.%s.%s.lifecycle.%s", a.userID, a.projectID, sessionID)
+	payload, _ := json.Marshal(map[string]string{
+		"type":      "session_permission_denied",
+		"sessionId": sessionID,
+		"tool":      toolName,
+		"jobId":     jobID,
 		"ts":        time.Now().UTC().Format(time.RFC3339),
 	})
 	_ = a.nc.Publish(subject, payload)

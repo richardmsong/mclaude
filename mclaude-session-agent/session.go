@@ -52,6 +52,13 @@ type Session struct {
 	// Used by the agent to update replayFromSeq on compact_boundary events.
 	// The seq is 0 when not using JetStream (core NATS publish).
 	onEventPublished func(evType string, seq uint64)
+	// onStrictDeny, if non-nil, is called when a strict-allowlist session
+	// auto-denies a control_request. Receives the tool name from the request.
+	onStrictDeny func(toolName string)
+	// onRawOutput, if non-nil, is called for every raw stdout line from Claude
+	// (in the stdout router goroutine) before the line is published to NATS.
+	// Used by QuotaMonitor to scan assistant events for the SESSION_JOB_COMPLETE marker.
+	onRawOutput func(evType string, raw []byte)
 }
 
 // newSession creates a Session but does not start the Claude process yet.
@@ -225,6 +232,14 @@ func (s *Session) start(claudePath string, resume bool, publish func(subject str
 				notify(evType, 0)
 			}
 
+			// Notify the quota monitor of raw output (scans for SESSION_JOB_COMPLETE marker).
+			s.mu.Lock()
+			rawNotify := s.onRawOutput
+			s.mu.Unlock()
+			if rawNotify != nil {
+				rawNotify(evType, lineCopy)
+			}
+
 			// Forward to debug clients (mclaude-cli attach).
 			s.mu.Lock()
 			dbg := s.debug
@@ -315,6 +330,31 @@ func (s *Session) handleSideEffect(line []byte, writeKV func(state SessionState)
 				resp := buildAutoApproveResponse(cr.RequestID)
 				s.stdinCh <- resp
 				s.clearPendingControl(cr.RequestID, writeKV)
+			} else if policy == PermissionPolicyStrictAllowlist {
+				// strict-allowlist: auto-deny tools not in the allowlist.
+				resp, _ := json.Marshal(map[string]any{
+					"type": "control_response",
+					"response": map[string]any{
+						"subtype":    "success",
+						"request_id": cr.RequestID,
+						"response":   map[string]string{"behavior": "deny"},
+					},
+				})
+				s.stdinCh <- resp
+				s.clearPendingControl(cr.RequestID, writeKV)
+				// Notify via onStrictDeny callback (e.g. QuotaMonitor).
+				var toolName string
+				var toolReq struct {
+					ToolName string `json:"tool_name"`
+				}
+				_ = json.Unmarshal(cr.Request, &toolReq)
+				toolName = toolReq.ToolName
+				s.mu.Lock()
+				denyFn := s.onStrictDeny
+				s.mu.Unlock()
+				if denyFn != nil {
+					denyFn(toolName)
+				}
 			}
 		}
 	case EventTypeResult:
@@ -341,7 +381,7 @@ func shouldAutoApprove(policy PermissionPolicy, allowed map[string]bool, cr cont
 	switch policy {
 	case PermissionPolicyAuto:
 		return true
-	case PermissionPolicyAllowlist:
+	case PermissionPolicyAllowlist, PermissionPolicyStrictAllowlist:
 		// Parse tool_name from the request payload.
 		var req struct {
 			ToolName string `json:"tool_name"`
