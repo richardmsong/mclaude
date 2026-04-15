@@ -144,8 +144,8 @@ Started by `Daemon.Run()` alongside the quota publisher and job dispatcher.
   - Sorts by `Priority` ascending (lowest first).
   - For each, sends graceful stop via NATS to `mclaude.{userId}.{job.ProjectID}.api.sessions.input`; updates job to `paused`. The payload must include a top-level `session_id` field so `handleInput` can route it to the correct session: `{"type":"user","message":{"role":"user","content":"QUOTA_THRESHOLD_REACHED..."},"session_id":"{job.SessionID}"}`. The content string is identical to the QuotaMonitor's graceful stop message.
   - Publishes `session_job_paused` lifecycle event to `mclaude.{userId}.{job.ProjectID}.lifecycle.{job.SessionID}` using `d.nc.Publish` with the payload from the data model (includes `priority`, `u5`, `jobId`).
-  - Stops after processing enough sessions that accumulated threshold headroom would drop below `threshold - 5` (5% hysteresis). If exact headroom cannot be computed, stops all running jobs.
-- On **quota recovery** (latest `u5 < threshold - 5`):
+  - Stops all running jobs whose individual threshold is exceeded. (No hysteresis needed — the 5h usage window is monotonically increasing and resets to zero; oscillation is impossible.)
+- On **quota recovery** (latest `u5 < threshold` — only happens after the 5h window resets):
   - Reads all `paused` jobs; sorts by `Priority` descending (highest first).
   - Resets each to `queued`. The watch loop picks them up and starts them.
 - On **daemon startup** (called once before entering the watch loop):
