@@ -45,6 +45,7 @@ export class ConversationVM {
   }
 
   sendMessage(text: string): void {
+    this.eventStore.addUserTurn(text)
     const subject = `mclaude.${this.userId}.${this.projectId}.api.sessions.input`
     const payload = {
       type: 'user',
@@ -57,15 +58,17 @@ export class ConversationVM {
   }
 
   sendMessageWithImage(text: string, imageBase64: string, mimeType: string): void {
+    const content = [
+      { type: 'text', text },
+      { type: 'image', source: { type: 'base64', media_type: mimeType, data: imageBase64 } },
+    ]
+    this.eventStore.addUserTurn(content)
     const subject = `mclaude.${this.userId}.${this.projectId}.api.sessions.input`
     const payload = {
       type: 'user',
       message: {
         role: 'user',
-        content: [
-          { type: 'text', text },
-          { type: 'image', source: { type: 'base64', media_type: mimeType, data: imageBase64 } },
-        ],
+        content,
       },
       session_id: this.sessionId,
       parent_tool_use_id: null,

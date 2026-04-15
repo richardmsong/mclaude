@@ -165,6 +165,26 @@ export class EventStore {
     this._notify()
   }
 
+  addUserTurn(content: string | Array<{ type: string; text?: string }>): void {
+    const blocks: TextBlock[] = []
+    if (typeof content === 'string') {
+      blocks.push({ type: 'text', text: content })
+    } else {
+      for (const item of content) {
+        if (item.type === 'text' && item.text !== undefined) {
+          blocks.push({ type: 'text', text: item.text })
+        }
+      }
+    }
+    const turn: Turn = {
+      id: this._nextTurnId(),
+      type: 'user',
+      blocks,
+    }
+    this._conversation.turns.push(turn)
+    this._notify()
+  }
+
   private _nextTurnId(): string {
     return `turn-${++this._turnCounter}`
   }
