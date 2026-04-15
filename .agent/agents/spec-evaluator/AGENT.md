@@ -37,6 +37,8 @@ Design docs (`docs/plan-*.md`) are the canonical spec. There is no separate spec
 
 **Discovery step:** Always `Glob("docs/plan-*.md")` first, then scan each file's Component Changes section (or grep for the component name) to find all design docs that apply.
 
+**State schema:** Always read `docs/plan-state-schema.md`. When evaluating code that reads or writes state (KV buckets, Postgres, NATS subjects, K8s resources), verify the code's field names, key formats, and types match the canonical state schema. Report mismatches as gaps.
+
 ## Component roots
 
 | Component | Root |
