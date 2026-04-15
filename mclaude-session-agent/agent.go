@@ -58,6 +58,10 @@ type Agent struct {
 	// doExit is called at the end of gracefulShutdown. Defaults to os.Exit(0).
 	// Overridable in tests to prevent process exit.
 	doExit func(code int)
+	// pendingUpdatingIDs tracks session IDs that were in "updating" state during
+	// recovery. clearUpdatingState() uses this to write idle to KV after consumers
+	// are attached, since the in-memory state is already idle.
+	pendingUpdatingIDs map[string]bool
 }
 
 // NewAgent creates an Agent connected to the given NATS server.
@@ -204,6 +208,12 @@ func (a *Agent) recoverSessions() error {
 		// "updating" state. For "updating" sessions we keep the KV entry as-is
 		// so the UI banner remains visible. clearUpdatingState() will write
 		// state:"idle" later, after consumers are attached and the agent is ready.
+		if wasUpdating {
+			if a.pendingUpdatingIDs == nil {
+				a.pendingUpdatingIDs = make(map[string]bool)
+			}
+			a.pendingUpdatingIDs[st.ID] = true
+		}
 		if !wasUpdating {
 			if wErr := a.writeSessionKV(st); wErr != nil {
 				a.log.Warn().Err(wErr).Str("sessionId", st.ID).Msg("failed to clear pending controls")
@@ -383,17 +393,13 @@ func (a *Agent) clearUpdatingState() error {
 
 	for _, sess := range sessions {
 		st := sess.getState()
-		if st.State == StateUpdating {
+		if a.pendingUpdatingIDs[st.ID] {
 			st.State = StateIdle
 			st.StateSince = time.Now().UTC()
-			// Update in-memory state too.
-			sess.mu.Lock()
-			sess.state.State = StateIdle
-			sess.state.StateSince = st.StateSince
-			sess.mu.Unlock()
 			if err := a.writeSessionKV(st); err != nil {
 				a.log.Warn().Err(err).Str("sessionId", st.ID).Msg("clearUpdatingState: KV write failed")
 			}
+			delete(a.pendingUpdatingIDs, st.ID)
 		}
 	}
 	return nil
