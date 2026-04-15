@@ -171,6 +171,8 @@ interface PendingMessage {
 4. Otherwise: create a normal user turn inline at current position
 5. Remove the text-matching dedup logic (uuid matching replaces it)
 
+**`clear` and `compact_boundary` handlers**: Both reset `_conversation.turns`. They must also clear `_pendingMessages = []` — after a clear or compaction, no replay will arrive for in-flight pending messages (the session context has been truncated), so they would otherwise remain stuck as pending indefinitely.
+
 **Getter**: `get pendingMessages(): PendingMessage[]` — exposes pending list for the UI.
 
 ### SPA — ConversationVM
