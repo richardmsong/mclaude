@@ -155,11 +155,11 @@ export class NATSClient implements INATSClient {
         watcher = stoppable as unknown as NatsKvEntry
         for await (const entry of iter) {
           if (stopped) break
-          if (entry.operation === 'DEL' || entry.operation === 'PURGE') continue
           callback({
             key: entry.key,
             value: entry.value,
             revision: entry.revision,
+            operation: entry.operation as 'PUT' | 'DEL' | 'PURGE',
           })
         }
       } catch (_err) {

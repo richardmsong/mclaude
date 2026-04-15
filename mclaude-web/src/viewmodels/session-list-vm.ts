@@ -70,12 +70,49 @@ export class SessionListVM {
   }
 
   async createSession(projectId: string, branch: string, name: string): Promise<string> {
+    const requestId = crypto.randomUUID()
     const subject = `mclaude.${this.userId}.${projectId}.api.sessions.create`
-    const payload = { projectId, branch, name }
-    const reply = await this.natsClient.request(subject, new TextEncoder().encode(JSON.stringify(payload)))
-    const result = JSON.parse(new TextDecoder().decode(reply.data)) as { id?: string; error?: string }
-    if (!result.id) throw new Error(result.error ?? 'createSession: no id in reply')
-    return result.id
+    const payload = { projectId, branch, name, requestId }
+    this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
+
+    return new Promise((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout>
+      let unsubKV: (() => void) | undefined
+      let unsubErr: (() => void) | undefined
+
+      const cleanup = () => {
+        clearTimeout(timer)
+        unsubKV?.()
+        unsubErr?.()
+      }
+
+      timer = setTimeout(() => {
+        cleanup()
+        reject(new Error('Create session timed out'))
+      }, 30_000)
+
+      // Success: session appears in KV (watched by session-store)
+      unsubKV = this.sessionStore.onSessionAdded(projectId, (session) => {
+        cleanup()
+        resolve(session.id)
+      })
+
+      // Error: temporary core NATS sub on project-level _api subject
+      unsubErr = this.natsClient.subscribe(
+        `mclaude.${this.userId}.${projectId}.events._api`,
+        (msg) => {
+          try {
+            const event = JSON.parse(new TextDecoder().decode(msg.data)) as { type?: string; request_id?: string; error?: string }
+            if (event.type === 'api_error' && event.request_id === requestId) {
+              cleanup()
+              reject(new Error(event.error ?? 'api_error'))
+            }
+          } catch {
+            // ignore parse errors
+          }
+        }
+      )
+    })
   }
 
   async deleteSession(sessionId: string): Promise<void> {
@@ -83,7 +120,7 @@ export class SessionListVM {
     const session = this.sessionStore.sessions.get(sessionId)
     if (!session) return
     const subject = `mclaude.${this.userId}.${session.projectId}.api.sessions.delete`
-    await this.natsClient.request(subject, new TextEncoder().encode(JSON.stringify({ sessionId })))
+    this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify({ sessionId })))
   }
 
   onProjectsChanged(listener: SessionListListener): () => void {
