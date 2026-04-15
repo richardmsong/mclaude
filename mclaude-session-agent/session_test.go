@@ -401,3 +401,96 @@ func TestEventSubjectFormat(t *testing.T) {
 		}
 	}
 }
+
+// TestSpawnArgsIncludeReplayUserMessages verifies that start() passes
+// --replay-user-messages to the Claude process for both new and resume sessions.
+// The spec (plan-replay-user-messages.md) requires this flag to enable Claude
+// to echo user messages on stdout so they flow through the events stream.
+func TestSpawnArgsIncludeReplayUserMessages(t *testing.T) {
+	mockClaude := testutil.MockClaudePath(t)
+	transcript := testutil.TranscriptPath("simple_message.jsonl")
+
+	for _, resume := range []bool{false, true} {
+		resume := resume
+		name := "new-session"
+		if resume {
+			name = "resume-session"
+		}
+		t.Run(name, func(t *testing.T) {
+			sessID := "sess-args-check-" + name
+			st := SessionState{
+				ID:        sessID,
+				ProjectID: "test-proj",
+				State:     StateIdle,
+				CreatedAt: time.Now(),
+			}
+			sess := newSession(st, "test-user")
+			sess.extraEnv = []string{"MOCK_TRANSCRIPT=" + transcript}
+
+			pc := &publishCapture{}
+			kc := &kvCapture{}
+
+			if err := sess.start(mockClaude, resume, pc.publish, kc.write); err != nil {
+				t.Fatalf("session.start: %v", err)
+			}
+			t.Cleanup(func() {
+				sess.stop()
+				sess.waitDone()
+			})
+
+			// Read the cmd.Args that were passed to the process.
+			sess.mu.Lock()
+			args := sess.cmd.Args
+			sess.mu.Unlock()
+
+			// --replay-user-messages must be present.
+			var found bool
+			for _, arg := range args {
+				if arg == "--replay-user-messages" {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("--replay-user-messages not found in spawn args: %v", args)
+			}
+
+			// --include-partial-messages must also be present.
+			var foundPartial bool
+			for _, arg := range args {
+				if arg == "--include-partial-messages" {
+					foundPartial = true
+					break
+				}
+			}
+			if !foundPartial {
+				t.Errorf("--include-partial-messages not found in spawn args: %v", args)
+			}
+
+			// Verify the session/resume flag is correct.
+			if resume {
+				var foundResume bool
+				for i, arg := range args {
+					if arg == "--resume" && i+1 < len(args) && args[i+1] == sessID {
+						foundResume = true
+						break
+					}
+				}
+				if !foundResume {
+					t.Errorf("--resume %s not found in resume spawn args: %v", sessID, args)
+				}
+			} else {
+				var foundSessionID bool
+				for i, arg := range args {
+					if arg == "--session-id" && i+1 < len(args) && args[i+1] == sessID {
+						foundSessionID = true
+						break
+					}
+				}
+				if !foundSessionID {
+					t.Errorf("--session-id %s not found in new-session spawn args: %v", sessID, args)
+				}
+			}
+		})
+	}
+}

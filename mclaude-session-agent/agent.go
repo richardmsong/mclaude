@@ -825,17 +825,6 @@ func (a *Agent) handleInput(msg *nats.Msg) {
 		return
 	}
 
-	// Publish user input to events stream so clients can replay user messages.
-	// Claude Code does not echo human input on stdout.
-	if a.js != nil {
-		eventSubject := fmt.Sprintf("mclaude.%s.%s.events.%s",
-			a.userID, a.projectID, sessionID)
-		if _, pubErr := a.js.Publish(context.Background(), eventSubject, cleaned); pubErr != nil {
-			a.log.Warn().Err(pubErr).Str("sessionId", sessionID).Msg("sessions.input: failed to publish user event")
-			// Continue — writing to stdin is more important than event persistence
-		}
-	}
-
 	sess.sendInput(cleaned)
 }
 
