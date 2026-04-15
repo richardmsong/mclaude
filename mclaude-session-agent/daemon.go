@@ -32,24 +32,29 @@ const (
 
 // DaemonConfig holds the runtime configuration for --daemon mode.
 type DaemonConfig struct {
-	NATSCredsFile string
-	RefreshURL    string // POST /auth/refresh endpoint
-	UserID        string
-	Hostname      string
-	MachineID     string
-	AgentBinary   string // path to this binary (os.Args[0])
-	AgentArgs     []string
-	Log           zerolog.Logger
+	NATSCredsFile   string
+	RefreshURL      string // POST /auth/refresh endpoint
+	UserID          string
+	Hostname        string
+	MachineID       string
+	AgentBinary     string // path to this binary (os.Args[0])
+	AgentArgs       []string
+	Log             zerolog.Logger
+	CredentialsPath string // path to ~/.claude/.credentials.json; default "$HOME/.claude/.credentials.json"
 }
 
 // Daemon is the laptop launcher — manages one child session-agent per project.
 type Daemon struct {
-	cfg       DaemonConfig
-	nc        *nats.Conn
-	js        jetstream.JetStream
-	mu        sync.Mutex
-	children  map[string]*managedChild
-	laptopsKV jetstream.KeyValue
+	cfg        DaemonConfig
+	nc         *nats.Conn
+	js         jetstream.JetStream
+	mu         sync.Mutex
+	children   map[string]*managedChild
+	laptopsKV  jetstream.KeyValue
+	sessKV     jetstream.KeyValue  // mclaude-sessions — read-only for startup recovery
+	jobQueueKV jetstream.KeyValue  // mclaude-job-queue — read/write for dispatcher
+	projectsKV jetstream.KeyValue  // mclaude-projects — read-only for GET /jobs/projects
+	quotaCh    chan QuotaStatus    // quota publisher -> job dispatcher
 }
 
 // managedChild tracks a running child session-agent process.
@@ -77,13 +82,29 @@ func NewDaemon(nc *nats.Conn, cfg DaemonConfig) (*Daemon, error) {
 	if err != nil {
 		return nil, fmt.Errorf("mclaude-laptops KV not found (control-plane not started?): %w", err)
 	}
+	sessKV, err := js.KeyValue(ctx, "mclaude-sessions")
+	if err != nil {
+		return nil, fmt.Errorf("mclaude-sessions KV not found (control-plane not started?): %w", err)
+	}
+	jobQueueKV, err := js.KeyValue(ctx, "mclaude-job-queue")
+	if err != nil {
+		return nil, fmt.Errorf("mclaude-job-queue KV not found (control-plane not started?): %w", err)
+	}
+	projectsKV, err := js.KeyValue(ctx, "mclaude-projects")
+	if err != nil {
+		return nil, fmt.Errorf("mclaude-projects KV not found (control-plane not started?): %w", err)
+	}
 
 	return &Daemon{
-		cfg:       cfg,
-		nc:        nc,
-		js:        js,
-		children:  make(map[string]*managedChild),
-		laptopsKV: laptopsKV,
+		cfg:        cfg,
+		nc:         nc,
+		js:         js,
+		children:   make(map[string]*managedChild),
+		laptopsKV:  laptopsKV,
+		sessKV:     sessKV,
+		jobQueueKV: jobQueueKV,
+		projectsKV: projectsKV,
+		quotaCh:    make(chan QuotaStatus, 8),
 	}, nil
 }
 
@@ -107,6 +128,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	go d.runJWTRefresh(ctx)
 	go d.runLaptopHeartbeat(ctx)
+	go d.runQuotaPublisher(ctx)
+	go d.runLifecycleSubscriber(ctx)
+	go d.runJobDispatcher(ctx)
+	go d.runJobsHTTP(ctx)
 
 	<-ctx.Done()
 	d.shutdownChildren()
