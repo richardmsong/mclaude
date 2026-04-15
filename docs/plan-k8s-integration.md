@@ -164,7 +164,7 @@ mclaude.{userId}.{location}.{projectId}.events.{sessionId}       → Claude Code
 mclaude.{userId}.{location}.{projectId}.lifecycle.{sessionId}     → session agent lifecycle events
 ```
 
-`events` carries raw stream-json objects from Claude Code stdout — no envelope, the subject encodes the routing metadata. `lifecycle` carries session agent's own events (created, stopped, resumed, debug attached/detached).
+`events` carries raw stream-json objects from Claude Code stdout — no envelope, the subject encodes the routing metadata. The session agent also publishes user input messages to the events stream (Claude Code does not echo human input on stdout). `lifecycle` carries session agent's own events (created, stopped, resumed, debug attached/detached).
 
 Separate subjects so clients can subscribe to one or both. Stream-json events are high-volume; lifecycle events are low-volume state transitions.
 
@@ -357,7 +357,7 @@ Set `terminationGracePeriodSeconds: 30` in pod spec to give enough time.
 |--------------|--------|
 | `…api.sessions.create` | `exec.Command("claude", "--print", "--verbose", "--output-format", "stream-json", "--input-format", "stream-json", "--session-id", id, "-w", cwd)` |
 | `…api.sessions.delete` | Send interrupt control request → wait for exit → kill if timeout |
-| `…api.sessions.input` | Write user message JSON to stdin pipe |
+| `…api.sessions.input` | Publish user message to events stream, then write to stdin pipe |
 | `…api.sessions.control` | Write control_response JSON to stdin pipe (permission approvals, interrupts, model changes) |
 | `…api.sessions.restart` | Kill process → relaunch with `--resume {sessionId}` |
 

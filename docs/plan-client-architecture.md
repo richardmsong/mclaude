@@ -245,6 +245,7 @@ Responsibilities:
   - `tool_use` → creates `ToolUseBlock`
   - `tool_progress` → updates `ToolUseBlock.elapsed`
   - `tool_result` → attaches to matching `ToolUseBlock` by toolUseId
+  - `user` (human text, not tool_result) → creates user `Turn` with `TextBlock`s. Session-agent publishes these (Claude Code does not echo human input). Client also adds an optimistic user turn on send; deduplication: if the last turn is already a user turn with matching text, skip the event.
   - `control_request` → creates `ControlRequestBlock` with status `pending`
   - Events with `parent_tool_use_id` → nested under the parent `ToolUseBlock`'s turn
 - On `clear` event: resets `ConversationModel` (empty turns), updates local `replayFromSeq`
