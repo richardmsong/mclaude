@@ -21,8 +21,9 @@ type ProjectKVState struct {
 	CreatedAt string `json:"createdAt"`
 }
 
-// StartProjectsSubscriber connects to NATS, ensures the mclaude-projects KV
-// bucket exists, and subscribes to mclaude.*.api.projects.create.
+// StartProjectsSubscriber connects to NATS, ensures the mclaude-projects and
+// mclaude-job-queue KV buckets exist, and subscribes to
+// mclaude.*.api.projects.create.
 // The caller owns the *nats.Conn lifetime — Close() it on shutdown.
 func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 	js, err := nc.JetStream()
@@ -32,6 +33,10 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 
 	kv, err := ensureProjectsKV(js)
 	if err != nil {
+		return err
+	}
+
+	if _, err := ensureJobQueueKV(js); err != nil {
 		return err
 	}
 
@@ -151,6 +156,19 @@ func ensureProjectsKV(js nats.JetStreamContext) (nats.KeyValue, error) {
 	// Bucket doesn't exist — create it.
 	return js.CreateKeyValue(&nats.KeyValueConfig{
 		Bucket:  "mclaude-projects",
+		History: 1,
+	})
+}
+
+// ensureJobQueueKV creates the mclaude-job-queue KV bucket if it doesn't exist.
+func ensureJobQueueKV(js nats.JetStreamContext) (nats.KeyValue, error) {
+	kv, err := js.KeyValue("mclaude-job-queue")
+	if err == nil {
+		return kv, nil
+	}
+	// Bucket doesn't exist — create it.
+	return js.CreateKeyValue(&nats.KeyValueConfig{
+		Bucket:  "mclaude-job-queue",
 		History: 1,
 	})
 }
