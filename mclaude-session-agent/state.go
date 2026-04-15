@@ -9,15 +9,17 @@ import (
 // PermissionPolicy controls how the session agent responds to control_request
 // events (tool-use permission prompts).
 //
-//   - PermissionPolicyManaged  — forward to NATS client (default)
-//   - PermissionPolicyAuto     — auto-approve all tools without forwarding
-//   - PermissionPolicyAllowlist — auto-approve listed tools; forward the rest
+//   - PermissionPolicyManaged         — forward to NATS client (default)
+//   - PermissionPolicyAuto            — auto-approve all tools without forwarding
+//   - PermissionPolicyAllowlist       — auto-approve listed tools; forward the rest
+//   - PermissionPolicyStrictAllowlist — auto-approve listed tools; auto-deny everything else
 type PermissionPolicy string
 
 const (
-	PermissionPolicyManaged   PermissionPolicy = "managed"
-	PermissionPolicyAuto      PermissionPolicy = "auto"
-	PermissionPolicyAllowlist PermissionPolicy = "allowlist"
+	PermissionPolicyManaged         PermissionPolicy = "managed"
+	PermissionPolicyAuto            PermissionPolicy = "auto"
+	PermissionPolicyAllowlist       PermissionPolicy = "allowlist"
+	PermissionPolicyStrictAllowlist PermissionPolicy = "strict-allowlist"
 )
 
 // SessionState is the materialised view of a session stored in the
@@ -108,4 +110,45 @@ type ProjectState struct {
 	Worktrees    []string  `json:"worktrees"`
 	CreatedAt    time.Time `json:"createdAt"`
 	LastActiveAt time.Time `json:"lastActiveAt"`
+}
+
+// QuotaStatus holds the API quota utilisation data published to mclaude.{userId}.quota.
+type QuotaStatus struct {
+	HasData bool      `json:"hasData"`
+	U5      int       `json:"u5"` // 5h utilization %
+	R5      time.Time `json:"r5"` // 5h reset time
+	U7      int       `json:"u7"` // 7-day utilization %
+	R7      time.Time `json:"r7"` // 7-day reset time
+}
+
+// QuotaMonitorConfig is sent in sessions.create to activate quota monitoring
+// for a scheduled job session.
+type QuotaMonitorConfig struct {
+	Threshold    int    `json:"threshold"`    // % 5h utilization; 0 = disabled
+	Priority     int    `json:"priority"`     // 1-10; affects preemption order in dispatcher
+	JobID        string `json:"jobId"`        // KV key suffix for the job entry ({userId}/{jobId})
+	AutoContinue bool   `json:"autoContinue"` // if true, dispatcher re-queues at 5h reset time
+}
+
+// JobEntry is the value stored in the mclaude-job-queue KV bucket.
+// Key: {userId}/{jobId}
+type JobEntry struct {
+	ID           string     `json:"id"`
+	UserID       string     `json:"userId"`
+	ProjectID    string     `json:"projectId"`
+	SpecPath     string     `json:"specPath"`
+	Priority     int        `json:"priority"`
+	Threshold    int        `json:"threshold"`
+	AutoContinue bool       `json:"autoContinue"`
+	Status       string     `json:"status"`
+	SessionID    string     `json:"sessionId"`
+	Branch       string     `json:"branch"`
+	PRUrl        string     `json:"prUrl"`
+	FailedTool   string     `json:"failedTool"`
+	Error        string     `json:"error"`
+	RetryCount   int        `json:"retryCount"`
+	ResumeAt     *time.Time `json:"resumeAt"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	StartedAt    *time.Time `json:"startedAt"`
+	CompletedAt  *time.Time `json:"completedAt"`
 }
