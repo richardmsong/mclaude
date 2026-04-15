@@ -229,7 +229,7 @@ Input subject `api.sessions.input` payload adds optional `uuid` field:
 }
 ```
 
-`uuid` is optional for backward compatibility. If absent, pending matching falls back to text comparison.
+`uuid` is optional for backward compatibility. If absent, no pending matching is possible — the event creates a normal inline turn with no duplicate risk (since `addUserTurn()` is removed).
 
 ### Events stream
 
