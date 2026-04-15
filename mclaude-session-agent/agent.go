@@ -503,27 +503,51 @@ func (a *Agent) handleDelete(msg *nats.Msg) {
 }
 
 // handleInput routes a user message to the target session's stdin.
-// Payload: raw stream-json user message (must contain session_id field).
-// No reply — fire and forget.
+// Payload: stream-json user message with an added session_id routing field.
+// The session_id field is stripped before forwarding to Claude's stdin because
+// Claude Code's --input-format stream-json does not accept unknown top-level
+// fields and would reject or mishandle a message containing session_id.
 func (a *Agent) handleInput(msg *nats.Msg) {
-	var header struct {
-		SessionID string `json:"session_id"`
+	// Parse the payload into a generic map so we can extract session_id and
+	// then remove it before forwarding the rest to Claude's stdin.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(msg.Data, &fields); err != nil {
+		a.log.Warn().Err(err).Msg("sessions.input: failed to parse payload")
+		return
 	}
-	if err := json.Unmarshal(msg.Data, &header); err != nil || header.SessionID == "" {
+
+	sessionIDRaw, ok := fields["session_id"]
+	if !ok || string(sessionIDRaw) == `""` || string(sessionIDRaw) == "null" {
 		a.log.Warn().Msg("sessions.input: missing session_id")
 		return
 	}
 
-	a.mu.RLock()
-	sess, ok := a.sessions[header.SessionID]
-	a.mu.RUnlock()
-
-	if !ok {
-		a.log.Warn().Str("sessionId", header.SessionID).Msg("sessions.input: session not found")
+	// Unquote the JSON string value.
+	var sessionID string
+	if err := json.Unmarshal(sessionIDRaw, &sessionID); err != nil || sessionID == "" {
+		a.log.Warn().Msg("sessions.input: session_id not a non-empty string")
 		return
 	}
 
-	sess.sendInput(msg.Data)
+	a.mu.RLock()
+	sess, ok2 := a.sessions[sessionID]
+	a.mu.RUnlock()
+
+	if !ok2 {
+		a.log.Warn().Str("sessionId", sessionID).Msg("sessions.input: session not found")
+		return
+	}
+
+	// Remove the routing field before forwarding to Claude's stdin.
+	delete(fields, "session_id")
+
+	cleaned, err := json.Marshal(fields)
+	if err != nil {
+		a.log.Warn().Err(err).Msg("sessions.input: failed to re-marshal payload without session_id")
+		return
+	}
+
+	sess.sendInput(cleaned)
 }
 
 // handleControl routes a control message (permission response, interrupt, model
