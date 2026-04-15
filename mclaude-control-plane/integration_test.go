@@ -222,3 +222,35 @@ func mustConnectDB(t *testing.T, ctx context.Context) *DB {
 	}
 	return db
 }
+
+// TestIntegration_StartProjectsSubscriberCreatesKVBuckets verifies that
+// StartProjectsSubscriber creates both the mclaude-projects and
+// mclaude-job-queue KV buckets on startup.
+func TestIntegration_StartProjectsSubscriberCreatesKVBuckets(t *testing.T) {
+	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
+	if err != nil {
+		t.Fatalf("NATS connect: %v", err)
+	}
+	defer nc.Close()
+
+	s := &Server{}
+	if err := s.StartProjectsSubscriber(nc); err != nil {
+		t.Fatalf("StartProjectsSubscriber: %v", err)
+	}
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+
+	for _, bucket := range []string{"mclaude-projects", "mclaude-job-queue"} {
+		kv, err := js.KeyValue(bucket)
+		if err != nil {
+			t.Errorf("KeyValue(%q): %v — bucket should have been created by StartProjectsSubscriber", bucket, err)
+			continue
+		}
+		if kv.Bucket() != bucket {
+			t.Errorf("bucket name = %q; want %q", kv.Bucket(), bucket)
+		}
+	}
+}
