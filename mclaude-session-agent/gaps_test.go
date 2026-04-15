@@ -669,6 +669,8 @@ func TestGracefulShutdownDrainsSubscriptions(t *testing.T) {
 	// The gracefulShutdown method drains a.subs — verify it reads them.
 	// We can't call Drain() on a nil subscription, so just verify the field exists
 	// and the method doesn't panic on an empty subs list.
+	// Prevent os.Exit(0) from killing the test process.
+	a.doExit = func(int) {}
 	a.gracefulShutdown() // must not panic with empty sessions and empty subs
 }
 
