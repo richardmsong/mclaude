@@ -404,13 +404,19 @@ func (p *K8sProvisioner) ensurePVC(ctx context.Context, ns, name, size, storageC
 	return err
 }
 
+// ensureDeployment creates or updates the session-agent Deployment for a project.
+// Per docs/plan-graceful-upgrades.md: both create and update paths set Recreate strategy
+// so the old pod exits before the new pod starts during image upgrades.
 func (p *K8sProvisioner) ensureDeployment(ctx context.Context, ns, projectID, userID, gitURL string, tpl *sessionAgentTpl) error {
 	name := "project-" + projectID
 
 	existing, err := p.client.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
-		// Deployment exists — update the container image so rolling deploys pick up new images.
+		// Update path: set image and migrate to Recreate strategy.
 		existing.Spec.Template.Spec.Containers[0].Image = tpl.image
+		existing.Spec.Strategy = appsv1.DeploymentStrategy{
+			Type: appsv1.RecreateDeploymentStrategyType,
+		}
 		_, err = p.client.AppsV1().Deployments(ns).Update(ctx, existing, metav1.UpdateOptions{})
 		return err
 	}
@@ -444,6 +450,7 @@ func (p *K8sProvisioner) ensureDeployment(ctx context.Context, ns, projectID, us
 		env = append(env, corev1.EnvVar{Name: "GIT_URL", Value: gitURL})
 	}
 
+	// Create path: Recreate strategy so old pod exits before new pod starts.
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -455,6 +462,9 @@ func (p *K8sProvisioner) ensureDeployment(ctx context.Context, ns, projectID, us
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RecreateDeploymentStrategyType,
+			},
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"app":     "mclaude-project",
