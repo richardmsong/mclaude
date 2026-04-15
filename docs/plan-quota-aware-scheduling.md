@@ -95,7 +95,7 @@ CredentialsPath string // path to ~/.claude/.credentials.json; default "$HOME/.c
 #### `runQuotaPublisher(ctx context.Context)`
 
 - Polls every 60 seconds.
-- Reads the OAuth bearer token from the file at `cfg.CredentialsPath` (field `.claudeAiOauth.accessToken`). Falls back to macOS Keychain entry `Claude Code-credentials` (same lookup order as claude-pace: credentials file → Keychain → `secret-tool`).
+- Reads the OAuth bearer token from the file at `cfg.CredentialsPath` (field `.claudeAiOauth.accessToken`). Returns `HasData: false` if the file is missing or the token is empty — quota monitoring is best-effort.
 - Calls `GET https://api.anthropic.com/api/oauth/usage` with:
   ```
   Authorization: Bearer {token}
