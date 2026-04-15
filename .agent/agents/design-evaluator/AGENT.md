@@ -32,6 +32,17 @@ For each section of the design document:
 - **Scope**: Is it clear what's in v1 vs deferred?
 - **Prerequisites**: Are all dependencies on existing code identified? Are assumptions about existing behavior correct?
 
+## Cross-spec consistency
+
+You MUST read `docs/plan-state-schema.md` (the canonical state schema) and check the design document against it:
+- Does the design doc reference any state (KV buckets, Postgres tables, NATS subjects, K8s resources) that exists in the schema? If so, do the field names, key formats, and types match exactly?
+- Does the design doc introduce new state? If so, it must be consistent with the patterns in the schema (key format conventions, naming conventions, writer/reader assignments).
+- Does the design doc contradict the schema (different field names, different key format, different writers)?
+
+Report any inconsistency as a gap. The state schema is authoritative for schemas; the design doc is authoritative for behavior.
+
+Also check against other `docs/plan-*.md` files when the design doc references shared concepts (NATS subjects, KV buckets, lifecycle events, auth model). Cross-reference to find contradictions.
+
 ## What to verify against the codebase
 
 You SHOULD read referenced codebase files to check assumptions:
