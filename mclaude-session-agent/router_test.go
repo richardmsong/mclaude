@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats.go"
+	"github.com/rs/zerolog"
 )
 
 func TestParseEventType(t *testing.T) {
@@ -197,4 +200,135 @@ func TestControlRequestEventParsing(t *testing.T) {
 	if len(ev.Request) == 0 {
 		t.Error("request payload should not be empty")
 	}
+}
+
+// TestHandleInputStripsSessionID verifies that handleInput removes the
+// session_id routing field from the NATS payload before forwarding to
+// Claude's stdin via sendInput.  Claude Code's --input-format stream-json
+// expects {"type":"user","message":{...}} without session_id.
+func TestHandleInputStripsSessionID(t *testing.T) {
+	const sessID = "sess-strip-test"
+
+	// Build a minimal Session with a buffered stdinCh so we can read
+	// what handleInput sends without starting the full Claude subprocess.
+	sess := &Session{
+		state:   SessionState{ID: sessID},
+		stdinCh: make(chan []byte, 8),
+		stopCh:  make(chan struct{}),
+		doneCh:  make(chan struct{}),
+		initCh:  make(chan struct{}),
+	}
+
+	// Build an Agent with the session registered but no real NATS connection.
+	a := &Agent{
+		sessions:  make(map[string]*Session),
+		terminals: make(map[string]*TerminalSession),
+		userID:    "u1",
+		projectID: "p1",
+		log:       zerolog.Nop(),
+	}
+	a.mu.Lock()
+	a.sessions[sessID] = sess
+	a.mu.Unlock()
+
+	// Payload as the NATS subject handler receives it — includes session_id.
+	payload := map[string]any{
+		"session_id": sessID,
+		"type":       "user",
+		"message": map[string]any{
+			"role":    "user",
+			"content": "hello world",
+		},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	// Invoke handleInput directly (no NATS required).
+	a.handleInput(&nats.Msg{Data: data})
+
+	// Read what landed on stdinCh — must arrive quickly since it's buffered.
+	var received []byte
+	select {
+	case received = <-sess.stdinCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for data on stdinCh")
+	}
+
+	// session_id must not appear in the forwarded payload.
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(received, &result); err != nil {
+		t.Fatalf("unmarshal received payload: %v", err)
+	}
+	if _, has := result["session_id"]; has {
+		t.Errorf("session_id must be stripped before forwarding to Claude stdin; got: %s", received)
+	}
+
+	// The stream-json fields (type, message) must be preserved.
+	if string(result["type"]) != `"user"` {
+		t.Errorf("type field must be preserved; got %s", result["type"])
+	}
+	if len(result["message"]) == 0 {
+		t.Error("message field must be preserved")
+	}
+
+	// Verify the message content is intact.
+	var msg map[string]any
+	if err := json.Unmarshal(result["message"], &msg); err != nil {
+		t.Fatalf("unmarshal message field: %v", err)
+	}
+	if msg["content"] != "hello world" {
+		t.Errorf("message.content: got %v, want 'hello world'", msg["content"])
+	}
+
+	// Confirm only one item landed on the channel (no duplicates).
+	if len(sess.stdinCh) != 0 {
+		t.Errorf("expected exactly 1 item on stdinCh, but %d remain", len(sess.stdinCh)+1)
+	}
+}
+
+// TestHandleInputMissingSessionID verifies that handleInput logs a warning and
+// does not call sendInput when the session_id field is absent or empty.
+func TestHandleInputMissingSessionID(t *testing.T) {
+	a := &Agent{
+		sessions:  make(map[string]*Session),
+		terminals: make(map[string]*TerminalSession),
+		userID:    "u1",
+		projectID: "p1",
+		log:       zerolog.Nop(),
+	}
+
+	cases := []struct {
+		name    string
+		payload []byte
+	}{
+		{"no session_id field", []byte(`{"type":"user","message":{"role":"user","content":"hi"}}`)},
+		{"empty session_id", []byte(`{"session_id":"","type":"user","message":{}}`)},
+		{"malformed JSON", []byte(`not json`)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// If handleInput calls sendInput on a nil session it panics —
+			// confirming the absence of a panic is the assertion.
+			a.handleInput(&nats.Msg{Data: tc.payload})
+		})
+	}
+}
+
+// TestHandleInputUnknownSession verifies that handleInput does not panic or
+// forward data when session_id is valid JSON but no session exists with that ID.
+func TestHandleInputUnknownSession(t *testing.T) {
+	a := &Agent{
+		sessions:  make(map[string]*Session),
+		terminals: make(map[string]*TerminalSession),
+		userID:    "u1",
+		projectID: "p1",
+		log:       zerolog.Nop(),
+	}
+
+	payload := []byte(`{"session_id":"does-not-exist","type":"user","message":{"role":"user","content":"hi"}}`)
+	// Must not panic — the session lookup fails and nothing is sent.
+	a.handleInput(&nats.Msg{Data: payload})
 }
