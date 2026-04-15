@@ -18,7 +18,7 @@ Enables unattended dev-harness implementation sessions that run as remote mclaud
 | Worktree per job | Branch `schedule/{slug}-{shortId}` | Each job gets an isolated worktree; concurrent jobs for different specs cannot conflict via shared files. Git conflicts between parallel sessions can be resolved by Claude because each session is aware of all concurrently running jobs. |
 | Auto-continuation | Optional flag per job | Re-queues at the 5h reset time when `--auto-continue` is set. |
 | PR creation | Claude creates the PR in the session as its final step | Keeps PR logic inside the dev-harness prompt; surfaces work for human review before merge. |
-| Job HTTP endpoints | Daemon exposes local HTTP server on localhost:8378; mclaude-server proxies `/jobs` requests to it | mclaude-server has no NATS Swift client dependency. Keeping NATS and KV ops in Go (daemon) avoids adding a Swift NATS library. mclaude-server handles auth via existing `requireAuth` (opaque session token), extracts userId, and proxies with `X-User-ID` header. |
+| Job HTTP endpoints | Daemon exposes local HTTP server on localhost:8378; skills call it directly | Loopback-only, no auth needed (daemon knows userId from config). V1 components (mclaude-server, connector, MCP) are not modified; proxy chain deferred to v2 for BYOM compatibility. |
 | Permission-denied signaling | In-process Go channel from `Session.onStrictDeny` to `QuotaMonitor.permDeniedCh`; lifecycle event published via `Agent.publishPermDenied` | Avoids a NATS round-trip for an in-process event; simpler than subscribing the monitor to the lifecycle subject. |
 | Completion detection | New `Session.onRawOutput` callback scans assistant events for `SESSION_JOB_COMPLETE:` marker | Extends the existing callback pattern; lets the QuotaMonitor parse the PR URL from Claude's assistant text without modifying the NATS event router. |
 
@@ -35,7 +35,7 @@ Enables unattended dev-harness implementation sessions that run as remote mclaud
    - Verifies the spec path exists.
    - Calls `GET /jobs/projects` and matches `basename(CWD) == project.name` to find `projectId`. If no match, asks user to pick.
    - Calls `mcp__mclaude__create_job` with spec path, priority, threshold, autoContinue, and projectId.
-   - The MCP tool POSTs to `http://localhost:8377/jobs`, which writes a `JobEntry` to the `mclaude-job-queue` KV bucket with status `queued`.
+   - The skill POSTs to `http://localhost:8378/jobs`, which writes a `JobEntry` to the `mclaude-job-queue` KV bucket with status `queued`.
    - Responds with the job ID and current queue status.
 
 4. The daemon's job dispatcher sees the new `queued` entry. If current 5h utilization (`u5`) < threshold, it:
@@ -451,7 +451,7 @@ Called in `StartProjectsSubscriber` alongside `ensureProjectsKV`.
 
 ### Daemon Jobs HTTP Server (`mclaude-session-agent/daemon.go`)
 
-The daemon starts a local HTTP server on `localhost:8378` (loopback-only, not accessible from outside the machine). This server is the actual implementation of the `/jobs` REST endpoints; mclaude-server proxies to it.
+The daemon starts a local HTTP server on `localhost:8378` (loopback-only, not accessible from outside the machine). This is the direct endpoint for `/jobs` REST operations. Skills call it directly via `curl`/`fetch`; no proxy chain is involved.
 
 #### `runJobsHTTP(ctx context.Context)`
 
@@ -465,57 +465,13 @@ Started by `Daemon.Run()` alongside the quota publisher and job dispatcher. Serv
 | `DELETE` | `/jobs/{id}` | header `X-User-ID` | `{}` |
 | `GET` | `/jobs/projects` | header `X-User-ID` | `[{id, name}, ...]` |
 
-All handlers read the `X-User-ID` header (set by mclaude-server after `requireAuth` authentication) and scope all KV operations to `{userId}/{jobId}` keys in `d.jobQueueKV`.
+All handlers scope KV operations to `{d.cfg.UserID}/{jobId}` keys in `d.jobQueueKV`. Since the server is loopback-only and the daemon already knows the userId from `DaemonConfig`, no auth header is required.
 
 `POST /jobs` generates a UUID `id`, sets `status = "queued"`, `createdAt = now()`, and writes the `JobEntry` to `d.jobQueueKV`.
 
 `DELETE /jobs/{id}`: reads the entry from `d.jobQueueKV`. If `status == "running"`, publishes a `sessions.delete` NATS message to `mclaude.{userId}.{job.ProjectID}.api.sessions.delete` with payload `{"sessionId":"{job.SessionID}"}` (required by `handleDelete` in agent.go) before updating state. Sets `status=cancelled` and writes back to KV (soft delete — the entry remains visible in `GET /jobs` so users can inspect it before re-queuing). The daemon has `nc *nats.Conn`, so the NATS publish is direct, not an HTTP call.
 
 `GET /jobs/projects`: reads all entries from `mclaude-projects` KV with key prefix `{userId}.`. Returns `[{id, name}]` — the project name is the human-readable name (e.g., `"mclaude"`); no local path is included since the daemon does not track project paths. The skill uses this to find the `projectId` by matching `basename(CWD) == project.name`.
-
-### mclaude-server (Swift/Hummingbird, `Sources/APIServer.swift`)
-
-**Proxy routes** added to `buildRouter()` for `/jobs`. The server does **not** open a NATS connection. Instead, it handles JWT auth (existing middleware), extracts `userId` from JWT claims, then proxies the request to the daemon's job HTTP server at `http://localhost:8378` using `URLSession`.
-
-Authentication: all `/jobs` routes call the existing `requireAuth(request:)` helper (APIServer.swift:120-127), which calls `store.authenticate(token:)` — an opaque session-token lookup returning the `userId` string. No JWT parsing is involved. After auth, the server adds the header `X-User-ID: {userId}` to the proxied request before forwarding.
-
-Proxy behavior: body, path suffix, and query string are forwarded verbatim. The response body from the daemon is returned unchanged to the caller. HTTP status codes from the daemon are forwarded unchanged.
-
-**Connector `apiPrefixes`** (`mclaude-connector/main.go`): add `"/jobs"` to the existing `apiPrefixes` slice so the relay-to-connector tunnel forwards `/jobs` requests to the local mclaude-server at localhost:8377.
-
-### mclaude-mcp (`mclaude-mcp/src/index.ts`)
-
-Four new tools, all calling `api(path)` against `MCLAUDE_URL` (same `http://localhost:8377` base):
-
-**`create_job`**
-```typescript
-{
-  specPath:     z.string(),                              // e.g. "docs/plan-spa.md"
-  projectId:    z.string(),                              // target project UUID
-  priority:     z.number().int().min(1).max(10).default(5),
-  threshold:    z.number().int().min(1).max(99).default(75),
-  autoContinue: z.boolean().default(false),
-}
-```
-Calls `POST /jobs`. Returns `{jobId, status: "queued"}`.
-
-**`list_jobs`**
-```typescript
-{} // no params
-```
-Calls `GET /jobs`. Returns `JobEntry[]`.
-
-**`get_job`**
-```typescript
-{ jobId: z.string() }
-```
-Calls `GET /jobs/{jobId}`. Returns `JobEntry`.
-
-**`cancel_job`**
-```typescript
-{ jobId: z.string() }
-```
-Calls `DELETE /jobs/{jobId}`. Returns `{}`.
 
 ### New Skill: `/schedule-feature` (`.agent/skills/schedule-feature/SKILL.md`)
 
@@ -532,8 +488,8 @@ Calls `DELETE /jobs/{jobId}`. Returns `{}`.
 
 **Behavior**:
 1. Verify `spec-path` exists (Glob or Read).
-2. Call `GET /jobs/projects` (via `api('/jobs/projects')`) to get `[{id, name}]`. Match `basename(CWD) == project.name` to find the `projectId`. If no match, display the project list and ask the user to pick by name.
-3. Call `mcp__mclaude__create_job` with `{specPath, projectId, priority, threshold, autoContinue}`.
+2. Call `GET http://localhost:8378/jobs/projects` (via Bash `curl`) to get `[{id, name}]`. Match `basename(CWD) == project.name` to find the `projectId`. If no match, display the project list and ask the user to pick by name.
+3. Call `POST http://localhost:8378/jobs` (via Bash `curl`) with `{specPath, projectId, priority, threshold, autoContinue}`.
 4. Display: job ID, spec path, priority, threshold, auto-continue, current queue depth.
 
 ### New Skill: `/job-queue` (`.agent/skills/job-queue/SKILL.md`)
@@ -545,16 +501,16 @@ Calls `DELETE /jobs/{jobId}`. Returns `{}`.
 
 Default (no subcommand): same as `list`.
 
-**`list`**: Calls `mcp__mclaude__list_jobs`. Displays a table:
+**`list`**: Calls `GET http://localhost:8378/jobs` (via Bash `curl`). Displays a table:
 ```
 ID         SPEC                     PRI  STATUS           SESSION
 abc12345   docs/plan-spa.md         7    running          sess-xyz
 def67890   docs/plan-k8s-int...md   5    queued           -
 ```
 
-**`cancel <jobId>`**: Calls `mcp__mclaude__cancel_job`. Confirms cancellation.
+**`cancel <jobId>`**: Calls `DELETE http://localhost:8378/jobs/{jobId}` (via Bash `curl`). Confirms cancellation.
 
-**`status <jobId>`**: Calls `mcp__mclaude__get_job`. Displays full entry including PR URL, error, branch, failedTool.
+**`status <jobId>`**: Calls `GET http://localhost:8378/jobs/{jobId}` (via Bash `curl`). Displays full entry including PR URL, error, branch, failedTool.
 
 ## Data Model
 
@@ -689,28 +645,25 @@ Published on `mclaude.{userId}.{projectId}.lifecycle.{sessionId}` (same subject 
 ## Security
 
 - OAuth token is read from `~/.claude/.credentials.json` at runtime; never written to NATS, KV, or logs.
-- Job entries in `mclaude-job-queue` are keyed `{userId}/...`. NATS auth enforces userId isolation (existing behavior). Job HTTP endpoints validate the JWT and scope all KV operations to the authenticated userId.
+- Job entries in `mclaude-job-queue` are keyed `{userId}/...`. NATS auth enforces userId isolation (existing behavior). Daemon HTTP endpoints are loopback-only (localhost:8378); no auth needed since the daemon knows its userId from config.
 - `strict-allowlist` sessions cannot access external services (email, browser, web APIs). Any attempt is auto-denied and surfaces as `session_permission_denied`.
 - Scheduled sessions use a fresh worktree branch (`schedule/{slug}-{shortId}`). The allowlist does not include force-push; merging to `main` requires the PR review workflow.
 - The 30-minute stop timeout ensures no runaway session exhausts quota silently; `sendHardInterrupt()` is the guaranteed backstop.
 
 ## Scope
 
-**In v1**:
+**In scope**:
 - Daemon: `runQuotaPublisher` goroutine (polls `api.anthropic.com/api/oauth/usage`)
 - Daemon: `runJobDispatcher` goroutine (start/pause/restart jobs from KV)
 - Daemon: `runLifecycleSubscriber` goroutine (writes terminal job state back to KV on lifecycle events)
-- Daemon: `sessKV` and `jobQueueKV` handles
+- Daemon: `runJobsHTTP` goroutine (localhost:8378 job CRUD)
+- Daemon: `sessKV`, `jobQueueKV`, and `projectsKV` handles
 - Session-agent: `strict-allowlist` permission policy with auto-deny
 - Session-agent: `Session.onStrictDeny` and `Session.onRawOutput` callbacks
 - Session-agent: `QuotaMonitor` per-session goroutine (`quota_monitor.go`)
 - Session-agent: `Agent.publishPermDenied` method
 - Five new lifecycle event types (`session_quota_interrupted`, `session_permission_denied`, `session_job_complete`, `session_job_paused`, `session_job_failed`)
 - `mclaude-job-queue` KV bucket (created by control-plane using `nats.JetStreamContext` API)
-- Daemon: `/jobs` local HTTP server on localhost:8378 (job CRUD + NATS cancel)
-- mclaude-server: proxy routes for `/jobs` → daemon localhost:8378 (JWT auth + X-User-ID header)
-- mclaude-connector: `/jobs` added to `apiPrefixes`
-- mclaude-mcp: `create_job`, `list_jobs`, `get_job`, `cancel_job` tools
 - `/schedule-feature` Claude Code skill
 - `/job-queue` Claude Code skill
 
@@ -720,3 +673,4 @@ Published on `mclaude.{userId}.{projectId}.lifecycle.{sessionId}` (same subject 
 - Job dependencies (run job A only after job B completes)
 - Automatic spec-fix session on `needs_spec_fix` status
 - K8s-only mode without a running laptop daemon (quota publisher requires daemon)
+- BYOM integration: v1 components (mclaude-server, mclaude-connector, mclaude-mcp) are not modified; proxy chain and MCP tools deferred for BYOM compatibility
