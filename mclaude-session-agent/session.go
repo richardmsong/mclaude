@@ -134,6 +134,7 @@ func (s *Session) start(claudePath string, resume bool, publish func(subject str
 			"--output-format", "stream-json",
 			"--input-format", "stream-json",
 			"--include-partial-messages",
+			"--replay-user-messages",
 			"--resume", s.state.ID,
 		}
 	} else {
@@ -142,6 +143,7 @@ func (s *Session) start(claudePath string, resume bool, publish func(subject str
 			"--output-format", "stream-json",
 			"--input-format", "stream-json",
 			"--include-partial-messages",
+			"--replay-user-messages",
 			"--session-id", s.state.ID,
 		}
 	}

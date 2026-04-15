@@ -231,10 +231,13 @@ func TestHandleInputStripsSessionID(t *testing.T) {
 	a.sessions[sessID] = sess
 	a.mu.Unlock()
 
-	// Payload as the NATS subject handler receives it — includes session_id.
+	// Payload as the NATS subject handler receives it — includes session_id and uuid.
+	// uuid must be preserved and forwarded to Claude stdin so Claude can echo it
+	// back in the --replay-user-messages replay event.
 	payload := map[string]any{
 		"session_id": sessID,
 		"type":       "user",
+		"uuid":       "550e8400-e29b-41d4-a716-446655440000",
 		"message": map[string]any{
 			"role":    "user",
 			"content": "hello world",
@@ -265,9 +268,14 @@ func TestHandleInputStripsSessionID(t *testing.T) {
 		t.Errorf("session_id must be stripped before forwarding to Claude stdin; got: %s", received)
 	}
 
-	// The stream-json fields (type, message) must be preserved.
+	// The stream-json fields (type, uuid, message) must be preserved.
+	// uuid is round-tripped to Claude stdin so Claude echoes it back in the
+	// --replay-user-messages replay event on stdout.
 	if string(result["type"]) != `"user"` {
 		t.Errorf("type field must be preserved; got %s", result["type"])
+	}
+	if string(result["uuid"]) != `"550e8400-e29b-41d4-a716-446655440000"` {
+		t.Errorf("uuid field must be preserved; got %s", result["uuid"])
 	}
 	if len(result["message"]) == 0 {
 		t.Error("message field must be preserved")
@@ -331,4 +339,58 @@ func TestHandleInputUnknownSession(t *testing.T) {
 	payload := []byte(`{"session_id":"does-not-exist","type":"user","message":{"role":"user","content":"hi"}}`)
 	// Must not panic — the session lookup fails and nothing is sent.
 	a.handleInput(&nats.Msg{Data: payload})
+}
+
+// TestHandleInputNoManualPublish verifies that handleInput does NOT publish to
+// the events stream directly.  With --replay-user-messages, Claude echoes user
+// messages on stdout; the stdout scanner publishes them.  handleInput only
+// writes to Claude's stdin.  This test confirms that handleInput with a real
+// JetStream mock does NOT call Publish — the a.js field is nil here, and we
+// verify the function still succeeds (sends to stdin) without panicking.
+func TestHandleInputNoManualPublish(t *testing.T) {
+	const sessID = "sess-no-publish"
+
+	sess := &Session{
+		state:   SessionState{ID: sessID},
+		stdinCh: make(chan []byte, 8),
+		stopCh:  make(chan struct{}),
+		doneCh:  make(chan struct{}),
+		initCh:  make(chan struct{}),
+	}
+
+	// Agent with nil js — if handleInput tries to call a.js.Publish it would panic.
+	// The test passes only if handleInput does not touch a.js.
+	a := &Agent{
+		sessions:  make(map[string]*Session),
+		terminals: make(map[string]*TerminalSession),
+		userID:    "u1",
+		projectID: "p1",
+		log:       zerolog.Nop(),
+		// js is intentionally nil — accessing it panics, confirming no publish
+	}
+	a.mu.Lock()
+	a.sessions[sessID] = sess
+	a.mu.Unlock()
+
+	payload := []byte(`{"session_id":"` + sessID + `","type":"user","uuid":"abc-123","message":{"role":"user","content":"test"}}`)
+
+	// Must not panic (would panic if a.js.Publish were called with a.js == nil).
+	a.handleInput(&nats.Msg{Data: payload})
+
+	// Confirm something arrived on stdinCh (the actual forwarding still works).
+	select {
+	case received := <-sess.stdinCh:
+		var result map[string]json.RawMessage
+		if err := json.Unmarshal(received, &result); err != nil {
+			t.Fatalf("unmarshal stdinCh data: %v", err)
+		}
+		if _, has := result["session_id"]; has {
+			t.Error("session_id must be stripped; still present in forwarded data")
+		}
+		if string(result["uuid"]) != `"abc-123"` {
+			t.Errorf("uuid must be preserved; got %s", result["uuid"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no data received on stdinCh")
+	}
 }
