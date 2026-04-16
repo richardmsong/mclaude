@@ -67,16 +67,22 @@ Work through the design docs **line by line**, section by section. For each line
 3. **Record** the implementing location: `file:line-range` (e.g., `agent.go:508-527`)
 4. **Verdict**: one of:
    - `IMPLEMENTED` — code matches spec
-   - `GAP` — spec says X, code doesn't do X or does it wrong
+   - `GAP` — spec and code diverge (explain the divergence)
    - `PARTIAL` — some of the spec line is implemented, rest is missing (explain what's missing)
+5. **Direction** (for GAP and PARTIAL only): determine which side should change:
+   - `CODE→FIX` — the spec is clearly correct and the code should be updated to match
+   - `SPEC→FIX` — the code's approach is reasonable and the spec is overly prescriptive, ambiguous, or missing practical constraints. The spec should be updated to match reality.
+   - `UNCLEAR` — you can't determine which side is wrong from the code and spec alone. Flag for the caller to decide.
+
+   To determine direction, consider: Does the code's approach have a practical justification (performance, environment constraints, edge cases the spec didn't consider)? Is the spec language aspirational rather than concrete? Would changing the code to match the spec introduce problems?
 
 Track every code line range you visit in the "reviewed set."
 
 Output this as a table in the audit file:
 
 ```
-| Spec (doc:line) | Spec text | Code location | Verdict | Notes |
-|-----------------|-----------|---------------|---------|-------|
+| Spec (doc:line) | Spec text | Code location | Verdict | Direction | Notes |
+|-----------------|-----------|---------------|---------|-----------|-------|
 ```
 
 ### Phase 2 — Code → Spec (reverse pass)
@@ -108,37 +114,95 @@ Procedure:
 
 Use `Edit` (append to end of file) or `Bash` (`echo "| ... |" >> <file>`) — whichever is faster. Never accumulate more than a handful of rows in memory before flushing.
 
-### Phase 3 — Summarize and return
+### Phase 3 — Test coverage (spec → tests)
+
+For each spec line that was `IMPLEMENTED` or `PARTIAL` in Phase 1, verify that test coverage exists:
+
+1. **Find** tests that exercise the implementing code — grep for function names, handler names, subject strings, or endpoint paths in `*_test.go` / `*.test.ts` / `*.spec.ts` files.
+2. **Classify** each spec line's test coverage:
+   - `TESTED` — at least one unit test AND one integration/e2e test covers this behavior
+   - `UNIT_ONLY` — unit test exists but no integration/e2e test
+   - `E2E_ONLY` — integration/e2e test exists but no unit test
+   - `UNTESTED` — no test covers this spec line at all
+
+A unit test verifies the function/method in isolation (mocked dependencies). An integration/e2e test verifies the behavior through a real or near-real stack (real NATS, real HTTP, Playwright, etc.).
+
+Append to the audit file:
+
+```markdown
+
+### Phase 3 — Test Coverage
+
+| Spec (doc:line) | Spec text | Unit test | E2E test | Verdict |
+|-----------------|-----------|-----------|----------|---------|
+```
+
+Write rows incrementally as with previous phases.
+
+### Phase 4 — Bug triage
+
+Check `.agent/bugs/` for open bugs whose `**Component**:` matches the component being audited. For each:
+
+1. Read the bug file. Look at the **Root Cause** and **Files** sections.
+2. Check if the code now implements the correct behavior described in **Spec Reference**.
+3. Verdict:
+   - `FIXED` — the code now matches the spec. The root cause described in the bug is resolved.
+   - `OPEN` — the code still diverges from the spec in the way the bug describes.
+   - `PARTIAL` — some of the bug is fixed, some remains.
+
+For each `FIXED` bug:
+1. `mkdir -p .agent/bugs/fixed`
+2. Move: `mv .agent/bugs/{file} .agent/bugs/fixed/{file}`
+3. Update `**Status**:` from `open` to `fixed`
+4. Add `**Fixed**: {YYYY-MM-DD}` line after the Status line
+
+Append bug triage results to the audit file:
+
+```markdown
+
+### Phase 3 — Bug Triage
+
+| Bug | Title | Verdict | Notes |
+|-----|-------|---------|-------|
+```
+
+### Phase 5 — Summarize and return
 
 1. Append the summary counts to the bottom of the audit file (which already has all rows from incremental writes).
-2. Return the summary: count of IMPLEMENTED, GAP, PARTIAL from Phase 1, and count of INFRA, UNSPEC'd, DEAD from Phase 2. Then list all GAP, PARTIAL, UNSPEC'd, and DEAD items.
+2. Return the summary: count of IMPLEMENTED, GAP, PARTIAL from Phase 1; count of INFRA, UNSPEC'd, DEAD from Phase 2; count of TESTED, UNIT_ONLY, E2E_ONLY, UNTESTED from Phase 3; count of FIXED, OPEN bugs from Phase 4. Then list all GAP, PARTIAL, UNSPEC'd, DEAD, UNTESTED, UNIT_ONLY, E2E_ONLY, and OPEN bug items.
 
 ## Output format
 
 If the component is spec-complete and has no dead code:
 
 ```
-CLEAN — N spec lines implemented, M infra lines, 0 gaps, 0 dead code
+CLEAN — N spec lines implemented, M infra lines, 0 gaps, 0 dead code, N tested, 0 untested, 0 open bugs
 ```
 
-Otherwise, list every non-clean finding:
+Otherwise, list every non-clean finding with direction:
 
 ```
-GAP: "<exact spec quote>" → <what the code does or doesn't do> (file:line)
-PARTIAL: "<exact spec quote>" → <what's implemented, what's missing> (file:line)
+GAP [CODE→FIX]: "<exact spec quote>" → <what the code does or doesn't do> (file:line)
+GAP [SPEC→FIX]: "<exact spec quote>" → <why the spec should change to match the code> (file:line)
+PARTIAL [CODE→FIX]: "<exact spec quote>" → <what's implemented, what's missing> (file:line)
+PARTIAL [SPEC→FIX]: "<exact spec quote>" → <what's implemented, why the rest should be dropped from spec> (file:line)
+PARTIAL [UNCLEAR]: "<exact spec quote>" → <the divergence and why you can't determine direction> (file:line)
 UNSPEC'd: <file:line-range> → <what this code does, why it has no spec coverage>
 DEAD: <file:line-range> → <why this is dead/unreachable>
 ```
+
+The direction tag tells the caller whether to fix the code or update the spec. This is critical — the evaluator must not assume the spec is always right. Divergences are symmetric: sometimes the code is wrong, sometimes the spec is.
 
 ## Rules
 
 - **Never** mark a gap as deferred, optional, low priority, or future work
 - **Never** report things the design docs don't say as gaps (missing tests, style issues, etc.)
-- **Only** GAP/PARTIAL when: design doc says X, code doesn't fully do X
+- **Only** GAP/PARTIAL when: design doc says X, code doesn't fully do X (or vice versa)
 - **Only** UNSPEC'd/DEAD when: code does X, no design doc describes X
 - **Never** rely on context you don't have — if it's not in the design docs, it's not a gap
-- You are the evaluator. You do NOT fix gaps. You report them.
-- If a gap cannot be implemented due to environment constraints, report it — the caller decides whether to update the design doc.
+- You are the evaluator. You do NOT fix gaps. You report them — with direction.
+- **Spec is not gospel.** When code diverges from spec, the spec may be the problem. Always assess both directions. If the code's approach has practical merit (environment constraints, performance, edge cases), flag the spec as the side to fix.
+- If a gap cannot be implemented due to environment constraints, report it as `SPEC→FIX` — the design doc should be updated to reflect reality.
 - **Be exhaustive.** Every spec line gets a row. Every uncovered code block gets a row. The audit must account for 100% of the spec and 100% of the production code.
 
 ## Saving results — incremental
@@ -170,7 +234,11 @@ The audit file is `.agent/audits/spec-<component>-<YYYY-MM-DD>.md`. Create `.age
 
 **Step 4 (during Phase 2):** After each code block is classified, immediately append its row.
 
-**Step 5 (Phase 3):** Append the summary:
+**Step 5 (Phase 3):** Append the test coverage header and rows (same incremental pattern).
+
+**Step 6 (Phase 4):** Append the bug triage header and rows (same incremental pattern).
+
+**Step 7 (Phase 5):** Append the summary:
 
 ```markdown
 
@@ -182,6 +250,12 @@ The audit file is `.agent/audits/spec-<component>-<YYYY-MM-DD>.md`. Create `.age
 - Infra: N
 - Unspec'd: N
 - Dead: N
+- Tested: N
+- Unit only: N
+- E2E only: N
+- Untested: N
+- Bugs fixed: N
+- Bugs open: N
 ```
 
 This is mandatory — evaluation history must be preserved, and incremental writing ensures no findings are lost to context compaction.
