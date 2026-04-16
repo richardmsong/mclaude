@@ -25,8 +25,13 @@ print(json.dumps({
 }
 
 # Block: helm deploy operations (upgrade/install — but not uninstall/list/get)
+# Exception: set LOCAL_DEPLOY=1 to allow local helm installs (e.g. k3d dev cluster).
 if echo "$COMMAND" | grep -qE '(^|[;&|])\s*helm\s+(upgrade|install)\b'; then
-  deny "BLOCKED: 'helm upgrade/install' must run via CI, not locally. Push to branch and let deploy-preview.yml handle it. Use 'helm uninstall' for cleanup, 'helm get manifest' to inspect."
+  if [ "${LOCAL_DEPLOY:-}" = "1" ]; then
+    : # allow — local deploy mode
+  else
+    deny "BLOCKED: 'helm upgrade/install' must run via CI, not locally. Push to branch and let deploy-preview.yml handle it. Set LOCAL_DEPLOY=1 to override for local k3d deploys."
+  fi
 fi
 
 # Block: local docker builds

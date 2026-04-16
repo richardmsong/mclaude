@@ -23,7 +23,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/mclaude/.agent/hooks/pre-tool-use.sh"
+            "command": ".agent/hooks/pre-tool-use.sh"
           }
         ]
       }

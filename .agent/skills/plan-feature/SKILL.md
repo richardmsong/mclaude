@@ -234,3 +234,26 @@ Which re-invokes dev-harness with the updated spec. The loop continues until spe
 - **Don't skip research** — uninformed questions waste the user's time
 - **Don't present false choices** — if there's only one reasonable option, state it as your recommendation and ask if they agree
 - **Don't ask about implementation details** — ask about behavior, scope, and architecture. Implementation is for the dev-harness.
+
+---
+
+## Skill authoring conventions (when the output is a SKILL.md)
+
+These apply whenever `plan-feature` is designing a new skill (i.e. the design doc will become `.agent/skills/<name>/SKILL.md`):
+
+**External binaries**
+- List every required binary in a `## Prerequisites` section with a one-line install command.
+- Always invoke binaries by name only — never hardcode an absolute path (e.g. `nats`). Rely on PATH.
+- Example:
+  ```bash
+  ## Prerequisites
+  which nats   # install: brew install nats-io/nats-tools/nats
+  which kubectl
+  which helm
+  ```
+
+**Idempotency**
+- All setup steps must be safe to re-run (`--dry-run=client -o yaml | kubectl apply -f -`, `helm upgrade --install`, etc.).
+
+**No hardcoded user paths**
+- No `/Users/<name>/...` paths anywhere in a skill. Use env vars (`$HOME`, `$KUBECONFIG`) or relative paths.
