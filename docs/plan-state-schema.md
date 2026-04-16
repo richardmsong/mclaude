@@ -31,7 +31,7 @@ Readers: control-plane (GetUserByEmail, GetUserByID, auth)
 | `user_id` | TEXT | NOT NULL FK→users ON DELETE CASCADE | Owner |
 | `name` | TEXT | NOT NULL | Human-readable name (e.g. "mclaude") |
 | `git_url` | TEXT | NOT NULL DEFAULT '' | Optional git remote |
-| `status` | TEXT | NOT NULL DEFAULT 'active' | active, archived |
+| `status` | TEXT | NOT NULL DEFAULT 'active' | active, pending, archived |
 | `cluster_id` | TEXT | NOT NULL FK→clusters ON DELETE RESTRICT | Cluster the project is provisioned on |
 | `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
 
@@ -66,7 +66,7 @@ Readers: control-plane (discovery, login response, RBAC checks)
 | `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
 
 Primary key: `(user_id, cluster_id)`
-Constraint: at most one `is_default = TRUE` per `user_id`
+Constraint: `CREATE UNIQUE INDEX idx_user_clusters_default ON user_clusters (user_id) WHERE is_default = TRUE` — partial unique index ensuring at most one default per user
 
 Writers: control-plane (GrantClusterAccess, RevokeClusterAccess, SetDefaultCluster)
 Readers: control-plane (RBAC validation, project creation, login response)
