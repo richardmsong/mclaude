@@ -43,6 +43,13 @@ All platforms use this palette verbatim. Do not substitute platform system color
 - List item height: ~52px with 12px vertical padding
 - Separator: 1px `--border` color
 
+### Viewport
+
+The SPA is a full-screen app — no zoom is permitted. The viewport is locked to device width at 1:1 scale.
+
+- **Meta tag**: `<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />`
+- **CSS**: `touch-action: manipulation` on `html, body, #root` — prevents double-tap zoom on Safari (which sometimes ignores `user-scalable=no` for accessibility)
+
 ### Status Dots
 
 A filled circle (8–10px) indicating session state, animated where noted.

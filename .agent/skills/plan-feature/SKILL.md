@@ -30,7 +30,7 @@ Examples:
 2. Draft design + question list
 3. Ask questions (AskUserQuestion)
 4. Repeat steps 2-3 until no ambiguities remain
-5. Write design document
+5. Write design document (includes Implementation Plan with token/effort estimates)
 6. Design audit (/design-audit) until CLEAN
 7. Hand off to /feature-change
 ```
@@ -85,6 +85,7 @@ Use `AskUserQuestion` to resolve ambiguities. Rules:
 - **Put your recommended option first** with "(Recommended)" in the label
 - **Don't ask yes/no questions** — offer real alternatives
 - **Don't ask questions you can answer from the code** — only ask about decisions
+- **Always include design ramifications in the question text** — explain the tradeoffs and consequences of each choice directly in the question, not just in the option descriptions. The user should be able to understand what each choice means for the system without having to ask "what are the ramifications?"
 
 After the user answers, incorporate their decisions and check: are there new ambiguities revealed by their choices? If yes, draft follow-up questions and ask again (back to step 2).
 
@@ -96,7 +97,21 @@ After the user answers, incorporate their decisions and check: are there new amb
 
 ## Step 4 — Write design document
 
-Once all questions are answered, write the design to `docs/plan-<feature-slug>.md`:
+**Choose the right home for the spec.** Not every feature needs its own `plan-*.md` file. If the change is a small addition to an existing subsystem, add it to the existing design doc that covers that area:
+
+| Change type | Where to write |
+|-------------|---------------|
+| New standalone feature (OAuth, multi-cluster, job queue) | New `docs/plan-<feature-slug>.md` |
+| UI behavior, design system rule, screen change | Edit `docs/ui-spec.md` |
+| Client architecture (stores, viewmodels, NATS pub/sub) | Edit `docs/plan-client-architecture.md` |
+| Backend behavior covered by existing doc | Edit the existing `docs/plan-*.md` |
+| Small cross-cutting rule (viewport, caching, headers) | Edit the doc for the affected component |
+
+**Rule of thumb:** if the feature is 1-2 paragraphs of spec, it belongs in an existing file. If it needs its own Decisions table, User Flow, Component Changes, and Error Handling sections, it gets its own file.
+
+When adding to an existing file, put the new content in the right section — follow the existing structure, don't append to the bottom.
+
+When creating a new file, write the design to `docs/plan-<feature-slug>.md`:
 
 ```markdown
 # <Feature Name>
@@ -132,6 +147,34 @@ Auth, token storage, scope, revocation.
 
 ## Scope
 What's in v1. What's explicitly deferred.
+
+## Implementation Plan
+
+Estimated effort to implement this design via dev-harness.
+
+| Component | New/changed lines (est.) | Dev-harness tokens (est.) | Notes |
+|-----------|--------------------------|---------------------------|-------|
+
+**Total estimated tokens:** N
+**Estimated wall-clock:** Xh of Yh budget (Z%)
+
+### How to estimate
+
+Lines of code: count spec lines that describe concrete behavior (endpoints,
+subjects, handlers, UI components, schemas). Each spec line typically produces
+10-30 lines of production code + 15-40 lines of test code depending on
+complexity.
+
+Tokens: dev-harness consumes roughly 50-80k tokens per component category
+(build/unit/integration/component/e2e). Multiply categories × 65k as a
+baseline, then adjust:
+- Simple categories (build, lint, config): ~30k tokens
+- Medium categories (unit, mocks, views): ~60k tokens
+- Complex categories (integration, component, e2e, failure): ~100k tokens
+- First-time component setup: +50k tokens overhead
+
+Budget: the 5h Anthropic API budget ≈ 15M tokens at Sonnet speed. Express
+the estimate as a fraction of this budget.
 ```
 
 ---
