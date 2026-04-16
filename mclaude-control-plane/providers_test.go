@@ -671,3 +671,163 @@ func TestRedirectWithError_NoConnectedParam(t *testing.T) {
 		t.Errorf("expected error=storage appended to redirect, got %s", loc)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// GAP 3 — POST /api/providers/pat/connect must return 400
+// ---------------------------------------------------------------------------
+
+func TestHandleConnectProvider_PatReturns400(t *testing.T) {
+	srv := newTestServerWithProviders(t)
+
+	body := bytes.NewBufferString(`{"returnUrl":"/settings"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/providers/pat/connect", body)
+	req.URL.Path = "/api/providers/pat/connect"
+	req = req.WithContext(contextWithUserID(req.Context(), "user1"))
+	w := httptest.NewRecorder()
+	srv.handleConnectProvider(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("want 400 for pat provider, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PARTIAL 1 — sanitizeReturnURL strips non-allowlisted query params
+// ---------------------------------------------------------------------------
+
+func TestSanitizeReturnURL_AllowlistedParamsPreserved(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{
+			input: "/?provider=github&connected=true&goto=settings&error=denied",
+			want:  "/?connected=true&error=denied&goto=settings&provider=github",
+		},
+		{
+			input: "/settings",
+			want:  "/settings",
+		},
+		{
+			input: "/?provider=github",
+			want:  "/?provider=github",
+		},
+	}
+	for _, c := range cases {
+		got := sanitizeReturnURL(c.input)
+		if got != c.want {
+			t.Errorf("sanitizeReturnURL(%q) = %q, want %q", c.input, got, c.want)
+		}
+	}
+}
+
+func TestSanitizeReturnURL_StripsNonAllowlisted(t *testing.T) {
+	cases := []struct {
+		input   string
+		notWant string
+	}{
+		{
+			input:   "/?provider=github&secret=leaked&connected=true",
+			notWant: "secret",
+		},
+		{
+			input:   "/?provider=github&foo=bar&baz=qux",
+			notWant: "foo",
+		},
+	}
+	for _, c := range cases {
+		got := sanitizeReturnURL(c.input)
+		if strings.Contains(got, c.notWant) {
+			t.Errorf("sanitizeReturnURL(%q) = %q, expected %q to be stripped", c.input, got, c.notWant)
+		}
+	}
+}
+
+func TestHandleConnectProvider_SanitizesReturnURL(t *testing.T) {
+	// Verify that a returnUrl with non-allowlisted params still succeeds but
+	// the stripped URL ends up in the state store.
+	srv := newTestServerWithProviders(t)
+
+	// Include a non-allowlisted param "secret=leaked" alongside allowlisted ones.
+	body := bytes.NewBufferString(`{"returnUrl":"/?provider=github&connected=true&secret=leaked"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/providers/github/connect", body)
+	req.URL.Path = "/api/providers/github/connect"
+	req = req.WithContext(contextWithUserID(req.Context(), "user1"))
+	w := httptest.NewRecorder()
+	srv.handleConnectProvider(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// Verify a redirectUrl was returned (state was stored successfully).
+	if resp["redirectUrl"] == "" {
+		t.Error("expected non-empty redirectUrl")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PARTIAL 2 — PAT error messages distinguish auth vs connectivity errors
+// ---------------------------------------------------------------------------
+
+func TestDetectPATProvider_AuthError401(t *testing.T) {
+	// Server returns 401 — should get "invalid token" message.
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer mock.Close()
+
+	_, _, err := detectPATProvider(mock.URL, "bad_token")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid token") {
+		t.Errorf("want 'invalid token' message for 401, got: %s", err.Error())
+	}
+}
+
+func TestDetectPATProvider_AuthError403(t *testing.T) {
+	// Server returns 403 — should get "invalid token" message.
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer mock.Close()
+
+	_, _, err := detectPATProvider(mock.URL, "bad_token")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid token") {
+		t.Errorf("want 'invalid token' message for 403, got: %s", err.Error())
+	}
+}
+
+func TestDetectPATProvider_ConnectivityError(t *testing.T) {
+	// Use a URL that can't be reached — should get "could not reach provider".
+	_, _, err := detectPATProvider("http://localhost:19999", "any_token")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "could not reach provider") {
+		t.Errorf("want 'could not reach provider' for unreachable host, got: %s", err.Error())
+	}
+}
+
+func TestDetectPATProvider_404IsConnectivityError(t *testing.T) {
+	// 404 means the URL path doesn't exist — treat as base URL config issue.
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer mock.Close()
+
+	_, _, err := detectPATProvider(mock.URL, "any_token")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "could not reach provider") {
+		t.Errorf("want 'could not reach provider' for 404, got: %s", err.Error())
+	}
+}

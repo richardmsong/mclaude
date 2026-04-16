@@ -136,7 +136,7 @@ func (db *DB) CreateProjectWithIdentity(ctx context.Context, id, userID, name, g
 // GetProjectsByUser returns all projects owned by a user.
 func (db *DB) GetProjectsByUser(ctx context.Context, userID string) ([]*Project, error) {
 	rows, err := db.pool.Query(ctx,
-		`SELECT id, user_id, name, git_url, status, created_at FROM projects WHERE user_id = $1 ORDER BY created_at`,
+		`SELECT id, user_id, name, git_url, status, created_at, git_identity_id FROM projects WHERE user_id = $1 ORDER BY created_at`,
 		userID)
 	if err != nil {
 		return nil, fmt.Errorf("get projects: %w", err)
@@ -145,7 +145,7 @@ func (db *DB) GetProjectsByUser(ctx context.Context, userID string) ([]*Project,
 	var projects []*Project
 	for rows.Next() {
 		p := &Project{}
-		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.GitURL, &p.Status, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.GitURL, &p.Status, &p.CreatedAt, &p.GitIdentityID); err != nil {
 			return nil, err
 		}
 		projects = append(projects, p)
@@ -156,9 +156,9 @@ func (db *DB) GetProjectsByUser(ctx context.Context, userID string) ([]*Project,
 // GetProjectByID returns a project by ID, or nil if not found.
 func (db *DB) GetProjectByID(ctx context.Context, id string) (*Project, error) {
 	row := db.pool.QueryRow(ctx,
-		`SELECT id, user_id, name, git_url, status, created_at FROM projects WHERE id = $1`, id)
+		`SELECT id, user_id, name, git_url, status, created_at, git_identity_id FROM projects WHERE id = $1`, id)
 	p := &Project{}
-	err := row.Scan(&p.ID, &p.UserID, &p.Name, &p.GitURL, &p.Status, &p.CreatedAt)
+	err := row.Scan(&p.ID, &p.UserID, &p.Name, &p.GitURL, &p.Status, &p.CreatedAt, &p.GitIdentityID)
 	if err != nil {
 		if err.Error() == "no rows in result set" {
 			return nil, nil

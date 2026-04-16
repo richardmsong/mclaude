@@ -166,6 +166,10 @@ func main() {
 	}
 	defer nc.Close()
 
+	// Wire NATS connection into Server so HTTP handlers (PATCH /api/projects/{id},
+	// DELETE /api/connections/{id}) can write to KV buckets in real-time.
+	srv.SetNATSConn(nc)
+
 	if err := srv.StartProjectsSubscriber(nc); err != nil {
 		logger.Fatal().Err(err).Msg("start projects subscriber")
 	}

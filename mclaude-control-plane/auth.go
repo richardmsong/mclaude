@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"golang.org/x/crypto/bcrypt"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -47,6 +48,7 @@ type Server struct {
 	controlPlaneNs  string          // K8s namespace where the control-plane runs (mclaude-system)
 	helmReleaseName string          // Helm release name, used to derive namespace for MCProject CRs
 	providers       *providerRegistry // OAuth provider config and state store; nil when no providers configured
+	nc              *nats.Conn      // NATS connection for KV writes from HTTP handlers; nil when NATS unavailable
 }
 
 // NewServer constructs a Server. accountKP must be an account-level NKey pair —
@@ -67,6 +69,12 @@ func NewServer(db *DB, accountKP nkeys.KeyPair, natsURL, natsWsURL string, jwtEx
 		controlPlaneNs:  controlPlaneNs,
 		helmReleaseName: helmReleaseName,
 	}
+}
+
+// SetNATSConn attaches the NATS connection to the server after startup.
+// Called after NATS connects so HTTP handlers can write to KV buckets.
+func (s *Server) SetNATSConn(nc *nats.Conn) {
+	s.nc = nc
 }
 
 // handleLogin handles POST /auth/login.
