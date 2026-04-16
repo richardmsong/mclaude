@@ -2,6 +2,18 @@ import type { INATSClient } from '@/types'
 import type { SessionStore } from '@/stores/session-store'
 import type { HeartbeatMonitor } from '@/stores/heartbeat-monitor'
 
+const FILTER_PROJECT_KEY = 'mclaude.filterProjectId'
+
+/**
+ * Minimal Storage interface — same shape as window.localStorage.
+ * Defaults to globalThis.localStorage in the browser; tests inject an in-memory fake.
+ */
+export interface IStorage {
+  getItem(key: string): string | null
+  setItem(key: string, value: string): void
+  removeItem(key: string): void
+}
+
 export interface SessionVM {
   id: string
   name: string
@@ -11,6 +23,8 @@ export interface SessionVM {
   cwd: string
   costUsd: number
   hasPendingPermission: boolean
+  /** ISO timestamp of last state change — used for sorting. */
+  stateSince: string
 }
 
 export interface ProjectVM {
@@ -21,18 +35,26 @@ export interface ProjectVM {
   sessions: SessionVM[]
 }
 
+export interface ProjectGroup {
+  project: ProjectVM
+  sessions: SessionVM[]
+}
+
 export type SessionListListener = (projects: ProjectVM[]) => void
 
 export class SessionListVM {
   private _listeners: SessionListListener[] = []
   private _unsubscribers: Array<() => void> = []
+  private readonly _storage: IStorage
 
   constructor(
     private readonly sessionStore: SessionStore,
     private readonly heartbeatMonitor: HeartbeatMonitor,
     private readonly natsClient: INATSClient,
     private readonly userId: string,
+    storage?: IStorage,
   ) {
+    this._storage = storage ?? (globalThis.localStorage as IStorage)
     this._unsubscribers.push(
       this.sessionStore.onSessionChanged(() => this._notify()),
       this.sessionStore.onProjectChanged(() => this._notify()),
@@ -55,7 +77,64 @@ export class SessionListVM {
         cwd: s.cwd,
         costUsd: s.usage.costUsd,
         hasPendingPermission: Object.keys(s.pendingControls).length > 0,
+        stateSince: s.stateSince,
       })),
+    }))
+  }
+
+  /** Current filter project ID from localStorage. Empty string = no filter. */
+  get filterProjectId(): string {
+    return this._storage.getItem(FILTER_PROJECT_KEY) ?? ''
+  }
+
+  /**
+   * Set the project filter. Pass empty string to clear.
+   * Persists to localStorage and notifies listeners.
+   */
+  setFilter(projectId: string): void {
+    if (projectId) {
+      this._storage.setItem(FILTER_PROJECT_KEY, projectId)
+    } else {
+      this._storage.removeItem(FILTER_PROJECT_KEY)
+    }
+    this._notify()
+  }
+
+  /**
+   * Returns the effective filter project ID after validating that the
+   * stored project still exists in the KV store. If the project no longer
+   * exists, clears the filter automatically and returns empty string.
+   */
+  resolveFilter(): string {
+    const stored = this.filterProjectId
+    if (!stored) return ''
+    const exists = Array.from(this.sessionStore.projects.values()).some(p => p.id === stored)
+    if (!exists) {
+      this._storage.removeItem(FILTER_PROJECT_KEY)
+      return ''
+    }
+    return stored
+  }
+
+  /**
+   * Projects sorted alphabetically by name. When a valid project filter is active,
+   * returns only that one project's group.
+   */
+  get sortedGroups(): ProjectGroup[] {
+    const allProjects = this.projects
+    const effectiveFilter = this.resolveFilter()
+
+    const sorted = [...allProjects].sort((a, b) => a.name.localeCompare(b.name))
+
+    const filtered = effectiveFilter
+      ? sorted.filter(p => p.id === effectiveFilter)
+      : sorted
+
+    return filtered.map(p => ({
+      project: p,
+      sessions: [...p.sessions].sort((a, b) =>
+        b.stateSince.localeCompare(a.stateSince)
+      ),
     }))
   }
 
