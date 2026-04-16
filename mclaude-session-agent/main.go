@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus"
@@ -142,6 +144,45 @@ func main() {
 	// Standalone (K8s or single-project laptop) mode.
 	if projectID == "" {
 		log.Fatal().Msg("--project-id is required in standalone mode")
+	}
+
+	// Credential helper setup + initial repo clone/init (per spec: happens before
+	// NATS session lifecycle, after NATS connection is established).
+	// Only runs in k8s mode (when --mode k8s) where user-secrets Secret is mounted.
+	// In standalone/laptop mode the Secret mount is not present; skip silently.
+	if *flagMode == "k8s" {
+		homeDir, _ := os.UserHomeDir()
+		credMgr := NewCredentialManager(homeDir, log.Logger)
+
+		gitURL := os.Getenv("GIT_URL")
+		gitIdentityID := os.Getenv("GIT_IDENTITY_ID")
+
+		log.Info().Str("gitURL", gitURL).Str("gitIdentityID", gitIdentityID).Msg("setting up git credentials")
+
+		if setupErr := credMgr.Setup(gitIdentityID); setupErr != nil {
+			// Non-fatal: log and continue. Credential helpers won't work but
+			// SSH key auth (if present) may still allow cloning.
+			log.Warn().Err(setupErr).Msg("credential helper setup failed (non-fatal)")
+		}
+
+		if repoErr := InitRepo(dataDir, gitURL, gitIdentityID, credMgr, log.Logger); repoErr != nil {
+			if authErr, ok := repoErr.(*GitAuthError); ok {
+				// Auth error during clone → publish session_failed with provider_auth_failed.
+				// We don't have a session ID yet (no sessions created), so publish on the
+				// project lifecycle subject with a synthetic session ID.
+				subject := fmt.Sprintf("mclaude.%s.%s.lifecycle._init", userID, projectID)
+				payload, _ := json.Marshal(map[string]string{
+					"type":      "session_failed",
+					"sessionId": "_init",
+					"error":     "provider_auth_failed",
+					"detail":    authErr.Error(),
+					"ts":        time.Now().UTC().Format(time.RFC3339),
+				})
+				_ = nc.Publish(subject, payload)
+				log.Fatal().Err(repoErr).Msg("git auth error during initial clone — aborting")
+			}
+			log.Fatal().Err(repoErr).Msg("failed to initialize git repo — aborting")
+		}
 	}
 
 	agent, err := NewAgent(nc, userID, projectID, claudePath, dataDir, log.Logger, m)
