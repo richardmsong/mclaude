@@ -418,7 +418,7 @@ At session start, the session-agent sets up `gh` and `glab` as git credential he
 # BEFORE the existing `apk del curl` cleanup step. Reorder the Dockerfile accordingly.
 ARG TARGETARCH=arm64
 RUN apk add --no-cache github-cli && \
-    GLAB_VERSION="1.46.0" && \
+    GLAB_VERSION="1.92.1" && \
     curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${TARGETARCH}.tar.gz" | \
     tar xz --strip-components=1 -C /usr/local/bin bin/glab && \
     chmod +x /usr/local/bin/glab
