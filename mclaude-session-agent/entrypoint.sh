@@ -31,34 +31,10 @@ ln -sf /data/projects "$HOME/.claude/projects"
 # guard hooks (platform-level enforcement) are the permission layer in pods, not Claude Code's UI prompts.
 echo '{"hasCompletedOnboarding":true,"bypassPermissions":true}' > "$HOME/.claude.json"
 
-# Git setup (bare repo — worktrees created by session agent)
-# Every project gets a bare repo. Git-backed projects clone from GIT_URL;
-# scratch projects (no GIT_URL) get an empty bare repo initialized in place.
-# This means the session agent's worktree machinery works uniformly for all projects.
-if [ ! -d "/data/repo/HEAD" ]; then
-    if [ -n "$GIT_URL" ]; then
-        git clone --bare "$GIT_URL" /data/repo || {
-            echo "[entrypoint] Git clone failed — exiting for restart"
-            exit 1
-        }
-    else
-        git init --bare /data/repo
-        # Set default branch to main (some git versions default to master).
-        git -C /data/repo symbolic-ref HEAD refs/heads/main
-        # Create an initial empty commit so worktrees have something to branch from.
-        # git commit requires a working tree, so use plumbing commands instead.
-        TREE=$(git -C /data/repo hash-object -t tree /dev/null)
-        COMMIT=$(GIT_AUTHOR_NAME="mclaude" GIT_AUTHOR_EMAIL="mclaude@local" \
-                 GIT_COMMITTER_NAME="mclaude" GIT_COMMITTER_EMAIL="mclaude@local" \
-                 git -C /data/repo commit-tree "$TREE" -m "init")
-        git -C /data/repo update-ref refs/heads/main "$COMMIT"
-    fi
-else
-    if [ -n "$GIT_URL" ]; then
-        git -C /data/repo fetch --all --prune || true
-    fi
-fi
-mkdir -p /data/worktrees
+# Git setup (credential helper setup + bare repo clone/init) is handled by
+# the Go session-agent binary. The agent reads GIT_URL and GIT_IDENTITY_ID
+# env vars and performs: credential helper setup → initial clone (or scratch
+# init if no GIT_URL) → NATS connection → session lifecycle.
 
 # Shared memory — symlink each worktree's memory dir to /data/shared-memory/
 mkdir -p /data/shared-memory
