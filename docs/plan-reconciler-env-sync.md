@@ -12,7 +12,7 @@ This design fixes the reconciler to fully sync the Deployment spec on every reco
 |----------|--------|-----------|
 | Sync granularity | Full container spec rebuild on every reconcile | Simpler, idempotent, catches any spec drift — not just env vars. K8s no-ops when nothing changed. |
 | Restart trigger | Rely on K8s Deployment controller | When the pod template changes (env vars, image, volumes), K8s automatically triggers a rolling restart. No annotation hacks needed. |
-| CRD schema | Add `gitIdentityId` as a formal optional field | Currently tolerated as an additional property but `kubectl patch` warns. Formalizing it makes the schema self-documenting. |
+| CRD schema | Add `gitIdentityId` as a formal optional field | The Go struct (`MCProjectSpec`) and reconciler create path already use this field, but the CRD YAML schema omits it. `kubectl patch` warns about unknown fields. Formalizing it makes the schema self-documenting and consistent with the Go types. |
 
 ## Component Changes
 
@@ -41,11 +41,12 @@ Fix the update path to rebuild the full container spec:
 existing Deployment found
   → rebuild containers[] with current env vars, image, command, volumeMounts
   → rebuild volumes[] with current volume list
+  → re-discover imagePullSecrets (list Secrets in user namespace, same as create path)
   → set strategy to Recreate
   → call client.Update()
 ```
 
-The reconciler already computes the correct env vars (including `GIT_IDENTITY_ID` when `gitIdentityId` is non-empty) and volumes. The fix is to apply them to the existing Deployment instead of only updating the image.
+The reconciler already computes the correct env vars (including `GIT_IDENTITY_ID` when `gitIdentityId` is non-empty), volumes, and imagePullSecrets on the create path. The fix is to apply the same full pod template to the existing Deployment instead of only updating the image. This includes `imagePullSecrets`, which the create path discovers dynamically by listing Secrets in the user namespace.
 
 K8s Deployment controller compares the pod template hash. If the template changed (new env var, different image), it triggers a rolling restart. If nothing changed, the Update is a no-op.
 
@@ -73,8 +74,8 @@ Conditional:
 ## Scope
 
 **In scope:**
-- Add `gitIdentityId` to CRD schema
-- Reconciler update path syncs full container spec (env vars, volumes, image, strategy)
+- Add `gitIdentityId` to CRD schema (YAML) and canonical state schema (`docs/plan-state-schema.md`)
+- Reconciler update path syncs full container spec (env vars, volumes, imagePullSecrets, image, strategy)
 
 **Deferred:**
 - Reconciler watching Secret changes (token refresh) — session-agent already handles this via `RefreshIfChanged` on the mounted Secret
