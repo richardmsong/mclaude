@@ -655,6 +655,53 @@ func CreateMCProject(ctx context.Context, c client.Client, namespace, userID, pr
 	return nil
 }
 
+// ClearMCProjectGitIdentityForConnection finds all MCProject CRs whose GitIdentityID
+// matches connID and clears it (sets to empty string). Called when a git identity
+// connection is deleted so that affected CRDs are reconciled by the controller.
+// No-ops when k8sClient is nil (not in cluster).
+func ClearMCProjectGitIdentityForConnection(ctx context.Context, c client.Client, namespace, connID string) {
+	if c == nil || connID == "" {
+		return
+	}
+	var mcpList MCProjectList
+	if err := c.List(ctx, &mcpList, client.InNamespace(namespace)); err != nil {
+		return
+	}
+	for i := range mcpList.Items {
+		mcp := &mcpList.Items[i]
+		if mcp.Spec.GitIdentityID != connID {
+			continue
+		}
+		mcp.Spec.GitIdentityID = ""
+		if err := c.Update(ctx, mcp); err != nil {
+			// Log but don't stop — patch as many as possible.
+			continue
+		}
+	}
+}
+
+// PatchMCProjectGitIdentity updates the GitIdentityID field of an MCProject CR.
+// Used by PATCH /api/projects/{id} to keep the CRD in sync with the DB row.
+// gitIdentityID may be empty string to clear the field.
+// No-ops when k8sClient is nil (not in cluster) or when the CR is not found.
+func PatchMCProjectGitIdentity(ctx context.Context, c client.Client, namespace, projectID, gitIdentityID string) error {
+	if c == nil {
+		return nil
+	}
+	var mcp MCProject
+	if err := c.Get(ctx, types.NamespacedName{Name: projectID, Namespace: namespace}, &mcp); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil // CR not yet created — skip
+		}
+		return fmt.Errorf("get MCProject for patch: %w", err)
+	}
+	mcp.Spec.GitIdentityID = gitIdentityID
+	if err := c.Update(ctx, &mcp); err != nil {
+		return fmt.Errorf("update MCProject GitIdentityID: %w", err)
+	}
+	return nil
+}
+
 // defaultTemplate returns a sessionAgentTpl with safe defaults for dev/test environments.
 func defaultTemplate() *sessionAgentTpl {
 	tpl := &sessionAgentTpl{

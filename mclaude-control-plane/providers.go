@@ -254,6 +254,12 @@ func (s *Server) handleConnectProvider(w http.ResponseWriter, r *http.Request) {
 	path = strings.TrimSuffix(path, "/connect")
 	providerID := path
 
+	// PAT connections are added via POST /api/providers/pat, not via OAuth flow.
+	if providerID == "pat" {
+		http.Error(w, "PAT providers do not use the OAuth connect flow — use POST /api/providers/pat instead", http.StatusBadRequest)
+		return
+	}
+
 	if s.providers == nil {
 		http.Error(w, "no providers configured", http.StatusNotFound)
 		return
@@ -275,8 +281,10 @@ func (s *Server) handleConnectProvider(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Strip non-allowlisted query params before storing the return URL.
+	sanitized := sanitizeReturnURL(body.ReturnURL)
 
-	stateToken, err := s.providers.stateStore.Put(userID, providerID, body.ReturnURL)
+	stateToken, err := s.providers.stateStore.Put(userID, providerID, sanitized)
 	if err != nil {
 		http.Error(w, "failed to generate state", http.StatusInternalServerError)
 		return
@@ -563,10 +571,34 @@ func (s *Server) handleDeleteConnection(w http.ResponseWriter, r *http.Request) 
 	}
 	_ = s.removeSecretKeys(r.Context(), userID, keysToRemove)
 
-	// Delete DB row.
+	// Delete DB row. The DB CASCADE ON DELETE SET NULL will clear git_identity_id
+	// on all projects rows, but we must also clear it on the MCProject CRDs so the
+	// reconciler can react (the DB cascade doesn't touch K8s resources).
 	if _, err := s.db.DeleteOAuthConnection(r.Context(), connID); err != nil {
 		http.Error(w, "failed to delete connection", http.StatusInternalServerError)
 		return
+	}
+
+	// Reconcile affected MCProject CRDs: clear GitIdentityID so the reconciler
+	// removes GIT_IDENTITY_ID from the session-agent pod spec.
+	if s.k8sClient != nil && s.controlPlaneNs != "" {
+		ClearMCProjectGitIdentityForConnection(r.Context(), s.k8sClient, s.controlPlaneNs, connID)
+	}
+
+	// Update NATS KV for all projects that were linked to this connection,
+	// so the SPA reflects the cleared git identity in real-time.
+	if s.nc != nil && s.db != nil {
+		if affectedProjects, err := s.db.GetProjectsByUser(r.Context(), userID); err == nil {
+			for _, proj := range affectedProjects {
+				// Only write KV for projects that were affected (git_identity_id now NULL).
+				// After the DB cascade, these will have nil GitIdentityID.
+				if proj.GitIdentityID == nil {
+					if kvErr := writeProjectKV(s.nc, userID, proj); kvErr != nil {
+						log.Warn().Err(kvErr).Str("projectId", proj.ID).Msg("disconnect: write KV for affected project failed (non-fatal)")
+					}
+				}
+			}
+		}
 	}
 
 	// Rebuild CLI config.
@@ -699,6 +731,28 @@ func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sync the MCProject CRD so the reconciler picks up the new GitIdentityID.
+	gitIdentityIDStr := ""
+	if body.GitIdentityID != nil {
+		gitIdentityIDStr = *body.GitIdentityID
+	}
+	if s.k8sClient != nil && s.controlPlaneNs != "" {
+		if err := PatchMCProjectGitIdentity(r.Context(), s.k8sClient, s.controlPlaneNs, projectID, gitIdentityIDStr); err != nil {
+			log.Warn().Err(err).Str("projectId", projectID).Msg("PATCH project: update MCProject CRD GitIdentityID failed (non-fatal)")
+		}
+	}
+
+	// Write updated ProjectKVState to NATS KV so the SPA sees the change in real-time.
+	if s.nc != nil {
+		// Re-fetch the updated project so KV state is authoritative.
+		updatedProj, fetchErr := s.db.GetProjectByID(r.Context(), projectID)
+		if fetchErr == nil && updatedProj != nil {
+			if kvErr := writeProjectKV(s.nc, userID, updatedProj); kvErr != nil {
+				log.Warn().Err(kvErr).Str("projectId", projectID).Msg("PATCH project: write KV failed (non-fatal)")
+			}
+		}
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -706,9 +760,21 @@ func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 // Return URL validation
 // ---------------------------------------------------------------------------
 
+// returnURLAllowedParams is the allowlist of query parameter names permitted in returnUrl.
+// Any other params are stripped before the URL is stored and used in redirects.
+// Spec: plan-github-oauth.md §Return URL Validation.
+var returnURLAllowedParams = map[string]bool{
+	"provider":  true,
+	"connected": true,
+	"goto":      true,
+	"error":     true,
+}
+
 // validateReturnURL ensures the return URL is a safe relative path.
 // Must start with "/" but not "//" (protocol-relative URLs can be redirected off-host).
 // Must not contain "://" (absolute URL injection).
+// Query params are filtered to the allowlist: provider, connected, goto, error.
+// Returns the sanitized URL (with non-allowlisted params stripped) if valid.
 func validateReturnURL(u string) error {
 	if !strings.HasPrefix(u, "/") {
 		return fmt.Errorf("returnUrl must start with /")
@@ -720,6 +786,26 @@ func validateReturnURL(u string) error {
 		return fmt.Errorf("returnUrl must be a relative path")
 	}
 	return nil
+}
+
+// sanitizeReturnURL strips query parameters not in the allowlist from a validated returnUrl.
+// Assumes validateReturnURL has already been called on u.
+func sanitizeReturnURL(u string) string {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return u
+	}
+	if parsed.RawQuery == "" {
+		return u
+	}
+	q := parsed.Query()
+	for k := range q {
+		if !returnURLAllowedParams[k] {
+			delete(q, k)
+		}
+	}
+	parsed.RawQuery = q.Encode()
+	return parsed.String()
 }
 
 // redirectWithError modifies the return URL: replaces "connected=true" with "error={code}",
@@ -887,16 +973,30 @@ func fetchUserProfile(p *ProviderConfig, token string) (*providerProfile, error)
 // PAT provider auto-detection
 // ---------------------------------------------------------------------------
 
+// patError is a typed error returned by fetchProfileWithToken to distinguish
+// network/reachability errors from authentication errors.
+type patError struct {
+	msg         string
+	isAuthError bool // true = 401/403; false = network error, 404, etc.
+}
+
+func (e *patError) Error() string { return e.msg }
+
 func detectPATProvider(baseURL, token string) (string, *providerProfile, error) {
 	// Try GitHub: GET {baseUrl}/api/v3/user (works for GHES; github.com uses /user)
 	githubURLs := []string{baseURL + "/api/v3/user"}
 	if baseURL == "https://github.com" {
 		githubURLs = []string{"https://api.github.com/user"}
 	}
+
+	var lastErr *patError
 	for _, u := range githubURLs {
 		profile, err := fetchProfileWithToken(u, token, "github")
 		if err == nil {
 			return "github", profile, nil
+		}
+		if pe, ok := err.(*patError); ok {
+			lastErr = pe
 		}
 	}
 
@@ -906,15 +1006,22 @@ func detectPATProvider(baseURL, token string) (string, *providerProfile, error) 
 	if err == nil {
 		return "gitlab", profile, nil
 	}
+	if pe, ok := err.(*patError); ok {
+		lastErr = pe
+	}
 
-	// Determine error message based on response.
-	return "", nil, fmt.Errorf("invalid token — check that the token has at least read access")
+	// Choose error message based on whether we got auth errors or connectivity errors.
+	if lastErr != nil && lastErr.isAuthError {
+		return "", nil, fmt.Errorf("invalid token — check that the token has at least read access")
+	}
+	return "", nil, fmt.Errorf("could not reach provider — check the base URL")
 }
 
 func fetchProfileWithToken(apiURL, token, provType string) (*providerProfile, error) {
 	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
 	if err != nil {
-		return nil, err
+		// Network-level error building request — treat as connectivity failure.
+		return nil, &patError{msg: err.Error(), isAuthError: false}
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	if provType == "github" {
@@ -926,11 +1033,17 @@ func fetchProfileWithToken(apiURL, token, provType string) (*providerProfile, er
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		// Connection refused, DNS failure, timeout — provider unreachable.
+		return nil, &patError{msg: err.Error(), isAuthError: false}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
+		// 401/403 = bad token; anything else (404, 5xx) = reachability/config issue.
+		isAuth := resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden
+		return nil, &patError{
+			msg:         fmt.Sprintf("status %d", resp.StatusCode),
+			isAuthError: isAuth,
+		}
 	}
 
 	var data struct {
@@ -939,7 +1052,7 @@ func fetchProfileWithToken(apiURL, token, provType string) (*providerProfile, er
 		Name  string      `json:"username"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, err
+		return nil, &patError{msg: err.Error(), isAuthError: false}
 	}
 	username := data.Login
 	if username == "" {
@@ -1426,7 +1539,6 @@ func listGitLabRepos(conn *OAuthConnection, token, query string, page int) (*rep
 	var rawRepos []struct {
 		Name              string `json:"name"`
 		PathWithNamespace string `json:"path_with_namespace"`
-		Private           bool   `json:"visibility"` // will be overwritten below
 		Description       string `json:"description"`
 		HTTPURLToRepo     string `json:"http_url_to_repo"`
 		LastActivityAt    string `json:"last_activity_at"`
