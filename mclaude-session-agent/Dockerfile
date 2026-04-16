@@ -7,7 +7,7 @@ FROM node:22-alpine
 # BEFORE the existing `apk del curl` cleanup step.
 ARG TARGETARCH=arm64
 RUN apk add --no-cache curl bash git openssh-client github-cli && \
-    GLAB_VERSION="1.46.0" && \
+    GLAB_VERSION="1.92.1" && \
     curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${TARGETARCH}.tar.gz" | \
     tar xz --strip-components=1 -C /usr/local/bin bin/glab && \
     chmod +x /usr/local/bin/glab && \
