@@ -1,9 +1,21 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { SessionListVM } from './session-list-vm'
+import type { IStorage } from './session-list-vm'
 import { SessionStore } from '../stores/session-store'
 import { HeartbeatMonitor } from '../stores/heartbeat-monitor'
 import { MockNATSClient } from '../testutil/mock-nats'
 import { makeSessionKVState, makeProjectKVState } from '../testutil/fixtures'
+
+/** In-memory fake storage — compatible with IStorage, safe in Node.js (no browser globals). */
+function makeMemoryStorage(): IStorage & { clear(): void } {
+  const store = new Map<string, string>()
+  return {
+    getItem: (k) => store.get(k) ?? null,
+    setItem: (k, v) => { store.set(k, v) },
+    removeItem: (k) => { store.delete(k) },
+    clear: () => { store.clear() },
+  }
+}
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
@@ -17,13 +29,15 @@ describe('SessionListVM', () => {
   let sessionStore: SessionStore
   let heartbeat: HeartbeatMonitor
   let vm: SessionListVM
+  let storage: ReturnType<typeof makeMemoryStorage>
 
   beforeEach(() => {
+    storage = makeMemoryStorage()
     mockNats = new MockNATSClient()
     sessionStore = new SessionStore(mockNats, 'user-1')
     sessionStore.startWatching()
     heartbeat = new HeartbeatMonitor(mockNats, 'user-1')
-    vm = new SessionListVM(sessionStore, heartbeat, mockNats, 'user-1')
+    vm = new SessionListVM(sessionStore, heartbeat, mockNats, 'user-1', storage)
   })
 
   describe('projects getter', () => {
@@ -68,6 +82,116 @@ describe('SessionListVM', () => {
       const now = new Date().toISOString()
       mockNats.kvSet('mclaude-heartbeats', 'user-1.project-1', { ts: now })
       expect(vm.projects[0]!.healthy).toBe(true)
+    })
+  })
+
+  describe('sortedGroups', () => {
+    it('returns projects sorted alphabetically by name', () => {
+      mockNats.kvSet('mclaude-projects', 'user-1.p-z', makeProjectKVState({ id: 'p-z', name: 'Zebra' }))
+      mockNats.kvSet('mclaude-projects', 'user-1.p-a', makeProjectKVState({ id: 'p-a', name: 'Alpha' }))
+      mockNats.kvSet('mclaude-projects', 'user-1.p-m', makeProjectKVState({ id: 'p-m', name: 'Middle' }))
+
+      const groups = vm.sortedGroups
+      expect(groups.map(g => g.project.name)).toEqual(['Alpha', 'Middle', 'Zebra'])
+    })
+
+    it('returns all groups when no filter is set', () => {
+      mockNats.kvSet('mclaude-projects', 'user-1.p-1', makeProjectKVState({ id: 'p-1', name: 'Alpha' }))
+      mockNats.kvSet('mclaude-projects', 'user-1.p-2', makeProjectKVState({ id: 'p-2', name: 'Beta' }))
+
+      expect(vm.sortedGroups).toHaveLength(2)
+    })
+
+    it('returns only the filtered project when filter is set', () => {
+      mockNats.kvSet('mclaude-projects', 'user-1.p-1', makeProjectKVState({ id: 'p-1', name: 'Alpha' }))
+      mockNats.kvSet('mclaude-projects', 'user-1.p-2', makeProjectKVState({ id: 'p-2', name: 'Beta' }))
+
+      vm.setFilter('p-1')
+      const groups = vm.sortedGroups
+      expect(groups).toHaveLength(1)
+      expect(groups[0]!.project.id).toBe('p-1')
+    })
+
+    it('sorts sessions within a project by descending stateSince', () => {
+      mockNats.kvSet('mclaude-projects', 'user-1.p-1', makeProjectKVState({ id: 'p-1', name: 'Alpha' }))
+      // Add three sessions with different stateSince values
+      mockNats.kvSet('mclaude-sessions', 'user-1.p-1.sess-old', makeSessionKVState({
+        id: 'sess-old',
+        projectId: 'p-1',
+        stateSince: '2024-01-01T00:00:00.000Z',
+      }))
+      mockNats.kvSet('mclaude-sessions', 'user-1.p-1.sess-new', makeSessionKVState({
+        id: 'sess-new',
+        projectId: 'p-1',
+        stateSince: '2024-03-01T00:00:00.000Z',
+      }))
+      mockNats.kvSet('mclaude-sessions', 'user-1.p-1.sess-mid', makeSessionKVState({
+        id: 'sess-mid',
+        projectId: 'p-1',
+        stateSince: '2024-02-01T00:00:00.000Z',
+      }))
+
+      const groups = vm.sortedGroups
+      expect(groups).toHaveLength(1)
+      const sessions = groups[0]!.sessions
+      expect(sessions.map(s => s.id)).toEqual(['sess-new', 'sess-mid', 'sess-old'])
+    })
+  })
+
+  describe('filter state', () => {
+    it('filterProjectId returns empty string when no filter stored', () => {
+      expect(vm.filterProjectId).toBe('')
+    })
+
+    it('setFilter persists to localStorage', () => {
+      mockNats.kvSet('mclaude-projects', 'user-1.p-1', makeProjectKVState({ id: 'p-1', name: 'Alpha' }))
+      vm.setFilter('p-1')
+      expect(storage.getItem('mclaude.filterProjectId')).toBe('p-1')
+      expect(vm.filterProjectId).toBe('p-1')
+    })
+
+    it('setFilter with empty string clears localStorage', () => {
+      storage.setItem('mclaude.filterProjectId', 'p-1')
+      vm.setFilter('')
+      expect(storage.getItem('mclaude.filterProjectId')).toBeNull()
+      expect(vm.filterProjectId).toBe('')
+    })
+
+    it('filter survives reload — reads from localStorage on construction', () => {
+      // Simulate: first VM sets a filter
+      mockNats.kvSet('mclaude-projects', 'user-1.p-1', makeProjectKVState({ id: 'p-1', name: 'Alpha' }))
+      vm.setFilter('p-1')
+      expect(storage.getItem('mclaude.filterProjectId')).toBe('p-1')
+
+      // Second VM reads from the same storage (simulates page reload)
+      const vm2 = new SessionListVM(sessionStore, heartbeat, mockNats, 'user-1', storage)
+      expect(vm2.filterProjectId).toBe('p-1')
+      vm2.destroy()
+    })
+
+    it('resolveFilter returns empty and clears storage when stored project no longer exists', () => {
+      storage.setItem('mclaude.filterProjectId', 'stale-project-id')
+      // No project with that ID in the store
+
+      const resolved = vm.resolveFilter()
+      expect(resolved).toBe('')
+      expect(storage.getItem('mclaude.filterProjectId')).toBeNull()
+    })
+
+    it('resolveFilter returns the stored ID when project still exists', () => {
+      mockNats.kvSet('mclaude-projects', 'user-1.p-1', makeProjectKVState({ id: 'p-1', name: 'Alpha' }))
+      storage.setItem('mclaude.filterProjectId', 'p-1')
+
+      expect(vm.resolveFilter()).toBe('p-1')
+    })
+
+    it('setFilter notifies listeners', () => {
+      mockNats.kvSet('mclaude-projects', 'user-1.p-1', makeProjectKVState({ id: 'p-1', name: 'Alpha' }))
+      const calls: number[] = []
+      vm.onProjectsChanged(() => calls.push(1))
+
+      vm.setFilter('p-1')
+      expect(calls.length).toBeGreaterThan(0)
     })
   })
 
