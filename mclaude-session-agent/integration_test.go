@@ -261,7 +261,7 @@ func TestNewAgentCreatesEventStream(t *testing.T) {
 	// NewAgent should be able to create or confirm the MCLAUDE_EVENTS stream.
 	// StartDeps pre-creates the KV buckets; we re-use the connection.
 	logger := zerolog.New(io.Discard)
-	agent, err := NewAgent(deps.NATSConn, "integ-user", "integ-proj", "claude", "", logger, nil)
+	agent, err := NewAgent(deps.NATSConn, "integ-user", "integ-proj", "claude", "", logger, nil, nil, "")
 	if err != nil {
 		t.Fatalf("NewAgent: %v", err)
 	}
@@ -312,13 +312,13 @@ func TestNewAgentEventStreamIdempotent(t *testing.T) {
 	logger := zerolog.New(io.Discard)
 
 	// First call — creates the stream.
-	_, err := NewAgent(deps.NATSConn, "integ-user", "integ-proj", "claude", "", logger, nil)
+	_, err := NewAgent(deps.NATSConn, "integ-user", "integ-proj", "claude", "", logger, nil, nil, "")
 	if err != nil {
 		t.Fatalf("first NewAgent: %v", err)
 	}
 
 	// Second call on the same connection — stream already exists, must not error.
-	_, err = NewAgent(deps.NATSConn, "integ-user", "integ-proj-2", "claude", "", logger, nil)
+	_, err = NewAgent(deps.NATSConn, "integ-user", "integ-proj-2", "claude", "", logger, nil, nil, "")
 	if err != nil {
 		t.Fatalf("second NewAgent (idempotent): %v", err)
 	}

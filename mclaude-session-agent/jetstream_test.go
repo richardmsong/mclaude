@@ -188,6 +188,7 @@ func TestMCLAUDE_APIStreamCreated(t *testing.T) {
 		"claude", "",
 		zerolog.Nop(),
 		nil,
+		nil, "",
 	)
 	if err != nil {
 		t.Fatalf("NewAgent: %v", err)
@@ -240,6 +241,7 @@ func TestJetStreamConsumersCreated(t *testing.T) {
 		"claude", "",
 		zerolog.Nop(),
 		nil,
+		nil, "",
 	)
 	if err != nil {
 		t.Fatalf("NewAgent: %v", err)
@@ -339,6 +341,7 @@ func TestRunConsumerDispatchesMessages(t *testing.T) {
 		"claude", "",
 		zerolog.Nop(),
 		nil,
+		nil, "",
 	)
 	if err != nil {
 		t.Fatalf("NewAgent: %v", err)
@@ -495,6 +498,7 @@ func TestClearUpdatingState(t *testing.T) {
 		"claude", "",
 		zerolog.Nop(),
 		nil,
+		nil, "",
 	)
 	if err != nil {
 		t.Fatalf("NewAgent: %v", err)
@@ -611,6 +615,7 @@ func TestRecoverSessionsSkipsKVWriteForUpdating(t *testing.T) {
 		"not-a-real-claude-binary", "",
 		zerolog.Nop(),
 		nil,
+		nil, "",
 	)
 	if err != nil {
 		t.Fatalf("NewAgent: %v", err)
@@ -706,6 +711,7 @@ func TestPublishAPIError(t *testing.T) {
 		"claude", "",
 		zerolog.Nop(),
 		nil,
+		nil, "",
 	)
 	if err != nil {
 		t.Fatalf("NewAgent: %v", err)
@@ -767,6 +773,7 @@ func TestHandleCreateErrorPublishesAPIError(t *testing.T) {
 		"claude", "",
 		zerolog.Nop(),
 		nil,
+		nil, "",
 	)
 	if err != nil {
 		t.Fatalf("NewAgent: %v", err)
@@ -820,6 +827,7 @@ func TestHandleRestartErrorPublishesAPIError(t *testing.T) {
 		"claude", "",
 		zerolog.Nop(),
 		nil,
+		nil, "",
 	)
 	if err != nil {
 		t.Fatalf("NewAgent: %v", err)
@@ -886,6 +894,7 @@ func TestSubscribeTerminalAPIOnlyTerminal(t *testing.T) {
 		"claude", "",
 		zerolog.Nop(),
 		nil,
+		nil, "",
 	)
 	if err != nil {
 		t.Fatalf("NewAgent: %v", err)

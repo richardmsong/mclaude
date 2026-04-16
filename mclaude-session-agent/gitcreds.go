@@ -683,31 +683,6 @@ func initScratchRepo(repoPath string, log zerolog.Logger) error {
 	return nil
 }
 
-// RunGitOpWithCredsRefresh refreshes credentials before a git operation and
-// normalizes the URL. It then runs the provided git command builder with the
-// (possibly normalized) URL.
-//
-// If the git command fails with an auth error, it returns a *GitAuthError.
-// The caller should publish session_failed with reason provider_auth_failed.
-func RunGitOpWithCredsRefresh(rawURL, gitIdentityID string, credMgr *CredentialManager, log zerolog.Logger, runGit func(url string) ([]byte, int, error)) error {
-	if credMgr != nil {
-		_ = credMgr.RefreshIfChanged(gitIdentityID)
-	}
-
-	effectiveURL := rawURL
-	if credMgr != nil {
-		effectiveURL = NormalizeGitURL(rawURL, credMgr.RegisteredHosts())
-	}
-
-	out, exitCode, err := runGit(effectiveURL)
-	if err != nil {
-		if IsGitAuthError(exitCode, string(out)) {
-			return &GitAuthError{URL: effectiveURL, Stderr: string(out)}
-		}
-		return fmt.Errorf("git operation failed (exit %d): %w: %s", exitCode, err, out)
-	}
-	return nil
-}
 
 // runCmd runs a command and returns an error if it exits non-zero.
 // stdout and stderr are discarded (errors are returned).
