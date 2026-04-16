@@ -303,9 +303,10 @@ Name: `{projectId}`
 
 ```yaml
 spec:
-  userId: string      # required
-  projectId: string   # required
-  gitUrl: string      # optional
+  userId: string         # required
+  projectId: string      # required
+  gitUrl: string         # optional
+  gitIdentityId: string  # optional — oauth_connections.id for git credential resolution
 status:
   phase: Pending | Provisioning | Ready | Failed
   userNamespace: string
