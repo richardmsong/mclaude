@@ -853,10 +853,12 @@ func buildAuthorizeURL(p *ProviderConfig, state, callbackURL string) string {
 // ---------------------------------------------------------------------------
 
 type tokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresIn    int    `json:"expires_in"`
-	TokenType    string `json:"token_type"`
+	AccessToken      string `json:"access_token"`
+	RefreshToken     string `json:"refresh_token"`
+	ExpiresIn        int    `json:"expires_in"`
+	TokenType        string `json:"token_type"`
+	Error            string `json:"error"`
+	ErrorDescription string `json:"error_description"`
 }
 
 func exchangeCode(p *ProviderConfig, code, callbackURL string) (*tokenResponse, error) {
@@ -900,6 +902,13 @@ func exchangeCode(p *ProviderConfig, code, callbackURL string) (*tokenResponse, 
 	var tr tokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
 		return nil, err
+	}
+	if tr.Error != "" {
+		desc := tr.Error
+		if tr.ErrorDescription != "" {
+			desc += ": " + tr.ErrorDescription
+		}
+		return nil, fmt.Errorf("token exchange: %s", desc)
 	}
 	if tr.AccessToken == "" {
 		return nil, fmt.Errorf("token exchange: empty access_token")
