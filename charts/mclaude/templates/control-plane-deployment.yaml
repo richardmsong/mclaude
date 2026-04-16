@@ -111,6 +111,15 @@ spec:
             - name: DEV_OAUTH_TOKEN
               value: {{ .Values.controlPlane.devOAuthToken | quote }}
             {{- end }}
+            - name: EXTERNAL_URL
+              value: {{ required "controlPlane.externalUrl is required" .Values.controlPlane.externalUrl | quote }}
+          {{- if .Values.controlPlane.providers }}
+          volumeMounts:
+            - name: provider-config
+              mountPath: /etc/mclaude/providers.json
+              subPath: providers.json
+              readOnly: true
+          {{- end }}
           livenessProbe:
             httpGet:
               path: {{ .Values.controlPlane.probe.liveness.path }}
@@ -127,4 +136,10 @@ spec:
             timeoutSeconds: 5
           resources:
             {{- toYaml .Values.controlPlane.resources | nindent 12 }}
+      {{- if .Values.controlPlane.providers }}
+      volumes:
+        - name: provider-config
+          configMap:
+            name: {{ include "mclaude.fullname" . }}-provider-config
+      {{- end }}
 {{- end }}

@@ -12,6 +12,9 @@ postgres:
 
 ## ── control-plane: ghcr.io image ───────────────────────────────────────────
 controlPlane:
+  ## External URL for the dev k3d cluster. Must match the ingress host scheme.
+  ## No OAuth providers configured by default — add providers[] to enable OAuth.
+  externalUrl: "https://dev.mclaude.local"
   image:
     registry: ghcr.io
     repository: mclaude-project/mclaude-control-plane
@@ -21,7 +24,7 @@ controlPlane:
     enabled: false
   config:
     devSeed: true
-    natsWsUrl: "ws://dev-nats.mclaude.local"
+    natsWsUrl: "wss://dev-nats.mclaude.local"
   probe:
     liveness:
       path: /healthz
@@ -53,8 +56,8 @@ namespace:
   name: mclaude-system
 
 ## ── ingress via k3d's built-in Traefik ─────────────────────────────────────
-## SPA + API at http://dev.mclaude.local/
-## NATS WebSocket at ws://dev-nats.mclaude.local/ (separate host — NATS only
+## SPA + API at https://dev.mclaude.local/
+## NATS WebSocket at wss://dev-nats.mclaude.local/ (separate host — NATS only
 ## accepts WebSocket at / and has no configurable handshake path)
 ingress:
   enabled: true
