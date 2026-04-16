@@ -32,10 +32,44 @@ Readers: control-plane (GetUserByEmail, GetUserByID, auth)
 | `name` | TEXT | NOT NULL | Human-readable name (e.g. "mclaude") |
 | `git_url` | TEXT | NOT NULL DEFAULT '' | Optional git remote |
 | `status` | TEXT | NOT NULL DEFAULT 'active' | active, archived |
+| `cluster_id` | TEXT | NOT NULL FK→clusters ON DELETE RESTRICT | Cluster the project is provisioned on |
 | `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
 
 Writers: control-plane (CreateProject)
 Readers: control-plane (GetProjectsByUser, reconciler)
+
+### `clusters`
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | TEXT | PRIMARY KEY | UUID v4 |
+| `name` | TEXT | UNIQUE NOT NULL | Human-readable name (e.g. "us-west") |
+| `js_domain` | TEXT | UNIQUE NOT NULL | JetStream domain name (e.g. "worker-a") |
+| `nats_url` | TEXT | NOT NULL | Internal NATS URL for leaf node connection |
+| `nats_ws_url` | TEXT | NOT NULL DEFAULT '' | External WebSocket URL for direct client connections |
+| `leaf_creds` | TEXT | NOT NULL | Leaf node NKey credential (private) |
+| `status` | TEXT | NOT NULL DEFAULT 'active' | active, draining, offline |
+| `labels` | JSONB | NOT NULL DEFAULT '{}' | Arbitrary key-value labels (region, tier, etc.) |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+Writers: control-plane (RegisterCluster, UpdateCluster)
+Readers: control-plane (discovery, login response, RBAC checks)
+
+### `user_clusters`
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `user_id` | TEXT | NOT NULL FK→users ON DELETE CASCADE | |
+| `cluster_id` | TEXT | NOT NULL FK→clusters ON DELETE CASCADE | |
+| `role` | TEXT | NOT NULL DEFAULT 'member' | member, admin |
+| `is_default` | BOOLEAN | NOT NULL DEFAULT FALSE | First grant = default |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+Primary key: `(user_id, cluster_id)`
+Constraint: at most one `is_default = TRUE` per `user_id`
+
+Writers: control-plane (GrantClusterAccess, RevokeClusterAccess, SetDefaultCluster)
+Readers: control-plane (RBAC validation, project creation, login response)
 
 ---
 
@@ -248,7 +282,12 @@ These are fire-and-forget messages on core NATS (not JetStream). No persistence.
 | `mclaude.{userId}.{projectId}.events.{sessionId}` | session-agent | SPA (via MCLAUDE_EVENTS stream) | raw stream-json |
 | `mclaude.{userId}.{projectId}.lifecycle.{sessionId}` | session-agent, daemon | SPA, daemon (via MCLAUDE_LIFECYCLE stream) | lifecycle event JSON |
 
+| `mclaude.clusters.{clusterId}.projects.provision` | control-plane | worker controller (request/reply) | `{userId, projectId, gitUrl}` |
+| `mclaude.clusters.{clusterId}.status` | worker controller | control-plane | `{clusterId, status, sessionCount, capacity}` |
+
 Note: `sessions.input`, `sessions.create`, etc. are captured by the `MCLAUDE_API` stream for at-least-once delivery. The session-agent consumes them via a JetStream pull consumer, not a core NATS subscription.
+
+Note: In multi-cluster deployments, all existing subjects flow between hub and worker NATS transparently via leaf node connections. KV buckets and JetStream streams are accessed from hub-connected clients using domain-qualified JetStream (`$JS.{domain}.API.>`).
 
 ---
 
