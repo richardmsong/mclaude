@@ -989,14 +989,14 @@ func detectPATProvider(baseURL, token string) (string, *providerProfile, error) 
 		githubURLs = []string{"https://api.github.com/user"}
 	}
 
-	var lastErr *patError
+	sawAuthError := false
 	for _, u := range githubURLs {
 		profile, err := fetchProfileWithToken(u, token, "github")
 		if err == nil {
 			return "github", profile, nil
 		}
-		if pe, ok := err.(*patError); ok {
-			lastErr = pe
+		if pe, ok := err.(*patError); ok && pe.isAuthError {
+			sawAuthError = true
 		}
 	}
 
@@ -1006,12 +1006,14 @@ func detectPATProvider(baseURL, token string) (string, *providerProfile, error) 
 	if err == nil {
 		return "gitlab", profile, nil
 	}
-	if pe, ok := err.(*patError); ok {
-		lastErr = pe
+	if pe, ok := err.(*patError); ok && pe.isAuthError {
+		sawAuthError = true
 	}
 
-	// Choose error message based on whether we got auth errors or connectivity errors.
-	if lastErr != nil && lastErr.isAuthError {
+	// Choose error message based on whether any attempt returned an auth error.
+	// A subsequent non-auth error (e.g. 404 from a wrong endpoint) must not
+	// clear the auth signal — once we know the token was rejected, report that.
+	if sawAuthError {
 		return "", nil, fmt.Errorf("invalid token — check that the token has at least read access")
 	}
 	return "", nil, fmt.Errorf("could not reach provider — check the base URL")
