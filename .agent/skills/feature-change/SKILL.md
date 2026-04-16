@@ -47,7 +47,7 @@ Also check `docs/feature-list.md` for feature IDs and platform support matrix.
 2. Classify the change:
    A. Design doc correct, code wrong (bug)         → skip to step 4
    B. No design doc covers this (new feature)       → run /plan-feature first
-   C. Design doc needs updating (behavior change)   → update design doc (step 3)
+   C. Design doc needs updating (change or gap)     → update design doc (step 3)
    D. Refactor (behavior unchanged)                 → skip to step 4
 3. Update the design doc, commit spec separately
 4. dev-harness → spec-evaluator loop per component (until CLEAN)
@@ -75,8 +75,10 @@ No design doc covers this feature. The user must run `/plan-feature` first to cr
 No design doc covers this feature. Run /plan-feature <description> to create one, then re-run /feature-change.
 ```
 
-**C — Behavior change (design doc needs updating):**
-The design doc describes the old behavior. You're changing it. Update the design doc to describe the new behavior following the editing rules in `/plan-feature`, commit separately, then proceed to step 4. For non-trivial changes, ask the user to confirm before committing.
+**C — Behavior change or spec gap (design doc needs updating):**
+Either the design doc describes old behavior you're changing, OR the design doc is silent on behavior that should be specified (e.g. error handling, edge cases, loading states). In both cases: update the design doc first to describe the intended behavior, commit separately, then proceed to step 4. For non-trivial changes, ask the user to confirm before committing.
+
+A missing spec is NOT the same as "spec correct, code wrong" (A). If the spec doesn't say what should happen, classify as C and fill in the spec — don't skip to step 4 and leave the gap undocumented.
 
 **D — Refactor (behavior unchanged):**
 The design doc already describes the correct behavior. The code is restructured but externally identical. Skip to step 4. If the refactor reveals a spec gap (something undocumented), update the design doc first.
