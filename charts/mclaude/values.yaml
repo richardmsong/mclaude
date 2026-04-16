@@ -108,6 +108,10 @@ controlPlane:
     ## devSeed: when true, creates dev@mclaude.local/dev on startup if no user exists.
     ## Never enable in production.
     devSeed: false
+    ## External WebSocket URL for NATS that browser clients use (returned in login response).
+    ## When empty, the SPA falls back to deriving from the page origin (e.g. ws://<origin>/nats).
+    ## Set this to the natsHost-based URL (e.g. ws://dev-nats.mclaude.local).
+    natsWsUrl: ""
   ## Name of existing Secret containing:
   ##   admin-token        — break-glass bearer token
   ##   database-url       — Postgres connection string
@@ -170,6 +174,11 @@ ingress:
     nginx.ingress.kubernetes.io/proxy-body-size: "8m"
   ## Hostname for the platform (e.g. preview-foo.mclaude.internal)
   host: ""
+  ## Separate hostname for NATS WebSocket (e.g. nats-preview-foo.mclaude.internal).
+  ## NATS WebSocket only accepts connections at / and has no configurable handshake
+  ## path, so it needs its own host to avoid path-rewriting middleware.
+  ## When set, creates a separate Ingress routing this host → NATS WS port.
+  natsHost: ""
   tls: []
   # tls:
   #   - secretName: mclaude-tls

@@ -1,0 +1,70 @@
+## k3d deployment using pre-built ghcr.io images (no local build needed).
+## Usage: ./charts/mclaude/scripts/k3d-ghcr.sh
+
+## ── no persistent volumes ──────────────────────────────────────────────────
+nats:
+  persistence:
+    enabled: false
+
+postgres:
+  persistence:
+    enabled: false
+
+## ── control-plane: ghcr.io image ───────────────────────────────────────────
+controlPlane:
+  image:
+    registry: ghcr.io
+    repository: mclaude-project/mclaude-control-plane
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  migrations:
+    enabled: false
+  config:
+    devSeed: true
+    natsWsUrl: "ws://dev-nats.mclaude.local"
+  probe:
+    liveness:
+      path: /healthz
+    readiness:
+      path: /readyz
+
+## ── SPA: ghcr.io image ─────────────────────────────────────────────────────
+spa:
+  image:
+    registry: ghcr.io
+    repository: mclaude-project/mclaude-spa
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  containerPort: 8080
+  service:
+    port: 8080
+
+## ── session-agent image (pulled when projects are provisioned) ─────────────
+sessionAgent:
+  image:
+    registry: ghcr.io
+    repository: mclaude-project/mclaude-session-agent
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+## ── namespace managed by k3d-ghcr.sh, not by helm ─────────────────────────
+namespace:
+  create: false
+  name: mclaude-system
+
+## ── ingress via k3d's built-in Traefik ─────────────────────────────────────
+## SPA + API at http://dev.mclaude.local/
+## NATS WebSocket at ws://dev-nats.mclaude.local/ (separate host — NATS only
+## accepts WebSocket at / and has no configurable handshake path)
+ingress:
+  enabled: true
+  className: traefik
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+  host: "dev.mclaude.local"
+  natsHost: "dev-nats.mclaude.local"
+
+## ── pull secret for private ghcr.io images ─────────────────────────────────
+global:
+  imagePullSecrets:
+    - name: ghcr-pull-secret

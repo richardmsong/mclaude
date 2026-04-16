@@ -47,15 +47,10 @@ spec:
                 name: {{ include "mclaude.fullname" . }}-control-plane
                 port:
                   name: http
-          ## NATS WebSocket proxy — browser clients connect here
-          - path: /nats
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ include "mclaude.fullname" . }}-nats
-                port:
-                  name: websocket
           ## SPA static files — catch-all
+          ## NOTE: NATS WebSocket (/nats) is handled by a separate IngressRoute
+          ## in nats-ingressroute.yaml (requires StripPrefix; standard Ingress
+          ## cannot apply per-path middleware).
           - path: /
             pathType: Prefix
             backend:
