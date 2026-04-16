@@ -7,8 +7,12 @@
 # Subagents (dev-harness, etc.) inherit only .claude/settings.json
 # which allows everything, so they can edit/build/test freely.
 
+# Prefer Opus 4.6 1M context if available, fall back to Opus 200k.
+MODEL="claude-opus-4-6[1m]"
+echo "" | claude --model "$MODEL" --print --max-turns 0 &>/dev/null || MODEL="opus"
+
 exec claude \
-  --model opus \
+  --model "$MODEL" \
   --disallowedTools \
     "Edit(mclaude-control-plane/**/*.go)" \
     "Write(mclaude-control-plane/**/*.go)" \
