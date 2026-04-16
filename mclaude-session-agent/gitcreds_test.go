@@ -110,15 +110,18 @@ func TestNormalizeGitURL_EmptyHosts(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // MergeGHHostsYAML
+//
+// Note: MergeGHHostsYAML now operates on old single-account format (oauth_token
+// at root level) on both sides. The managed side is expected to have already been
+// converted via ConvertGHHostsToOldFormat before being passed here.
 // ---------------------------------------------------------------------------
 
 func TestMergeGHHostsYAML_ManagedAddsToEmpty(t *testing.T) {
-	managed := []byte(`
-github.com:
-  users:
-    rsong-work:
-      oauth_token: gho_abc123
-  user: rsong-work
+	// Old-format managed — no users: map.
+	managed := []byte(`github.com:
+    oauth_token: gho_abc123
+    user: rsong-work
+    git_protocol: https
 `)
 	merged, err := MergeGHHostsYAML(nil, managed)
 	if err != nil {
@@ -133,19 +136,18 @@ github.com:
 }
 
 func TestMergeGHHostsYAML_PreservesManualEntries(t *testing.T) {
-	existing := []byte(`
-github.com:
-  users:
-    manual-user:
-      oauth_token: gho_manual999
-  user: manual-user
+	// Existing (from PVC, old format): has manual-github.com.
+	// Managed (converted old format): has github.com.
+	// After merge: both hosts must be present.
+	existing := []byte(`manual-github.com:
+    oauth_token: gho_manual999
+    user: manual-user
+    git_protocol: https
 `)
-	managed := []byte(`
-github.com:
-  users:
-    managed-user:
-      oauth_token: gho_managed111
-  user: managed-user
+	managed := []byte(`github.com:
+    oauth_token: gho_managed111
+    user: managed-user
+    git_protocol: https
 `)
 	merged, err := MergeGHHostsYAML(existing, managed)
 	if err != nil {
@@ -160,20 +162,17 @@ github.com:
 	}
 }
 
-func TestMergeGHHostsYAML_ManagedWinsOnSameUsername(t *testing.T) {
-	existing := []byte(`
-github.com:
-  users:
-    rsong:
-      oauth_token: gho_old_token
-  user: rsong
+func TestMergeGHHostsYAML_ManagedWinsOnSameHost(t *testing.T) {
+	// When both existing and managed have the same host, managed wins.
+	existing := []byte(`github.com:
+    oauth_token: gho_old_token
+    user: rsong
+    git_protocol: https
 `)
-	managed := []byte(`
-github.com:
-  users:
-    rsong:
-      oauth_token: gho_new_token
-  user: rsong
+	managed := []byte(`github.com:
+    oauth_token: gho_new_token
+    user: rsong
+    git_protocol: https
 `)
 	merged, err := MergeGHHostsYAML(existing, managed)
 	if err != nil {
@@ -189,19 +188,16 @@ github.com:
 }
 
 func TestMergeGHHostsYAML_MultipleHosts(t *testing.T) {
-	existing := []byte(`
-github.com:
-  users:
-    manual-user:
-      oauth_token: gho_manual
-  user: manual-user
+	// Existing has github.com; managed has github.acme.com — both must appear.
+	existing := []byte(`github.com:
+    oauth_token: gho_manual
+    user: manual-user
+    git_protocol: https
 `)
-	managed := []byte(`
-github.acme.com:
-  users:
-    corp-user:
-      oauth_token: ghp_corp
-  user: corp-user
+	managed := []byte(`github.acme.com:
+    oauth_token: ghp_corp
+    user: corp-user
+    git_protocol: https
 `)
 	merged, err := MergeGHHostsYAML(existing, managed)
 	if err != nil {
@@ -217,12 +213,10 @@ github.acme.com:
 }
 
 func TestMergeGHHostsYAML_EmptyManaged(t *testing.T) {
-	existing := []byte(`
-github.com:
-  users:
-    rsong:
-      oauth_token: gho_abc
-  user: rsong
+	existing := []byte(`github.com:
+    oauth_token: gho_abc
+    user: rsong
+    git_protocol: https
 `)
 	// Empty managed should not remove existing entries.
 	merged, err := MergeGHHostsYAML(existing, nil)
@@ -243,12 +237,10 @@ func TestMergeGHHostsYAML_InvalidManagedYAML(t *testing.T) {
 
 func TestMergeGHHostsYAML_InvalidExistingYAML(t *testing.T) {
 	// Invalid existing YAML → start fresh from managed (not an error).
-	managed := []byte(`
-github.com:
-  users:
-    rsong:
-      oauth_token: gho_abc
-  user: rsong
+	managed := []byte(`github.com:
+    oauth_token: gho_abc
+    user: rsong
+    git_protocol: https
 `)
 	merged, err := MergeGHHostsYAML([]byte("{{invalid"), managed)
 	if err != nil {
@@ -445,34 +437,155 @@ func TestSymlinkPVCConfig(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// CredentialManager.findHostForUsername
+// ConvertGHHostsToOldFormat
 // ---------------------------------------------------------------------------
 
-func TestFindHostForUsername_MultiAccountFormat(t *testing.T) {
-	homeDir := t.TempDir()
-	log := zerolog.Nop()
-	cm := NewCredentialManager(homeDir, log)
-
-	// Write a hosts.yml with multi-account format.
-	ghDir := filepath.Join(homeDir, ".config", "gh")
-	if err := os.MkdirAll(ghDir, 0755); err != nil {
-		t.Fatalf("mkdir gh dir: %v", err)
-	}
-	hostsContent := []byte(`github.com:
+func TestConvertGHHostsToOldFormat_DefaultUser(t *testing.T) {
+	// No identity bound — should pick the user: default account.
+	managed := []byte(`github.com:
     users:
         rsong-work:
-            oauth_token: gho_abc
+            oauth_token: gho_abc123
         rsong-personal:
-            oauth_token: gho_xyz
+            oauth_token: gho_xyz789
+    user: rsong-work
+`)
+	result, err := ConvertGHHostsToOldFormat(managed, "", "")
+	if err != nil {
+		t.Fatalf("ConvertGHHostsToOldFormat error: %v", err)
+	}
+	resultStr := string(result)
+	// Should select rsong-work (the user: default) and its token.
+	if !strings.Contains(resultStr, "gho_abc123") {
+		t.Errorf("expected default user's token gho_abc123: %s", resultStr)
+	}
+	// Should NOT contain the users: map — old format only.
+	if strings.Contains(resultStr, "users:") {
+		t.Errorf("output should not contain users: map (old format): %s", resultStr)
+	}
+	// Should contain git_protocol: https.
+	if !strings.Contains(resultStr, "git_protocol: https") {
+		t.Errorf("expected git_protocol: https: %s", resultStr)
+	}
+	// Should not contain the non-selected account's token.
+	if strings.Contains(resultStr, "gho_xyz789") {
+		t.Errorf("non-selected token should not appear: %s", resultStr)
+	}
+}
+
+func TestConvertGHHostsToOldFormat_ActiveIdentity(t *testing.T) {
+	// Identity bound to rsong-personal on github.com.
+	managed := []byte(`github.com:
+    users:
+        rsong-work:
+            oauth_token: gho_abc123
+        rsong-personal:
+            oauth_token: gho_xyz789
     user: rsong-work
 github.acme.com:
     users:
         corp-user:
-            oauth_token: ghp_corp
+            oauth_token: ghp_corp111
     user: corp-user
 `)
-	if err := os.WriteFile(filepath.Join(ghDir, "hosts.yml"), hostsContent, 0600); err != nil {
-		t.Fatalf("write hosts.yml: %v", err)
+	result, err := ConvertGHHostsToOldFormat(managed, "rsong-personal", "github.com")
+	if err != nil {
+		t.Fatalf("ConvertGHHostsToOldFormat error: %v", err)
+	}
+	resultStr := string(result)
+	// github.com: should use rsong-personal's token (active identity).
+	if !strings.Contains(resultStr, "gho_xyz789") {
+		t.Errorf("expected active identity token gho_xyz789: %s", resultStr)
+	}
+	// github.com: should NOT use rsong-work's token.
+	if strings.Contains(resultStr, "gho_abc123") {
+		t.Errorf("non-active token gho_abc123 should not appear: %s", resultStr)
+	}
+	// github.acme.com: identity is not bound here, should use corp-user (default).
+	if !strings.Contains(resultStr, "ghp_corp111") {
+		t.Errorf("expected corp-user token for github.acme.com: %s", resultStr)
+	}
+	// No users: map in output.
+	if strings.Contains(resultStr, "users:") {
+		t.Errorf("output should not contain users: map: %s", resultStr)
+	}
+}
+
+func TestConvertGHHostsToOldFormat_AlreadyOldFormat(t *testing.T) {
+	// Input has no users: map — already old format, pass through.
+	managed := []byte(`github.com:
+    oauth_token: gho_passthrough
+    user: rsong
+`)
+	result, err := ConvertGHHostsToOldFormat(managed, "", "")
+	if err != nil {
+		t.Fatalf("ConvertGHHostsToOldFormat error: %v", err)
+	}
+	resultStr := string(result)
+	if !strings.Contains(resultStr, "gho_passthrough") {
+		t.Errorf("old-format token should be preserved: %s", resultStr)
+	}
+	if !strings.Contains(resultStr, "git_protocol: https") {
+		t.Errorf("git_protocol: https should be added: %s", resultStr)
+	}
+}
+
+func TestConvertGHHostsToOldFormat_NilInput(t *testing.T) {
+	result, err := ConvertGHHostsToOldFormat(nil, "", "")
+	if err != nil {
+		t.Fatalf("nil input should not error: %v", err)
+	}
+	if result != nil {
+		t.Errorf("nil input should return nil result, got %q", result)
+	}
+}
+
+func TestConvertGHHostsToOldFormat_InvalidYAML(t *testing.T) {
+	_, err := ConvertGHHostsToOldFormat([]byte("{{invalid"), "", "")
+	if err == nil {
+		t.Error("expected error for invalid YAML input")
+	}
+}
+
+func TestConvertGHHostsToOldFormat_IdentityOnWrongHost(t *testing.T) {
+	// Identity says activeHost=github.acme.com but the host is github.com.
+	// Should fall back to the user: default for github.com.
+	managed := []byte(`github.com:
+    users:
+        rsong-work:
+            oauth_token: gho_abc123
+    user: rsong-work
+`)
+	result, err := ConvertGHHostsToOldFormat(managed, "rsong-work", "github.acme.com")
+	if err != nil {
+		t.Fatalf("ConvertGHHostsToOldFormat error: %v", err)
+	}
+	resultStr := string(result)
+	// Should use rsong-work (default) since the identity host doesn't match.
+	if !strings.Contains(resultStr, "gho_abc123") {
+		t.Errorf("expected default user's token: %s", resultStr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// findHostForUsernameInManaged
+// ---------------------------------------------------------------------------
+
+func TestFindHostForUsernameInManaged_MultiAccountFormat(t *testing.T) {
+	managedCfg := ghHostsConfig{
+		"github.com": ghHostEntry{
+			Users: map[string]ghUserEntry{
+				"rsong-work":     {OAuthToken: "gho_abc"},
+				"rsong-personal": {OAuthToken: "gho_xyz"},
+			},
+			User: "rsong-work",
+		},
+		"github.acme.com": ghHostEntry{
+			Users: map[string]ghUserEntry{
+				"corp-user": {OAuthToken: "ghp_corp"},
+			},
+			User: "corp-user",
+		},
 	}
 
 	cases := []struct {
@@ -482,45 +595,15 @@ github.acme.com:
 		{"rsong-work", "github.com"},
 		{"rsong-personal", "github.com"},
 		{"corp-user", "github.acme.com"},
+		{"nonexistent", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.username, func(t *testing.T) {
-			host, err := cm.findHostForUsername(tc.username)
-			if err != nil {
-				t.Fatalf("findHostForUsername(%q): %v", tc.username, err)
-			}
+			host := findHostForUsernameInManaged(managedCfg, tc.username)
 			if host != tc.wantHost {
 				t.Errorf("host for %q: got %q, want %q", tc.username, host, tc.wantHost)
 			}
 		})
-	}
-}
-
-func TestFindHostForUsername_NotFound(t *testing.T) {
-	homeDir := t.TempDir()
-	log := zerolog.Nop()
-	cm := NewCredentialManager(homeDir, log)
-
-	ghDir := filepath.Join(homeDir, ".config", "gh")
-	if err := os.MkdirAll(ghDir, 0755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	hostsContent := []byte(`github.com:
-    users:
-        rsong:
-            oauth_token: gho_abc
-    user: rsong
-`)
-	if err := os.WriteFile(filepath.Join(ghDir, "hosts.yml"), hostsContent, 0600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	host, err := cm.findHostForUsername("nonexistent-user")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if host != "" {
-		t.Errorf("expected empty host for missing user, got %q", host)
 	}
 }
 
@@ -746,120 +829,107 @@ func TestMergeAndSetup_CreatesGHConfigYML_NoManagedHosts(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// TestRefreshIfChanged_SwitchesIdentityEvenWhenConfigUnchanged verifies that
-// switchProjectIdentity is invoked on every RefreshIfChanged call when
-// gitIdentityID is non-empty, not only when the managed config changed
-// (Gap 2 fix: condition changed from `changed && gitIdentityID != ""`
-// to `gitIdentityID != ""`).
+// TestRefreshIfChanged_NonFatalWithNonEmptyIdentity verifies that
+// RefreshIfChanged returns nil (non-fatal) even when gitIdentityID is set but
+// the identity cannot be resolved (secret mount unavailable in unit tests).
+// Identity selection is now done inside mergeAndSetup via format conversion,
+// not via gh auth switch.
 // ---------------------------------------------------------------------------
 
-func TestRefreshIfChanged_SwitchesIdentityEvenWhenConfigUnchanged(t *testing.T) {
-	// Strategy: install a mock `gh` script on PATH that records calls,
-	// then pre-populate lastGHHosts so that mergeAndSetup sees no change
-	// (ghChanged=false, glabChanged=false → returns false, nil).
-	// RefreshIfChanged must still call switchProjectIdentity when gitIdentityID != "".
-
-	homeDir := t.TempDir()
-
-	// Create mock gh binary that records invocations.
+func TestRefreshIfChanged_NonFatalWithNonEmptyIdentity(t *testing.T) {
+	// Install mock gh/glab so setup-git calls don't fail with "binary not found".
 	mockBinDir := t.TempDir()
-	switchRecordPath := filepath.Join(t.TempDir(), "gh-switch-called")
-
-	mockGH := fmt.Sprintf(`#!/bin/sh
-if [ "$1" = "auth" ] && [ "$2" = "switch" ]; then
-  touch %s
-  exit 0
-fi
-# auth setup-git and other subcommands succeed silently
-exit 0
-`, switchRecordPath)
-	mockGHPath := filepath.Join(mockBinDir, "gh")
-	if err := os.WriteFile(mockGHPath, []byte(mockGH), 0755); err != nil {
-		t.Fatalf("write mock gh: %v", err)
+	for _, bin := range []string{"gh", "glab"} {
+		if err := os.WriteFile(filepath.Join(mockBinDir, bin), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+			t.Fatalf("write mock %s: %v", bin, err)
+		}
 	}
-
-	// Also install a mock glab that succeeds silently.
-	mockGlab := "#!/bin/sh\nexit 0\n"
-	mockGlabPath := filepath.Join(mockBinDir, "glab")
-	if err := os.WriteFile(mockGlabPath, []byte(mockGlab), 0755); err != nil {
-		t.Fatalf("write mock glab: %v", err)
-	}
-
-	// Prepend mockBinDir to PATH.
 	origPath := os.Getenv("PATH")
 	t.Setenv("PATH", mockBinDir+":"+origPath)
 
+	homeDir := t.TempDir()
 	log := zerolog.Nop()
 	cm := NewCredentialManager(homeDir, log)
 
-	// Pre-populate lastGHHosts with some content that matches what
-	// ReadSecretFile would return (nil, since secret mount doesn't exist in test).
-	// lastGHHosts == nil and ReadSecretFile returns nil → ghChanged = false.
-	// Leave lastGHHosts and lastGLabConfig as nil (zero value), and
-	// since secretMountPath won't have any files, mergeAndSetup will see
-	// nil == nil → no change → returns (false, nil).
-	// But we need gitIdentityID to be non-empty so switchProjectIdentity fires.
+	// lastGHHosts and lastGLabConfig are nil (zero value).
+	// ReadSecretFile returns nil since secretMountPath doesn't exist in test.
+	// nil == nil → no change → mergeAndSetup returns (false, nil) quickly.
 
-	// Pre-create the gh hosts.yml so switchProjectIdentity's findHostForUsername
-	// can return a host without erroring — we need a conn-{id}-username file too.
-	// Since secretMountPath is a const we can't redirect it, so instead
-	// we verify the switch was attempted by checking that mock gh was invoked
-	// even though an error is returned (non-fatal per spec).
-
-	// Write a conn-testid-username file in the secret mount.
-	// secretMountPath = /home/node/.user-secrets — this likely doesn't exist in test.
-	// switchProjectIdentity will fail at resolveUsername, which is non-fatal.
-	// What matters is that switchProjectIdentity IS called when gitIdentityID != "".
-	// We can detect this by observing that mock gh was invoked OR that the
-	// function returns nil (non-fatal error suppressed) even with a non-empty ID.
-
-	// First call with gitIdentityID="" — switch must NOT be called.
+	// RefreshIfChanged with empty gitIdentityID must return nil.
 	if err := cm.RefreshIfChanged(""); err != nil {
 		t.Errorf("RefreshIfChanged with empty id: unexpected error: %v", err)
 	}
-	if _, err := os.Stat(switchRecordPath); !os.IsNotExist(err) {
-		t.Error("mock gh auth switch was called with empty gitIdentityID — should not have been")
+
+	// RefreshIfChanged with non-empty gitIdentityID must also return nil
+	// (non-fatal: identity resolution fails gracefully when secret mount absent).
+	if err := cm.RefreshIfChanged("testid"); err != nil {
+		t.Errorf("RefreshIfChanged with non-empty id must return nil (non-fatal): %v", err)
 	}
+}
 
-	// Second call: set up hosts.yml and conn file so switchProjectIdentity can succeed.
-	ghDir := filepath.Join(homeDir, ".config", "gh")
-	if err := os.MkdirAll(ghDir, 0755); err != nil {
-		t.Fatalf("mkdir gh dir: %v", err)
-	}
-	hostsContent := []byte("github.com:\n    users:\n        proj-user:\n            oauth_token: gho_test\n    user: proj-user\n")
-	if err := os.WriteFile(filepath.Join(ghDir, "hosts.yml"), hostsContent, 0600); err != nil {
-		t.Fatalf("write hosts.yml: %v", err)
-	}
+// TestConvertAndMerge_EndToEnd verifies the full pipeline: multi-account managed
+// data → ConvertGHHostsToOldFormat → MergeGHHostsYAML → old-format output
+// that gh auth git-credential can read.
+func TestConvertAndMerge_EndToEnd(t *testing.T) {
+	// Managed data from K8s Secret (multi-account format, as written by reconciler).
+	managedMultiAccount := []byte(`github.com:
+    users:
+        rsong-work:
+            oauth_token: gho_abc123
+        rsong-personal:
+            oauth_token: gho_xyz789
+    user: rsong-work
+github.acme.com:
+    users:
+        corp:
+            oauth_token: ghp_corp111
+    user: corp
+`)
 
-	// Create a temporary secret mount with conn-testid-username.
-	secretDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(secretDir, "conn-testid-username"), []byte("proj-user"), 0600); err != nil {
-		t.Fatalf("write conn file: %v", err)
-	}
+	// Existing file from PVC (old format, from a prior manual gh auth login).
+	existingOldFormat := []byte(`manual-github.com:
+    oauth_token: gho_manual999
+    user: manual-user
+    git_protocol: https
+`)
 
-	// We cannot redirect secretMountPath (it's a const), so we test the
-	// condition logic directly: verify that when gitIdentityID != "", the
-	// call path through RefreshIfChanged is taken regardless of changed value.
-	// We do this by calling the internal switchProjectIdentity directly on
-	// a cm whose findHostForUsername will succeed.
-
-	// Populate lastGHHosts so mergeAndSetup returns (false, nil) — no change.
-	cm.mu.Lock()
-	cm.lastGHHosts = nil    // matches ReadSecretFile nil return → no change
-	cm.lastGLabConfig = nil // matches ReadSecretFile nil return → no change
-	cm.mu.Unlock()
-
-	// RefreshIfChanged with non-empty gitIdentityID — switch must be attempted.
-	// It will fail (resolveUsername fails because secretMountPath is const /home/node/.user-secrets),
-	// but the error is non-fatal and RefreshIfChanged returns nil.
-	// The key assertion: the function does not skip switchProjectIdentity.
-	err := cm.RefreshIfChanged("testid")
+	// Step 1: convert managed multi-account → old format, selecting rsong-personal
+	// as the active identity for github.com.
+	converted, err := ConvertGHHostsToOldFormat(managedMultiAccount, "rsong-personal", "github.com")
 	if err != nil {
-		t.Errorf("RefreshIfChanged must return nil (non-fatal) even when switch fails: %v", err)
+		t.Fatalf("ConvertGHHostsToOldFormat: %v", err)
 	}
-	// We cannot assert mock gh was called (resolveUsername fails before gh is invoked),
-	// but we have confirmed the code path reaches switchProjectIdentity by verifying
-	// RefreshIfChanged returns nil (non-fatal suppression), not that it skipped the call.
-	// The production code fix (removing `changed &&`) is the observable change —
-	// this test documents and exercises that path.
+
+	// Step 2: merge converted (old format) with existing (old format from PVC).
+	merged, err := MergeGHHostsYAML(existingOldFormat, converted)
+	if err != nil {
+		t.Fatalf("MergeGHHostsYAML: %v", err)
+	}
+
+	mergedStr := string(merged)
+
+	// github.com: rsong-personal's token (active identity).
+	if !strings.Contains(mergedStr, "gho_xyz789") {
+		t.Errorf("expected rsong-personal's token gho_xyz789: %s", mergedStr)
+	}
+	// github.com: rsong-work's token should NOT appear.
+	if strings.Contains(mergedStr, "gho_abc123") {
+		t.Errorf("rsong-work's token should not appear: %s", mergedStr)
+	}
+	// github.acme.com: corp's token (default, identity not bound here).
+	if !strings.Contains(mergedStr, "ghp_corp111") {
+		t.Errorf("expected corp's token ghp_corp111: %s", mergedStr)
+	}
+	// manual-github.com: preserved from existing (manual gh auth login).
+	if !strings.Contains(mergedStr, "gho_manual999") {
+		t.Errorf("manual entry should be preserved: %s", mergedStr)
+	}
+	// No users: map in output (old format only).
+	if strings.Contains(mergedStr, "users:") {
+		t.Errorf("output must not contain users: map (old format required): %s", mergedStr)
+	}
+	// git_protocol: https on all managed hosts.
+	if !strings.Contains(mergedStr, "git_protocol: https") {
+		t.Errorf("expected git_protocol: https on managed hosts: %s", mergedStr)
+	}
 }
