@@ -4,6 +4,7 @@ import { StatusDot } from './StatusDot'
 import { NewSessionSheet } from './NewSessionSheet'
 import { NewProjectSheet } from './NewProjectSheet'
 import type { SessionListVM, ProjectVM, SessionVM } from '@/viewmodels/session-list-vm'
+import type { AuthClient } from '@/transport/auth-client'
 
 const LAST_PROJECT_KEY = 'mclaude.lastProjectId'
 
@@ -21,6 +22,9 @@ interface DashboardScreenProps {
   onSelectSession: (sessionId: string) => void
   onSettings: () => void
   onUsage: () => void
+  authClient?: AuthClient
+  openNewProject?: boolean
+  onNewProjectOpened?: () => void
 }
 
 export function DashboardScreen({
@@ -29,6 +33,9 @@ export function DashboardScreen({
   onSelectSession,
   onSettings,
   onUsage,
+  authClient,
+  openNewProject,
+  onNewProjectOpened,
 }: DashboardScreenProps) {
   const [projects, setProjects] = useState<ProjectVM[]>(sessionListVM.projects)
   const [activeGroup, setActiveGroup] = useState<string>('all')
@@ -42,6 +49,15 @@ export function DashboardScreen({
     const unsub = sessionListVM.onProjectsChanged(p => setProjects([...p]))
     return unsub
   }, [sessionListVM])
+
+  // Open new project sheet programmatically (e.g. after OAuth redirect with goto=new-project)
+  useEffect(() => {
+    if (openNewProject) {
+      setShowNewProject(true)
+      onNewProjectOpened?.()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openNewProject])
 
   // Close menu on outside click
   useEffect(() => {
@@ -343,6 +359,7 @@ export function DashboardScreen({
         <NewProjectSheet
           sessionListVM={sessionListVM}
           onClose={() => setShowNewProject(false)}
+          authClient={authClient}
           onCreated={async projectId => {
             // Always navigate into the new project by starting a session in it
             try {

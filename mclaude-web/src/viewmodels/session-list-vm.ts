@@ -59,10 +59,11 @@ export class SessionListVM {
     }))
   }
 
-  async createProject(name: string, gitUrl?: string): Promise<string> {
+  async createProject(name: string, gitUrl?: string, gitIdentityId?: string): Promise<string> {
     const subject = `mclaude.${this.userId}.api.projects.create`
     const payload: Record<string, string> = { name }
     if (gitUrl) payload['gitUrl'] = gitUrl
+    if (gitIdentityId) payload['gitIdentityId'] = gitIdentityId
     const reply = await this.natsClient.request(subject, new TextEncoder().encode(JSON.stringify(payload)))
     const result = JSON.parse(new TextDecoder().decode(reply.data)) as { id?: string; error?: string }
     if (!result.id) throw new Error(result.error ?? 'createProject: no id in reply')

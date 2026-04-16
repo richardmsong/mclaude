@@ -52,6 +52,13 @@ export interface IAuthClient {
   getStoredTokens(): AuthTokens | null
   storeTokens(tokens: AuthTokens): void
   clearTokens(): void
+  getMe(): Promise<MeResponse>
+  getAdminProviders(): Promise<AdminProvider[]>
+  startOAuthConnect(providerId: string, returnUrl: string): Promise<string>
+  getConnectionRepos(connectionId: string, query: string, page?: number): Promise<RepoListResponse>
+  disconnectConnection(connectionId: string): Promise<void>
+  addPAT(baseUrl: string, displayName: string, token: string): Promise<{ connectionId: string; providerType: string; displayName: string; username: string }>
+  updateProjectIdentity(projectId: string, connectionId: string | null): Promise<void>
 }
 
 // ─── Session / Project state ─────────────────────────────────────────────────
@@ -107,8 +114,52 @@ export interface ProjectKVState {
   id: string
   name: string
   gitUrl: string
+  gitIdentityId?: string | null
   status: string
   createdAt: string
+}
+
+// ─── Git provider / connection types ─────────────────────────────────────────
+
+export interface ConnectedProvider {
+  connectionId: string
+  providerId: string
+  providerType: 'github' | 'gitlab'
+  authType: 'oauth' | 'pat'
+  displayName: string
+  baseUrl: string
+  username: string
+  connectedAt: string
+}
+
+export interface AdminProvider {
+  id: string
+  type: 'github' | 'gitlab'
+  displayName: string
+  baseUrl: string
+  source: 'admin'
+}
+
+export interface Repo {
+  name: string
+  fullName: string
+  private: boolean
+  description: string
+  cloneUrl: string
+  updatedAt: string
+}
+
+export interface RepoListResponse {
+  repos: Repo[]
+  nextPage: number | null
+  hasMore: boolean
+}
+
+export interface MeResponse {
+  userId: string
+  email: string
+  name: string
+  connectedProviders: ConnectedProvider[]
 }
 
 // ─── Stream-JSON event types ──────────────────────────────────────────────────

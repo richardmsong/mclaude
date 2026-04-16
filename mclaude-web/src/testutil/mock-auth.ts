@@ -53,4 +53,32 @@ export class MockAuthClient implements IAuthClient {
   clearTokens(): void {
     this._tokens = null
   }
+
+  async getMe(): Promise<{ userId: string; email: string; name: string; connectedProviders: import('@/types').ConnectedProvider[] }> {
+    return { userId: 'user-1', email: 'test@example.com', name: 'Test User', connectedProviders: [] }
+  }
+
+  async getAdminProviders(): Promise<import('@/types').AdminProvider[]> {
+    return []
+  }
+
+  async startOAuthConnect(_providerId: string, _returnUrl: string): Promise<string> {
+    return 'https://github.com/login/oauth/authorize?client_id=mock'
+  }
+
+  async getConnectionRepos(_connectionId: string, _query: string, _page?: number): Promise<import('@/types').RepoListResponse> {
+    return { repos: [], nextPage: null, hasMore: false }
+  }
+
+  async disconnectConnection(_connectionId: string): Promise<void> {
+    // no-op in tests
+  }
+
+  async addPAT(_baseUrl: string, _displayName: string, _token: string): Promise<{ connectionId: string; providerType: string; displayName: string; username: string }> {
+    return { connectionId: 'conn-mock', providerType: 'github', displayName: 'Mock', username: 'mock-user' }
+  }
+
+  async updateProjectIdentity(_projectId: string, _connectionId: string | null): Promise<void> {
+    // no-op in tests
+  }
 }

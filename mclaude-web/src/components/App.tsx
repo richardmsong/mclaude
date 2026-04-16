@@ -59,13 +59,69 @@ function UpdateBanner() {
   )
 }
 
+// ── Toast component ───────────────────────────────────────────────────────
+interface ToastProps {
+  message: string
+  isError?: boolean
+}
+
+function Toast({ message, isError }: ToastProps) {
+  return (
+    <div style={{
+      position: 'fixed', top: 60, left: '50%', transform: 'translateX(-50%)',
+      zIndex: 10000,
+      background: isError ? 'rgba(255,69,58,0.15)' : 'var(--surf2)',
+      border: `1px solid ${isError ? 'var(--red)' : 'var(--border)'}`,
+      borderRadius: 10, padding: '10px 18px', fontSize: 14,
+      color: isError ? 'var(--red)' : 'var(--text)',
+      boxShadow: '0 2px 12px rgba(0,0,0,0.4)',
+      maxWidth: '90vw', textAlign: 'center',
+    }}>
+      {message}
+    </div>
+  )
+}
+
+// ── Post-redirect query param handling ────────────────────────────────────
+//
+// Spec (plan-github-oauth.md §SPA): On page load, read query params: provider,
+// connected, goto, error. Show toast for success or error. Navigate to goto
+// route (settings → #settings, new-project → open sheet). Clean query string
+// via history.replaceState.
+
+interface RedirectParams {
+  provider?: string
+  connected?: string
+  goto?: string
+  error?: string
+  username?: string
+}
+
+function readAndClearRedirectParams(): RedirectParams | null {
+  const params = new URLSearchParams(window.location.search)
+  const provider = params.get('provider') ?? undefined
+  const connected = params.get('connected') ?? undefined
+  const goto = params.get('goto') ?? undefined
+  const error = params.get('error') ?? undefined
+  const username = params.get('username') ?? undefined
+
+  if (!provider && !error) return null
+
+  // Clean the query string — spec requires history.replaceState
+  const cleanUrl = window.location.pathname + window.location.hash
+  history.replaceState(null, '', cleanUrl)
+
+  return { provider, connected, goto, error, username }
+}
+
 // ── Global singleton ──────────────────────────────────────────────────────
 const natsClient = new NATSClient()
 
 export function App() {
   // AuthStore uses window.location.origin as the server URL — no user input needed.
+  const [authClient] = useState<AuthClient>(() => new AuthClient(window.location.origin))
   const [authStore, setAuthStore] = useState<AuthStore>(() => {
-    return new AuthStore(new AuthClient(window.location.origin), natsClient)
+    return new AuthStore(authClient, natsClient)
   })
 
   const [authState, setAuthState] = useState(authStore.state)
@@ -75,6 +131,12 @@ export function App() {
   // Session store and heartbeat (created after login)
   const [sessionStore, setSessionStore] = useState<SessionStore | null>(null)
   const [heartbeatMonitor, setHeartbeatMonitor] = useState<HeartbeatMonitor | null>(null)
+
+  // Toast state for post-redirect notifications
+  const [toast, setToast] = useState<{ message: string; isError: boolean } | null>(null)
+
+  // Post-redirect param handling: open New Project sheet if goto=new-project
+  const [openNewProject, setOpenNewProject] = useState(false)
 
   // Auth state subscription — re-subscribe when authStore changes
   useEffect(() => {
@@ -87,6 +149,44 @@ export function App() {
     const unsub1 = natsClient.onDisconnect(() => setConnected(false))
     const unsub2 = natsClient.onReconnect(() => setConnected(true))
     return () => { unsub1(); unsub2() }
+  }, [])
+
+  // On mount: process query params FIRST (before restoring session) so the
+  // redirect toast is shown even before the NATS connection is ready.
+  useEffect(() => {
+    const params = readAndClearRedirectParams()
+    if (!params) return
+
+    if (params.error) {
+      const errorMessages: Record<string, string> = {
+        denied: 'Authorization was denied',
+        csrf: 'Authentication state mismatch — please try again',
+        storage: 'Failed to save credentials — please try again',
+        exchange_failed: 'Failed to connect — please try again',
+        profile_failed: 'Failed to fetch your profile — please try again',
+      }
+      const msg = errorMessages[params.error] ?? `Connection error: ${params.error}`
+      setToast({ message: msg, isError: true })
+      setTimeout(() => setToast(null), 5000)
+    } else if (params.connected === 'true') {
+      const providerLabel = params.provider
+        ? params.provider.charAt(0).toUpperCase() + params.provider.slice(1)
+        : 'Provider'
+      const msg = params.username
+        ? `${providerLabel} connected as @${params.username}`
+        : `${providerLabel} connected successfully`
+      setToast({ message: msg, isError: false })
+      setTimeout(() => setToast(null), 4000)
+    }
+
+    // Navigate to the goto route
+    if (params.goto === 'settings') {
+      navigate('settings')
+    } else if (params.goto === 'new-project') {
+      // Defer opening the sheet until auth + initial data load complete
+      setOpenNewProject(true)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // On mount: restore session from localStorage so refresh doesn't log the user out
@@ -318,6 +418,7 @@ export function App() {
     return (
       <Fragment>
         <AuthScreen onConnect={handleConnect} />
+        {toast && <Toast message={toast.message} isError={toast.isError} />}
         {updateAvailable && <UpdateBanner />}
       </Fragment>
     )
@@ -335,7 +436,9 @@ export function App() {
           onBack={() => navigate('/')}
           onLogout={handleLogout}
           onCacheReset={handleCacheReset}
+          authClient={authClient}
         />
+        {toast && <Toast message={toast.message} isError={toast.isError} />}
         {updateAvailable && <UpdateBanner />}
       </Fragment>
     )
@@ -349,6 +452,7 @@ export function App() {
           onBack={() => navigate('/')}
           connected={connected}
         />
+        {toast && <Toast message={toast.message} isError={toast.isError} />}
         {updateAvailable && <UpdateBanner />}
       </Fragment>
     )
@@ -361,6 +465,7 @@ export function App() {
           connected={connected}
           onBack={() => navigate('/')}
         />
+        {toast && <Toast message={toast.message} isError={toast.isError} />}
         {updateAvailable && <UpdateBanner />}
       </Fragment>
     )
@@ -383,6 +488,7 @@ export function App() {
           initialMessage={initialMessage ?? undefined}
           onInitialMessageSent={() => setInitialMessage(null)}
         />
+        {toast && <Toast message={toast.message} isError={toast.isError} />}
         {updateAvailable && <UpdateBanner />}
       </Fragment>
     )
@@ -397,7 +503,11 @@ export function App() {
           onSelectSession={id => navigate(`s/${id}`)}
           onSettings={() => navigate('settings')}
           onUsage={() => navigate('usage')}
+          authClient={authClient}
+          openNewProject={openNewProject}
+          onNewProjectOpened={() => setOpenNewProject(false)}
         />
+        {toast && <Toast message={toast.message} isError={toast.isError} />}
         {updateAvailable && <UpdateBanner />}
       </Fragment>
     )
@@ -416,6 +526,7 @@ export function App() {
       }}>
         Connecting…
       </div>
+      {toast && <Toast message={toast.message} isError={toast.isError} />}
       {updateAvailable && <UpdateBanner />}
     </Fragment>
   )
