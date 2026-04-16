@@ -96,6 +96,7 @@ function GitProvidersSection({ authClient }: GitProvidersSectionProps) {
   const [connectedProviders, setConnectedProviders] = useState<ConnectedProvider[]>([])
   const [adminProviders, setAdminProviders] = useState<AdminProvider[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [showPATForm, setShowPATForm] = useState(false)
   const [disconnecting, setDisconnecting] = useState<string | null>(null)
   const [connectingProvider, setConnectingProvider] = useState<string | null>(null)
@@ -115,8 +116,10 @@ function GitProvidersSection({ authClient }: GitProvidersSectionProps) {
       ])
       setConnectedProviders(me.connectedProviders)
       setAdminProviders(admins)
+      setError(null)
     } catch (err) {
       console.error('loadProviders failed:', err)
+      setError('Failed to load providers')
     } finally {
       setLoading(false)
     }
@@ -270,8 +273,12 @@ function GitProvidersSection({ authClient }: GitProvidersSectionProps) {
           </div>
         ))}
 
-        {/* Empty state when no providers connected and no admin providers */}
-        {adminProviders.length === 0 && connectedProviders.length === 0 && (
+        {/* Error state or empty state when no providers connected and no admin providers */}
+        {error ? (
+          <div style={{ ...row, justifyContent: 'flex-start' }}>
+            <span style={{ color: 'var(--red)', fontSize: 13 }}>{error}</span>
+          </div>
+        ) : adminProviders.length === 0 && connectedProviders.length === 0 && (
           <div style={{ ...row, justifyContent: 'flex-start' }}>
             <span style={{ color: 'var(--text3)', fontSize: 13 }}>
               No providers configured. Ask your admin to configure OAuth providers.
