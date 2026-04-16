@@ -58,20 +58,61 @@ Write the JWT and NKey seed to a creds file at `/tmp/mclaude-nats.creds`:
 
 ### 3. Resolve target session
 
-If `--session` and `--project` not provided, auto-detect from KV:
+If `--session` and `--project` not provided, auto-detect or create:
 
 ```bash
-# Get user ID from login response
 USER_ID=<from login>
 
-# List sessions
-nats --creds /tmp/mclaude-nats.creds -s nats://localhost:4222 kv ls mclaude-sessions
-# Key format: {userId}.{projectId}.{sessionId}
+# List all session keys for this user
+KEYS=$(nats --creds /tmp/mclaude-nats.creds -s nats://localhost:4222 \
+  kv ls mclaude-sessions --raw 2>/dev/null | grep "^${USER_ID}\.")
 
-# If multiple sessions, pick the first idle one by reading each value
-nats --creds /tmp/mclaude-nats.creds -s nats://localhost:4222 kv get mclaude-sessions '<key>' --raw
-# Parse JSON, check state=="idle"
+# Find the first idle session
+SESSION_KEY=""
+for KEY in $KEYS; do
+  STATE=$(nats --creds /tmp/mclaude-nats.creds -s nats://localhost:4222 \
+    kv get mclaude-sessions "$KEY" --raw 2>/dev/null \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('state',''))" 2>/dev/null)
+  if [ "$STATE" = "idle" ]; then
+    SESSION_KEY="$KEY"
+    break
+  fi
+done
 ```
+
+**If no idle session found — create one:**
+
+First resolve a project ID. Check `mclaude-projects` KV for any key matching `{userId}.*`:
+
+```bash
+PROJECT_KEY=$(nats --creds /tmp/mclaude-nats.creds -s nats://localhost:4222 \
+  kv ls mclaude-projects --raw 2>/dev/null | grep "^${USER_ID}\." | head -1)
+PROJECT_ID=$(echo "$PROJECT_KEY" | cut -d. -f2)
+```
+
+If no project exists either, the cluster isn't seeded — stop and report that.
+
+Then publish a create message (branch must be a valid git branch; use `main`):
+
+```bash
+REQUEST_ID="req-$(openssl rand -hex 6)"
+nats --creds /tmp/mclaude-nats.creds -s nats://localhost:4222 pub \
+  "mclaude.${USER_ID}.${PROJECT_ID}.api.sessions.create" \
+  "{\"projectId\":\"${PROJECT_ID}\",\"branch\":\"main\",\"name\":\"nats-send-session\",\"requestId\":\"${REQUEST_ID}\"}"
+```
+
+Poll until the session appears in KV (up to 10s):
+
+```bash
+for i in $(seq 10); do
+  sleep 1
+  SESSION_KEY=$(nats --creds /tmp/mclaude-nats.creds -s nats://localhost:4222 \
+    kv ls mclaude-sessions --raw 2>/dev/null | grep "^${USER_ID}\.${PROJECT_ID}\." | head -1)
+  [ -n "$SESSION_KEY" ] && break
+done
+```
+
+Parse out PROJECT_ID and SESSION_ID from the key (`{userId}.{projectId}.{sessionId}`).
 
 ### 4. Send the message
 
@@ -105,6 +146,14 @@ If not `--watch`, just confirm the message was published and check KV for state 
 
 - Field name is `session_id` (snake_case), NOT `sessionId` (camelCase)
 - Dev credentials: `dev@mclaude.local` / `dev`
-- NATS CLI binary: `nats` (installed at `nats`)
+- NATS CLI binary: `nats` — must be on PATH. Install: `brew install nats-io/nats-tools/nats`. Never hardcode an absolute path.
 - The session must be in `idle` state to accept input
-- Claude Code inside the container must be authenticated (has OAuth token) for the message to produce a response
+- Claude Code inside the container must be authenticated. With `/deploy-local-preview` this is handled automatically via `devOAuthToken`. If sessions receive messages but produce no response, check `kubectl get secret user-secrets -n mclaude-{userId} -o jsonpath='{.data.oauth-token}' | base64 -d` — should be non-empty.
+
+## Prerequisites
+
+```bash
+which nats   # must be on PATH — install: brew install nats-io/nats-tools/nats
+which kubectl
+which curl
+```
