@@ -143,13 +143,16 @@ The flow runs once. After the default project is created it appears in the KV st
 ┌─────────────────────────────────┐
 │ MClaude  [2]    📊  ⚙  ⋯   ●  │  nav: title + badge + usage + settings + menu + conn dot
 ├─────────────────────────────────┤
-│  mclaude  all  other-session    │  tmux filter chips (only when >1 tmux session)
+│  Showing: mclaude        [✕]   │  filter banner (only when filter active)
 ├─────────────────────────────────┤
 │                                 │
-│  ●  my-project                  │  session row
-│     Working · ~/work/proj       │
+│  MCLAUDE                        │  project header (only when >1 project visible)
+│  ●  working-session             │  session row
+│     Working · ~/work/mclaude    │
 │                               › │
-│  ●  other-project               │
+│                                 │
+│  OTHER-PROJECT                  │
+│  ●  demo                        │
 │     Idle · ~/work/other         │
 │                               › │
 │                                 │
@@ -178,18 +181,39 @@ Dropdown anchored to the ⋯ button, dismisses on outside tap.
 ```
   ┌───────────────────────────┐
   │ 📁 New Project            │
+  │ 🔍 Filter by Project      │  only shown when >1 project exists
   └───────────────────────────┘
 ```
 
-- **New Project**: opens the New Project sheet
+- **New Project**: opens the New Project sheet.
+- **Filter by Project**: opens the Project Filter Sheet. Hidden when there is ≤1 project (nothing to filter).
 
-### Tmux Filter Bar
+### Session List Grouping
 
-Horizontal scrollable row of chips. Shown only when sessions come from >1 tmux session name.
+When more than one project is visible, sessions are grouped by project, with a project header above each group. When only one project is visible — either because the user has a single project, or because a project filter is active — project headers are hidden and session rows render flat.
 
-Each chip: pill shape, `--surf2` background, `--text2` color when inactive; `--blue` background + white text when active.
+- Projects sorted alphabetically by name.
+- Within a project, sessions sort by descending last-updated time.
+- Project header: 12px, weight 600, uppercase, `--text2`, 8px top padding, 4px bottom padding, not tappable.
 
-Chips: one per tmux session name (alphabetical) + "All" chip at end. Default active chip is "mclaude" if present, otherwise first alphabetically.
+### Project Filter
+
+The dashboard can be filtered to sessions from a single project. The filter is opened via the overflow menu (⋯ → "Filter by Project") and persists across reloads.
+
+**State**: `localStorage.mclaude.filterProjectId` holds the selected project ID. Unset or empty string means "no filter" (show all projects).
+
+**Filter banner**: when a filter is active, a banner renders above the session list:
+
+```
+┌─────────────────────────────────┐
+│  Showing: mclaude        [✕]   │  --surf2 background, 13px/500/--text, 10px padding
+└─────────────────────────────────┘
+```
+
+- Banner text: `Showing: {project name}`.
+- `✕` button on the right clears the filter (removes `mclaude.filterProjectId` from localStorage, re-renders dashboard).
+
+**Stale filter**: if the filtered project no longer exists in the KV store (was deleted), the filter is cleared automatically on the next render and the banner is hidden.
 
 ### Session Rows (`.srow`)
 
@@ -240,9 +264,9 @@ When there are no sessions AND no projects:
 - Heading: "No Sessions"
 - Body: "Tap + to start a Claude session"
 
-When filtered to a tmux group with no sessions:
+When a project filter is active and the filtered project has no sessions:
 - Heading: "No Sessions"
-- Body: "No sessions in this group"
+- Body: "No sessions in this project"
 
 ### FAB
 
@@ -273,6 +297,27 @@ Bottom sheet modal with scrim overlay (tapping scrim closes it).
 Project rows sorted: last-used project first (tracked in `localStorage` by `mclaude.lastProjectId`), then alphabetical by name.
 
 On tap: create session in that project, persist its ID to `mclaude.lastProjectId`, dismiss sheet.
+
+---
+
+## Sheet: Project Filter
+
+Bottom sheet modal with scrim overlay (tapping scrim closes it). Opened from the dashboard overflow menu → "Filter by Project".
+
+```
+┌─────────────────────────────────┐
+│     Filter by Project       [✕] │
+├─────────────────────────────────┤
+│  ○ All Projects                 │  always first; selecting clears the filter
+│  ● mclaude                      │  current active filter (filled radio)
+│  ○ other-project                │
+└─────────────────────────────────┘
+```
+
+- "All Projects" is always the first row; selecting it clears the filter (`mclaude.filterProjectId` removed from localStorage).
+- Project rows below, sorted alphabetically by name.
+- The row matching the current `mclaude.filterProjectId` has a filled radio; all others empty. If no filter is active, "All Projects" is filled.
+- On tap: write `mclaude.filterProjectId` to localStorage (or remove it if "All Projects" tapped), dismiss sheet, re-render dashboard.
 
 ---
 
