@@ -19,7 +19,12 @@ export function AuthScreen({ onConnect, error }: AuthScreenProps) {
     try {
       await onConnect(email.trim(), password.trim())
     } catch (err) {
-      setLocalError(err instanceof Error ? err.message : 'Connection failed')
+      const msg = err instanceof Error ? err.message : 'Connection failed'
+      if (msg === 'Load failed' || msg === 'Failed to fetch') {
+        setLocalError('Network error — if using HTTPS with a self-signed certificate, ensure it is trusted in your system keychain')
+      } else {
+        setLocalError(msg)
+      }
     } finally {
       setLoading(false)
     }

@@ -12,7 +12,10 @@ export class AuthClient implements IAuthClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
     })
-    if (!res.ok) throw new Error(`Login failed: ${res.status}`)
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      throw new Error(body || `Login failed: ${res.status}`)
+    }
     const tokens: AuthTokens = await res.json()
     this._tokens = tokens
     this._persist(tokens)
