@@ -691,9 +691,14 @@ Cached in-memory with decoded expiry.
 
 ### SPA static assets
 
-Standard browser HTTP cache for JS/CSS bundles.
+Two cache tiers:
 
-**Invalidated by**: content-hash filenames from the build tool (e.g., `main.a3f2b1.js`). No manual busting needed.
+| Path | `Cache-Control` | Why |
+|------|----------------|-----|
+| `index.html` | `no-cache` | Entry point that references hashed bundles. Browser must revalidate on every load so it picks up new bundle filenames after a deploy. (Still uses `ETag`/`Last-Modified` — a 304 is fine, but a stale 200 from heuristic cache is not.) |
+| `/assets/*` | `public, max-age=31536000, immutable` | Content-hashed filenames from the build tool (e.g., `index-BAOWvUvJ.js`). Safe to cache forever — a new build produces a new filename. |
+
+**Invalidated by**: content-hash filenames (assets) and `no-cache` revalidation (HTML entry point).
 
 ---
 
