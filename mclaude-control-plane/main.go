@@ -63,6 +63,24 @@ func main() {
 		logger.Warn().Msg("DATABASE_DSN not set — running without persistence")
 	}
 
+	// EXTERNAL_URL is required — control-plane exits on startup if empty.
+	externalURL := os.Getenv("EXTERNAL_URL")
+	if externalURL == "" {
+		logger.Fatal().Msg("EXTERNAL_URL is required (set to the externally-accessible base URL, e.g. https://mclaude.internal)")
+	}
+
+	// Load OAuth provider config from /etc/mclaude/providers.json (Helm ConfigMap mount).
+	providerCfgPath := envOr("PROVIDERS_CONFIG_PATH", "/etc/mclaude/providers.json")
+	loadedProviders, err := LoadProviders(ctx, providerCfgPath)
+	if err != nil {
+		logger.Warn().Err(err).Msg("load providers config — continuing without providers")
+	}
+	provReg := &providerRegistry{
+		providers:   loadedProviders,
+		stateStore:  NewOAuthStateStore(),
+		externalURL: externalURL,
+	}
+
 	// Account NKey — in production, load from secret; generate ephemeral for dev.
 	accountKP, err := loadOrGenerateAccountKey()
 	if err != nil {
@@ -136,6 +154,7 @@ func main() {
 		controlPlaneNs = k8sProv.controlPlaneNs
 	}
 	srv := NewServer(db, accountKP, natsURL, natsWsURL, jwtExpiry, adminToken, k8sProv, k8sClient, controlPlaneNs, helmReleaseName)
+	srv.providers = provReg
 
 	// NATS connection — used for project subscriptions and KV writes.
 	nc, err := nats.Connect(natsURL,
@@ -151,6 +170,16 @@ func main() {
 		logger.Fatal().Err(err).Msg("start projects subscriber")
 	}
 	logger.Info().Msg("projects subscriber started")
+
+	// Start GitLab token refresh goroutine (runs every 15 minutes).
+	srv.StartGitLabRefreshGoroutine(ctx)
+	logger.Info().Msg("GitLab token refresh goroutine started")
+
+	// Startup reconcile: rebuild CLI configs for all users, cleanup orphaned connections.
+	go func() {
+		srv.ReconcileAllUserCLIConfigs(ctx)
+		logger.Info().Msg("startup CLI config reconcile complete")
+	}()
 
 	// Dev seed: create a known account + default project when DEV_SEED=true and DB is available.
 	// Runs after NATS connects so the seed can write to the mclaude-projects KV bucket.
@@ -230,7 +259,7 @@ func seedDev(ctx context.Context, db *DB, nc *nats.Conn, k8s *K8sProvisioner, k8
 		// Provision K8s resources for the project.
 		// Prefer MCProject CR (reconciler-driven) when k8sClient is available.
 		if k8sClient != nil {
-			if err := CreateMCProject(ctx, k8sClient, controlPlaneNs, user.ID, proj.ID, proj.GitURL); err != nil {
+			if err := CreateMCProject(ctx, k8sClient, controlPlaneNs, user.ID, proj.ID, proj.GitURL, ""); err != nil {
 				logger.Error().Err(err).
 					Str("userId", user.ID).Str("projectId", proj.ID).
 					Msg("DEV_SEED: create MCProject CR failed (non-fatal)")

@@ -14,11 +14,12 @@ import (
 // ProjectKVState is the value written to the mclaude-projects JetStream KV bucket.
 // Must match the TypeScript ProjectKVState in mclaude-web/src/types.ts.
 type ProjectKVState struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	GitURL    string `json:"gitUrl"`
-	Status    string `json:"status"`
-	CreatedAt string `json:"createdAt"`
+	ID            string  `json:"id"`
+	Name          string  `json:"name"`
+	GitURL        string  `json:"gitUrl"`
+	Status        string  `json:"status"`
+	CreatedAt     string  `json:"createdAt"`
+	GitIdentityID *string `json:"gitIdentityId,omitempty"`
 }
 
 // StartProjectsSubscriber connects to NATS, ensures the mclaude-projects and
@@ -51,8 +52,9 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 		userID := parts[1]
 
 		var req struct {
-			Name   string `json:"name"`
-			GitURL string `json:"gitUrl"`
+			Name          string  `json:"name"`
+			GitURL        string  `json:"gitUrl"`
+			GitIdentityID *string `json:"gitIdentityId"`
 		}
 		if err := json.Unmarshal(msg.Data, &req); err != nil || req.Name == "" {
 			replyError(msg, "name required")
@@ -64,11 +66,35 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 			return
 		}
 
+		// Validate gitIdentityId if provided.
+		if req.GitIdentityID != nil && *req.GitIdentityID != "" {
+			conn, err := s.db.GetOAuthConnectionByID(context.Background(), *req.GitIdentityID)
+			if err != nil || conn == nil || conn.UserID != userID {
+				replyError(msg, "invalid gitIdentityId")
+				return
+			}
+			// Validate hostname matches gitUrl.
+			if req.GitURL != "" {
+				projHost := extractHost(req.GitURL)
+				connHost := extractHost(conn.BaseURL)
+				if projHost != "" && connHost != "" && projHost != connHost {
+					replyError(msg, "gitIdentityId hostname does not match gitUrl")
+					return
+				}
+			}
+		}
+
 		id := uuid.NewString()
-		proj, err := s.db.CreateProject(context.Background(), id, userID, req.Name, req.GitURL)
+		proj, err := s.db.CreateProjectWithIdentity(context.Background(), id, userID, req.Name, req.GitURL, req.GitIdentityID)
 		if err != nil {
 			replyError(msg, "failed to create project")
 			return
+		}
+
+		// Determine gitIdentityID string for MCProject.
+		gitIdentityIDStr := ""
+		if req.GitIdentityID != nil {
+			gitIdentityIDStr = *req.GitIdentityID
 		}
 
 		// Create MCProject CR to trigger the reconciler to provision K8s resources.
@@ -77,7 +103,7 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 		// compatibility when the Manager is not running (e.g., local dev without cluster).
 		// Non-fatal — project record and KV entry are always created.
 		if s.k8sClient != nil {
-			if err := CreateMCProject(context.Background(), s.k8sClient, s.controlPlaneNs, userID, id, req.GitURL); err != nil {
+			if err := CreateMCProject(context.Background(), s.k8sClient, s.controlPlaneNs, userID, id, req.GitURL, gitIdentityIDStr); err != nil {
 				log.Error().Err(err).
 					Str("userId", userID).
 					Str("projectId", id).
@@ -104,11 +130,12 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 
 		// Write to KV so session-store watchers pick it up immediately.
 		state := ProjectKVState{
-			ID:        proj.ID,
-			Name:      proj.Name,
-			GitURL:    proj.GitURL,
-			Status:    proj.Status,
-			CreatedAt: proj.CreatedAt.UTC().Format(time.RFC3339),
+			ID:            proj.ID,
+			Name:          proj.Name,
+			GitURL:        proj.GitURL,
+			Status:        proj.Status,
+			CreatedAt:     proj.CreatedAt.UTC().Format(time.RFC3339),
+			GitIdentityID: proj.GitIdentityID,
 		}
 		val, _ := json.Marshal(state)
 		if _, err := kv.Put(userID+"."+id, val); err != nil {
@@ -134,11 +161,12 @@ func writeProjectKV(nc *nats.Conn, userID string, proj *Project) error {
 		return err
 	}
 	state := ProjectKVState{
-		ID:        proj.ID,
-		Name:      proj.Name,
-		GitURL:    proj.GitURL,
-		Status:    proj.Status,
-		CreatedAt: proj.CreatedAt.UTC().Format(time.RFC3339),
+		ID:            proj.ID,
+		Name:          proj.Name,
+		GitURL:        proj.GitURL,
+		Status:        proj.Status,
+		CreatedAt:     proj.CreatedAt.UTC().Format(time.RFC3339),
+		GitIdentityID: proj.GitIdentityID,
 	}
 	val, _ := json.Marshal(state)
 	// Key uses "." as separator — NATS uses "." as the token separator for

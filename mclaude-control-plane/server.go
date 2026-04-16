@@ -2,14 +2,16 @@ package main
 
 import (
 	"net/http"
+	"strings"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // RegisterRoutes wires all HTTP handlers onto the given mux.
 // Public routes (no auth): /auth/login, /auth/refresh, /version, /health
-// Protected routes (NATS JWT auth): /auth/me
-// Admin routes (admin bearer token): /admin/* on separate mux (see adminMux)
+// Protected routes (NATS JWT auth): /auth/me, /api/*
+// OAuth callback (no auth — redirects): /auth/providers/*/callback
+// Admin routes (admin bearer token): /admin/* on separate mux (see AdminMux)
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	// Public
 	mux.HandleFunc("/auth/login", s.handleLogin)
@@ -27,8 +29,63 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	// OAuth callbacks (no auth — browser redirect, state validates the request)
+	mux.HandleFunc("/auth/providers/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/callback") {
+			s.handleOAuthCallback(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
+
 	// Protected
 	mux.Handle("/auth/me", s.authMiddleware(http.HandlerFunc(s.handleMe)))
+
+	// Protected API routes
+	mux.Handle("/api/providers", s.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			s.handleGetProviders(w, r)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	})))
+
+	// POST /api/providers/pat (must be registered before /api/providers/{id}/connect)
+	mux.Handle("/api/providers/pat", s.authMiddleware(http.HandlerFunc(s.handleAddPAT)))
+
+	// POST /api/providers/{id}/connect
+	mux.Handle("/api/providers/", s.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/api/providers/")
+		if strings.HasSuffix(path, "/connect") {
+			s.handleConnectProvider(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})))
+
+	// GET /api/connections/{connection_id}/repos
+	// DELETE /api/connections/{connection_id}
+	mux.Handle("/api/connections/", s.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/api/connections/")
+		if strings.HasSuffix(path, "/repos") && r.Method == http.MethodGet {
+			s.handleGetConnectionRepos(w, r)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			s.handleDeleteConnection(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})))
+
+	// PATCH /api/projects/{project_id}
+	mux.Handle("/api/projects/", s.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			s.handlePatchProject(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})))
 }
 
 // AdminMux returns an http.ServeMux for the break-glass admin port (:9091).

@@ -40,6 +40,11 @@ type MCProjectSpec struct {
 	// GitURL is an optional git remote for the project repository.
 	// Empty for scratch (no-repo) projects.
 	GitURL string `json:"gitUrl,omitempty"`
+	// GitIdentityID is the optional oauth_connections.id to use for git operations.
+	// When set, the session-agent switches to this identity via gh auth switch.
+	// When empty, the env var is omitted from the pod spec and the session-agent
+	// uses the default active account for the host.
+	GitIdentityID string `json:"gitIdentityId,omitempty"`
 }
 
 // MCProjectConditionType is a well-known condition name for MCProject status.

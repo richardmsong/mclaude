@@ -303,6 +303,7 @@ func (r *MCProjectReconciler) reconcileDeployment(ctx context.Context, mcp *MCPr
 	projectID := mcp.Spec.ProjectID
 	userID := mcp.Spec.UserID
 	gitURL := mcp.Spec.GitURL
+	gitIdentityID := mcp.Spec.GitIdentityID
 
 	if err := r.ensurePVCCR(ctx, mcp, userNs, "project-"+projectID, tpl.projectPvcSize, tpl.projectPvcStorageClass); err != nil {
 		return fmt.Errorf("project pvc: %w", err)
@@ -351,6 +352,11 @@ func (r *MCProjectReconciler) reconcileDeployment(ctx context.Context, mcp *MCPr
 	}
 	if gitURL != "" {
 		env = append(env, corev1.EnvVar{Name: "GIT_URL", Value: gitURL})
+	}
+	// GIT_IDENTITY_ID is omitted entirely when empty (not set to empty string).
+	// The session-agent checks os.Getenv("GIT_IDENTITY_ID") != "" to decide whether to switch accounts.
+	if gitIdentityID != "" {
+		env = append(env, corev1.EnvVar{Name: "GIT_IDENTITY_ID", Value: gitIdentityID})
 	}
 
 	// Create path: Recreate strategy so old pod exits before new pod starts.
@@ -625,7 +631,8 @@ func (r *MCProjectReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // CreateMCProject creates an MCProject CR in the given namespace.
 // Used by the NATS projects.create handler and seedDev instead of calling
 // ProvisionProject directly.
-func CreateMCProject(ctx context.Context, c client.Client, namespace, userID, projectID, gitURL string) error {
+// gitIdentityID may be empty — when empty, the GIT_IDENTITY_ID env var is omitted from the pod spec.
+func CreateMCProject(ctx context.Context, c client.Client, namespace, userID, projectID, gitURL, gitIdentityID string) error {
 	mcp := &MCProject{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: SchemeGroupVersion.String(),
@@ -636,9 +643,10 @@ func CreateMCProject(ctx context.Context, c client.Client, namespace, userID, pr
 			Namespace: namespace,
 		},
 		Spec: MCProjectSpec{
-			UserID:    userID,
-			ProjectID: projectID,
-			GitURL:    gitURL,
+			UserID:        userID,
+			ProjectID:     projectID,
+			GitURL:        gitURL,
+			GitIdentityID: gitIdentityID,
 		},
 	}
 	if err := c.Create(ctx, mcp); err != nil && !k8serrors.IsAlreadyExists(err) {

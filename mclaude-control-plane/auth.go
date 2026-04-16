@@ -46,6 +46,7 @@ type Server struct {
 	k8sClient       client.Client   // controller-runtime client; nil when not in cluster
 	controlPlaneNs  string          // K8s namespace where the control-plane runs (mclaude-system)
 	helmReleaseName string          // Helm release name, used to derive namespace for MCProject CRs
+	providers       *providerRegistry // OAuth provider config and state store; nil when no providers configured
 }
 
 // NewServer constructs a Server. accountKP must be an account-level NKey pair —
@@ -161,8 +162,20 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// connectedProviderEntry is one entry in the connectedProviders array on /auth/me.
+type connectedProviderEntry struct {
+	ConnectionID string `json:"connectionId"`
+	ProviderID   string `json:"providerId"`
+	ProviderType string `json:"providerType"`
+	AuthType     string `json:"authType"`
+	DisplayName  string `json:"displayName"`
+	BaseURL      string `json:"baseUrl"`
+	Username     string `json:"username"`
+	ConnectedAt  string `json:"connectedAt"`
+}
+
 // handleMe handles GET /auth/me.
-// Returns basic info about the authenticated user.
+// Returns basic info about the authenticated user, including connected OAuth providers.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	userID, ok := r.Context().Value(contextKeyUserID).(string)
 	if !ok || userID == "" {
@@ -176,11 +189,35 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fetch connected providers.
+	var connectedProviders []connectedProviderEntry
+	if s.db != nil {
+		conns, err := s.db.GetOAuthConnectionsByUser(r.Context(), userID)
+		if err == nil {
+			for _, c := range conns {
+				connectedProviders = append(connectedProviders, connectedProviderEntry{
+					ConnectionID: c.ID,
+					ProviderID:   c.ProviderID,
+					ProviderType: c.ProviderType,
+					AuthType:     c.AuthType,
+					DisplayName:  c.DisplayName,
+					BaseURL:      c.BaseURL,
+					Username:     c.Username,
+					ConnectedAt:  c.ConnectedAt.UTC().Format(time.RFC3339),
+				})
+			}
+		}
+	}
+	if connectedProviders == nil {
+		connectedProviders = []connectedProviderEntry{}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-		"userId": user.ID,
-		"email":  user.Email,
-		"name":   user.Name,
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"userId":             user.ID,
+		"email":              user.Email,
+		"name":               user.Name,
+		"connectedProviders": connectedProviders,
 	})
 }
 
