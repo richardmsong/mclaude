@@ -118,15 +118,109 @@ type glabHostEntry struct {
 	User    string `yaml:"user,omitempty"`
 }
 
-// MergeGHHostsYAML merges managed gh hosts.yml (from Secret mount) into the
-// existing gh hosts.yml (from PVC, which may have manual gh auth login entries).
+// ConvertGHHostsToOldFormat converts a managed gh-hosts.yml (multi-account
+// users: format from the K8s Secret) to old single-account format suitable
+// for writing to ~/.config/gh/hosts.yml on Alpine (no D-Bus keyring).
 //
-// Strategy: for each host in managed, add/update managed accounts in existing.
-// Do NOT remove accounts only in existing (preserves manual gh auth login).
-// If a managed account and a manual account share the same username on the same
-// host, the managed token wins (overwrite).
+// Per host logic:
+//   - If activeUsername is non-empty AND the host equals activeHost AND the host
+//     contains that username in its users: map, use that account's token.
+//   - Otherwise use the user: default account's token.
+//   - Always write git_protocol: https.
+//   - If a host has no users: map (already old format), pass through as-is
+//     but still set git_protocol: https.
 //
-// Returns the merged YAML bytes.
+// The activeUsername and activeHost parameters come from resolving
+// GIT_IDENTITY_ID → conn-{id}-username → which host has that username in managed.
+// Both may be empty (no identity binding), in which case the user: default is
+// used for every host.
+func ConvertGHHostsToOldFormat(managed []byte, activeUsername, activeHost string) ([]byte, error) {
+	if len(managed) == 0 {
+		return nil, nil
+	}
+
+	managedCfg := make(ghHostsConfig)
+	if err := yaml.Unmarshal(managed, &managedCfg); err != nil {
+		return nil, fmt.Errorf("parse managed gh-hosts.yml: %w", err)
+	}
+
+	result := make(ghHostsConfig)
+	for host, entry := range managedCfg {
+		var token string
+		var selectedUser string
+
+		if len(entry.Users) > 0 {
+			// Multi-account format: pick the active account's token.
+			if activeUsername != "" && host == activeHost {
+				// Use the identity-bound account's token for this host.
+				if u, ok := entry.Users[activeUsername]; ok {
+					token = u.OAuthToken
+					selectedUser = activeUsername
+				}
+			}
+			if token == "" && entry.User != "" {
+				// Fall back to the user: default account.
+				if u, ok := entry.Users[entry.User]; ok {
+					token = u.OAuthToken
+					selectedUser = entry.User
+				}
+			}
+			if token == "" {
+				// Last resort: pick the first user (map iteration order is random;
+				// determinism is best-effort here since this path means the config
+				// has no user: field and no matching identity).
+				for username, u := range entry.Users {
+					token = u.OAuthToken
+					selectedUser = username
+					break
+				}
+			}
+		} else {
+			// Already old format (oauth_token at root level) — pass through.
+			token = entry.OAuthToken
+			selectedUser = entry.User
+		}
+
+		result[host] = ghHostEntry{
+			OAuthToken:  token,
+			User:        selectedUser,
+			GitProtocol: "https",
+		}
+	}
+
+	return yaml.Marshal(result)
+}
+
+// findHostForUsernameInManaged looks up which host in the managed config (multi-account
+// format) contains the given username in its users: map or User field.
+// Returns empty string if not found.
+func findHostForUsernameInManaged(managedCfg ghHostsConfig, username string) string {
+	for host, entry := range managedCfg {
+		if _, ok := entry.Users[username]; ok {
+			return host
+		}
+		// Also check old-format User field (no users: map).
+		if entry.User == username && len(entry.Users) == 0 {
+			return host
+		}
+	}
+	return ""
+}
+
+// MergeGHHostsYAML merges managed gh hosts.yml (already converted to old
+// single-account format) into the existing gh hosts.yml (from PVC, which may
+// have manual gh auth login entries, also in old format).
+//
+// Strategy: for each host in managed, write/overwrite in existing.
+// Do NOT remove hosts only in existing (preserves manual gh auth login).
+// If a managed host and a manual entry share the same host, the managed token wins.
+//
+// Both existing and managed are expected to be in old single-account format
+// (oauth_token at root level, no users: map). If existing contains multi-account
+// users: entries (e.g. from a prior manual gh auth login), they are preserved
+// for hosts not covered by managed — but managed always wins per host.
+//
+// Returns the merged YAML bytes in old format.
 func MergeGHHostsYAML(existing, managed []byte) ([]byte, error) {
 	// Parse existing (may be empty/nil).
 	existingCfg := make(ghHostsConfig)
@@ -145,41 +239,9 @@ func MergeGHHostsYAML(existing, managed []byte) ([]byte, error) {
 		}
 	}
 
-	// Merge: for each host in managed, upsert into existing.
+	// Merge: managed wins per host.
 	for host, managedEntry := range managedCfg {
-		existingEntry, exists := existingCfg[host]
-		if !exists {
-			existingEntry = ghHostEntry{}
-		}
-
-		// Ensure the Users map exists in the existing entry.
-		if existingEntry.Users == nil {
-			existingEntry.Users = make(map[string]ghUserEntry)
-		}
-
-		// If the managed entry uses the multi-account Users map, merge account by account.
-		if len(managedEntry.Users) > 0 {
-			for username, userEntry := range managedEntry.Users {
-				existingEntry.Users[username] = userEntry
-			}
-			// If managed sets a default user, propagate it (managed authority wins).
-			if managedEntry.User != "" {
-				existingEntry.User = managedEntry.User
-			}
-		} else if managedEntry.OAuthToken != "" && managedEntry.User != "" {
-			// Single-account format: convert to multi-account in the merge.
-			existingEntry.Users[managedEntry.User] = ghUserEntry{OAuthToken: managedEntry.OAuthToken}
-			if existingEntry.User == "" {
-				existingEntry.User = managedEntry.User
-			}
-		}
-
-		// Preserve other fields from managed that may not be in existing.
-		if managedEntry.GitProtocol != "" {
-			existingEntry.GitProtocol = managedEntry.GitProtocol
-		}
-
-		existingCfg[host] = existingEntry
+		existingCfg[host] = managedEntry
 	}
 
 	return yaml.Marshal(existingCfg)
@@ -251,29 +313,23 @@ func NewCredentialManager(homeDir string, log zerolog.Logger) *CredentialManager
 
 // Setup runs the full credential helper setup sequence:
 //  1. Symlink PVC config (/data/.config → ~/.config)
-//  2. Merge managed tokens into CLI configs
+//  2. Merge managed tokens into CLI configs (with format conversion + identity selection)
 //  3. Register credential helpers (gh auth setup-git, glab auth setup-git)
-//  4. Switch to project identity (if GIT_IDENTITY_ID is set)
 //
-// It is safe to call Setup multiple times. Steps 2-4 are re-run only if the
+// Identity selection happens inside mergeAndSetup via the gitIdentityID parameter.
+// No gh auth switch call is made — the old-format hosts.yml already contains the
+// correct account's token per host.
+//
+// It is safe to call Setup multiple times. Steps 2-3 are re-run only if the
 // managed config content has changed since the last call.
 func (cm *CredentialManager) Setup(gitIdentityID string) error {
 	if err := cm.symlinkPVCConfig(); err != nil {
 		return fmt.Errorf("symlink PVC config: %w", err)
 	}
 
-	changed, err := cm.mergeAndSetup()
-	if err != nil {
+	if _, err := cm.mergeAndSetup(gitIdentityID); err != nil {
 		// Non-fatal: log and continue. Git operations fall back to SSH key auth.
 		cm.log.Warn().Err(err).Msg("credential helper merge failed (non-fatal)")
-	}
-
-	if changed || gitIdentityID != "" {
-		if switchErr := cm.switchProjectIdentity(gitIdentityID); switchErr != nil {
-			// Non-fatal per spec: log warning, use default active account.
-			cm.log.Warn().Err(switchErr).Str("gitIdentityID", gitIdentityID).
-				Msg("gh auth switch failed — using default active account (non-fatal)")
-		}
 	}
 
 	return nil
@@ -282,17 +338,13 @@ func (cm *CredentialManager) Setup(gitIdentityID string) error {
 // RefreshIfChanged re-reads the managed configs from the Secret mount and
 // re-runs merge + setup-git if the content has changed. Called before each
 // git operation.
+//
+// Identity selection (gitIdentityID) is applied during the merge step, not via
+// gh auth switch.
 func (cm *CredentialManager) RefreshIfChanged(gitIdentityID string) error {
-	_, err := cm.mergeAndSetup()
-	if err != nil {
+	if _, err := cm.mergeAndSetup(gitIdentityID); err != nil {
 		cm.log.Warn().Err(err).Msg("credential helper refresh failed (non-fatal)")
 		return nil // non-fatal
-	}
-	if gitIdentityID != "" {
-		if switchErr := cm.switchProjectIdentity(gitIdentityID); switchErr != nil {
-			cm.log.Warn().Err(switchErr).Str("gitIdentityID", gitIdentityID).
-				Msg("gh auth switch failed after refresh (non-fatal)")
-		}
 	}
 	return nil
 }
@@ -345,9 +397,15 @@ func (cm *CredentialManager) symlinkPVCConfig() error {
 	return nil
 }
 
-// mergeAndSetup reads managed configs from Secret mount, merges into ~/.config/,
-// and runs gh/glab auth setup-git if content changed. Returns true if content changed.
-func (cm *CredentialManager) mergeAndSetup() (bool, error) {
+// mergeAndSetup reads managed configs from Secret mount, converts gh-hosts.yml
+// from multi-account format to old single-account format (with identity selection),
+// merges into ~/.config/, and runs gh/glab auth setup-git if content changed.
+// Returns true if content changed.
+//
+// Identity selection: if gitIdentityID is non-empty, resolves it to a username
+// and host via the Secret mount, then selects that account's token when converting
+// the managed gh-hosts.yml for that host. All other hosts use the user: default.
+func (cm *CredentialManager) mergeAndSetup(gitIdentityID string) (bool, error) {
 	// Read managed configs from Secret mount.
 	managedGHHosts, err := ReadSecretFile("gh-hosts.yml")
 	if err != nil {
@@ -387,13 +445,34 @@ func (cm *CredentialManager) mergeAndSetup() (bool, error) {
 		ghConfigPath := filepath.Join(ghDir, "hosts.yml")
 
 		if err := os.MkdirAll(ghDir, 0755); err == nil {
-			existing, _ := os.ReadFile(ghConfigPath)
-			merged, err := MergeGHHostsYAML(existing, managedGHHosts)
-			if err != nil {
-				mergeErr = err
+			// Parse the managed multi-account config so we can resolve the identity.
+			managedCfg := make(ghHostsConfig)
+			if parseErr := yaml.Unmarshal(managedGHHosts, &managedCfg); parseErr != nil {
+				mergeErr = fmt.Errorf("parse managed gh-hosts.yml: %w", parseErr)
 			} else {
-				if err := os.WriteFile(ghConfigPath, merged, 0600); err != nil {
-					cm.log.Warn().Err(err).Str("path", ghConfigPath).Msg("write gh hosts.yml failed")
+				// Resolve GIT_IDENTITY_ID → (username, host) from the managed config.
+				activeUsername, activeHost, resolveErr := cm.resolveIdentityFromManaged(gitIdentityID, managedCfg)
+				if resolveErr != nil {
+					// Non-fatal: log and use defaults.
+					cm.log.Warn().Err(resolveErr).Str("gitIdentityID", gitIdentityID).
+						Msg("identity resolution failed — using default account (non-fatal)")
+				}
+
+				// Convert managed multi-account format → old single-account format.
+				convertedManaged, convertErr := ConvertGHHostsToOldFormat(managedGHHosts, activeUsername, activeHost)
+				if convertErr != nil {
+					mergeErr = convertErr
+				} else {
+					// Merge converted managed (old format) with existing (old format from PVC).
+					existing, _ := os.ReadFile(ghConfigPath)
+					merged, mergeErrInner := MergeGHHostsYAML(existing, convertedManaged)
+					if mergeErrInner != nil {
+						mergeErr = mergeErrInner
+					} else {
+						if writeErr := os.WriteFile(ghConfigPath, merged, 0600); writeErr != nil {
+							cm.log.Warn().Err(writeErr).Str("path", ghConfigPath).Msg("write gh hosts.yml failed")
+						}
+					}
 				}
 			}
 		}
@@ -431,7 +510,7 @@ func (cm *CredentialManager) mergeAndSetup() (bool, error) {
 		// Non-fatal per spec.
 	}
 
-	// Update last-seen content.
+	// Update last-seen raw managed content (for change detection on next call).
 	cm.mu.Lock()
 	cm.lastGHHosts = managedGHHosts
 	cm.lastGLabConfig = managedGLabConfig
@@ -440,82 +519,41 @@ func (cm *CredentialManager) mergeAndSetup() (bool, error) {
 	return true, mergeErr
 }
 
-// switchProjectIdentity switches gh to the correct account for this project.
-// If gitIdentityID is empty, this is a no-op.
-func (cm *CredentialManager) switchProjectIdentity(gitIdentityID string) error {
+// resolveIdentityFromManaged resolves GIT_IDENTITY_ID to (username, host) by:
+//  1. Reading conn-{id}-username from the Secret mount.
+//  2. Finding which host in the managed config has that username.
+//
+// Returns ("", "", nil) when gitIdentityID is empty or the username key is missing.
+func (cm *CredentialManager) resolveIdentityFromManaged(gitIdentityID string, managedCfg ghHostsConfig) (username, host string, err error) {
 	if gitIdentityID == "" {
-		return nil
+		return "", "", nil
 	}
 
-	// Read conn-{id}-username from Secret mount.
-	username, err := cm.resolveUsername(gitIdentityID)
-	if err != nil {
-		return fmt.Errorf("resolve username for identity %s: %w", gitIdentityID, err)
+	key := fmt.Sprintf("conn-%s-username", gitIdentityID)
+	data, readErr := ReadSecretFile(key)
+	if readErr != nil {
+		return "", "", fmt.Errorf("read %s: %w", key, readErr)
 	}
-	if username == "" {
-		return fmt.Errorf("no username found for identity %s in Secret mount", gitIdentityID)
-	}
-
-	// Find which host this username belongs to in gh-hosts.yml.
-	host, err := cm.findHostForUsername(username)
-	if err != nil {
-		return fmt.Errorf("find host for username %s: %w", username, err)
-	}
-	if host == "" {
-		return fmt.Errorf("username %s not found in any gh host config", username)
+	if len(data) == 0 {
+		// Key missing — fall back to default (non-fatal).
+		cm.log.Warn().Str("gitIdentityID", gitIdentityID).Msg("conn-username key not found in Secret mount — using default account")
+		return "", "", nil
 	}
 
-	// Run: gh auth switch --user {username} --hostname {host}
-	if err := runCmd("gh", "auth", "switch", "--user", username, "--hostname", host); err != nil {
-		return fmt.Errorf("gh auth switch --user %s --hostname %s: %w", username, host, err)
+	resolvedUsername := strings.TrimSpace(string(data))
+	resolvedHost := findHostForUsernameInManaged(managedCfg, resolvedUsername)
+	if resolvedHost == "" {
+		cm.log.Warn().
+			Str("gitIdentityID", gitIdentityID).
+			Str("username", resolvedUsername).
+			Msg("username not found in any managed gh host — using default account")
+		return "", "", nil
 	}
 
-	cm.log.Info().
-		Str("gitIdentityID", gitIdentityID).
-		Str("username", username).
-		Str("host", host).
-		Msg("switched to project identity")
-
-	return nil
+	return resolvedUsername, resolvedHost, nil
 }
 
-// resolveUsername reads conn-{id}-username from the Secret mount.
-func (cm *CredentialManager) resolveUsername(connectionID string) (string, error) {
-	key := fmt.Sprintf("conn-%s-username", connectionID)
-	data, err := ReadSecretFile(key)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(data)), nil
-}
 
-// findHostForUsername parses the merged gh-hosts.yml and returns the hostname
-// that has the given username in its users map.
-func (cm *CredentialManager) findHostForUsername(username string) (string, error) {
-	ghConfigPath := filepath.Join(cm.homeDir, ".config", "gh", "hosts.yml")
-	data, err := os.ReadFile(ghConfigPath)
-	if err != nil {
-		return "", fmt.Errorf("read %s: %w", ghConfigPath, err)
-	}
-
-	cfg := make(ghHostsConfig)
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return "", fmt.Errorf("parse gh hosts.yml: %w", err)
-	}
-
-	for host, entry := range cfg {
-		// Check multi-account Users map.
-		if _, ok := entry.Users[username]; ok {
-			return host, nil
-		}
-		// Check single-account User field.
-		if entry.User == username {
-			return host, nil
-		}
-	}
-
-	return "", nil
-}
 
 // InitRepo performs the initial git repository setup that previously lived in
 // entrypoint.sh. It handles two cases:
