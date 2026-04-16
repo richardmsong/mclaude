@@ -409,12 +409,12 @@ func TestReconciler_CreateMCProject(t *testing.T) {
 	userID := "reconciler-test-user-6"
 	projectID := "reconciler-proj-6"
 
-	if err := CreateMCProject(ctx, c, "mclaude-system", userID, projectID, ""); err != nil {
+	if err := CreateMCProject(ctx, c, "mclaude-system", userID, projectID, "", ""); err != nil {
 		t.Fatalf("CreateMCProject: %v", err)
 	}
 
 	// Idempotent: calling again should not error
-	if err := CreateMCProject(ctx, c, "mclaude-system", userID, projectID, ""); err != nil {
+	if err := CreateMCProject(ctx, c, "mclaude-system", userID, projectID, "", ""); err != nil {
 		t.Fatalf("CreateMCProject idempotent call: %v", err)
 	}
 
