@@ -3,6 +3,7 @@ import { NavBar } from './NavBar'
 import { StatusDot } from './StatusDot'
 import { NewSessionSheet } from './NewSessionSheet'
 import { NewProjectSheet } from './NewProjectSheet'
+import { ProjectFilterSheet } from './ProjectFilterSheet'
 import type { SessionListVM, ProjectVM, SessionVM } from '@/viewmodels/session-list-vm'
 import type { AuthClient } from '@/transport/auth-client'
 
@@ -14,6 +15,18 @@ function shortenPath(p: string): string {
   const parts = p.replace(/\/$/, '').split('/')
   const short = parts.slice(-2).join('/')
   return short.startsWith('~') ? short : `~/${short}`
+}
+
+const STATE_LABELS: Record<string, string> = {
+  working: 'Working',
+  running: 'Working',
+  requires_action: 'Needs permission',
+  idle: 'Idle',
+  updating: 'Updating...',
+  restarting: 'Restarting',
+  failed: 'Failed',
+  unknown: 'Unknown',
+  waiting_for_input: 'Waiting for input',
 }
 
 interface DashboardScreenProps {
@@ -38,15 +51,21 @@ export function DashboardScreen({
   onNewProjectOpened,
 }: DashboardScreenProps) {
   const [projects, setProjects] = useState<ProjectVM[]>(sessionListVM.projects)
-  const [activeGroup, setActiveGroup] = useState<string>('all')
+  const [filterProjectId, setFilterProjectId] = useState<string>(() => sessionListVM.resolveFilter())
   const [showNewSession, setShowNewSession] = useState(false)
   const [showNewProject, setShowNewProject] = useState(false)
+  const [showFilterSheet, setShowFilterSheet] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     setProjects(sessionListVM.projects)
-    const unsub = sessionListVM.onProjectsChanged(p => setProjects([...p]))
+    // Re-resolve filter in case stored project was deleted
+    setFilterProjectId(sessionListVM.resolveFilter())
+    const unsub = sessionListVM.onProjectsChanged(p => {
+      setProjects([...p])
+      setFilterProjectId(sessionListVM.resolveFilter())
+    })
     return unsub
   }, [sessionListVM])
 
@@ -71,38 +90,33 @@ export function DashboardScreen({
     return () => document.removeEventListener('mousedown', handler)
   }, [showMenu])
 
-  // Flatten all sessions
-  const allSessions: Array<{ session: SessionVM; projectName: string }> = []
+  // Sorted groups: projects alphabetically, filtered when filterProjectId set
+  const sortedGroups = sessionListVM.sortedGroups
+
+  // All sessions flattened for badge count
+  const allSessions: SessionVM[] = []
   for (const p of projects) {
     for (const s of p.sessions) {
-      allSessions.push({ session: s, projectName: p.name })
+      allSessions.push(s)
     }
   }
 
   const badge = allSessions.filter(
-    ({ session: s }) => s.state === 'requires_action' || s.hasPendingPermission
+    s => s.state === 'requires_action' || s.hasPendingPermission
   ).length
 
   const unhealthyProjects = projects.filter(p => !p.healthy)
 
-  const STATE_LABELS: Record<string, string> = {
-    working: 'Working',
-    running: 'Working',
-    requires_action: 'Needs permission',
-    idle: 'Idle',
-    updating: 'Updating...',
-    restarting: 'Restarting',
-    failed: 'Failed',
-    unknown: 'Unknown',
-    waiting_for_input: 'Waiting for input',
+  // Active filter project info (for banner label)
+  const activeFilterProject = filterProjectId
+    ? projects.find(p => p.id === filterProjectId)
+    : undefined
+
+  // Handle filter selection from sheet
+  const handleFilterSelect = (projectId: string) => {
+    sessionListVM.setFilter(projectId)
+    setFilterProjectId(sessionListVM.resolveFilter())
   }
-
-  const displayed = activeGroup === 'all'
-    ? allSessions
-    : allSessions.filter(({ session }) => session.name.includes(activeGroup))
-
-  const groups = ['all', ...Array.from(new Set(allSessions.map(({ projectName }) => projectName))).sort()]
-  const showChips = groups.length > 2
 
   const handleFAB = async () => {
     if (projects.length === 0) return
@@ -127,7 +141,7 @@ export function DashboardScreen({
         onClick={() => setShowMenu(v => !v)}
         style={{ fontSize: 16, color: 'var(--text2)', padding: '0 2px' }}
       >
-        ⋯
+        &#x22EF;
       </button>
       {showMenu && (
         <div style={{
@@ -137,7 +151,7 @@ export function DashboardScreen({
           background: 'var(--surf)',
           border: '1px solid var(--border)',
           borderRadius: 10,
-          minWidth: 160,
+          minWidth: 180,
           zIndex: 300,
           overflow: 'hidden',
           boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
@@ -155,12 +169,33 @@ export function DashboardScreen({
               gap: 10,
             }}
           >
-            <span>📁</span> New Project
+            <span>&#x1F4C1;</span> New Project
           </button>
+          {projects.length > 1 && (
+            <button
+              onClick={() => { setShowMenu(false); setShowFilterSheet(true) }}
+              style={{
+                width: '100%',
+                padding: '12px 16px',
+                textAlign: 'left',
+                color: 'var(--text)',
+                fontSize: 14,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                borderTop: '1px solid var(--border)',
+              }}
+            >
+              <span>&#x1F50D;</span> Filter by Project
+            </button>
+          )}
         </div>
       )}
     </div>
   )
+
+  // Determine if we show project headers: only when >1 project visible
+  const showProjectHeaders = sortedGroups.length > 1
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg)' }}>
@@ -173,33 +208,26 @@ export function DashboardScreen({
         right={menuButton}
       />
 
-      {/* Filter chips */}
-      {showChips && (
+      {/* Filter banner — shown only when filter active */}
+      {activeFilterProject && (
         <div style={{
           display: 'flex',
-          gap: 8,
-          padding: '8px 16px',
-          overflowX: 'auto',
-          borderBottom: '1px solid var(--border)',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          background: 'var(--surf2)',
+          padding: '10px 16px',
           flexShrink: 0,
         }}>
-          {groups.map(group => (
-            <button
-              key={group}
-              onClick={() => setActiveGroup(group)}
-              style={{
-                padding: '4px 12px',
-                borderRadius: 14,
-                fontSize: 13,
-                fontWeight: 500,
-                background: activeGroup === group ? 'var(--blue)' : 'var(--surf2)',
-                color: activeGroup === group ? '#fff' : 'var(--text2)',
-                flexShrink: 0,
-              }}
-            >
-              {group === 'all' ? 'All' : group}
-            </button>
-          ))}
+          <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--text)' }}>
+            Showing: {activeFilterProject.name}
+          </span>
+          <button
+            onClick={() => handleFilterSelect('')}
+            style={{ color: 'var(--text2)', fontSize: 16, padding: '0 4px' }}
+            aria-label="Clear filter"
+          >
+            &#x2715;
+          </button>
         </div>
       )}
 
@@ -216,7 +244,7 @@ export function DashboardScreen({
           gap: 8,
           flexShrink: 0,
         }}>
-          <span>⚠</span>
+          <span>&#x26A0;</span>
           <span>
             Agent down: {unhealthyProjects.map(p => p.name).join(', ')} — heartbeat stale
           </span>
@@ -225,14 +253,30 @@ export function DashboardScreen({
 
       {/* Session list */}
       <div style={{ flex: 1, overflowY: 'auto' }}>
-        {displayed.length === 0 ? (
+        {sortedGroups.length === 0 || sortedGroups.every(g => g.sessions.length === 0) ? (
+          // Empty state
           <div style={{
             display: 'flex',
             flexDirection: 'column',
             height: '100%',
             padding: '16px 0',
           }}>
-            {activeGroup === 'all' && projects.length > 0 ? (
+            {filterProjectId ? (
+              // Filter active + no sessions in that project
+              <div style={{
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                color: 'var(--text2)',
+              }}>
+                <div style={{ fontSize: 18, fontWeight: 600, color: 'var(--text)' }}>No Sessions</div>
+                <div style={{ fontSize: 14 }}>No sessions in this project</div>
+              </div>
+            ) : projects.length > 0 ? (
+              // No sessions but projects exist — show project list
               <>
                 <div style={{
                   fontSize: 12,
@@ -266,9 +310,9 @@ export function DashboardScreen({
                       gap: 10,
                     }}
                   >
-                    <span style={{ fontSize: 16 }}>📁</span>
+                    <span style={{ fontSize: 16 }}>&#x1F4C1;</span>
                     <span style={{ flex: 1, color: 'var(--text)', fontSize: 15, fontWeight: 500 }}>{p.name}</span>
-                    <span style={{ color: 'var(--text3)', fontSize: 18 }}>›</span>
+                    <span style={{ color: 'var(--text3)', fontSize: 18 }}>&#x203A;</span>
                   </button>
                 ))}
                 <div style={{ fontSize: 14, color: 'var(--text2)', padding: '12px 16px' }}>
@@ -276,6 +320,7 @@ export function DashboardScreen({
                 </div>
               </>
             ) : (
+              // No projects at all
               <div style={{
                 flex: 1,
                 display: 'flex',
@@ -286,41 +331,58 @@ export function DashboardScreen({
                 color: 'var(--text2)',
               }}>
                 <div style={{ fontSize: 18, fontWeight: 600, color: 'var(--text)' }}>No Sessions</div>
-                <div style={{ fontSize: 14 }}>
-                  {activeGroup !== 'all' ? 'No sessions in this group' : 'Tap + to start a Claude session'}
-                </div>
+                <div style={{ fontSize: 14 }}>Tap + to start a Claude session</div>
               </div>
             )}
           </div>
         ) : (
-          displayed.map(({ session, projectName }) => (
-            <button
-              key={session.id}
-              onClick={() => onSelectSession(session.id)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                width: '100%',
-                padding: '12px 16px',
-                borderBottom: '1px solid var(--border)',
-                background: 'none',
-                textAlign: 'left',
-                gap: 12,
-              }}
-            >
-              <StatusDot state={session.state as 'idle' | 'running' | 'requires_action' | 'restarting' | 'failed' | 'updating'} size={12} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ color: 'var(--text)', fontWeight: 500, fontSize: 15, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {session.name || projectName}
-                </div>
-                <div style={{ color: 'var(--text2)', fontSize: 13, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {STATE_LABELS[session.state] ?? session.state}
-                  {session.cwd ? ` · ${shortenPath(session.cwd)}` : (session.name ? ` · ${projectName}` : '')}
-                </div>
+          // Session list — grouped by project when >1 project visible, flat otherwise
+          <div>
+            {sortedGroups.map(({ project, sessions }) => (
+              <div key={project.id}>
+                {showProjectHeaders && (
+                  <div style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.5px',
+                    color: 'var(--text2)',
+                    padding: '8px 16px 4px',
+                  }}>
+                    {project.name}
+                  </div>
+                )}
+                {sessions.map((session: SessionVM) => (
+                  <button
+                    key={session.id}
+                    onClick={() => onSelectSession(session.id)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      width: '100%',
+                      padding: '12px 16px',
+                      borderBottom: '1px solid var(--border)',
+                      background: 'none',
+                      textAlign: 'left',
+                      gap: 12,
+                    }}
+                  >
+                    <StatusDot state={session.state as 'idle' | 'running' | 'requires_action' | 'restarting' | 'failed' | 'updating'} size={12} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ color: 'var(--text)', fontWeight: 500, fontSize: 15, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {session.name || project.name}
+                      </div>
+                      <div style={{ color: 'var(--text2)', fontSize: 13, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {STATE_LABELS[session.state] ?? session.state}
+                        {session.cwd ? ` \u00B7 ${shortenPath(session.cwd)}` : (session.name ? ` \u00B7 ${project.name}` : '')}
+                      </div>
+                    </div>
+                    <span style={{ color: 'var(--text3)', fontSize: 18 }}>&#x203A;</span>
+                  </button>
+                ))}
               </div>
-              <span style={{ color: 'var(--text3)', fontSize: 18 }}>›</span>
-            </button>
-          ))
+            ))}
+          </div>
         )}
       </div>
 
@@ -370,6 +432,15 @@ export function DashboardScreen({
               // session-agent not available — project was still created, user can tap it later
             }
           }}
+        />
+      )}
+
+      {showFilterSheet && (
+        <ProjectFilterSheet
+          projects={projects}
+          activeFilterId={filterProjectId}
+          onSelect={handleFilterSelect}
+          onClose={() => setShowFilterSheet(false)}
         />
       )}
     </div>
