@@ -212,6 +212,7 @@ jobs:
             --set "global.imagePullSecrets[0]=ghcr-pull-secret" \
             --set controlPlane.config.devSeed=true \
             --set controlPlane.devOAuthToken="${DEV_OAUTH_TOKEN}" \
+            --set controlPlane.externalUrl="https://mclaude.internal" \
             --set ingress.className=traefik \
             --set ingress.host="mclaude.internal" \
             --namespace "mclaude-system" \
