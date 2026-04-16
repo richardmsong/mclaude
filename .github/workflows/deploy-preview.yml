@@ -215,6 +215,7 @@ jobs:
             --set "global.imagePullSecrets[0]=ghcr-pull-secret" \
             --set controlPlane.migrations.enabled=false \
             --set controlPlane.config.devSeed=true \
+            --set controlPlane.externalUrl="https://${PREVIEW_HOST}" \
             --set ingress.className=traefik \
             --set ingress.host="${PREVIEW_HOST}" \
             --namespace "mclaude-system" \
