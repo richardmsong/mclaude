@@ -375,24 +375,26 @@ At session start, the session-agent sets up `gh` and `glab` as git credential he
 
 1. **Symlink PVC config:** Remove any pre-existing `~/.config/` directory (`rm -rf ~/.config/` — safe because `$HOME` is an emptyDir, fresh each boot). If `/data/.config/` exists (PVC-persisted from prior session), symlink via `ln -s /data/.config/ ~/.config/`. If not, create `/data/.config/` then symlink. This preserves manual `gh auth login` / `glab auth login` across pod restarts.
 
-2. **Merge managed tokens into CLI configs:**
+2. **Initialize `gh` config for headless operation:** Before writing `hosts.yml` or running any `gh` command, ensure `~/.config/gh/config.yml` exists with at least `version: "1"`. This tells `gh` CLI 2.40+ that the config is already in multi-account format, preventing a "config migration" that requires D-Bus keyring access (unavailable in Alpine containers). If `config.yml` already exists (manual `gh config set` from a prior session on PVC), do not overwrite it — only create if missing.
+
+3. **Merge managed tokens into CLI configs:**
    - Read `gh-hosts.yml` from Secret mount (`/home/node/.user-secrets/gh-hosts.yml`)
    - Read existing `~/.config/gh/hosts.yml` (may have entries from manual `gh auth login`)
    - **Merge strategy:** For each host in the Secret's `gh-hosts.yml`, add/update the managed accounts in the existing file. Do NOT remove accounts that are only in the existing file (those are from manual `gh auth login`). If a managed account and a manual account have the same username on the same host, the managed token wins (overwrite).
    - Same merge for `glab-config.yml` → `~/.config/glab-cli/config.yml`
 
-3. **Register credential helpers:**
+4. **Register credential helpers:**
    - Run `gh auth setup-git` — registers `gh` as git's credential helper for all hosts in `~/.config/gh/hosts.yml`
    - Run `glab auth setup-git` — same for GitLab hosts
 
-4. **Switch to project identity:** If `GIT_IDENTITY_ID` env var is set (from the MCProject CRD):
+5. **Switch to project identity:** If `GIT_IDENTITY_ID` env var is set (from the MCProject CRD):
    - Parse `~/.config/gh/hosts.yml` to find which host has a `users:` entry matching this connection's username. The mapping from connection ID → username is embedded in the `gh-hosts.yml` via a YAML comment or looked up from the `conn-{id}-username` key in the Secret (see below).
    - Run `gh auth switch --user {username} --hostname {host}` (GitHub)
    - This makes `gh auth git-credential` return this specific account's token for this host
 
 **Connection metadata keys:** The `conn-{connection_id}-username` keys in `user-secrets` are written by the same code path that writes the token — the OAuth callback handler and the PAT add handler both write `conn-{id}-token` and `conn-{id}-username` to the Secret in a single patch. The `reconcileUserCLIConfig` function also ensures these keys exist (backfill on startup, cleanup on disconnect). The session-agent reads `conn-{GIT_IDENTITY_ID}-username` to resolve the connection UUID to a username, then looks up which host in `hosts.yml` has that username to construct the `gh auth switch` command.
 
-5. **Proceed with normal session setup** (clone if needed, NATS connection, etc.)
+6. **Proceed with normal session setup** (clone if needed, NATS connection, etc.)
 
 **Before each git operation (clone, fetch, push, worktree add):**
 
