@@ -367,7 +367,11 @@ export function App() {
     // Use natsUrl from login response; fall back to ws(s)://host/nats
     const natsUrl = tokens.natsUrl
       ?? serverUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:') + '/nats'
-    await natsClient.connect({ url: natsUrl, jwt: tokens.jwt, nkeySeed: tokens.nkeySeed })
+    try {
+      await natsClient.connect({ url: natsUrl, jwt: tokens.jwt, nkeySeed: tokens.nkeySeed })
+    } catch (err) {
+      throw new Error(`Login succeeded but could not connect to messaging (${natsUrl}): ${err instanceof Error ? err.message : err}`)
+    }
     setConnected(true)
     freshStore.startRefreshLoop()
     setAuthStore(freshStore)
