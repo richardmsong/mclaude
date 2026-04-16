@@ -79,6 +79,10 @@ spec:
               value: {{ include "mclaude.fullname" . | quote }}
             - name: NATS_URL
               value: "nats://{{ include "mclaude.fullname" . }}-nats:{{ .Values.nats.service.clientPort }}"
+            {{- if .Values.controlPlane.config.natsWsUrl }}
+            - name: NATS_WS_URL
+              value: {{ .Values.controlPlane.config.natsWsUrl | quote }}
+            {{- end }}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
