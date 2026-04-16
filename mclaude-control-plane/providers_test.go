@@ -860,3 +860,36 @@ func TestDetectPATProvider_GitHubAuth401ThenGitLab404ReportsInvalidToken(t *test
 		t.Errorf("got 'could not reach provider' — auth error was incorrectly cleared by 404: %s", err.Error())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Token exchange — GitHub error body with HTTP 200
+// ---------------------------------------------------------------------------
+
+func TestExchangeCode_GitHubErrorBody(t *testing.T) {
+	// GitHub always returns HTTP 200 even for errors.
+	// The error details are in the JSON body.
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+			"error":             "bad_verification_code",
+			"error_description": "The code passed is incorrect or expired.",
+		})
+	}))
+	defer mock.Close()
+
+	p := &ProviderConfig{
+		ID:           "github",
+		Type:         "github",
+		BaseURL:      mock.URL,
+		ClientID:     "client-id",
+		ClientSecret: "client-secret",
+	}
+	_, err := exchangeCode(p, "bad-code", mock.URL+"/callback")
+	if err == nil {
+		t.Fatal("expected error for GitHub error body, got nil")
+	}
+	if !strings.Contains(err.Error(), "bad_verification_code") {
+		t.Errorf("expected error to contain 'bad_verification_code', got: %s", err.Error())
+	}
+}
