@@ -132,7 +132,8 @@ Value: `ProjectState`
   "sessionCount": 0,
   "worktrees": ["string"],
   "createdAt": "RFC3339",
-  "lastActiveAt": "RFC3339"
+  "lastActiveAt": "RFC3339",
+  "gitIdentityId": "string | null"
 }
 ```
 
@@ -333,8 +334,13 @@ Contains all per-user resources below.
 |-----|-------|-------------|
 | `nats-creds` | NATS credentials file (JWT + NKey seed) | Session-agent NATS auth |
 | `oauth-token` | OAuth bearer token (optional) | From DEV_OAUTH_TOKEN env |
+| `gh-hosts.yml` | `gh` CLI hosts config (YAML) | Reconciler-managed GitHub credential helper config |
+| `glab-config.yml` | `glab` CLI config (YAML) | Reconciler-managed GitLab credential helper config |
+| `conn-{id}-token` | OAuth access token or PAT | One per `oauth_connections` row |
+| `conn-{id}-refresh-token` | OAuth refresh token (GitLab only) | Rotated on each refresh cycle |
+| `conn-{id}-username` | Provider username (plain text) | Used by session-agent to resolve `GIT_IDENTITY_ID` → username |
 
-Writers: reconciler (`reconcileSecrets`)
+Writers: reconciler (`reconcileSecrets`), control-plane OAuth callback + PAT handler + `reconcileUserCLIConfig`
 Readers: session-agent pod (mounted read-only at `/home/node/.user-secrets`)
 
 ### ConfigMap: `user-config` (in `mclaude-{userId}`)
