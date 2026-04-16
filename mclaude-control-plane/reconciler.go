@@ -296,49 +296,26 @@ func (r *MCProjectReconciler) reconcileSecrets(ctx context.Context, mcp *MCProje
 	return nil
 }
 
-// reconcileDeployment ensures the project PVC, nix PVC, and Deployment exist.
-// Per docs/plan-graceful-upgrades.md, all Deployments use the Recreate strategy
-// so the old pod exits before the new pod starts during image upgrades.
-func (r *MCProjectReconciler) reconcileDeployment(ctx context.Context, mcp *MCProject, userNs string, tpl *sessionAgentTpl) error {
+// buildPodTemplate constructs the full PodTemplateSpec for the session-agent Deployment.
+// It discovers imagePullSecrets dynamically by listing dockerconfigjson Secrets in userNs.
+// This is called by both the create path and the update path of reconcileDeployment so both
+// paths always produce the same, fully-synced pod template.
+func (r *MCProjectReconciler) buildPodTemplate(ctx context.Context, mcp *MCProject, userNs string, tpl *sessionAgentTpl) corev1.PodTemplateSpec {
 	projectID := mcp.Spec.ProjectID
 	userID := mcp.Spec.UserID
 	gitURL := mcp.Spec.GitURL
 	gitIdentityID := mcp.Spec.GitIdentityID
 
-	if err := r.ensurePVCCR(ctx, mcp, userNs, "project-"+projectID, tpl.projectPvcSize, tpl.projectPvcStorageClass); err != nil {
-		return fmt.Errorf("project pvc: %w", err)
-	}
-	if err := r.ensurePVCCR(ctx, mcp, userNs, "nix-"+projectID, tpl.nixPvcSize, tpl.nixPvcStorageClass); err != nil {
-		return fmt.Errorf("nix pvc: %w", err)
-	}
-
-	deployName := "project-" + projectID
-	existing := &appsv1.Deployment{}
-	err := r.client.Get(ctx, types.NamespacedName{Name: deployName, Namespace: userNs}, existing)
-	if err == nil {
-		// Update path: set image and migrate to Recreate strategy.
-		if len(existing.Spec.Template.Spec.Containers) > 0 {
-			existing.Spec.Template.Spec.Containers[0].Image = tpl.image
-		}
-		existing.Spec.Strategy = appsv1.DeploymentStrategy{
-			Type: appsv1.RecreateDeploymentStrategyType,
-		}
-		return r.client.Update(ctx, existing)
-	}
-	if !k8serrors.IsNotFound(err) {
-		return fmt.Errorf("get deployment: %w", err)
-	}
-
-	replicas := int32(1)
 	grace := tpl.terminationGracePeriodSeconds
 	runAsUser := int64(1000)
 	fsGroup := int64(1000)
 	runAsNonRoot := true
 
+	// Re-discover imagePullSecrets from the user namespace.
 	var imagePullSecrets []corev1.LocalObjectReference
-	nsList := &corev1.SecretList{}
-	if listErr := r.client.List(ctx, nsList, client.InNamespace(userNs)); listErr == nil {
-		for _, s := range nsList.Items {
+	secretList := &corev1.SecretList{}
+	if listErr := r.client.List(ctx, secretList, client.InNamespace(userNs)); listErr == nil {
+		for _, s := range secretList.Items {
 			if s.Type == corev1.SecretTypeDockerConfigJson {
 				imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{Name: s.Name})
 			}
@@ -358,6 +335,95 @@ func (r *MCProjectReconciler) reconcileDeployment(ctx context.Context, mcp *MCPr
 	if gitIdentityID != "" {
 		env = append(env, corev1.EnvVar{Name: "GIT_IDENTITY_ID", Value: gitIdentityID})
 	}
+
+	return corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels: map[string]string{
+				"app":     "mclaude-project",
+				"project": projectID,
+			},
+		},
+		Spec: corev1.PodSpec{
+			ServiceAccountName:            "mclaude-sa",
+			ImagePullSecrets:              imagePullSecrets,
+			TerminationGracePeriodSeconds: &grace,
+			SecurityContext: &corev1.PodSecurityContext{
+				RunAsNonRoot: &runAsNonRoot,
+				RunAsUser:    &runAsUser,
+				FSGroup:      &fsGroup,
+			},
+			Volumes: []corev1.Volume{
+				{Name: "project-data", VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "project-" + projectID},
+				}},
+				{Name: "nix-store", VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "nix-" + projectID},
+				}},
+				{Name: "claude-home", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				{Name: "user-config", VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "user-config"},
+					},
+				}},
+				{Name: "user-secrets", VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{SecretName: "user-secrets"},
+				}},
+			},
+			Containers: []corev1.Container{
+				{
+					Name:            "session-agent",
+					Image:           tpl.image,
+					ImagePullPolicy: tpl.imagePullPolicy,
+					Env:             env,
+					Resources:       tpl.resources,
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: "project-data", MountPath: "/data"},
+						{Name: "nix-store", MountPath: "/nix"},
+						{Name: "claude-home", MountPath: "/home/node/.claude"},
+						{Name: "user-config", MountPath: "/home/node/.claude-seed", ReadOnly: true},
+						{Name: "user-secrets", MountPath: "/home/node/.user-secrets", ReadOnly: true},
+					},
+				},
+			},
+		},
+	}
+}
+
+// reconcileDeployment ensures the project PVC, nix PVC, and Deployment exist.
+// Per docs/plan-graceful-upgrades.md, all Deployments use the Recreate strategy
+// so the old pod exits before the new pod starts during image upgrades.
+// Per docs/plan-reconciler-env-sync.md, the update path rebuilds the full pod
+// template (env vars, image, volumes, imagePullSecrets) so spec drift is corrected
+// on every reconcile cycle.
+func (r *MCProjectReconciler) reconcileDeployment(ctx context.Context, mcp *MCProject, userNs string, tpl *sessionAgentTpl) error {
+	projectID := mcp.Spec.ProjectID
+
+	if err := r.ensurePVCCR(ctx, mcp, userNs, "project-"+projectID, tpl.projectPvcSize, tpl.projectPvcStorageClass); err != nil {
+		return fmt.Errorf("project pvc: %w", err)
+	}
+	if err := r.ensurePVCCR(ctx, mcp, userNs, "nix-"+projectID, tpl.nixPvcSize, tpl.nixPvcStorageClass); err != nil {
+		return fmt.Errorf("nix pvc: %w", err)
+	}
+
+	deployName := "project-" + projectID
+	existing := &appsv1.Deployment{}
+	err := r.client.Get(ctx, types.NamespacedName{Name: deployName, Namespace: userNs}, existing)
+	if err == nil {
+		// Update path: rebuild the full pod template so env vars, image, volumes,
+		// and imagePullSecrets are all synced to the current MCProject spec.
+		// K8s compares the pod template hash and only triggers a rolling restart
+		// if something actually changed.
+		existing.Spec.Template = r.buildPodTemplate(ctx, mcp, userNs, tpl)
+		existing.Spec.Strategy = appsv1.DeploymentStrategy{
+			Type: appsv1.RecreateDeploymentStrategyType,
+		}
+		return r.client.Update(ctx, existing)
+	}
+	if !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("get deployment: %w", err)
+	}
+
+	replicas := int32(1)
 
 	// Create path: Recreate strategy so old pod exits before new pod starts.
 	deploy := &appsv1.Deployment{
@@ -380,57 +446,7 @@ func (r *MCProjectReconciler) reconcileDeployment(ctx context.Context, mcp *MCPr
 					"project": projectID,
 				},
 			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app":     "mclaude-project",
-						"project": projectID,
-					},
-				},
-				Spec: corev1.PodSpec{
-					ServiceAccountName:            "mclaude-sa",
-					ImagePullSecrets:              imagePullSecrets,
-					TerminationGracePeriodSeconds: &grace,
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: &runAsNonRoot,
-						RunAsUser:    &runAsUser,
-						FSGroup:      &fsGroup,
-					},
-					Volumes: []corev1.Volume{
-						{Name: "project-data", VolumeSource: corev1.VolumeSource{
-							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "project-" + projectID},
-						}},
-						{Name: "nix-store", VolumeSource: corev1.VolumeSource{
-							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "nix-" + projectID},
-						}},
-						{Name: "claude-home", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-						{Name: "user-config", VolumeSource: corev1.VolumeSource{
-							ConfigMap: &corev1.ConfigMapVolumeSource{
-								LocalObjectReference: corev1.LocalObjectReference{Name: "user-config"},
-							},
-						}},
-						{Name: "user-secrets", VolumeSource: corev1.VolumeSource{
-							Secret: &corev1.SecretVolumeSource{SecretName: "user-secrets"},
-						}},
-					},
-					Containers: []corev1.Container{
-						{
-							Name:            "session-agent",
-							Image:           tpl.image,
-							ImagePullPolicy: tpl.imagePullPolicy,
-							Env:             env,
-							Resources:       tpl.resources,
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: "project-data", MountPath: "/data"},
-								{Name: "nix-store", MountPath: "/nix"},
-								{Name: "claude-home", MountPath: "/home/node/.claude"},
-								{Name: "user-config", MountPath: "/home/node/.claude-seed", ReadOnly: true},
-								{Name: "user-secrets", MountPath: "/home/node/.user-secrets", ReadOnly: true},
-							},
-						},
-					},
-				},
-			},
+			Template: r.buildPodTemplate(ctx, mcp, userNs, tpl),
 		},
 	}
 
