@@ -150,12 +150,14 @@ func main() {
 	// NATS session lifecycle, after NATS connection is established).
 	// Only runs in k8s mode (when --mode k8s) where user-secrets Secret is mounted.
 	// In standalone/laptop mode the Secret mount is not present; skip silently.
+	var credMgr *CredentialManager
+	var gitIdentityID string
 	if *flagMode == "k8s" {
 		homeDir, _ := os.UserHomeDir()
-		credMgr := NewCredentialManager(homeDir, log.Logger)
+		credMgr = NewCredentialManager(homeDir, log.Logger)
 
 		gitURL := os.Getenv("GIT_URL")
-		gitIdentityID := os.Getenv("GIT_IDENTITY_ID")
+		gitIdentityID = os.Getenv("GIT_IDENTITY_ID")
 
 		log.Info().Str("gitURL", gitURL).Str("gitIdentityID", gitIdentityID).Msg("setting up git credentials")
 
@@ -185,7 +187,7 @@ func main() {
 		}
 	}
 
-	agent, err := NewAgent(nc, userID, projectID, claudePath, dataDir, log.Logger, m)
+	agent, err := NewAgent(nc, userID, projectID, claudePath, dataDir, log.Logger, m, credMgr, gitIdentityID)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create agent")
 	}

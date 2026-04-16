@@ -62,13 +62,17 @@ type Agent struct {
 	// recovery. clearUpdatingState() uses this to write idle to KV after consumers
 	// are attached, since the in-memory state is already idle.
 	pendingUpdatingIDs map[string]bool
+	// credMgr refreshes git credentials before git operations (nil in dev/laptop mode).
+	credMgr *CredentialManager
+	// gitIdentityID is the GIT_IDENTITY_ID for credential identity selection.
+	gitIdentityID string
 }
 
 // NewAgent creates an Agent connected to the given NATS server.
 // m may be nil (no-op metrics) — pass NewMetrics(reg) in production.
 // dataDir is the project PVC mount point (e.g. "/data"); pass "" to skip git
 // worktree operations (dev/laptop mode without a bare repo).
-func NewAgent(nc *nats.Conn, userID, projectID, claudePath, dataDir string, log zerolog.Logger, m *Metrics) (*Agent, error) {
+func NewAgent(nc *nats.Conn, userID, projectID, claudePath, dataDir string, log zerolog.Logger, m *Metrics, credMgr *CredentialManager, gitIdentityID string) (*Agent, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return nil, fmt.Errorf("jetstream: %w", err)
@@ -121,19 +125,21 @@ func NewAgent(nc *nats.Conn, userID, projectID, claudePath, dataDir string, log 
 	}
 
 	agent := &Agent{
-		sessions:   make(map[string]*Session),
-		terminals:  make(map[string]*TerminalSession),
-		nc:         nc,
-		js:         js,
-		sessKV:     sessKV,
-		projKV:     projKV,
-		hbKV:       hbKV,
-		userID:     userID,
-		projectID:  projectID,
-		claudePath: claudePath,
-		dataDir:    dataDir,
-		log:        log,
-		metrics:    m,
+		sessions:      make(map[string]*Session),
+		terminals:     make(map[string]*TerminalSession),
+		nc:            nc,
+		js:            js,
+		sessKV:        sessKV,
+		projKV:        projKV,
+		hbKV:          hbKV,
+		userID:        userID,
+		projectID:     projectID,
+		claudePath:    claudePath,
+		dataDir:       dataDir,
+		log:           log,
+		metrics:       m,
+		credMgr:       credMgr,
+		gitIdentityID: gitIdentityID,
 	}
 
 	// Wire NATS reconnect counter.
@@ -1191,8 +1197,13 @@ type controlResponse struct {
 }
 
 // gitWorktreeAdd runs `git -C {repoPath} worktree add {worktreePath} {branch}`.
+// Before running, it refreshes git credentials if the managed config has changed
+// (per spec: re-read managed configs before each git operation).
 // Returns nil if the command succeeds.
 func (a *Agent) gitWorktreeAdd(repoPath, worktreePath, branch string) error {
+	if a.credMgr != nil {
+		_ = a.credMgr.RefreshIfChanged(a.gitIdentityID)
+	}
 	cmd := exec.Command("git", "-C", repoPath, "worktree", "add", worktreePath, branch)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
