@@ -698,6 +698,13 @@ Settings rows use a grouped card style (iOS Settings aesthetic):
 
 "Active Host" dropdown: selecting a host reconnects the WebSocket filtered to that host. "All Hosts" option shows sessions from all connected hosts.
 
+**Error handling — general rule:**
+Every section that loads data from the server must surface failures visibly. Silent catches that swallow errors and show an empty/default state are not acceptable — the user cannot distinguish "no data" from "failed to load."
+
+Specific rules:
+- **Git Providers section**: if `getMe()` or `getAdminProviders()` fails, show a red error line in the section (e.g. "Failed to load providers") instead of "No providers configured." Always `console.error` the underlying error for dev-tools debugging.
+- **Any async load**: on failure, log to `console.error` with the error object. Show an inline error in the relevant section. Never silently fall back to an empty state.
+
 ---
 
 ## Screen: User Management (admin only)
