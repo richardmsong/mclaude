@@ -115,8 +115,8 @@ function GitProvidersSection({ authClient }: GitProvidersSectionProps) {
       ])
       setConnectedProviders(me.connectedProviders)
       setAdminProviders(admins)
-    } catch {
-      // silently ignore — user may not have providers configured
+    } catch (err) {
+      console.error('loadProviders failed:', err)
     } finally {
       setLoading(false)
     }
