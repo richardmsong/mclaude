@@ -191,13 +191,12 @@ export function App() {
 
   // On mount: restore session from localStorage so refresh doesn't log the user out
   useEffect(() => {
-    const ac = new AuthClient(window.location.origin)
-    const tokens = ac.loadFromStorage()
+    const tokens = authClient.loadFromStorage()
     if (!tokens) return
     const serverUrl = window.location.origin
     const natsUrl = tokens.natsUrl
       ?? serverUrl.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:') + '/nats'
-    const freshStore = new AuthStore(ac, natsClient)
+    const freshStore = new AuthStore(authClient, natsClient)
     freshStore.restoreTokens(tokens)
     natsClient.connect({ url: natsUrl, jwt: tokens.jwt, nkeySeed: tokens.nkeySeed })
       .then(() => {
@@ -207,7 +206,7 @@ export function App() {
       })
       .catch(() => {
         // Stored tokens invalid/expired — clear and show login
-        ac.clearTokens()
+        authClient.clearTokens()
       })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -359,10 +358,9 @@ export function App() {
   // ── Login handler ─────────────────────────────────────────────────────
   const handleConnect = async (email: string, password: string) => {
     const serverUrl = window.location.origin
-    const ac = new AuthClient(serverUrl)
-    const freshStore = new AuthStore(ac, natsClient)
+    const freshStore = new AuthStore(authClient, natsClient)
     await freshStore.login(email, password)
-    const tokens = ac.getStoredTokens()
+    const tokens = authClient.getStoredTokens()
     if (!tokens) throw new Error('Login did not return tokens')
     // Use natsUrl from login response; fall back to ws(s)://host/nats
     const natsUrl = tokens.natsUrl
