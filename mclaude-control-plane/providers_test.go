@@ -831,3 +831,32 @@ func TestDetectPATProvider_404IsConnectivityError(t *testing.T) {
 		t.Errorf("want 'could not reach provider' for 404, got: %s", err.Error())
 	}
 }
+
+func TestDetectPATProvider_GitHubAuth401ThenGitLab404ReportsInvalidToken(t *testing.T) {
+	// Regression test: GitHub returns 401 (invalid token) and then the GitLab
+	// endpoint on the same base URL returns 404. The old code let the 404
+	// overwrite lastErr so the caller saw "could not reach provider" instead of
+	// "invalid token". The fix uses sawAuthError which is never cleared by a
+	// subsequent non-auth error.
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v3/user" {
+			// GitHub endpoint: 401 — token is invalid.
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		// GitLab endpoint (/api/v4/user) — 404, not a GitHub server.
+		http.NotFound(w, r)
+	}))
+	defer mock.Close()
+
+	_, _, err := detectPATProvider(mock.URL, "invalid_github_token")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid token") {
+		t.Errorf("want 'invalid token' when GitHub returns 401 followed by GitLab 404, got: %s", err.Error())
+	}
+	if strings.Contains(err.Error(), "could not reach provider") {
+		t.Errorf("got 'could not reach provider' — auth error was incorrectly cleared by 404: %s", err.Error())
+	}
+}
