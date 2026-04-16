@@ -283,12 +283,12 @@ func (cm *CredentialManager) Setup(gitIdentityID string) error {
 // re-runs merge + setup-git if the content has changed. Called before each
 // git operation.
 func (cm *CredentialManager) RefreshIfChanged(gitIdentityID string) error {
-	changed, err := cm.mergeAndSetup()
+	_, err := cm.mergeAndSetup()
 	if err != nil {
 		cm.log.Warn().Err(err).Msg("credential helper refresh failed (non-fatal)")
 		return nil // non-fatal
 	}
-	if changed && gitIdentityID != "" {
+	if gitIdentityID != "" {
 		if switchErr := cm.switchProjectIdentity(gitIdentityID); switchErr != nil {
 			cm.log.Warn().Err(switchErr).Str("gitIdentityID", gitIdentityID).
 				Msg("gh auth switch failed after refresh (non-fatal)")
@@ -369,21 +369,24 @@ func (cm *CredentialManager) mergeAndSetup() (bool, error) {
 
 	var mergeErr error
 
+	// Ensure ~/.config/gh/ exists and config.yml is present unconditionally.
+	// This guarantees gh 2.40+ sees version: "1" and skips the D-Bus keyring
+	// migration on Alpine even when no managed gh-hosts.yml is present.
+	ghDir := filepath.Join(cm.homeDir, ".config", "gh")
+	if err := os.MkdirAll(ghDir, 0755); err == nil {
+		ghMainConfig := filepath.Join(ghDir, "config.yml")
+		if _, statErr := os.Stat(ghMainConfig); os.IsNotExist(statErr) {
+			if writeErr := os.WriteFile(ghMainConfig, []byte("version: \"1\"\n"), 0600); writeErr != nil {
+				cm.log.Warn().Err(writeErr).Str("path", ghMainConfig).Msg("write gh config.yml failed")
+			}
+		}
+	}
+
 	// Merge gh-hosts.yml.
 	if managedGHHosts != nil {
-		ghConfigPath := filepath.Join(cm.homeDir, ".config", "gh", "hosts.yml")
-		ghDir := filepath.Dir(ghConfigPath)
+		ghConfigPath := filepath.Join(ghDir, "hosts.yml")
 
 		if err := os.MkdirAll(ghDir, 0755); err == nil {
-			// Write config.yml BEFORE hosts.yml so that gh 2.40+ sees
-			// version: "1" and skips the D-Bus keyring migration on Alpine.
-			ghMainConfig := filepath.Join(ghDir, "config.yml")
-			if _, statErr := os.Stat(ghMainConfig); os.IsNotExist(statErr) {
-				if writeErr := os.WriteFile(ghMainConfig, []byte("version: \"1\"\n"), 0600); writeErr != nil {
-					cm.log.Warn().Err(writeErr).Str("path", ghMainConfig).Msg("write gh config.yml failed")
-				}
-			}
-
 			existing, _ := os.ReadFile(ghConfigPath)
 			merged, err := MergeGHHostsYAML(existing, managedGHHosts)
 			if err != nil {
