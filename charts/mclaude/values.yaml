@@ -83,6 +83,23 @@ postgres:
 ## ---------------------------------------------------------------------------
 controlPlane:
   enabled: true
+  ## External URL for this deployment (e.g. https://mclaude.internal).
+  ## Required — control-plane exits on startup if EXTERNAL_URL is empty.
+  ## The Helm template uses `required` to fail at install time if unset.
+  ## For preview environments, CI passes --set controlPlane.externalUrl=...
+  externalUrl: ""
+  ## OAuth provider instances. Each entry is a provider the control-plane
+  ## manages OAuth flows for. Empty by default — providers are opt-in.
+  ## See docs/plan-github-oauth.md "Instance configuration" for full schema.
+  providers: []
+  # - id: github
+  #   type: github
+  #   displayName: GitHub
+  #   baseUrl: https://github.com
+  #   apiUrl: https://api.github.com
+  #   clientId: "Ov23li..."
+  #   clientSecretRef: github-oauth-secret   # K8s Secret name, key: client-secret
+  #   scopes: "repo read:org gist workflow read:user user:email"
   image:
     registry: ghcr.io
     repository: mclaude-project/mclaude-control-plane
