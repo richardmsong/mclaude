@@ -372,13 +372,23 @@ func (cm *CredentialManager) mergeAndSetup() (bool, error) {
 	// Merge gh-hosts.yml.
 	if managedGHHosts != nil {
 		ghConfigPath := filepath.Join(cm.homeDir, ".config", "gh", "hosts.yml")
-		existing, _ := os.ReadFile(ghConfigPath)
+		ghDir := filepath.Dir(ghConfigPath)
 
-		merged, err := MergeGHHostsYAML(existing, managedGHHosts)
-		if err != nil {
-			mergeErr = err
-		} else {
-			if err := os.MkdirAll(filepath.Dir(ghConfigPath), 0755); err == nil {
+		if err := os.MkdirAll(ghDir, 0755); err == nil {
+			// Write config.yml BEFORE hosts.yml so that gh 2.40+ sees
+			// version: "1" and skips the D-Bus keyring migration on Alpine.
+			ghMainConfig := filepath.Join(ghDir, "config.yml")
+			if _, statErr := os.Stat(ghMainConfig); os.IsNotExist(statErr) {
+				if writeErr := os.WriteFile(ghMainConfig, []byte("version: \"1\"\n"), 0600); writeErr != nil {
+					cm.log.Warn().Err(writeErr).Str("path", ghMainConfig).Msg("write gh config.yml failed")
+				}
+			}
+
+			existing, _ := os.ReadFile(ghConfigPath)
+			merged, err := MergeGHHostsYAML(existing, managedGHHosts)
+			if err != nil {
+				mergeErr = err
+			} else {
 				if err := os.WriteFile(ghConfigPath, merged, 0600); err != nil {
 					cm.log.Warn().Err(err).Str("path", ghConfigPath).Msg("write gh hosts.yml failed")
 				}
