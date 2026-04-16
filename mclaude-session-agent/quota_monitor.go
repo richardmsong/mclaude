@@ -198,7 +198,7 @@ func (m *QuotaMonitor) run() {
 			}
 			m.lastU5 = qs.U5
 			m.lastR5 = qs.R5
-			if qs.HasData && qs.U5 >= m.cfg.Threshold && stopReason == "" {
+			if qs.HasData && m.cfg.Threshold > 0 && qs.U5 >= m.cfg.Threshold && stopReason == "" {
 				stopReason = "quota"
 				m.sendGracefulStop()
 				stopTimer = time.After(30 * time.Minute)
