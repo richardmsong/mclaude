@@ -37,6 +37,9 @@ spec:
                 gitUrl:
                   type: string
                   description: Optional git remote URL (empty for scratch projects)
+                gitIdentityId:
+                  type: string
+                  description: OAuth connection ID for git credential resolution
             status:
               type: object
               properties:
