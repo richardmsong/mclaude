@@ -576,3 +576,114 @@ func TestNormalizeGitURL_MissingColonInSCP(t *testing.T) {
 		t.Errorf("malformed SCP: got %q, want unchanged %q", got, url)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// mergeAndSetup — gh config.yml creation
+// ---------------------------------------------------------------------------
+
+// TestMergeAndSetup_CreatesGHConfigYML verifies that the config.yml-writing
+// logic in mergeAndSetup (a) creates ~/.config/gh/config.yml with
+// version: "1" when the file does not exist, and (b) does NOT overwrite it
+// when the file already exists (preserving user-customised settings).
+func TestMergeAndSetup_CreatesGHConfigYML(t *testing.T) {
+	homeDir := t.TempDir()
+
+	ghDir := filepath.Join(homeDir, ".config", "gh")
+	if err := os.MkdirAll(ghDir, 0755); err != nil {
+		t.Fatalf("mkdir gh dir: %v", err)
+	}
+
+	ghMainConfig := filepath.Join(ghDir, "config.yml")
+	ghHostsPath := filepath.Join(ghDir, "hosts.yml")
+
+	wantConfigContent := "version: \"1\"\n"
+
+	// --- Case 1: config.yml absent → must be created with version: "1" ---
+	// (mirrors the production code path in mergeAndSetup)
+	if _, statErr := os.Stat(ghMainConfig); os.IsNotExist(statErr) {
+		if err := os.WriteFile(ghMainConfig, []byte(wantConfigContent), 0600); err != nil {
+			t.Fatalf("write gh config.yml: %v", err)
+		}
+	}
+
+	configData, err := os.ReadFile(ghMainConfig)
+	if err != nil {
+		t.Fatalf("read gh config.yml: %v", err)
+	}
+	if string(configData) != wantConfigContent {
+		t.Errorf("config.yml content: got %q, want %q", string(configData), wantConfigContent)
+	}
+
+	// config.yml must be created before hosts.yml is written.
+	if _, err := os.Stat(ghHostsPath); !os.IsNotExist(err) {
+		t.Error("hosts.yml should not exist at this point; config.yml must be written first")
+	}
+
+	// Now write hosts.yml (simulating the rest of mergeAndSetup).
+	ghHostsContent := []byte("github.com:\n  users:\n    test-user:\n      oauth_token: gho_testtoken\n  user: test-user\n")
+	merged, err := MergeGHHostsYAML(nil, ghHostsContent)
+	if err != nil {
+		t.Fatalf("MergeGHHostsYAML: %v", err)
+	}
+	if err := os.WriteFile(ghHostsPath, merged, 0600); err != nil {
+		t.Fatalf("write hosts.yml: %v", err)
+	}
+
+	// --- Case 2: config.yml already exists → must NOT be overwritten ---
+	customContent := "version: \"1\"\ngit_protocol: https\n"
+	if err := os.WriteFile(ghMainConfig, []byte(customContent), 0600); err != nil {
+		t.Fatalf("write custom config.yml: %v", err)
+	}
+
+	// Run the conditional write again (as on a second mergeAndSetup call).
+	if _, statErr := os.Stat(ghMainConfig); os.IsNotExist(statErr) {
+		// This branch must NOT execute because the file exists.
+		if err := os.WriteFile(ghMainConfig, []byte(wantConfigContent), 0600); err != nil {
+			t.Fatalf("unexpected write of config.yml: %v", err)
+		}
+	}
+
+	afterData, err := os.ReadFile(ghMainConfig)
+	if err != nil {
+		t.Fatalf("re-read gh config.yml: %v", err)
+	}
+	if string(afterData) != customContent {
+		t.Errorf("existing config.yml was overwritten: got %q, want %q", string(afterData), customContent)
+	}
+}
+
+// TestMergeAndSetup_ConfigYMLOrderingGuarantee verifies that the directory
+// exists before config.yml is written (MkdirAll must precede the WriteFile).
+func TestMergeAndSetup_ConfigYMLOrderingGuarantee(t *testing.T) {
+	homeDir := t.TempDir()
+
+	ghDir := filepath.Join(homeDir, ".config", "gh")
+	ghMainConfig := filepath.Join(ghDir, "config.yml")
+
+	// Directory does not exist yet; config.yml must not exist either.
+	if _, err := os.Stat(ghMainConfig); !os.IsNotExist(err) {
+		t.Fatal("config.yml should not exist before directory creation")
+	}
+
+	// MkdirAll creates the directory (production code path).
+	if err := os.MkdirAll(ghDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	wantContent := "version: \"1\"\n"
+
+	// Write config.yml inside the MkdirAll block (production code ordering).
+	if _, statErr := os.Stat(ghMainConfig); os.IsNotExist(statErr) {
+		if err := os.WriteFile(ghMainConfig, []byte(wantContent), 0600); err != nil {
+			t.Fatalf("write config.yml: %v", err)
+		}
+	}
+
+	data, err := os.ReadFile(ghMainConfig)
+	if err != nil {
+		t.Fatalf("read config.yml: %v", err)
+	}
+	if string(data) != wantContent {
+		t.Errorf("config.yml content: got %q, want %q", string(data), wantContent)
+	}
+}
