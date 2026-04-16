@@ -67,7 +67,11 @@ Read the full section of every design doc that covers the area being changed. Co
 ## Step 2 — Classify the change
 
 **A — Bug (design doc correct, code wrong):**
-The design doc describes the desired behavior. The code doesn't match. Skip to step 4. Example: design doc says `natsUrl` is omitted when empty, code was returning the internal cluster URL.
+The design doc describes the desired behavior *in enough detail that someone reading only the spec could implement the fix*. The code simply diverges from what's written. Skip to step 4. Example: design doc says `natsUrl` is omitted when empty, code was returning the internal cluster URL.
+
+**Litmus test for A:** Can you point to a specific sentence in the spec that the fix restores compliance with? If yes → A. If the fix requires adding behavior, configuration, setup steps, or environmental prerequisites that the spec doesn't mention → C, even if the spec describes the desired *outcome*.
+
+"Spec says X should work" is not the same as "spec describes how X works." If the spec says `gh auth setup-git` registers credential helpers but doesn't describe the config prerequisites that make it succeed in headless containers, and the fix is to add those prerequisites — that's a spec gap (C), not a bug (A).
 
 **B — New feature (no design doc):**
 No design doc covers this feature. The user must run `/plan-feature` first to create the design doc. Do not write code without a spec. Tell the user:
@@ -76,9 +80,11 @@ No design doc covers this feature. Run /plan-feature <description> to create one
 ```
 
 **C — Behavior change or spec gap (design doc needs updating):**
-Either the design doc describes old behavior you're changing, OR the design doc is silent on behavior that should be specified (e.g. error handling, edge cases, loading states). In both cases: update the design doc first to describe the intended behavior, commit separately, then proceed to step 4. For non-trivial changes, ask the user to confirm before committing.
+Either the design doc describes old behavior you're changing, OR the design doc is silent on behavior that should be specified. In both cases: update the design doc first to describe the intended behavior, commit separately, then proceed to step 4. For non-trivial changes, ask the user to confirm before committing.
 
-A missing spec is NOT the same as "spec correct, code wrong" (A). If the spec doesn't say what should happen, classify as C and fill in the spec — don't skip to step 4 and leave the gap undocumented.
+Spec gaps include but are not limited to: error handling, edge cases, loading states, environmental prerequisites, configuration setup, platform-specific behavior, failure modes, and any mechanism the code needs but the spec doesn't describe.
+
+**Default to C.** A missing spec is NOT the same as "spec correct, code wrong" (A). If the spec doesn't say what should happen, classify as C and fill in the spec — don't skip to step 4 and leave the gap undocumented. When in doubt between A and C, choose C — the cost of an unnecessary spec update is near zero, the cost of an undocumented behavior is cumulative.
 
 **D — Refactor (behavior unchanged):**
 The design doc already describes the correct behavior. The code is restructured but externally identical. Skip to step 4. If the refactor reveals a spec gap (something undocumented), update the design doc first.
