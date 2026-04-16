@@ -171,6 +171,24 @@ Do not report the task complete until Playwright confirms the acceptance criteri
 
 ---
 
+## Master session write restrictions
+
+The master session (where `/feature-change` runs) may only write to:
+- **Design docs** (`docs/plan-*.md`, `docs/ui-spec.md`, `docs/feature-list.md`) — spec updates in step 3
+- **Skill files** (`.agent/skills/`) — process improvements
+- **Memory files** — feedback, project context
+
+The master session must **never** directly edit:
+- `mclaude-control-plane/` — use dev-harness
+- `mclaude-web/` — use dev-harness
+- `mclaude-session-agent/` — use dev-harness
+- `mclaude-cli/` — use dev-harness
+- `charts/mclaude/` — use dev-harness
+
+All implementation changes go through dev-harness subagents. The master session classifies, updates specs, orchestrates agents, and evaluates results — it does not write code, templates, or config.
+
+---
+
 ## Reference
 
 - `docs/plan-k8s-integration.md` — backend architecture, NATS subjects, KV
