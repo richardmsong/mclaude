@@ -28,8 +28,8 @@ Users connect their GitHub or GitLab account via OAuth so mclaude can clone priv
 | Running pods after connect | Live pickup via Secret mount sync | K8s auto-syncs Secret mounts (~1 min). Session-agent merges new tokens into CLI configs before next git operation. |
 | Post-redirect UX | Query params in redirect URL | Callback redirects to `{externalUrl}/?provider=github&connected=true&goto=settings`. SPA reads query params on page load, shows toast, navigates to the hash route, then cleans the query string via `history.replaceState`. Query params (not hash fragments) because HTTP redirects discard fragments. Full redirect (not popup) — works on mobile Safari. |
 | User PATs | Users can add their own provider instances via PAT | Covers GHES servers not admin-configured. User pastes a PAT in Settings, control-plane stores it in `user-secrets` Secret. No OAuth flow needed. |
-| Credential resolution | Credential helpers (`gh`/`glab`) with active account switching | `gh auth setup-git` / `glab auth setup-git` register CLI as git credential helper. `gh auth switch --user {username}` sets the active account per project. Git operations automatically use the active account's token. |
-| Multi-identity | Multiple accounts per hostname (GitHub only) | Users can connect `@rsong-work` and `@rsong-personal` to the same github.com. Per-project identity binding via `git_identity_id`. GitLab is limited to one identity per hostname — `glab` doesn't support per-host multi-account switching. |
+| Credential resolution | Credential helpers (`gh`/`glab`) with file-backed token selection | `gh auth setup-git` / `glab auth setup-git` register CLI as git credential helper. Session-agent writes the correct account's token in old single-account format per host. `gh auth git-credential get` reads the token from the file. No `gh auth switch` (requires D-Bus keyring on Linux). |
+| Multi-identity | Multiple accounts per hostname (GitHub only) | Users can connect `@rsong-work` and `@rsong-personal` to the same github.com. Per-project identity binding via `git_identity_id`. Session-agent writes the selected account's token to old-format `hosts.yml` (identity switching = file rewrite, not `gh auth switch`). GitLab is limited to one identity per hostname — `glab` doesn't support per-host multi-account switching. |
 | Credential mechanism | `gh`/`glab` credential helpers (not GIT_ASKPASS) | `gh auth setup-git` registers `gh` as git's credential helper for a given host. Git calls `gh auth git-credential` which returns the active account's token. Native, maintained by GitHub/GitLab, handles edge cases. |
 | CLI tool installation | `gh` and `glab` baked into session image as system dependencies | Required for credential helper model. `gh` via `apk` (Alpine community repo, 2.40+ for multi-account), `glab` via binary download (not in Alpine repos). Not via Nix — `/nix/` PVC mount hides image-layer packages. |
 | CLI config persistence | PVC-backed `~/.config/` | Symlink `/data/.config/` → `~/.config/` so `gh auth login` and `glab auth login` survive pod restarts. Manual CLI auth within sessions is respected. |
@@ -317,9 +317,22 @@ hosts:
     user: rsong
 ```
 
-The `user` field under each host marks the default active account. The reconciler picks the most recently connected account as the default. Per-project identity binding overrides this at session start via `gh auth switch`.
+The `user` field under each host marks the default active account. The reconciler picks the most recently connected account as the default. Per-project identity binding overrides this at session start by selecting the correct account's token.
 
-For hosts with only one account, the format is simplified (no `users` map needed — `gh` accepts both formats).
+**Secret format vs disk format:** The `gh-hosts.yml` key in the K8s Secret uses the multi-account `users:` format above — it stores ALL accounts for all hosts. The session-agent converts this to the **old single-account format** when writing to `~/.config/gh/hosts.yml`:
+
+```yaml
+github.com:
+    oauth_token: gho_abc123...
+    user: rsong-work
+    git_protocol: https
+```
+
+**Why old format:** `gh` CLI 2.40+ stores `users:` map tokens in the system keyring (via D-Bus), not in the config file. Alpine containers don't have D-Bus, so the `users:` format produces empty credentials. The old format stores the token directly in the file, which `gh auth git-credential get` reads correctly.
+
+**Identity selection:** The session-agent picks which account's token to write per host. If `GIT_IDENTITY_ID` is set, the matching account's token is used for that host. For other hosts (or when no identity is set), the `user:` default is used. This replaces `gh auth switch` — the active token is always the one in the file.
+
+For hosts with only one account, the conversion is trivial (extract the single user's `oauth_token`).
 
 **GitLab token refresh:** GitLab access tokens expire in 2 hours. The control-plane runs a background goroutine that:
 1. Queries `oauth_connections WHERE provider_type = 'gitlab' AND token_expires_at < NOW() + interval '30 minutes'`
@@ -377,31 +390,28 @@ At session start, the session-agent sets up `gh` and `glab` as git credential he
 
 2. **Initialize `gh` config for headless operation:** Before writing `hosts.yml` or running any `gh` command, ensure `~/.config/gh/config.yml` exists with at least `version: "1"`. This tells `gh` CLI 2.40+ that the config is already in multi-account format, preventing a "config migration" that requires D-Bus keyring access (unavailable in Alpine containers). If `config.yml` already exists (manual `gh config set` from a prior session on PVC), do not overwrite it — only create if missing.
 
-3. **Merge managed tokens into CLI configs:**
-   - Read `gh-hosts.yml` from Secret mount (`/home/node/.user-secrets/gh-hosts.yml`)
-   - Read existing `~/.config/gh/hosts.yml` (may have entries from manual `gh auth login`)
-   - **Merge strategy:** For each host in the Secret's `gh-hosts.yml`, add/update the managed accounts in the existing file. Do NOT remove accounts that are only in the existing file (those are from manual `gh auth login`). If a managed account and a manual account have the same username on the same host, the managed token wins (overwrite).
+3. **Merge managed tokens into CLI configs (with format conversion):**
+   - Read `gh-hosts.yml` from Secret mount (`/home/node/.user-secrets/gh-hosts.yml`) — this is in multi-account `users:` format
+   - Read existing `~/.config/gh/hosts.yml` (may have entries from manual `gh auth login`, always in old format)
+   - **Convert and select:** For each host in the Secret's `gh-hosts.yml`, select ONE account's token to write in old format (`oauth_token` at root level). If `GIT_IDENTITY_ID` is set, resolve it to a username via `conn-{id}-username` from the Secret, find which host has that username, and use that account's token. For all other hosts (or when no identity is set), use the `user:` default account's token.
+   - **Merge strategy:** For each host, write or overwrite the managed token in old format. Preserve hosts that are only in the existing file (those are from manual `gh auth login`). If a managed host and a manual entry share the same host, the managed token wins.
    - Same merge for `glab-config.yml` → `~/.config/glab-cli/config.yml`
 
 4. **Register credential helpers:**
    - Run `gh auth setup-git` — registers `gh` as git's credential helper for all hosts in `~/.config/gh/hosts.yml`
    - Run `glab auth setup-git` — same for GitLab hosts
 
-5. **Switch to project identity:** If `GIT_IDENTITY_ID` env var is set (from the MCProject CRD):
-   - Parse `~/.config/gh/hosts.yml` to find which host has a `users:` entry matching this connection's username. The mapping from connection ID → username is embedded in the `gh-hosts.yml` via a YAML comment or looked up from the `conn-{id}-username` key in the Secret (see below).
-   - Run `gh auth switch --user {username} --hostname {host}` (GitHub)
-   - This makes `gh auth git-credential` return this specific account's token for this host
+5. **Identity is already selected** (by step 3). No `gh auth switch` call needed — the old format file already contains the correct account's token per host. `gh auth git-credential get` returns the token from the file directly.
 
-**Connection metadata keys:** The `conn-{connection_id}-username` keys in `user-secrets` are written by the same code path that writes the token — the OAuth callback handler and the PAT add handler both write `conn-{id}-token` and `conn-{id}-username` to the Secret in a single patch. The `reconcileUserCLIConfig` function also ensures these keys exist (backfill on startup, cleanup on disconnect). The session-agent reads `conn-{GIT_IDENTITY_ID}-username` to resolve the connection UUID to a username, then looks up which host in `hosts.yml` has that username to construct the `gh auth switch` command.
+**Connection metadata keys:** The `conn-{connection_id}-username` keys in `user-secrets` are written by the same code path that writes the token — the OAuth callback handler and the PAT add handler both write `conn-{id}-token` and `conn-{id}-username` to the Secret in a single patch. The `reconcileUserCLIConfig` function also ensures these keys exist (backfill on startup, cleanup on disconnect). The session-agent reads `conn-{GIT_IDENTITY_ID}-username` to resolve the connection UUID to a username, then looks up which host in the managed `gh-hosts.yml` has that username to select the correct token.
 
 6. **Proceed with normal session setup** (clone if needed, NATS connection, etc.)
 
 **Before each git operation (clone, fetch, push, worktree add):**
 
 1. Re-read `gh-hosts.yml` and `glab-config.yml` from Secret mount (K8s auto-syncs ~1 min)
-2. If the set of managed tokens has changed since last check, re-merge into `~/.config/` and re-run `gh auth setup-git` / `glab auth setup-git`
-3. If the project has `git_identity_id`, ensure the correct account is active (`gh auth switch` if needed)
-4. Run the git command — git automatically calls `gh auth git-credential` for HTTPS URLs
+2. If the set of managed tokens has changed since last check, re-merge (with format conversion and identity selection) into `~/.config/` and re-run `gh auth setup-git` / `glab auth setup-git`
+3. Run the git command — git automatically calls `gh auth git-credential` for HTTPS URLs, which reads the token from the old-format `hosts.yml`
 
 **SSH → HTTPS normalization:** Before git operations, if the URL is SCP-style (`git@{host}:{path}`) and a credential helper is registered for that host, normalize to HTTPS (`https://{host}/{path}`). Only SCP-style shorthand is normalized — `ssh://` scheme URLs are left as-is (they use SSH key auth). This is the only URL manipulation the agent does.
 
