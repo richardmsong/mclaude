@@ -71,7 +71,7 @@ Readers: control-plane (discovery, login response, RBAC checks)
 | `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
 
 Primary key: `(user_id, cluster_id)`
-Constraint: at most one `is_default = TRUE` per `user_id`
+Constraint: `CREATE UNIQUE INDEX idx_user_clusters_default ON user_clusters (user_id) WHERE is_default = TRUE` — partial unique index ensuring at most one default per user
 
 Writers: control-plane (GrantClusterAccess, RevokeClusterAccess, SetDefaultCluster)
 Readers: control-plane (RBAC validation, project creation, login response)
@@ -82,9 +82,9 @@ Readers: control-plane (RBAC validation, project creation, login response)
 |--------|------|-------------|-------------|
 | `cluster_id` | TEXT | NOT NULL FK->clusters ON DELETE RESTRICT | Cluster the project is provisioned on |
 
-Migration strategy: The existing `Migrate()` function runs idempotent DDL. Add a multi-step migration to the schema string: (1) `CREATE TABLE IF NOT EXISTS clusters` first, (2) `ALTER TABLE projects ADD COLUMN IF NOT EXISTS cluster_id TEXT REFERENCES clusters(id) ON DELETE RESTRICT`, (3) for existing rows with NULL `cluster_id`, the single-cluster auto-registration (see Backwards Compatibility) backfills them with the auto-registered cluster's ID. The column is initially nullable; after backfill, a follow-up `ALTER TABLE projects ALTER COLUMN cluster_id SET NOT NULL` enforces the constraint. `ON DELETE RESTRICT` prevents deleting a cluster with active projects.
+Migration strategy: The control plane startup sequence runs in order: (1) `Migrate()` executes DDL — `CREATE TABLE IF NOT EXISTS clusters`, `CREATE TABLE IF NOT EXISTS user_clusters`, and `ALTER TABLE projects ADD COLUMN IF NOT EXISTS cluster_id TEXT REFERENCES clusters(id) ON DELETE RESTRICT` (column is nullable initially). (2) Auto-registration runs (see Backwards Compatibility) — inserts a cluster row if the table is empty. (3) A backfill query runs: `UPDATE projects SET cluster_id = $1 WHERE cluster_id IS NULL` using the auto-registered cluster ID. (4) `ALTER TABLE projects ALTER COLUMN cluster_id SET NOT NULL` enforces the constraint. Steps 2-4 are procedural Go code in the control plane startup path, not part of the DDL string. `ON DELETE RESTRICT` prevents deleting a cluster with active projects.
 
-**New HTTP endpoints** — all cluster management endpoints are on the admin mux (`:9091`, bound to `127.0.0.1`), consistent with existing admin endpoints under `/admin/`:
+**New HTTP endpoints** — all cluster management endpoints are on the admin mux (`:9091`, bound to `127.0.0.1`), registered as separate route handlers under `/admin/clusters` (extending the existing admin mux that currently handles `/admin/` as a catch-all for user management):
 
 `POST /admin/clusters` — Register a new worker cluster.
 - Auth: admin bearer token (same as existing admin endpoints)
@@ -108,7 +108,7 @@ Migration strategy: The existing `Migrate()` function runs idempotent DDL. Add a
 - Auth: admin bearer token
 - Response (200): `{ ok: true }`
 - Behavior: deletes the `user_clusters` record. If this was the user's default, promotes the grant with the oldest `created_at` as the new default (or none if this was the last grant).
-- Error: 404 if grant not found. 409 if user has active projects on this cluster.
+- Error: 404 if grant not found. 409 if user has projects on this cluster with `status IN ('active', 'pending')` — the user must delete or migrate their projects before losing cluster access.
 
 **Modified login response** — add cluster info:
 
@@ -141,9 +141,11 @@ Migration strategy: The existing `Migrate()` function runs idempotent DDL. Add a
 
 The `natsUrl` is always the hub. `directNatsUrl` per cluster/project is the worker's WebSocket URL (empty if not externally accessible).
 
+The `AuthTokens` type gains `projects` and `clusters` arrays matching the JSON above. `AuthStore` stores these after login and exposes them to other stores. `SessionStore` reads `clusters` from `AuthStore` on initialization to open per-cluster KV watches. `EventStore` reads `projects` to look up `jsDomain` and `directNatsUrl` for the active session's project.
+
 **Modified project creation** — cluster assignment:
 
-`POST /api/projects` now accepts optional `clusterId`. If omitted, uses the user's default cluster. Validates the user has access to the target cluster. After creating the Postgres record, publishes a provisioning request to the worker controller via NATS.
+Project creation uses the existing NATS request/reply subject `mclaude.{userId}.api.projects.create`. The request payload gains an optional `clusterId` field: `{ projectId, name, gitUrl, clusterId? }`. If `clusterId` is omitted, the control plane uses the user's default cluster. The control plane validates the user has access to the target cluster before creating the Postgres record (which now includes `cluster_id`). After the Postgres insert, the control plane publishes a provisioning request to the worker controller via NATS.
 
 **Provisioning via NATS** — replaces direct K8s CRD creation for remote clusters:
 
@@ -153,13 +155,19 @@ Reply: `{ status: "ok" | "error", message? }`
 
 The control plane publishes this as a NATS request (request/reply). The message routes through the hub's leaf node to the target worker. For the local cluster (degenerate single-cluster mode), the control plane can still create CRDs directly as today — the NATS path is for remote workers.
 
-**Hub NATS configuration** — the control plane cluster's NATS adds a leaf node listener:
+**Hub NATS configuration** — the control plane cluster's NATS adds a leaf node listener and account-based authorization:
 
 ```
 leafnodes {
   port: 7422
 }
+
+authorization {
+  account: $MCLAUDE_ACCOUNT_PUBLIC_KEY
+}
 ```
+
+The `authorization` block with an `account` field configures NATS to verify user JWTs signed by the mclaude account NKey. This is the NATS "account-only" auth mode — no operator, no resolver, just a single account public key baked into the config. The account public key is injected via Helm values (derived from the account NKey seed the control plane generates at initial setup). Worker NATS instances use the same `authorization { account: ... }` block with the same public key (shared account key), plus a `system_account` NKey for the worker controller (see Worker Controller section).
 
 All other NATS config (WebSocket, JetStream, max payload) remains as today.
 
@@ -173,7 +181,18 @@ New component deployed by the mclaude-worker Helm chart. Runs in the worker clus
 - The existing reconciler (already part of the codebase) watches MCProject CRDs and provisions namespaces, PVCs, deployments, secrets — unchanged
 - Publishes provisioning status back via NATS reply
 
-**NATS connection:** Connects to the local worker NATS using a system-level NKey credential. The control plane generates a system NKey pair during cluster registration (separate from user NKeys and leaf NKeys). The system NKey is included in the registration response and stored as a K8s secret in the worker's `mclaude-system` namespace. The worker NATS is configured to trust this system NKey for subscribing to `mclaude.clusters.>` subjects. Messages reach the hub transparently via the leaf node.
+**NATS connection:** Connects to the local worker NATS using an NKey seed credential. The control plane generates a controller NKey pair during cluster registration (separate from user NKeys and leaf NKeys). The NKey seed is included in the `POST /admin/clusters` registration response (alongside `leafCreds`) and stored as a K8s secret in the worker's `mclaude-system` namespace. The worker NATS config includes a `users` block that trusts this NKey public key with full publish/subscribe permissions on `mclaude.clusters.>` subjects:
+
+```
+authorization {
+  account: $MCLAUDE_ACCOUNT_PUBLIC_KEY
+  users: [
+    { nkey: $CONTROLLER_NKEY_PUBLIC, permissions: { publish: "mclaude.clusters.>", subscribe: "mclaude.clusters.>" } }
+  ]
+}
+```
+
+The controller connects with `nats.NkeyOptionFromSeed(seedFile)`. Messages reach the hub transparently via the leaf node.
 
 **K8s access:** Full cluster access (same ServiceAccount/RBAC as the existing reconciler). Only operates on its own cluster.
 
@@ -189,19 +208,19 @@ The one implicit change: session-agent events published on the worker NATS are n
 
 **Transport layer extensions:**
 
-`INATSClient` gains an optional `domain` parameter on JetStream methods:
+`INATSClient` gains an optional `domain` parameter as the last argument on JetStream methods:
 
-- `kvWatch(bucket, key, callback, domain?)` — when `domain` is set, opens a domain-qualified KV watch (`$JS.{domain}.API.>`)
-- `kvGet(bucket, key, domain?)` — domain-qualified KV get
-- `jsSubscribe(stream, subject, startSeq, callback, domain?)` — domain-qualified JetStream ordered consumer
+- `kvWatch(bucket, key, callback, domain?: string)` — when `domain` is set, opens the KV watcher via `jetstream({ domain }).views.kv(bucket)` instead of `jetstream().views.kv(bucket)`. Returns unsubscriber.
+- `kvGet(bucket, key, domain?: string)` — same pattern, domain-qualified KV get
+- `jsSubscribe(stream, subject, startSeq, callback, domain?: string)` — creates ordered consumer via `jetstream({ domain }).consumers.get(stream, ...)` instead of `jetstream().consumers.get(...)`
 
-When `domain` is omitted, behavior is unchanged (local JetStream). The NATS client library handles domain routing internally by rewriting the JetStream API subject prefix.
+Internally, the `nats.ws` library's `jetstream({ domain })` method handles subject rewriting (`$JS.{domain}.API.>` instead of `$JS.API.>`). When `domain` is omitted or empty, behavior is unchanged (local JetStream). The `NATSClient` implementation caches `JetStreamClient` instances per domain to avoid re-creating them on every call.
 
 **NATS connection management:**
 
 The SPA maintains up to two NATS connections:
-1. **Hub connection** (always open) — connects to `natsUrl` from login response. Used for the dashboard KV watches (domain-qualified) and as fallback for session interaction.
-2. **Direct worker connection** (opened on demand) — when the user opens a session, SPA tries connecting to the worker's `directNatsUrl` using the same JWT/NKey (shared account key). If successful, uses this for events and KV natively (no domain qualification). If not, uses the hub connection with domain routing.
+1. **Hub connection** (always open) — owned by `AuthStore`, connects to `natsUrl` from login response. Used for the dashboard KV watches (domain-qualified) and as fallback for session interaction. All stores (`SessionStore`, `LifecycleStore`, `HeartbeatMonitor`) use this connection by default.
+2. **Direct worker connection** (opened on demand, per-cluster) — owned by `EventStore`. When the user opens a session, `EventStore` creates a new `NATSClient` instance and connects to the worker's `directNatsUrl` using the same JWT/NKey from `AuthStore`. If successful, `EventStore` and the session-specific `kvWatch` use this connection (no domain qualification). If the direct connection fails, `EventStore` falls back to the hub connection with domain routing. The direct connection is closed when the user navigates away from the session detail view. Only one direct connection is open at a time — switching sessions closes the previous one.
 
 **Dashboard / session list:**
 
@@ -300,7 +319,7 @@ controller:
 
 **Backwards compatibility — single-cluster deployment:**
 
-A single-cluster deployment installs both charts on the same cluster. The hub NATS and worker NATS can be the same NATS instance (worker configured as leaf of localhost, or a combined chart that deploys one NATS with both hub and worker JetStream domains).
+A single-cluster deployment installs both charts on the same cluster. In this mode, a single NATS instance serves both hub and worker roles — no leaf node connection to itself. The NATS config includes `leafnodes { port: 7422 }` (listener for future workers) and a JetStream domain matching the auto-registered cluster's `js_domain`. The SPA connects to this NATS directly without domain qualification (since all KV and streams are local). The control plane provisions projects via direct CRD creation (no NATS provisioning request needed — it detects the local cluster by checking if the target `cluster_id` matches the auto-registered cluster). Adding a second cluster later is seamless: the new worker connects as a leaf to the existing NATS, and the SPA starts using domain-qualified watches for the new cluster.
 
 **Auto-registration:** On startup, if the `clusters` table is empty, the control plane auto-registers a local cluster with:
 - `name`: value of `HELM_RELEASE_NAME` env var (default "mclaude")
@@ -383,7 +402,7 @@ No new KV buckets are needed. The cluster registry is in Postgres, not NATS.
 | Worker controller crashes | K8s restarts pod; provisioning requests queue in NATS | Provisioning requests are NATS request/reply — control plane times out and returns error to user. Retry when controller comes back. |
 | Cluster registration with duplicate domain | Postgres UNIQUE constraint on `js_domain` | `POST /api/clusters` returns 409 Conflict. |
 | Project creation on inaccessible cluster | RBAC check in control plane | `POST /api/projects` returns 403 if user lacks cluster access. |
-| Project creation on offline cluster | Provisioning NATS request times out | Control plane returns 503 with error message. Project record created in Postgres but status set to `pending`. Provisioning retried when cluster reconnects. |
+| Project creation on offline cluster | Provisioning NATS request times out (10s) | Control plane returns 503 with error message. Project record created in Postgres with `status = 'pending'` (new status value alongside `active` and `archived`). When the cluster heartbeat resumes (marking it `active`), the control plane queries for projects with `status = 'pending'` on that cluster and re-sends provisioning requests. On successful provisioning reply, status is updated to `active`. |
 | Hub NATS goes down | SPA and daemon lose connection | All real-time monitoring stops. Direct worker connections (if active) continue working. SPA shows disconnected state, auto-reconnects when hub returns. |
 
 ## Security
