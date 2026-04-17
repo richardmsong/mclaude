@@ -1629,46 +1629,122 @@ All project pods set `HTTPS_PROXY` env var. Claude Code respects it natively. Om
 
 When a corporate proxy intercepts TLS (MITM), the session-agent container must trust the proxy's CA certificate. Without it, Claude Code fails with `SSL certificate verification failed`.
 
-**Helm values:**
+#### Prerequisites
+
+**trust-manager** must be installed in the cluster. trust-manager is a cert-manager component that syncs CA bundles across namespaces via `Bundle` CRDs. Install it via Helm:
+
+```bash
+helm repo add jetstack https://charts.jetstack.io
+helm install trust-manager jetstack/trust-manager -n cert-manager --create-namespace
+```
+
+#### Helm values
 
 ```yaml
 sessionAgent:
   corporateCA:
-    configMapName: ""  # Name of a ConfigMap in the control-plane namespace
-                       # containing a `ca-certificates.crt` key with PEM-encoded
-                       # CA certificates. When set, the reconciler mounts it into
-                       # session-agent pods and sets NODE_EXTRA_CA_CERTS.
+    enabled: false        # Set to true to mount CA bundle into session-agent pods
+    bundleName: ""        # Name of the trust-manager Bundle CR that syncs the CA
+                          # ConfigMap into user namespaces. The Bundle must target
+                          # ConfigMaps with a well-known key (see below).
+    configMapName: ""     # Name of the ConfigMap created by trust-manager in each
+                          # user namespace. Must match the Bundle's target name.
+    configMapKey: "ca-certificates.crt"  # Key in the ConfigMap containing PEM certs
 ```
 
-**How it works:**
+#### How it works
 
-1. The operator creates a ConfigMap in `mclaude-system` with the combined CA bundle:
-   ```bash
-   kubectl create configmap corporate-ca-bundle \
-     --namespace mclaude-system \
-     --from-file=ca-certificates.crt=/path/to/combined-ca-bundle.pem
-   ```
+**1. Operator creates a CA source and a trust-manager Bundle:**
 
-2. The Helm chart writes `corporateCA.configMapName` into the `session-agent-template` ConfigMap.
-
-3. On reconcile, if `corporateCAConfigMap` is non-empty in the template, the reconciler:
-   - Copies the CA ConfigMap from the control-plane namespace into the user namespace (idempotent)
-   - Adds a volume (`corporate-ca`) referencing the copied ConfigMap
-   - Adds a volumeMount at `/etc/ssl/certs/corporate-ca-certificates.crt` (subPath, read-only)
-   - Sets `NODE_EXTRA_CA_CERTS=/etc/ssl/certs/corporate-ca-certificates.crt` env var
-
-4. Claude Code (Node.js) respects `NODE_EXTRA_CA_CERTS` natively — the extra CAs are merged with the built-in CA store at TLS handshake time. The session-agent binary (Go) also reads this env var via `x509.SystemCertPool()` when configured.
-
-**Why copy the ConfigMap**: the CA ConfigMap lives in `mclaude-system` (operator-managed). Session-agent pods run in `mclaude-{userId}` namespaces. K8s volumes cannot reference cross-namespace ConfigMaps, so the reconciler copies it. The copy is refreshed on every reconcile cycle — updating the source ConfigMap propagates to all user namespaces on the next reconcile (within 10 minutes via resync, or immediately if a watched resource triggers re-enqueue).
-
-**Local dev (k3d)**: create the ConfigMap from the macOS system keychain:
 ```bash
-security find-certificate -a -p /Library/Keychains/System.keychain > /tmp/corporate-ca-bundle.pem
-kubectl create configmap corporate-ca-bundle \
+# Create the source CA ConfigMap in mclaude-system
+kubectl create configmap corporate-ca-source \
   --namespace mclaude-system \
-  --from-file=ca-certificates.crt=/tmp/corporate-ca-bundle.pem
+  --from-file=ca-certificates.crt=/path/to/combined-ca-bundle.pem
 ```
-Then set `sessionAgent.corporateCA.configMapName: corporate-ca-bundle` in values.
+
+```yaml
+# Bundle CR — trust-manager syncs this into every namespace with the label
+apiVersion: trust.cert-manager.io/v1alpha1
+kind: Bundle
+metadata:
+  name: corporate-ca-bundle
+spec:
+  sources:
+    - configMap:
+        name: corporate-ca-source
+        key: ca-certificates.crt
+  target:
+    configMap:
+      key: ca-certificates.crt
+    namespaceSelector:
+      matchLabels:
+        mclaude.io/user-namespace: "true"   # reconciler sets this label on user namespaces
+```
+
+trust-manager watches the source and automatically creates/updates a ConfigMap named `corporate-ca-bundle` in every namespace matching the label selector. No cross-namespace copy logic needed in the reconciler.
+
+**2. Helm chart writes CA config into the `session-agent-template` ConfigMap:**
+
+The template includes `corporateCAEnabled`, `corporateCAConfigMapName`, and `corporateCAConfigMapKey`. The reconciler reads these when building the pod spec.
+
+**3. Reconciler ensures user namespace has the label:**
+
+When `corporateCA.enabled` is true, the reconciler adds the label `mclaude.io/user-namespace: "true"` to each user namespace. trust-manager sees the label and syncs the CA ConfigMap into that namespace.
+
+**4. Reconciler builds the pod spec with CA mount:**
+
+When corporate CA is enabled and the CA ConfigMap exists in the user namespace, the reconciler:
+- Adds a volume (`corporate-ca`) referencing the trust-manager-synced ConfigMap
+- Adds a volumeMount at `/etc/ssl/certs/corporate-ca-certificates.crt` (`subPath` from the ConfigMap key, read-only)
+- Sets `NODE_EXTRA_CA_CERTS=/etc/ssl/certs/corporate-ca-certificates.crt` env var
+
+**5. CA bundle updates trigger graceful rollout:**
+
+The reconciler computes a SHA-256 hash of the CA ConfigMap's data and stores it as a pod template annotation (`mclaude.io/ca-bundle-hash`). When the CA bundle changes:
+
+1. trust-manager updates the ConfigMap in every user namespace
+2. On the next reconcile cycle (resync or triggered), the reconciler sees a hash mismatch in the pod template annotation
+3. The reconciler updates the Deployment spec with the new hash annotation → Recreate strategy triggers
+4. The graceful upgrade flow applies: SIGTERM → wait for idle → exit → new pod starts with updated CA
+
+This reuses the same graceful upgrade mechanism as image updates (see "Graceful Session-Agent Pod Upgrades"). No special CA-specific shutdown logic is needed — the session-agent doesn't cache CAs, so the new pod picks up the updated ConfigMap on start.
+
+**6. Runtime behavior:**
+
+Claude Code (Node.js) respects `NODE_EXTRA_CA_CERTS` natively — the extra CAs are merged with the built-in CA store at TLS handshake time. The session-agent binary (Go) also reads this env var via `x509.SystemCertPool()` when configured.
+
+#### Local dev (k3d)
+
+trust-manager is optional for k3d. The simpler approach: create the ConfigMap directly in the user namespace (skipping trust-manager), then set the Helm values:
+
+```bash
+# Export corporate CAs from the infra repo
+CA_BUNDLE=/path/to/t1v0-infra/resources/certs/ca-bundle.crt
+
+# Create ConfigMap in mclaude-system (source of truth)
+kubectl create configmap corporate-ca-source \
+  --namespace mclaude-system \
+  --from-file=ca-certificates.crt="$CA_BUNDLE" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# For k3d without trust-manager: also create directly in the user namespace
+USER_NS=$(kubectl get ns -l mclaude.io/user-namespace=true -o name | head -1 | cut -d/ -f2)
+kubectl create configmap corporate-ca-bundle \
+  --namespace "$USER_NS" \
+  --from-file=ca-certificates.crt="$CA_BUNDLE" \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Helm values for k3d:
+```yaml
+sessionAgent:
+  corporateCA:
+    enabled: true
+    bundleName: corporate-ca-bundle
+    configMapName: corporate-ca-bundle
+    configMapKey: ca-certificates.crt
+```
 
 ---
 
