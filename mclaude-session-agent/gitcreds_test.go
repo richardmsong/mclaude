@@ -853,7 +853,8 @@ func TestRefreshIfChanged_NonFatalWithNonEmptyIdentity(t *testing.T) {
 
 	// lastGHHosts and lastGLabConfig are nil (zero value).
 	// ReadSecretFile returns nil since secretMountPath doesn't exist in test.
-	// nil == nil → no change → mergeAndSetup returns (false, nil) quickly.
+	// nil == nil → no content change, but setupRan=false on first call, so
+	// setup-git is still invoked (the fix for the dev/local boot bug).
 
 	// RefreshIfChanged with empty gitIdentityID must return nil.
 	if err := cm.RefreshIfChanged(""); err != nil {
@@ -931,5 +932,127 @@ github.acme.com:
 	// git_protocol: https on all managed hosts.
 	if !strings.Contains(mergedStr, "git_protocol: https") {
 		t.Errorf("expected git_protocol: https on managed hosts: %s", mergedStr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// setupRan — credential helper registration on first boot (no managed files)
+//
+// These tests verify the fix for the bug where gh/glab auth setup-git was
+// never called in dev/local environments because no managed Secret files exist,
+// causing nil==nil early-return to skip credential helper registration entirely.
+// ---------------------------------------------------------------------------
+
+// setupGitCallCounter is a helper that installs mock gh and glab binaries which
+// write a sentinel file each time they are invoked with "auth setup-git".
+// Returns the directory containing the mock binaries and a function that reads
+// the call count for a given tool name.
+func setupGitCallCounter(t *testing.T) (binDir string, callCount func(tool string) int) {
+	t.Helper()
+	binDir = t.TempDir()
+
+	// Mock script: appends one line per invocation to a log file, then exits 0.
+	script := `#!/bin/sh
+echo called >> "$0.calls"
+exit 0
+`
+	for _, bin := range []string{"gh", "glab"} {
+		binPath := filepath.Join(binDir, bin)
+		if err := os.WriteFile(binPath, []byte(script), 0755); err != nil {
+			t.Fatalf("write mock %s: %v", bin, err)
+		}
+	}
+
+	callCount = func(tool string) int {
+		logPath := filepath.Join(binDir, tool+".calls")
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			return 0
+		}
+		return len(strings.Split(strings.TrimSpace(string(data)), "\n"))
+	}
+	return binDir, callCount
+}
+
+// TestSetupGit_CalledWhenNoManagedFiles verifies that gh auth setup-git and
+// glab auth setup-git are executed on the first mergeAndSetup call even when
+// no managed Secret files are present (the dev/local environment case).
+func TestSetupGit_CalledWhenNoManagedFiles(t *testing.T) {
+	binDir, callCount := setupGitCallCounter(t)
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", binDir+":"+origPath)
+
+	homeDir := t.TempDir()
+	log := zerolog.Nop()
+	cm := NewCredentialManager(homeDir, log)
+
+	// No managed files: secretMountPath doesn't exist in the test environment,
+	// so ReadSecretFile returns nil for both gh-hosts.yml and glab-config.yml.
+	// Both lastGHHosts and lastGLabConfig start as nil → no change detected.
+	// setupRan is false → credential helpers MUST still be registered.
+	changed, err := cm.mergeAndSetup("")
+	if err != nil {
+		t.Fatalf("mergeAndSetup: unexpected error: %v", err)
+	}
+
+	// changed should be true on the first call (setupRan transitioned false→true).
+	if !changed {
+		t.Error("mergeAndSetup: expected changed=true on first call (setupRan transitioned)")
+	}
+
+	// Both credential helpers must have been called exactly once.
+	if n := callCount("gh"); n != 1 {
+		t.Errorf("gh auth setup-git: expected 1 call, got %d", n)
+	}
+	if n := callCount("glab"); n != 1 {
+		t.Errorf("glab auth setup-git: expected 1 call, got %d", n)
+	}
+
+	// setupRan must be true after the first call.
+	cm.mu.Lock()
+	ran := cm.setupRan
+	cm.mu.Unlock()
+	if !ran {
+		t.Error("cm.setupRan should be true after first mergeAndSetup call")
+	}
+}
+
+// TestSetupGit_NotCalledAgainWhenNothingChanged verifies idempotency: after the
+// first call, subsequent calls with no managed-file changes do NOT re-invoke
+// gh/glab auth setup-git.
+func TestSetupGit_NotCalledAgainWhenNothingChanged(t *testing.T) {
+	binDir, callCount := setupGitCallCounter(t)
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", binDir+":"+origPath)
+
+	homeDir := t.TempDir()
+	log := zerolog.Nop()
+	cm := NewCredentialManager(homeDir, log)
+
+	// First call — registers credential helpers.
+	if _, err := cm.mergeAndSetup(""); err != nil {
+		t.Fatalf("first mergeAndSetup: %v", err)
+	}
+
+	// Second call — nothing changed (still no managed files), setupRan=true.
+	changed, err := cm.mergeAndSetup("")
+	if err != nil {
+		t.Fatalf("second mergeAndSetup: %v", err)
+	}
+	if changed {
+		t.Error("second call: expected changed=false when nothing changed and setupRan=true")
+	}
+
+	// Third call for good measure.
+	if _, err := cm.mergeAndSetup(""); err != nil {
+		t.Fatalf("third mergeAndSetup: %v", err)
+	}
+
+	// Both tools must still have been called exactly once (from the first call).
+	if n := callCount("gh"); n != 1 {
+		t.Errorf("gh auth setup-git: expected exactly 1 call total (idempotent), got %d", n)
+	}
+	if n := callCount("glab"); n != 1 {
+		t.Errorf("glab auth setup-git: expected exactly 1 call total (idempotent), got %d", n)
 	}
 }
