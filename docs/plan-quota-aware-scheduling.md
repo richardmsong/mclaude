@@ -650,6 +650,49 @@ Published on `mclaude.{userId}.{projectId}.lifecycle.{sessionId}` (same subject 
 - Scheduled sessions use a fresh worktree branch (`schedule/{slug}-{shortId}`). The allowlist does not include force-push; merging to `main` requires the PR review workflow.
 - The 30-minute stop timeout ensures no runaway session exhausts quota silently; `sendHardInterrupt()` is the guaranteed backstop.
 
+## Operational Plan
+
+### Scheduling Parameters
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| Model for dev-harness jobs | Sonnet | ~2x more work per quota unit vs Opus (Opus burns ~$245/session vs Sonnet ~$112 against shared pool) |
+| Daytime threshold (9am–5pm) | 75% | Leaves headroom for interactive Claude Code use during work hours |
+| Overnight threshold (midnight–7am) | 95% | Maximize throughput; no interactive use expected |
+| Train commute (7–9am) | Interactive Opus only | User does spec work on the train; no scheduled jobs |
+| Evening (5pm–midnight) | Interactive only | Personal projects; scheduled jobs paused |
+| `--auto-continue` | All jobs | Re-queues at 5h reset time automatically |
+| Parallelism | Sequential (one job at a time) | Avoids git conflicts; simpler quota management |
+
+### Job Queue Priority
+
+Jobs are ordered by dependency (enabling components first), gap count (quick wins first), and user-facing value.
+
+| Priority | Component | Spec(s) | Gaps | Design Audit Status | Notes |
+|----------|-----------|---------|------|---------------------|-------|
+| 1 | session-agent | plan-k8s-integration, plan-graceful-upgrades | 3 GAP + ~6 PARTIAL | k8s: Round 1 only | Quick win — mostly adding `{location}` segment to NATS subjects. Enables everything else. |
+| 2 | spa | plan-client-architecture, ui-spec, plan-replay-user-messages | 9 GAP + 11 PARTIAL | client-arch: none; replay: CLEAN | Highest daily-use value. xterm.js terminal, table rendering, budget bar, reconnect logic. |
+| 3 | control-plane | plan-core-containers, plan-github-oauth, plan-k8s-integration | 17 GAP | github-oauth: CLEAN; core-containers: none | Large scope — OAuth endpoints, KV buckets, SCIM, project HTTP API. Consider splitting essentials vs OAuth/SCIM. |
+| 4 | helm | plan-core-containers | 7 GAP | None | Chart templates. |
+| 5 | cli | plan-client-architecture | 5 GAP | None | Client tool. |
+
+### Execution Approach
+
+1. Queue **session-agent** first (quick win, spec mostly clean).
+2. Queue **spa** second (highest daily interaction value).
+3. Run **design-audit** on plan-core-containers and plan-client-architecture in parallel while jobs 1–2 execute — reduces rework risk from spec ambiguities.
+4. Queue **control-plane** and **helm** after design audits resolve ambiguities.
+5. Queue **cli** last.
+
+### Quota Budget Context (Max 5x, $100/mo)
+
+- Single unified utilization percentage (0–100%) across a 5-hour rolling window (~88K Haiku-equivalent billable tokens).
+- 7-day rolling window is the real weekly limit — usage rolls off continuously, not in fixed blocks.
+- Opus burns ~2x faster than Sonnet against the same pool (based on observed $245 vs $112 sessions).
+- Cache reads dominate volume (97–278M per session) at 10% billing rate.
+- Physical ceiling: 4.8 five-hour windows per day = ~33 windows/week.
+- Goal: hit ~100% weekly utilization right as it rolls over.
+
 ## Scope
 
 **In scope**:
