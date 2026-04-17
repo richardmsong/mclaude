@@ -18,9 +18,12 @@ Two services + infrastructure. The relay, connector, server, and controller coll
 
 | Old component | Replaced by |
 |---------------|-------------|
-| `mclaude-relay` | nginx ingress |
+| `mclaude-relay` (in-cluster proxy) | nginx ingress |
+| `mclaude-session` (tmux-based) | session-agent (stream-json) |
 | `mclaude-connector` | session agent connects to NATS directly |
 | `mclaude-server` | collapsed into session agent |
+
+Note: the `mclaude-relay/` directory still contains a standalone Go tunnel binary deployed to user VMs via the `deploy-relay` skill; only the in-cluster proxy role was replaced by nginx ingress. The binary is not published as a container image.
 | `mclaude-controller` | merged into control-plane |
 | Per-namespace Postgres | central Postgres (users only) + NATS KV (state) |
 | Per-namespace mclaude-server | session agent runs inside each project pod |

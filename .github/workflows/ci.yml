@@ -15,7 +15,6 @@ jobs:
       pull-requests: read
     outputs:
       relay: ${{ steps.filter.outputs.relay }}
-      session: ${{ steps.filter.outputs.session }}
       control-plane: ${{ steps.filter.outputs.control-plane }}
       spa: ${{ steps.filter.outputs.spa }}
       session-agent: ${{ steps.filter.outputs.session-agent }}
@@ -27,9 +26,6 @@ jobs:
           filters: |
             relay:
               - 'mclaude-relay/**'
-              - '.github/workflows/ci.yml'
-            session:
-              - 'mclaude-session/**'
               - '.github/workflows/ci.yml'
             control-plane:
               - 'mclaude-control-plane/**'
@@ -69,21 +65,6 @@ jobs:
           cache-dependency-path: mclaude-relay/go.sum
       - run: go test -race ./...
         working-directory: mclaude-relay
-
-  build-session:
-    name: Build session image
-    needs: changes
-    if: needs.changes.outputs.session == 'true' || github.ref == 'refs/heads/main'
-    runs-on: self-hosted
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: ./mclaude-session
-          push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
   build-control-plane:
     name: Build control-plane image
