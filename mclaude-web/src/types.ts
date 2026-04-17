@@ -347,6 +347,12 @@ export interface SkillInvocationBlock {
   rawContent: string
 }
 
+export interface UserImageBlock {
+  type: 'user_image'
+  dataUrl: string   // "data:image/png;base64,..." — full data URL
+  mimeType: string  // e.g. "image/png"
+}
+
 export type Block =
   | TextBlock
   | StreamingTextBlock
@@ -357,10 +363,11 @@ export type Block =
   | CompactionBlock
   | SystemMessageBlock
   | SkillInvocationBlock
+  | UserImageBlock
 
 export interface PendingMessage {
   uuid: string
-  content: string | Array<{ type: string; text?: string }>
+  content: string | Array<{ type: string; text?: string; source?: { type: string; media_type: string; data: string } }>
   sentAt: number  // Date.now() for ordering
 }
 

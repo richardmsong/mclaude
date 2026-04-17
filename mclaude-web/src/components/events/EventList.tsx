@@ -1,4 +1,5 @@
-import type { Turn, Block, StreamingTextBlock, SkillInvocationBlock, PendingMessage } from '@/types'
+import { useState } from 'react'
+import type { Turn, Block, StreamingTextBlock, SkillInvocationBlock, PendingMessage, UserImageBlock } from '@/types'
 import { UserMessage } from './UserMessage'
 import { AssistantText } from './AssistantText'
 import { ThinkingBlock } from './ThinkingBlock'
@@ -13,6 +14,50 @@ interface EventListProps {
   pendingMessages?: PendingMessage[]
   onApprove: (requestId: string) => void
   onDeny: (requestId: string) => void
+}
+
+function UserImageThumbnail({ dataUrl, pending }: { dataUrl: string; pending: boolean }) {
+  const [lightboxOpen, setLightboxOpen] = useState(false)
+  return (
+    <>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', margin: '4px 0' }}>
+        <img
+          src={dataUrl}
+          alt="attached image"
+          style={{
+            maxWidth: 240,
+            borderRadius: 8,
+            display: 'block',
+            cursor: 'pointer',
+            opacity: pending ? 0.5 : 1,
+          }}
+          onClick={() => setLightboxOpen(true)}
+        />
+      </div>
+      {lightboxOpen && (
+        <div
+          onClick={() => setLightboxOpen(false)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.8)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            cursor: 'zoom-out',
+          }}
+        >
+          <img
+            src={dataUrl}
+            alt="full size"
+            style={{ maxWidth: '90vw', maxHeight: '90vh', borderRadius: 8 }}
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>
+      )}
+    </>
+  )
 }
 
 function renderBlock(block: Block, turn: Turn, allTurns: Turn[], onApprove: (id: string) => void, onDeny: (id: string) => void): React.ReactNode {
@@ -131,6 +176,15 @@ export function EventList({ turns, pendingMessages = [], onApprove, onDeny }: Ev
                 />
               )
             }
+            if (block.type === 'user_image') {
+              return (
+                <UserImageThumbnail
+                  key={`${turn.id}-${i}`}
+                  dataUrl={(block as UserImageBlock).dataUrl}
+                  pending={turn.pendingUuid !== undefined}
+                />
+              )
+            }
             return null
           })
         }
@@ -162,28 +216,42 @@ export function EventList({ turns, pendingMessages = [], onApprove, onDeny }: Ev
 
         return null
       })}
-      {unrenderedPending.map(pm => (
-        <div
-          key={pm.uuid}
-          style={{
-            opacity: 0.5,
-            padding: '6px 12px',
-            margin: '4px 0',
-            background: 'var(--surf)',
-            borderRadius: 12,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 2,
-          }}
-        >
-          <div style={{ color: 'var(--text)', fontSize: 15 }}>
-            {typeof pm.content === 'string'
-              ? pm.content
-              : pm.content.filter(c => c.type === 'text').map(c => c.text ?? '').join('')}
+      {unrenderedPending.map(pm => {
+        const textContent = typeof pm.content === 'string'
+          ? pm.content
+          : pm.content.filter(c => c.type === 'text').map(c => c.text ?? '').join('')
+        const imageItems = typeof pm.content === 'string'
+          ? []
+          : pm.content.filter(c => c.type === 'image' && c.source?.type === 'base64')
+        return (
+          <div key={pm.uuid}>
+            {textContent && (
+              <div
+                style={{
+                  opacity: 0.5,
+                  padding: '6px 12px',
+                  margin: '4px 0',
+                  background: 'var(--surf)',
+                  borderRadius: 12,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 2,
+                }}
+              >
+                <div style={{ color: 'var(--text)', fontSize: 15 }}>{textContent}</div>
+                <div style={{ color: 'var(--text3)', fontSize: 11 }}>sending...</div>
+              </div>
+            )}
+            {imageItems.map((c, i) => (
+              <UserImageThumbnail
+                key={`${pm.uuid}-img-${i}`}
+                dataUrl={`data:${c.source!.media_type};base64,${c.source!.data}`}
+                pending={true}
+              />
+            ))}
           </div>
-          <div style={{ color: 'var(--text3)', fontSize: 11 }}>sending...</div>
-        </div>
-      ))}
+        )
+      })}
     </div>
   )
 }

@@ -4,6 +4,7 @@ import type {
   StreamJsonEvent,
   ConversationModel,
   Turn,
+  Block,
   StreamingTextBlock,
   ToolUseBlock,
   ToolResultBlock,
@@ -12,6 +13,7 @@ import type {
   ControlRequestBlock,
   SystemMessageBlock,
   SkillInvocationBlock,
+  UserImageBlock,
   SessionState,
   SystemInitEvent,
   SystemStateChangedEvent,
@@ -169,20 +171,36 @@ export class EventStore {
     this._notify()
   }
 
-  addPendingMessage(uuid: string, content: string | Array<{ type: string; text?: string }>): void {
+  addPendingMessage(uuid: string, content: string | Array<{ type: string; text?: string; source?: { type: string; media_type: string; data: string } }>): void {
     const pending: PendingMessage = { uuid, content, sentAt: Date.now() }
     this._pendingMessages.push(pending)
 
     // Immediately add an optimistic user turn so the message appears in the
     // correct position (before any subsequent assistant turns).
-    const text = typeof content === 'string'
-      ? content
-      : content.filter(c => c.type === 'text').map(c => c.text ?? '').join('')
-    if (text) {
+    const blocks: Block[] = []
+    if (typeof content === 'string') {
+      if (content) blocks.push({ type: 'text', text: content })
+    } else {
+      for (const c of content) {
+        if (c.type === 'text' && c.text) {
+          blocks.push({ type: 'text', text: c.text })
+        } else if (c.type === 'image' && c.source?.type === 'base64') {
+          const imgBlock: UserImageBlock = {
+            type: 'user_image',
+            dataUrl: `data:${c.source.media_type};base64,${c.source.data}`,
+            mimeType: c.source.media_type,
+          }
+          blocks.push(imgBlock)
+        }
+      }
+    }
+
+    // Only create the turn if there's something to show
+    if (blocks.length > 0) {
       const turn: Turn = {
         id: this._nextTurnId(),
         type: 'user',
-        blocks: [{ type: 'text', text }],
+        blocks,
         // Tag with uuid so the server-echo dedup can find and replace it
         pendingUuid: uuid,
       }
@@ -685,8 +703,19 @@ export class EventStore {
           }
         } else if (Array.isArray(event.message.content)) {
           for (const c of event.message.content) {
-            if (c.type === 'text' && c.text) {
-              turn.blocks.push({ type: 'text', text: c.text })
+            const raw = c as { type: string; text?: string; source?: { type: string; media_type: string; data: string } }
+            if (raw.type === 'text' && raw.text) {
+              turn.blocks.push({ type: 'text', text: raw.text })
+            } else if (raw.type === 'image') {
+              const src = raw.source
+              if (src?.type === 'base64') {
+                const imgBlock: UserImageBlock = {
+                  type: 'user_image',
+                  dataUrl: `data:${src.media_type};base64,${src.data}`,
+                  mimeType: src.media_type,
+                }
+                turn.blocks.push(imgBlock)
+              }
             }
           }
         }
