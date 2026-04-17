@@ -36,9 +36,9 @@ Every NATS connection authenticates with a JWT signed by the account operator. E
 |----------|-----------|----------|-------------------|
 | SPA (browser user) | Control-plane on login | Session duration (matches HTTP JWT) | `mclaude.{userId}.>` |
 | Control-plane | Static (deployed with account seed) | Long-lived | `mclaude.>`, `$KV.>`, `$JS.>` |
-| K8s controller | Control-plane on registration | Long-lived, rotatable | `mclaude.*.clusters.{clusterId}.>` |
-| BYOH controller | Control-plane on `mclaude register` | Long-lived, rotatable | `mclaude.*.clusters.{clusterId}.>` |
-| Session-agent | Controller on pod creation | Session duration | `mclaude.{userId}.sessions.{sessionId}.>` |
+| K8s controller | Control-plane on registration | Long-lived, rotatable | `mclaude.clusters.{clusterId}.>`, `$KV.mclaude-projects.{clusterId}.>` |
+| BYOH controller | Control-plane on `mclaude register` | Long-lived, rotatable | `mclaude.clusters.{clusterId}.>`, `$KV.mclaude-projects.{clusterId}.>` |
+| Session-agent | Controller (via scoped signing key) | Session duration | `mclaude.{userId}.sessions.{clusterId}.{sessionId}.>` |
 
 ### JWT Issuance Flow
 
@@ -51,14 +51,19 @@ SPA:
 
 Controller:
   1. Admin registers cluster (or user runs mclaude register)
-  2. Control-plane issues NATS JWT scoped to the cluster's UUID
-  3. Controller connects with JWT
-  4. On reconnect: controller uses stored credentials (not re-issued each time)
+  2. Control-plane issues:
+     a. Controller NATS JWT (signed with account seed, scoped to cluster)
+     b. Scoped signing key for the cluster (registered on account,
+        ceiling: mclaude.*.sessions.{clusterId}.*.>)
+  3. Controller stores both credentials
+  4. On reconnect: controller uses stored JWT (not re-issued each time)
 
 Session-agent:
-  1. Controller creates pod with NATS credentials mounted as Secret
-  2. Session-agent reads credentials from mounted path
-  3. JWT scoped to the specific user's session subjects
+  1. Controller signs session-agent JWT with its cluster's signing key
+     (scoped to mclaude.{userId}.sessions.{clusterId}.{sessionId}.>)
+  2. NATS server validates: signing key is registered on account,
+     permissions are within the signing key's ceiling
+  3. Controller mounts JWT as Secret in pod (K8s) or passes to process (BYOH)
 ```
 
 ---
@@ -126,10 +131,10 @@ The controller writes project status directly to the `mclaude-projects` KV bucke
 
 ```
 Publish allow:
-  mclaude.{userId}.sessions.{sessionId}.>
+  mclaude.{userId}.sessions.{clusterId}.{sessionId}.>
 
 Subscribe allow:
-  mclaude.{userId}.sessions.{sessionId}.>
+  mclaude.{userId}.sessions.{clusterId}.{sessionId}.>
 ```
 
 Narrowest scope. A session-agent can only interact with its own session's subjects. Cannot see other sessions, other users, or any project-level events.
@@ -159,8 +164,9 @@ This means:
 
 | Bucket | Purpose | Writer | Readers |
 |--------|---------|--------|---------|
-| `mclaude-projects` | Project status, metadata | Controller (status), Control-plane (metadata on create) | SPA (per-user filtered) |
+| `mclaude-projects` | Project status, metadata | Controller (status, key: `{clusterId}.{projectId}`), Control-plane (metadata on create) | SPA (per-user filtered) |
 | `mclaude-sessions` | Active session state | Control-plane | SPA |
+| `mclaude-clusters` | Per-user accessible cluster list | Control-plane (key: `{userId}`) | SPA (user watches own key) |
 
 ---
 
@@ -273,7 +279,7 @@ A managed K8s controller runs on infrastructure we operate. We trust the runtime
 - It only receives pre-validated commands from control-plane (never raw user events)
 - It can only write to its own cluster's slice of the `mclaude-projects` KV bucket (`$KV.mclaude-projects.{clusterId}.>`) — cannot write other clusters' status or session state
 - It cannot see other clusters' commands
-- It cannot issue JWTs (doesn't have the account seed — **OPEN QUESTION**: it does have the account seed for signing session-agent JWTs. See "Account Seed Distribution" below.)
+- It can only mint session-agent JWTs for its own cluster (scoped signing key, ceiling enforced by NATS server) — cannot mint controller, SPA, or control-plane JWTs
 
 ### What "Minimally Trusted" Means
 
@@ -348,7 +354,7 @@ Access control is enforced in Postgres at routing time (no KV access bucket). Th
 
 **Threat**: A session-agent (running user code) attempts to read other users' sessions or publish to project-level subjects.
 
-**Mitigation**: Session-agent JWT is scoped to `mclaude.{userId}.sessions.{sessionId}.>` only. It cannot:
+**Mitigation**: Session-agent JWT is scoped to `mclaude.{userId}.sessions.{clusterId}.{sessionId}.>` only. It cannot:
 - See other users' sessions
 - See its own other sessions
 - Publish project create/update/delete commands
@@ -403,24 +409,48 @@ User JWTs are also unaffected: they publish to `mclaude.{userId}.projects.*` reg
 
 ---
 
-## Account Seed Distribution
+## Account Seed & Signing Key Distribution
 
-The account seed (`NATS_ACCOUNT_SEED`) is the most sensitive credential in the system. It signs all NATS JWTs.
+The account seed (`NATS_ACCOUNT_SEED`) is the most sensitive credential in the system. It signs all NATS JWTs. It must never leave the control-plane.
 
-**Current distribution:**
-- Control-plane: has account seed (signs user + controller JWTs)
-- K8s controller: has account seed (signs session-agent JWTs)
-- BYOH controller: has account seed (signs session-agent JWTs)
+### Signing Hierarchy
 
-**OPEN QUESTION**: Should BYOH controllers have the account seed? If a BYOH controller is compromised, the attacker has the account seed and can issue arbitrary JWTs with any permissions. This is the single biggest security risk in the current design.
+```
+Account Seed (control-plane only)
+├── Signs: SPA user JWTs
+├── Signs: controller JWTs
+├── Signs: scoped signing keys (one per cluster)
+│
+├── K8s Cluster Signing Key (scoped)
+│   └── Signs: session-agent JWTs (ceiling: mclaude.*.sessions.{clusterId}.*.>)
+│
+└── BYOH Cluster Signing Key (scoped)
+    └── Signs: session-agent JWTs (ceiling: mclaude.*.sessions.{clusterId}.*.>)
+```
 
-Options:
-1. **BYOH gets the seed** (current) — simplest. BYOH can sign session-agent JWTs locally without round-tripping to control-plane. Risk: seed exposure on untrusted hardware.
-2. **BYOH requests JWTs from control-plane** — BYOH sends a request to control-plane ("I need a JWT for session X"), control-plane signs and returns it. BYOH never has the seed. Adds latency to session creation. Adds a hard dependency on control-plane for session starts.
-3. **Delegated signing with a sub-key** — Control-plane issues a delegated signing key scoped to the BYOH's cluster. BYOH can sign JWTs but only with permissions within its cluster scope. NATS supports signing keys, but the scoping may not be granular enough.
-4. **Pre-issued session JWTs** — Control-plane pre-issues session-agent JWTs when the project is created and includes them in the create event. BYOH stores them and mounts them when creating sessions. Limits: fixed number of JWTs, requires re-issuance for new sessions.
+### How It Works
 
-**Recommendation**: Option 2 (request from control-plane) for BYOH targets. Managed K8s controllers keep the seed (managed infrastructure, lower risk). The latency of a NATS request/reply for JWT issuance is sub-10ms on a healthy system — acceptable for session creation.
+NATS supports **scoped signing keys**: a signing key registered on an account with a permission ceiling. Any JWT signed by the key is automatically clamped to that ceiling by the NATS server, regardless of what the JWT claims say.
+
+1. Control-plane holds the account seed. Never shared.
+2. On cluster registration, control-plane generates a signing key scoped to `mclaude.*.sessions.{clusterId}.*.>` and registers it on the account.
+3. The signing key is given to the controller (K8s or BYOH).
+4. Controller uses the signing key to mint session-agent JWTs. Each JWT is scoped to `mclaude.{userId}.sessions.{clusterId}.{sessionId}.>`.
+5. NATS server validates: signing key is registered on the account, JWT permissions are within the signing key's ceiling.
+
+### Why Not the Account Seed?
+
+If a controller had the account seed, a compromise would let the attacker mint arbitrary JWTs — impersonate control-plane, read all user data, write all KV buckets. With a scoped signing key, a compromised controller can only mint session-scoped JWTs for its own cluster. The blast radius is bounded.
+
+### Per-Identity Credential
+
+| Identity | Credential | Issued By | Signs |
+|----------|-----------|-----------|-------|
+| Control-plane | Account seed | Operator (deploy-time) | SPA JWTs, controller JWTs, signing keys |
+| K8s controller | Controller JWT + cluster signing key | Control-plane (registration) | Session-agent JWTs (scoped to its cluster) |
+| BYOH controller | Controller JWT + cluster signing key | Control-plane (`mclaude register`) | Session-agent JWTs (scoped to its cluster) |
+| SPA | User JWT | Control-plane (login) | Nothing |
+| Session-agent | Session JWT | Controller (pod/process creation) | Nothing |
 
 ---
 
