@@ -149,10 +149,16 @@ export class SessionListVM {
     return result.id
   }
 
-  async createSession(projectId: string, branch: string, name: string): Promise<string> {
+  async createSession(projectId: string, branch: string, name: string, opts?: { disallowedTools?: string[] }): Promise<string> {
     const requestId = crypto.randomUUID()
     const subject = `mclaude.${this.userId}.${projectId}.api.sessions.create`
-    const payload = { projectId, branch, name, requestId }
+    const payload = {
+      projectId,
+      branch,
+      name,
+      requestId,
+      ...(opts?.disallowedTools?.length ? { disallowedTools: opts.disallowedTools } : {}),
+    }
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
 
     return new Promise((resolve, reject) => {

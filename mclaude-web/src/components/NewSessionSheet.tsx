@@ -18,9 +18,14 @@ function sortProjects(projects: ProjectVM[]): ProjectVM[] {
   })
 }
 
+function parseDisallowedTools(text: string): string[] {
+  return text.split('\n').map(s => s.trim()).filter(s => s.length > 0)
+}
+
 export function NewSessionSheet({ sessionListVM, onClose, onSessionCreated }: NewSessionSheetProps) {
   const [projects, setProjects] = useState<ProjectVM[]>(() => sortProjects(sessionListVM.projects))
   const [creating, setCreating] = useState<string | null>(null)
+  const [disallowedToolsText, setDisallowedToolsText] = useState('')
 
   useEffect(() => {
     setProjects(sortProjects(sessionListVM.projects))
@@ -31,7 +36,13 @@ export function NewSessionSheet({ sessionListVM, onClose, onSessionCreated }: Ne
   const handleSelect = async (projectId: string) => {
     setCreating(projectId)
     try {
-      const sessionId = await sessionListVM.createSession(projectId, 'main', 'new-session')
+      const disallowedTools = parseDisallowedTools(disallowedToolsText)
+      const sessionId = await sessionListVM.createSession(
+        projectId,
+        'main',
+        'new-session',
+        disallowedTools.length > 0 ? { disallowedTools } : undefined,
+      )
       localStorage.setItem(LAST_PROJECT_KEY, projectId)
       onSessionCreated?.(sessionId)
       onClose()
@@ -115,6 +126,48 @@ export function NewSessionSheet({ sessionListVM, onClose, onSessionCreated }: Ne
               </div>
             </button>
           ))}
+
+          {/* Advanced section */}
+          <details style={{ padding: '8px 16px', borderTop: '1px solid var(--border)' }}>
+            <summary style={{
+              cursor: 'pointer',
+              color: 'var(--text2)',
+              fontSize: 13,
+              userSelect: 'none',
+              listStyle: 'none',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+            }}>
+              Advanced
+            </summary>
+            <div style={{ marginTop: 8 }}>
+              <label style={{ display: 'block', fontSize: 12, color: 'var(--text2)', marginBottom: 4 }}>
+                Restrict tools
+              </label>
+              <textarea
+                value={disallowedToolsText}
+                onChange={e => setDisallowedToolsText(e.target.value)}
+                placeholder={'Edit(src/**)\nWrite'}
+                rows={3}
+                style={{
+                  width: '100%',
+                  resize: 'vertical',
+                  fontSize: 12,
+                  fontFamily: 'monospace',
+                  padding: '6px 8px',
+                  background: 'var(--surf2)',
+                  color: 'var(--text)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 4,
+                  boxSizing: 'border-box',
+                }}
+              />
+              <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 4 }}>
+                One pattern per line, e.g. Edit(src/**)
+              </div>
+            </div>
+          </details>
         </div>
       </div>
     </div>
