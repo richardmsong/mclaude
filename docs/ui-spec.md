@@ -436,11 +436,14 @@ Events render in a vertically scrolling list, newest at bottom. Each event type 
 
 ### User Message (`.ev-user`)
 
-Right-aligned bubble (or left-aligned on platforms that prefer it), `--blue` background, white text, border-radius 18px (tighter on the send side). Images render inline with rounded corners.
+Right-aligned bubble (`--blue` background, white text, border-radius 18px, tighter on the send side). Text content renders in the bubble. Image content blocks (from the Attach button or clipboard paste) render as thumbnails inside the bubble — max 240px wide, rounded corners 8px — directly below the text. Tapping a thumbnail opens it full-size in a lightbox overlay (dimmed backdrop, tap outside to close); on web, clicking also works. When a message has both text and images, text appears first, images below. Pending messages (opacity 0.5) show thumbnails at the same opacity.
 
 ```
                        ┌──────────────────┐
                        │  fix the bug     │
+                       │ ┌──────────────┐ │
+                       │ │  [thumbnail] │ │
+                       │ └──────────────┘ │
                        └──────────────────┘
 ```
 
@@ -919,6 +922,23 @@ The microphone button in the input bar:
 - **Release**: stops recording, transcribed text is sent immediately (not placed in field)
 - **Visual state**: button turns red with pulse animation while recording
 - **Fallback**: if Speech API unavailable or on HTTP, button is dimmed (40% opacity); tapping shows alert explaining why
+
+### Voice-first mode
+
+Configurable in **Settings → Input → Default input method** (stored in `localStorage` as `mclaude.inputMode: 'text' | 'voice'`; default `'text'`).
+
+**Text mode** (default): PTT button is small (32px) and sits between Attach and Send. Layout: `[Stop] [📷] [textarea] [🎙] [Send]`.
+
+**Voice mode**: the Send button is replaced by a large microphone button (56×56px). The textarea shrinks but remains visible (users can still type and press Enter to send). Layout: `[Stop] [📷] [textarea…] [large 🎙]`.
+
+In voice mode the large button uses the same hold-to-record / release-to-send semantics. A keyboard icon (⌨) appears in the top-right corner of the input area; tapping it temporarily focuses the textarea and collapses the button back to small size until focus is lost.
+
+**Settings screen** adds an "Input" section:
+```
+Input
+  Default method:  ○ Text  ● Voice
+```
+The preference is persisted in `localStorage` under `mclaude.inputMode` and applied on every render of the input bar.
 
 ---
 
