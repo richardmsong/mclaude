@@ -161,7 +161,7 @@ mclaude.clusters.{clusterId}.projects.delete
 
 ### Status Updates
 
-Controller writes project status directly to NATS KV (`mclaude-projects` bucket). No status event subjects needed — KV watches propagate the update to SPA and control-plane.
+Controller writes project status directly to NATS KV (`mclaude-projects` bucket, key: `{clusterId}.{projectId}`). Controller JWT is scoped to `$KV.mclaude-projects.{itsClusterId}.>` — NATS blocks cross-cluster status writes. No status event subjects needed — KV watches propagate the update to SPA and control-plane.
 
 ### Target Registration
 
@@ -198,7 +198,7 @@ $SYS.ACCOUNT.{accountId}.DISCONNECT
 |----------|-----------|---------|
 | SPA (user) | `mclaude.{userId}.>` | `mclaude.{userId}.>` |
 | Control-plane | `mclaude.>`, `$SYS.ACCOUNT.>` | `mclaude.>`, `mclaude.clusters.>`, `$KV.mclaude-sessions.>` |
-| Controller | `mclaude.clusters.{clusterId}.>` | `$KV.mclaude-projects.>` |
+| Controller | `mclaude.clusters.{clusterId}.>` | `$KV.mclaude-projects.{clusterId}.>` |
 
 See `docs/plan-nats-security.md` for full threat model.
 
@@ -225,12 +225,12 @@ See `docs/plan-nats-security.md` for full threat model.
    b. Reconciler watches CR → provisions namespace, RBAC, secrets, PVCs, deployment
    (No access check needed — control-plane already validated)
 
-5. Controller writes KV: mclaude-projects.{projectId} = {status: "Provisioning"}
+5. Controller writes KV: mclaude-projects.{clusterId}.{projectId} = {status: "Provisioning"}
 
 6. SPA KV watch fires → UI shows project as Provisioning
 
 7. Controller reconciliation completes:
-   Writes KV: mclaude-projects.{projectId} = {status: "Ready"}
+   Writes KV: mclaude-projects.{clusterId}.{projectId} = {status: "Ready"}
 
 8. SPA KV watch fires → UI shows project as Ready
 ```
