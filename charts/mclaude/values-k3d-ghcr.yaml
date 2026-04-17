@@ -1,14 +1,6 @@
-## k3d deployment using pre-built ghcr.io images (no local build needed).
-## Usage: ./charts/mclaude/scripts/k3d-ghcr.sh
-
-## ── no persistent volumes ──────────────────────────────────────────────────
-nats:
-  persistence:
-    enabled: false
-
-postgres:
-  persistence:
-    enabled: false
+## k3d local-preview values. Persistence inherits chart defaults (enabled).
+## Used by `/deploy-local-preview` skill. Mirrors `Deploy main` CI pattern
+## with k3d-specific TLS/ingress overrides.
 
 ## ── control-plane: ghcr.io image ───────────────────────────────────────────
 controlPlane:
@@ -63,9 +55,14 @@ ingress:
   enabled: true
   className: traefik
   annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
   host: "dev.mclaude.local"
   natsHost: "dev-nats.mclaude.local"
+  tls:
+    - secretName: mclaude-local-tls
+      hosts:
+        - dev.mclaude.local
 
 ## ── pull secret for private ghcr.io images ─────────────────────────────────
 global:
