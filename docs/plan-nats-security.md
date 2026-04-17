@@ -106,7 +106,7 @@ Control-plane is the router: receives user commands on `mclaude.*.projects.>`, c
 
 ```
 Publish allow:
-  $KV.mclaude-projects.>                     # writes project status directly to KV
+  $KV.mclaude-projects.{clusterId}.>                     # writes project status directly to KV
   _INBOX.>                                   # request/reply
 
 Subscribe allow:
@@ -150,8 +150,8 @@ NATS KV operations map to JetStream subjects under `$KV.<bucket>.<key>`. KV writ
 Access control is enforced in Postgres at routing time, not via a KV bucket.
 
 This means:
-- **SPA can watch KV** (subscribe to `$KV.mclaude-projects.>`) — reads project status changes in real-time
-- **Controller writes project status** (publish to `$KV.mclaude-projects.>`) — directly updates status as it provisions
+- **SPA can watch KV** (subscribe to `$KV.mclaude-projects.{clusterId}.>`) — reads project status changes in real-time
+- **Controller writes project status** (publish to `$KV.mclaude-projects.{clusterId}.>`) — directly updates status as it provisions
 - **Control-plane writes session state** — owns session metadata
 - **SPA and controllers cannot write each other's KV buckets** — enforced at JWT level
 
@@ -271,7 +271,7 @@ NATS JWTs support per-connection rate limits:
 A managed K8s controller runs on infrastructure we operate. We trust the runtime environment but not the software blindly — it still gets scoped NATS permissions. If the controller binary is compromised:
 - It can only affect its own cluster's projects
 - It only receives pre-validated commands from control-plane (never raw user events)
-- It can only write to the `mclaude-projects` KV bucket (project status) — cannot write session state
+- It can only write to its own cluster's slice of the `mclaude-projects` KV bucket (`$KV.mclaude-projects.{clusterId}.>`) — cannot write other clusters' status or session state
 - It cannot see other clusters' commands
 - It cannot issue JWTs (doesn't have the account seed — **OPEN QUESTION**: it does have the account seed for signing session-agent JWTs. See "Account Seed Distribution" below.)
 
@@ -302,23 +302,17 @@ This is acceptable because:
 
 ### T2: BYOH Spoofs Project Status via KV
 
-**Threat**: A compromised BYOH controller writes fake project status directly to the `mclaude-projects` KV bucket, claiming a project is Ready when it's actually failed. Since the controller has `$KV.mclaude-projects.>` publish permission, it can write status for ANY project key — not just projects on its cluster.
+**Threat**: A compromised BYOH controller writes fake project status to the `mclaude-projects` KV bucket, claiming a project is Ready when it's actually failed.
 
-**Impact**: Users see incorrect project status. SPA shows "Ready" but the project is broken. Worse: the controller could overwrite status for projects on OTHER clusters.
+**Impact**: Users see incorrect project status for projects on that cluster. SPA shows "Ready" but the project is broken.
 
-**Mitigation**:
-- Controller JWT scopes KV writes to `$KV.mclaude-projects.>` but the KV key includes the project ID, not the cluster ID. A compromised controller could write any project's status.
-- Rate limiting prevents flooding KV writes.
-- Users will quickly notice the project doesn't work and report it.
-- Control-plane can detect anomalies: status updates for projects not assigned to the reporting cluster.
+**Mitigation**: KV keys are cluster-prefixed (`{clusterId}.{projectId}`). Controller JWT is scoped to `$KV.mclaude-projects.{itsClusterId}.>`. NATS blocks writes to other clusters' keys at the server level. A compromised controller can only write bogus status for projects on its own cluster.
 
-**Residual risk**: A compromised controller can write bogus status for projects on other clusters. This is the main trade-off of letting controllers write KV directly. Mitigated by monitoring (control-plane watches all KV changes and can flag cross-cluster status writes) and by the fact that incorrect status is annoying but not destructive — the underlying resources are untouched.
-
-**OPEN QUESTION**: Should project KV keys include the cluster ID (e.g., `{clusterId}.{projectId}`) so controller JWT can be scoped to `$KV.mclaude-projects.{clusterId}.>`? This would prevent cross-cluster status poisoning at the NATS level. Trade-off: SPA needs to know the cluster ID to watch the right KV keys.
+**Residual risk**: Status confusion limited to the compromised cluster's projects. The underlying resources are untouched. Users will quickly notice when sessions don't work. Admin can deregister the cluster (revoke JWT) to stop the poisoning.
 
 ### T3: DoS on BYOH Target
 
-**Threat**: A malicious user spams project create events targeting a BYOH controller's cluster ID: `mclaude.{userId}.clusters.{byohClusterId}.projects.create`.
+**Threat**: A malicious user spams project create events targeting a BYOH cluster: `mclaude.{userId}.projects.create` with the BYOH cluster's UUID in the payload.
 
 **Analysis**: The user publishes to `mclaude.{userId}.projects.create` with the BYOH cluster's UUID in the payload. Control-plane receives it.
 
@@ -338,9 +332,9 @@ This is acceptable because:
 
 **Mitigation by bucket:**
 - `mclaude-sessions` (session state): only control-plane can write. **Residual risk: zero.**
-- `mclaude-projects` (project status): controllers can write. A compromised controller could write bogus status for any project (see T2). SPA is denied `$KV.mclaude-projects.>` publish. **Residual risk: status confusion, mitigated by monitoring.**
+- `mclaude-projects` (project status): controllers can write. A compromised controller could write bogus status for any project (see T2). SPA is denied `$KV.mclaude-projects.{clusterId}.>` publish. **Residual risk: status confusion, mitigated by monitoring.**
 
-Access control is enforced in Postgres at routing time (no KV access bucket). The project status bucket is the trade-off zone — controllers need write access for performance, accepting the risk that a compromised controller can write cross-cluster status.
+Access control is enforced in Postgres at routing time (no KV access bucket). The project status bucket is scoped per-cluster via KV key prefix (`{clusterId}.{projectId}`) and JWT scoping (`$KV.mclaude-projects.{clusterId}.>`) — a compromised controller can only affect its own cluster's status.
 
 ### T5: Subject Hijacking
 
