@@ -1743,4 +1743,95 @@ describe('EventStore', () => {
     })
   })
 
+  // ─── UserImageBlock: image thumbnails in user messages ───────────────────────
+
+  describe('UserImageBlock: addPendingMessage with image content', () => {
+    it('creates a turn with UserImageBlock when content includes an image entry', () => {
+      store.addPendingMessage('uuid-img', [
+        { type: 'text', text: 'look at this' },
+        {
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/png', data: 'abc123' },
+        },
+      ])
+
+      const userTurns = store.conversation.turns.filter(t => t.type === 'user')
+      expect(userTurns).toHaveLength(1)
+      expect(userTurns[0].blocks).toHaveLength(2)
+
+      const textBlock = userTurns[0].blocks[0]
+      expect(textBlock.type).toBe('text')
+      if (textBlock.type === 'text') {
+        expect(textBlock.text).toBe('look at this')
+      }
+
+      const imgBlock = userTurns[0].blocks[1]
+      expect(imgBlock.type).toBe('user_image')
+      if (imgBlock.type === 'user_image') {
+        expect(imgBlock.dataUrl).toBe('data:image/png;base64,abc123')
+        expect(imgBlock.mimeType).toBe('image/png')
+      }
+    })
+
+    it('creates a turn with only UserImageBlock when no text is present', () => {
+      store.addPendingMessage('uuid-imgonly', [
+        {
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/jpeg', data: 'deadbeef' },
+        },
+      ])
+
+      const userTurns = store.conversation.turns.filter(t => t.type === 'user')
+      expect(userTurns).toHaveLength(1)
+      expect(userTurns[0].blocks).toHaveLength(1)
+      expect(userTurns[0].blocks[0].type).toBe('user_image')
+      if (userTurns[0].blocks[0].type === 'user_image') {
+        expect(userTurns[0].blocks[0].dataUrl).toBe('data:image/jpeg;base64,deadbeef')
+        expect(userTurns[0].blocks[0].mimeType).toBe('image/jpeg')
+      }
+    })
+
+    it('server echo promotes the pending turn and image block survives', () => {
+      store.addPendingMessage('uuid-img-echo', [
+        { type: 'text', text: 'here is a screenshot' },
+        {
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/png', data: 'xyz789' },
+        },
+      ])
+
+      expect(store.pendingMessages).toHaveLength(1)
+
+      // Server echoes the user message back (uuid matches)
+      store.applyEventForTest({
+        type: 'user',
+        message: {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'here is a screenshot' },
+          ],
+        },
+        uuid: 'uuid-img-echo',
+        isReplay: true,
+      })
+
+      // Pending message removed
+      expect(store.pendingMessages).toHaveLength(0)
+
+      // Still exactly one user turn — no duplicate
+      const userTurns = store.conversation.turns.filter(t => t.type === 'user')
+      expect(userTurns).toHaveLength(1)
+
+      // The turn is confirmed (no pendingUuid)
+      expect(userTurns[0].pendingUuid).toBeUndefined()
+
+      // Image block survived promotion
+      const imgBlock = userTurns[0].blocks.find(b => b.type === 'user_image')
+      expect(imgBlock).toBeDefined()
+      if (imgBlock?.type === 'user_image') {
+        expect(imgBlock.dataUrl).toBe('data:image/png;base64,xyz789')
+      }
+    })
+  })
+
 })
