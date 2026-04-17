@@ -406,16 +406,36 @@ export class EventStore {
           }
         }
 
-        // Step 2: If event has uuid and matching pending message → remove from _pendingMessages
-        // and dedup the optimistic turn that addPendingMessage already inserted.
-        if (event.uuid) {
-          const idx = this._pendingMessages.findIndex(p => p.uuid === event.uuid)
-          if (idx !== -1) {
-            this._pendingMessages.splice(idx, 1)
-            // Find the optimistic turn we already inserted and clear its pendingUuid
-            // so it becomes a fully-confirmed turn.  Skip creating a new turn.
+        // Step 2: Dedup the optimistic turn that addPendingMessage already inserted.
+        // Primary: match by uuid (present on --replay-user-messages echoes).
+        // Fallback: match by text content (normal Claude Code echoes omit uuid).
+        {
+          const incomingText = typeof event.message.content === 'string'
+            ? event.message.content
+            : Array.isArray(event.message.content)
+              ? event.message.content.filter(c => c.type === 'text' && c.text).map(c => c.text ?? '').join('')
+              : ''
+
+          // Find a matching pending message: match by uuid when present, fall back to
+          // text content only when uuid is absent (normal Claude echoes omit uuid).
+          let pendingIdx = event.uuid
+            ? this._pendingMessages.findIndex(p => p.uuid === event.uuid)
+            : -1
+          if (pendingIdx === -1 && !event.uuid && incomingText) {
+            pendingIdx = this._pendingMessages.findIndex(p => {
+              const pendingText = typeof p.content === 'string'
+                ? p.content
+                : p.content.filter(c => c.type === 'text').map(c => c.text ?? '').join('')
+              return pendingText === incomingText
+            })
+          }
+
+          if (pendingIdx !== -1) {
+            const matched = this._pendingMessages[pendingIdx]
+            this._pendingMessages.splice(pendingIdx, 1)
+            // Confirm the optimistic turn already in turns[].
             const optimisticIdx = this._conversation.turns.findIndex(
-              t => t.type === 'user' && t.pendingUuid === event.uuid,
+              t => t.type === 'user' && t.pendingUuid === matched.uuid,
             )
             if (optimisticIdx !== -1) {
               delete this._conversation.turns[optimisticIdx].pendingUuid
