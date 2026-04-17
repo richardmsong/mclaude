@@ -307,6 +307,16 @@ export class EventStore {
       return
     }
 
+    // If a confirmed user turn exists ANYWHERE after asstIdx, this assistant turn
+    // is already paired with that later user message — just append.
+    const hasConfirmedUserAfter = this._conversation.turns
+      .slice(asstIdx + 1)
+      .some(t => t.type === 'user' && t.pendingUuid === undefined)
+    if (hasConfirmedUserAfter) {
+      this._conversation.turns.push(turn)
+      return
+    }
+
     // Step 2: check whether the found assistant turn is already "claimed" by
     // a confirmed user turn immediately preceding it (skipping system turns).
     let predecessorIdx = asstIdx - 1
