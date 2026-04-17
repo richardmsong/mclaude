@@ -69,6 +69,29 @@ describe('SessionListVM', () => {
       expect(session.cwd).toBe('/home/user/work/myproject')
     })
 
+    it('maps extraFlags from SessionKVState to SessionVM', () => {
+      mockNats.kvSet('mclaude-projects', 'user-1.project-1', makeProjectKVState({ id: 'project-1', name: 'Alpha' }))
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({
+        id: 'session-1',
+        projectId: 'project-1',
+        extraFlags: '--disallowedTools "Edit(src/**)"',
+      }))
+
+      const session = vm.projects[0]!.sessions[0]!
+      expect(session.extraFlags).toBe('--disallowedTools "Edit(src/**)"')
+    })
+
+    it('maps extraFlags to empty string when not set in SessionKVState', () => {
+      mockNats.kvSet('mclaude-projects', 'user-1.project-1', makeProjectKVState({ id: 'project-1', name: 'Alpha' }))
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({
+        id: 'session-1',
+        projectId: 'project-1',
+      }))
+
+      const session = vm.projects[0]!.sessions[0]!
+      expect(session.extraFlags).toBe('')
+    })
+
     it('P6: healthy is false when no heartbeat seen', () => {
       mockNats.kvSet('mclaude-projects', 'user-1.project-1', makeProjectKVState({ id: 'project-1', name: 'Alpha' }))
       heartbeat.start()
@@ -295,6 +318,40 @@ describe('SessionListVM', () => {
       expect(sessionId).toBe('sess-new')
     })
 
+    it('includes extraFlags string in payload when provided', async () => {
+      const createPromise = vm.createSession('project-1', 'main', 'My Session', {
+        extraFlags: '--disallowedTools "Edit(src/**)" --model claude-opus-4-7',
+      })
+
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.project-1.api.sessions.create')
+      expect(pub).toBeDefined()
+      const payload = parsePublished(pub!.data) as Record<string, unknown>
+      expect(payload['extraFlags']).toBe('--disallowedTools "Edit(src/**)" --model claude-opus-4-7')
+
+      // Resolve via KV
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.sess-new', makeSessionKVState({
+        id: 'sess-new',
+        projectId: 'project-1',
+      }))
+      await createPromise
+    })
+
+    it('omits extraFlags from payload when not provided', async () => {
+      const createPromise = vm.createSession('project-1', 'main', 'My Session')
+
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.project-1.api.sessions.create')
+      expect(pub).toBeDefined()
+      const payload = parsePublished(pub!.data) as Record<string, unknown>
+      expect('extraFlags' in payload).toBe(false)
+      expect('disallowedTools' in payload).toBe(false)
+
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.sess-new', makeSessionKVState({
+        id: 'sess-new',
+        projectId: 'project-1',
+      }))
+      await createPromise
+    })
+
     it('rejects on api_error event matching requestId', async () => {
       const createPromise = vm.createSession('project-1', 'main', 'My Session')
 
@@ -335,6 +392,45 @@ describe('SessionListVM', () => {
 
       const sessionId = await createPromise
       expect(sessionId).toBe('sess-new')
+    })
+  })
+
+  describe('restartSession', () => {
+    it('publishes to mclaude.{userId}.api.sessions.restart with sessionId', async () => {
+      await vm.restartSession('session-abc')
+
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.api.sessions.restart')
+      expect(pub).toBeDefined()
+      const payload = parsePublished(pub!.data) as Record<string, unknown>
+      expect(payload['sessionId']).toBe('session-abc')
+    })
+
+    it('includes extraFlags in payload when provided', async () => {
+      await vm.restartSession('session-abc', { extraFlags: '--model claude-opus-4-7' })
+
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.api.sessions.restart')
+      expect(pub).toBeDefined()
+      const payload = parsePublished(pub!.data) as Record<string, unknown>
+      expect(payload['sessionId']).toBe('session-abc')
+      expect(payload['extraFlags']).toBe('--model claude-opus-4-7')
+    })
+
+    it('omits extraFlags from payload when not provided', async () => {
+      await vm.restartSession('session-abc')
+
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.api.sessions.restart')
+      expect(pub).toBeDefined()
+      const payload = parsePublished(pub!.data) as Record<string, unknown>
+      expect('extraFlags' in payload).toBe(false)
+    })
+
+    it('omits extraFlags from payload when opts.extraFlags is undefined', async () => {
+      await vm.restartSession('session-abc', { extraFlags: undefined })
+
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.api.sessions.restart')
+      expect(pub).toBeDefined()
+      const payload = parsePublished(pub!.data) as Record<string, unknown>
+      expect('extraFlags' in payload).toBe(false)
     })
   })
 

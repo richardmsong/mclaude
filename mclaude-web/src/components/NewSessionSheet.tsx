@@ -18,14 +18,10 @@ function sortProjects(projects: ProjectVM[]): ProjectVM[] {
   })
 }
 
-function parseDisallowedTools(text: string): string[] {
-  return text.split('\n').map(s => s.trim()).filter(s => s.length > 0)
-}
-
 export function NewSessionSheet({ sessionListVM, onClose, onSessionCreated }: NewSessionSheetProps) {
   const [projects, setProjects] = useState<ProjectVM[]>(() => sortProjects(sessionListVM.projects))
   const [creating, setCreating] = useState<string | null>(null)
-  const [disallowedToolsText, setDisallowedToolsText] = useState('')
+  const [extraFlagsText, setExtraFlagsText] = useState('')
 
   useEffect(() => {
     setProjects(sortProjects(sessionListVM.projects))
@@ -36,12 +32,11 @@ export function NewSessionSheet({ sessionListVM, onClose, onSessionCreated }: Ne
   const handleSelect = async (projectId: string) => {
     setCreating(projectId)
     try {
-      const disallowedTools = parseDisallowedTools(disallowedToolsText)
       const sessionId = await sessionListVM.createSession(
         projectId,
         'main',
         'new-session',
-        disallowedTools.length > 0 ? { disallowedTools } : undefined,
+        extraFlagsText.trim() ? { extraFlags: extraFlagsText.trim() } : undefined,
       )
       localStorage.setItem(LAST_PROJECT_KEY, projectId)
       onSessionCreated?.(sessionId)
@@ -143,12 +138,12 @@ export function NewSessionSheet({ sessionListVM, onClose, onSessionCreated }: Ne
             </summary>
             <div style={{ marginTop: 8 }}>
               <label style={{ display: 'block', fontSize: 12, color: 'var(--text2)', marginBottom: 4 }}>
-                Restrict tools
+                Extra flags
               </label>
               <textarea
-                value={disallowedToolsText}
-                onChange={e => setDisallowedToolsText(e.target.value)}
-                placeholder={'Edit(src/**)\nWrite'}
+                value={extraFlagsText}
+                onChange={e => setExtraFlagsText(e.target.value)}
+                placeholder='--disallowedTools "Edit(src/**)" --model claude-opus-4-7'
                 rows={3}
                 style={{
                   width: '100%',
@@ -163,9 +158,6 @@ export function NewSessionSheet({ sessionListVM, onClose, onSessionCreated }: Ne
                   boxSizing: 'border-box',
                 }}
               />
-              <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 4 }}>
-                One pattern per line, e.g. Edit(src/**)
-              </div>
             </div>
           </details>
         </div>

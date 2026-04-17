@@ -25,6 +25,8 @@ export interface SessionVM {
   hasPendingPermission: boolean
   /** ISO timestamp of last state change — used for sorting. */
   stateSince: string
+  /** Raw CLI flags string passed at session create/restart. Empty string if none. */
+  extraFlags: string
 }
 
 export interface ProjectVM {
@@ -78,6 +80,7 @@ export class SessionListVM {
         costUsd: s.usage.costUsd,
         hasPendingPermission: Object.keys(s.pendingControls).length > 0,
         stateSince: s.stateSince,
+        extraFlags: s.extraFlags ?? '',
       })),
     }))
   }
@@ -149,7 +152,7 @@ export class SessionListVM {
     return result.id
   }
 
-  async createSession(projectId: string, branch: string, name: string, opts?: { disallowedTools?: string[] }): Promise<string> {
+  async createSession(projectId: string, branch: string, name: string, opts?: { extraFlags?: string }): Promise<string> {
     const requestId = crypto.randomUUID()
     const subject = `mclaude.${this.userId}.${projectId}.api.sessions.create`
     const payload = {
@@ -157,7 +160,7 @@ export class SessionListVM {
       branch,
       name,
       requestId,
-      ...(opts?.disallowedTools?.length ? { disallowedTools: opts.disallowedTools } : {}),
+      ...(opts?.extraFlags !== undefined ? { extraFlags: opts.extraFlags } : {}),
     }
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
 
@@ -207,6 +210,15 @@ export class SessionListVM {
     if (!session) return
     const subject = `mclaude.${this.userId}.${session.projectId}.api.sessions.delete`
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify({ sessionId })))
+  }
+
+  async restartSession(sessionId: string, opts?: { extraFlags?: string }): Promise<void> {
+    const subject = `mclaude.${this.userId}.api.sessions.restart`
+    const payload = {
+      sessionId,
+      ...(opts?.extraFlags !== undefined ? { extraFlags: opts.extraFlags } : {}),
+    }
+    this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
   }
 
   onProjectsChanged(listener: SessionListListener): () => void {

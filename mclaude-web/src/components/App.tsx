@@ -484,6 +484,8 @@ export function App() {
           sessionState={session?.state ?? 'idle'}
           sessionModel={session?.model}
           sessionUsage={session?.usage}
+          sessionExtraFlags={session?.extraFlags ?? ''}
+          sessionListVM={sessionListVM ?? undefined}
           conversationVM={conversationVM}
           onBack={() => navigate('/')}
           connected={connected}
