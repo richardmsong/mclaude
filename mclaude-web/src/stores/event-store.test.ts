@@ -342,6 +342,128 @@ describe('EventStore', () => {
     })
   })
 
+  // ─── Skill invocation chip ───────────────────────────────────────────────────
+
+  describe('skill invocation parsing', () => {
+    it('creates a user turn with SkillInvocationBlock when content starts with "Base directory for this skill:"', () => {
+      const event: StreamJsonEvent = {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: 'Base directory for this skill: /data/worktrees/main/.claude/skills/feature-change\n\nARGUMENTS:\nFix two event-store bugs in the SPA',
+        },
+      }
+      store.applyEventForTest(event, 1)
+
+      const userTurns = store.conversation.turns.filter(t => t.type === 'user')
+      expect(userTurns).toHaveLength(1)
+      expect(userTurns[0].blocks).toHaveLength(1)
+      const block = userTurns[0].blocks[0]
+      expect(block.type).toBe('skill_invocation')
+      if (block.type === 'skill_invocation') {
+        expect(block.skillName).toBe('feature-change')
+        expect(block.args).toBe('Fix two event-store bugs in the SPA')
+        expect(block.rawContent).toContain('Base directory for this skill:')
+      }
+    })
+
+    it('extracts args from after the ARGUMENTS: line', () => {
+      const event: StreamJsonEvent = {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: 'Base directory for this skill: /path/to/skills/my-skill\n\nSome preamble\nARGUMENTS:\nline1\nline2',
+        },
+      }
+      store.applyEventForTest(event, 1)
+
+      const block = store.conversation.turns[0].blocks[0]
+      if (block.type === 'skill_invocation') {
+        expect(block.skillName).toBe('my-skill')
+        expect(block.args).toBe('line1\nline2')
+      }
+    })
+
+    it('sets args to empty string when no ARGUMENTS: line present', () => {
+      const event: StreamJsonEvent = {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: 'Base directory for this skill: /path/to/skills/no-args-skill\n\nNo arguments section here.',
+        },
+      }
+      store.applyEventForTest(event, 1)
+
+      const block = store.conversation.turns[0].blocks[0]
+      if (block.type === 'skill_invocation') {
+        expect(block.skillName).toBe('no-args-skill')
+        expect(block.args).toBe('')
+      }
+    })
+  })
+
+  // ─── System notification filter ───────────────────────────────────────────────
+
+  describe('system notification filter', () => {
+    it('does NOT create a turn when content starts with "[SYSTEM NOTIFICATION"', () => {
+      const event: StreamJsonEvent = {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: '[SYSTEM NOTIFICATION] harness check-in: task is still running',
+        },
+      }
+      store.applyEventForTest(event, 1)
+
+      expect(store.conversation.turns).toHaveLength(0)
+    })
+
+    it('discards system notification with additional content after the prefix', () => {
+      const event: StreamJsonEvent = {
+        type: 'user',
+        message: {
+          role: 'user',
+          content: '[SYSTEM NOTIFICATION — 12:34:56] You have been idle for 5 minutes.',
+        },
+      }
+      store.applyEventForTest(event, 1)
+
+      expect(store.conversation.turns).toHaveLength(0)
+    })
+  })
+
+  // ─── Normal user text regression ─────────────────────────────────────────────
+
+  describe('normal user text (regression)', () => {
+    it('creates a TextBlock turn for ordinary user messages', () => {
+      const event: StreamJsonEvent = {
+        type: 'user',
+        message: { role: 'user', content: 'Hello, Claude!' },
+      }
+      store.applyEventForTest(event, 1)
+
+      const userTurns = store.conversation.turns.filter(t => t.type === 'user')
+      expect(userTurns).toHaveLength(1)
+      expect(userTurns[0].blocks).toHaveLength(1)
+      const block = userTurns[0].blocks[0]
+      expect(block.type).toBe('text')
+      if (block.type === 'text') {
+        expect(block.text).toBe('Hello, Claude!')
+      }
+    })
+
+    it('does NOT create a SkillInvocationBlock for non-skill messages', () => {
+      const event: StreamJsonEvent = {
+        type: 'user',
+        message: { role: 'user', content: 'fix the bug please' },
+      }
+      store.applyEventForTest(event, 1)
+
+      const block = store.conversation.turns[0]?.blocks[0]
+      expect(block?.type).toBe('text')
+    })
+  })
+
   // ─── Bug 1: user turn ordering ───────────────────────────────────────────────
 
   describe('Bug 1 — user turn ordering', () => {
