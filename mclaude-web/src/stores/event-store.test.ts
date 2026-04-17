@@ -1743,6 +1743,108 @@ describe('EventStore', () => {
     })
   })
 
+  // ─── _insertUserTurn: n-1 injection fix ──────────────────────────────────────
+  // Bug: user echo was inserted before the WRONG assistant turn when a confirmed
+  // user turn already existed after the found assistant turn. The fix: if any
+  // confirmed (non-pending) user turn exists ANYWHERE after asstIdx, just append.
+
+  describe('_insertUserTurn: n-1 injection fix', () => {
+    it('user echo with a confirmed user turn already after the last assistant turn → appended, not injected before it', () => {
+      // Setup: turns = [user1(confirmed), asst1, user2(confirmed), asst2_streaming]
+      // asst2 is streaming so it is "unclaimed" by the immediate-predecessor check alone,
+      // BUT user2 is a confirmed user turn after asst1, so asst2 belongs to user2.
+      // A new user echo (user3) must be appended, not inserted before asst2.
+
+      // Exchange 1 (confirmed)
+      store.applyEventForTest({
+        type: 'user',
+        message: { role: 'user', content: 'first message' },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: { id: 'msg-1', role: 'assistant', content: [{ type: 'text', text: 'response one' }], model: 'claude-test' },
+      })
+
+      // Exchange 2: user2 confirmed, asst2 streaming (not yet finalized)
+      store.applyEventForTest({
+        type: 'user',
+        message: { role: 'user', content: 'second message' },
+      })
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'response two' }, index: 0 },
+      })
+
+      // Current state: [user1, asst1, user2, asst2_streaming]
+      expect(store.conversation.turns).toHaveLength(4)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+      expect(store.conversation.turns[2].type).toBe('user')
+      expect(store.conversation.turns[3].type).toBe('assistant')
+
+      // Echo for a third user message arrives (new turn, no pending)
+      store.applyEventForTest({
+        type: 'user',
+        message: { role: 'user', content: 'third message' },
+      })
+
+      // Must be appended: [user1, asst1, user2, asst2_streaming, user3]
+      // NOT injected before asst2: [user1, asst1, user2, user3, asst2_streaming]
+      expect(store.conversation.turns).toHaveLength(5)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+      expect(store.conversation.turns[2].type).toBe('user')
+      expect(store.conversation.turns[3].type).toBe('assistant')
+      expect(store.conversation.turns[4].type).toBe('user')
+      const u3text = store.conversation.turns[4].blocks.find(b => b.type === 'text')
+      expect(u3text?.type === 'text' && u3text.text).toBe('third message')
+    })
+
+    it('user echo with NO confirmed user turn after last assistant turn → inserted before it', () => {
+      // Setup: turns = [user1(confirmed), asst1, asst2_new]
+      // asst1 is claimed by user1 (immediate predecessor), asst2 is unclaimed.
+      // A new user echo must be inserted BEFORE asst2.
+
+      // user1 + asst1 form a complete confirmed exchange
+      store.applyEventForTest({
+        type: 'user',
+        message: { role: 'user', content: 'first message' },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: { id: 'msg-1', role: 'assistant', content: [{ type: 'text', text: 'response one' }], model: 'claude-test' },
+      })
+
+      // A new assistant turn starts streaming (no user turn yet for it)
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'response two' }, index: 0 },
+      })
+
+      // Current state: [user1, asst1, asst2_streaming]
+      expect(store.conversation.turns).toHaveLength(3)
+      expect(store.conversation.turns[2].type).toBe('assistant')
+
+      // User echo for the second exchange arrives
+      store.applyEventForTest({
+        type: 'user',
+        message: { role: 'user', content: 'second message' },
+      })
+
+      // Must be inserted before asst2: [user1, asst1, user2, asst2_streaming]
+      expect(store.conversation.turns).toHaveLength(4)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+      expect(store.conversation.turns[2].type).toBe('user')
+      expect(store.conversation.turns[3].type).toBe('assistant')
+      const u2text = store.conversation.turns[2].blocks.find(b => b.type === 'text')
+      expect(u2text?.type === 'text' && u2text.text).toBe('second message')
+      const asstStreaming = store.conversation.turns[3].blocks.find(b => b.type === 'streaming_text')
+      expect(asstStreaming).toBeDefined()
+      expect(asstStreaming?.type === 'streaming_text' && asstStreaming.chunks.join('')).toBe('response two')
+    })
+  })
+
   // ─── UserImageBlock: image thumbnails in user messages ───────────────────────
 
   describe('UserImageBlock: addPendingMessage with image content', () => {

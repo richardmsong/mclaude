@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, useCallback } from 'react'
 import { NavBar } from './NavBar'
 import { StatusDot } from './StatusDot'
 import { EventList } from './events/EventList'
@@ -104,7 +104,6 @@ export function SessionDetailScreen({
   const scrollRef = useRef<HTMLDivElement>(null)
   const atBottomRef = useRef(true)
   const initialMessageSentRef = useRef(false)
-  const hasScrolledToBottomRef = useRef(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -124,13 +123,6 @@ export function SessionDetailScreen({
     setVmState(conversationVM.state)
     const unsub = conversationVM.onStateChanged(s => {
       setVmState({ ...s })
-      if (atBottomRef.current) {
-        requestAnimationFrame(() => {
-          if (scrollRef.current) {
-            scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-          }
-        })
-      }
     })
     return unsub
   }, [conversationVM])
@@ -157,25 +149,6 @@ export function SessionDetailScreen({
       }
     }
   }, [sessionId])
-
-  // Initial scroll to bottom: on fresh navigation (no saved position), scroll to
-  // bottom after the first non-empty render so the user sees the most recent messages.
-  useEffect(() => {
-    if (hasScrolledToBottomRef.current) return
-    const currentTurns = vmState.turns
-    if (!currentTurns || currentTurns.length === 0) return
-    // If there is a saved scroll position this is back-navigation — the restore
-    // effect handles positioning, so skip the initial scroll-to-bottom.
-    if ((scrollPositions.get(sessionId) ?? null) !== null) {
-      hasScrolledToBottomRef.current = true
-      return
-    }
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-      atBottomRef.current = true
-    }
-    hasScrolledToBottomRef.current = true
-  }, [vmState.turns, sessionId])
 
   // Close menu on outside click
   useEffect(() => {
@@ -209,6 +182,15 @@ export function SessionDetailScreen({
     const el = scrollRef.current
     atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100
   }
+
+  // After every render: if still at bottom, snap to latest content.
+  // useLayoutEffect (no deps) fires synchronously after every React DOM commit,
+  // before paint — it never races with handleScroll.
+  useLayoutEffect(() => {
+    if (scrollRef.current && atBottomRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+    }
+  })
 
   const handleSend = () => {
     const text = input.trim()
