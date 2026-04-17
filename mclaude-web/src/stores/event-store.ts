@@ -219,6 +219,88 @@ export class EventStore {
     return null
   }
 
+  /**
+   * Insert a user turn at the correct position in _conversation.turns.
+   *
+   * With --replay-user-messages, Claude publishes stream_events BEFORE the user
+   * echo in the JetStream sequence. So when the user echo arrives (live or replay),
+   * the associated assistant response turn may already be at the END of turns[].
+   *
+   * If the last matching assistant turn is a "fresh" response turn (all blocks are
+   * streaming_text, meaning the response just started), insert the user turn BEFORE
+   * it so the conversation reads [user] -> [assistant], not [assistant] -> [user].
+   *
+   * "Matching" means the turn's parentToolUseId equals wantedParent (both may be
+   * undefined for top-level turns).
+   *
+   * If no fresh streaming assistant turn is found, append to the end (correct for
+   * idle-state sends where no response has started yet).
+   */
+  private _insertUserTurn(turn: Turn, wantedParent: string | undefined): void {
+    // Goal: insert a confirmed user turn BEFORE the fresh streaming assistant
+    // turn that responded to it, keeping any remaining pending user turns at
+    // the very end of the conversation (below all active content).
+    //
+    // Algorithm:
+    //  1. Find the last fresh streaming assistant turn under wantedParent
+    //     (all blocks are streaming_text). If none, just append and return.
+    //  2. Collect all pending user turns from the array (they may be anywhere —
+    //     before or after the streaming asst turn — due to batched sends).
+    //  3. Remove the streaming asst turn from the array.
+    //  4. Push the confirmed turn, then re-push the streaming asst turn.
+    //  5. Re-append all collected pending turns at the very end.
+
+    // Step 1: find the fresh streaming assistant turn.
+    let streamingAsstIdx = -1
+    for (let i = this._conversation.turns.length - 1; i >= 0; i--) {
+      const t = this._conversation.turns[i]
+      if (
+        t.type === 'assistant' &&
+        t.parentToolUseId === wantedParent &&
+        t.blocks.length > 0 &&
+        t.blocks.every(b => b.type === 'streaming_text')
+      ) {
+        streamingAsstIdx = i
+        break
+      }
+    }
+
+    if (streamingAsstIdx === -1) {
+      // No fresh streaming assistant turn — just append.
+      this._conversation.turns.push(turn)
+      return
+    }
+
+    const streamingAsstTurn = this._conversation.turns[streamingAsstIdx]
+
+    // Step 2: collect all pending user turns from the array.
+    // We scan the entire array because pending turns can appear before or
+    // after the streaming assistant turn in a batched-send scenario.
+    const pendingTurns: Turn[] = []
+    for (let i = this._conversation.turns.length - 1; i >= 0; i--) {
+      const t = this._conversation.turns[i]
+      if (t.type === 'user' && t.pendingUuid !== undefined) {
+        pendingTurns.unshift(this._conversation.turns.splice(i, 1)[0])
+        // Adjust streamingAsstIdx if we removed an element before it.
+        if (i < streamingAsstIdx) {
+          streamingAsstIdx--
+        }
+      }
+    }
+
+    // Step 3: remove the streaming assistant turn.
+    this._conversation.turns.splice(streamingAsstIdx, 1)
+
+    // Step 4: push confirmed turn then streaming asst turn.
+    this._conversation.turns.push(turn)
+    this._conversation.turns.push(streamingAsstTurn)
+
+    // Step 5: re-append pending turns at the very end.
+    for (const p of pendingTurns) {
+      this._conversation.turns.push(p)
+    }
+  }
+
   private _applyEvent(event: StreamJsonEvent): void {
     switch (event.type) {
       case 'clear': {
@@ -446,12 +528,22 @@ export class EventStore {
           if (pendingIdx !== -1) {
             const matched = this._pendingMessages[pendingIdx]
             this._pendingMessages.splice(pendingIdx, 1)
-            // Confirm the optimistic turn already in turns[].
+            // Find the optimistic turn in turns[] and reposition it to the correct
+            // inline position. The optimistic turn was pushed to the end by
+            // addPendingMessage, but Claude may have started streaming a response
+            // before we received the echo — so the optimistic turn may now be
+            // sitting AFTER the streaming assistant turn instead of BEFORE it.
             const optimisticIdx = this._conversation.turns.findIndex(
               t => t.type === 'user' && t.pendingUuid === matched.uuid,
             )
             if (optimisticIdx !== -1) {
-              delete this._conversation.turns[optimisticIdx].pendingUuid
+              // Splice the optimistic turn out of its current position.
+              const [optimisticTurn] = this._conversation.turns.splice(optimisticIdx, 1)
+              // Clear the pending flag.
+              delete optimisticTurn.pendingUuid
+              // Reinsert at the correct position (before any fresh streaming
+              // assistant turn under the same parentToolUseId).
+              this._insertUserTurn(optimisticTurn, event.parent_tool_use_id ?? undefined)
               break
             }
           }
@@ -525,20 +617,14 @@ export class EventStore {
         }
 
         // Step 4c: Otherwise → create a normal user turn.
-        // Ordering fix: with --replay-user-messages, Claude publishes stream_events
-        // BEFORE the user echo in the JetStream sequence. So when we receive the user
-        // echo during replay (or live, if streaming started before the echo arrived),
-        // the associated response turn is already at the END of turns[].
+        // Use _insertUserTurn which handles the ordering fix: with
+        // --replay-user-messages, Claude publishes stream_events BEFORE the user
+        // echo in the JetStream sequence. So when we receive the user echo during
+        // replay (or live, if streaming started before the echo arrived), the
+        // associated response turn is already at the END of turns[].
         //
-        // If the last top-level assistant turn was just created for this response
-        // (it only has streaming_text blocks — no tool_use or other blocks yet),
-        // insert the user turn BEFORE it so the conversation reads:
-        //   [user message] → [assistant response]
-        // rather than:
-        //   [assistant response] → [user message]
-        //
-        // We do NOT apply this for mid-turn user messages (assistant turn has
-        // tool_use or tool_result blocks, meaning it's a complex in-progress turn).
+        // _insertUserTurn inserts before a fresh streaming-only assistant turn if
+        // one exists under the same parentToolUseId, otherwise appends to the end.
         const turn: Turn = {
           id: this._nextTurnId(),
           type: 'user',
@@ -559,29 +645,7 @@ export class EventStore {
         }
 
         if (turn.blocks.length > 0) {
-          // Find the last top-level assistant turn (no parentToolUseId)
-          const wantedParent = event.parent_tool_use_id ?? undefined
-          let insertIdx = -1
-          for (let i = this._conversation.turns.length - 1; i >= 0; i--) {
-            const t = this._conversation.turns[i]
-            if (t.parentToolUseId !== wantedParent) continue
-            if (t.type === 'assistant') {
-              // Only insert before this turn if it's a fresh response turn:
-              // all blocks are streaming_text (no tool_use/tool_result blocks),
-              // indicating the stream_events for this response just started.
-              const onlyStreamingText = t.blocks.length > 0 && t.blocks.every(b => b.type === 'streaming_text')
-              if (onlyStreamingText) {
-                insertIdx = i
-              }
-            }
-            break // stop at the first matching turn regardless
-          }
-
-          if (insertIdx !== -1) {
-            this._conversation.turns.splice(insertIdx, 0, turn)
-          } else {
-            this._conversation.turns.push(turn)
-          }
+          this._insertUserTurn(turn, event.parent_tool_use_id ?? undefined)
         }
         break
       }
