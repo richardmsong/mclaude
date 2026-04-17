@@ -5,7 +5,6 @@
 ## ── control-plane: ghcr.io image ───────────────────────────────────────────
 controlPlane:
   ## External URL for the dev k3d cluster. Must match the ingress host scheme.
-  ## No OAuth providers configured by default — add providers[] to enable OAuth.
   externalUrl: "https://dev.mclaude.local"
   image:
     registry: ghcr.io
@@ -22,6 +21,19 @@ controlPlane:
       path: /healthz
     readiness:
       path: /readyz
+  ## Pre-configured GitHub OAuth provider for local dev. The client-secret
+  ## is stored in K8s Secret `github-oauth-secret` (key: `client-secret`),
+  ## created by step 3 of the `/deploy-local-preview` skill from the
+  ## Bitwarden entry "Mclaude dev GitHub app".
+  providers:
+    - id: github
+      type: github
+      displayName: GitHub
+      baseUrl: https://github.com
+      apiUrl: https://api.github.com
+      clientId: YOUR_GITHUB_OAUTH_CLIENT_ID
+      clientSecretRef: github-oauth-secret
+      scopes: "repo read:org gist workflow read:user user:email"
 
 ## ── SPA: ghcr.io image ─────────────────────────────────────────────────────
 spa:
