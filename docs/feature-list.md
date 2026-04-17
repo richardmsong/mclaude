@@ -64,6 +64,7 @@ Future: Figma designs linked per feature.
 | M2 | Effort switcher | Change thinking budget via `set_max_thinking_tokens` |
 | M3 | Cost display | Per-session token usage and cost (input, output, cache read/write) |
 | M4 | Context meter | Context window utilization from `get_context_usage` |
+| M5 | Per-turn token insights | Inline token/cost badge on each assistant message, tap for full breakdown |
 
 ## Terminal
 
@@ -101,6 +102,7 @@ Future: Figma designs linked per feature.
 | R2 | Desktop notification | — | Push notification |
 | S1–S2 | All | S1 (numbered list) | All |
 | M1–M4 | All | M1 only | All |
+| M5 | Yes | — | Future |
 | T1–T3 | All (xterm.js) | — (`kubectl exec`) | All (SwiftTerm) |
 | V1 | WebSpeech API | — | SFSpeechRecognizer |
 | X1–X4 | All | X2, X4 (print error + exit) | All |
