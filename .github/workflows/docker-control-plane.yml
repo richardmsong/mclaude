@@ -12,7 +12,7 @@ on:
         type: string
 
 env:
-  IMAGE: ghcr.io/mclaude-project/mclaude-control-plane
+  IMAGE: ghcr.io/richardmsong/mclaude-control-plane
 
 jobs:
   build-push:
