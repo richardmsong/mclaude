@@ -6,6 +6,7 @@ import { AuthStore } from '@/stores/auth-store'
 import { SessionStore } from '@/stores/session-store'
 import { EventStore } from '@/stores/event-store'
 import { HeartbeatMonitor } from '@/stores/heartbeat-monitor'
+import { LifecycleStore } from '@/stores/lifecycle-store'
 import { SessionListVM } from '@/viewmodels/session-list-vm'
 import { ConversationVM } from '@/viewmodels/conversation-vm'
 import { AuthScreen } from './AuthScreen'
@@ -321,7 +322,7 @@ export function App() {
     }
   }, [route.screen, route.sessionId, sessionStore, sessionVersion])
 
-  // Per-session EventStore + ConversationVM — created ONCE per sessionId+projectId.
+  // Per-session EventStore + ConversationVM + LifecycleStore — created ONCE per sessionId+projectId.
   // Does NOT depend on sessionVersion so KV updates (idle→running→idle) don't destroy
   // and recreate the store, which would lose all accumulated conversation data.
   useEffect(() => {
@@ -341,11 +342,14 @@ export function App() {
     const replayFromSeq = session?.replayFromSeq ?? undefined
     store.start(replayFromSeq)
     const vm = new ConversationVM(store, sessionStore, natsClient, authState.userId, resolvedProjectId, route.sessionId)
+    const lifecycle = new LifecycleStore(natsClient, authState.userId, resolvedProjectId)
+    lifecycle.start()
     setEventStore(store)
     setConversationVM(vm)
     return () => {
       store.stop()
       vm.destroy()
+      lifecycle.stop()
     }
   // resolvedProjectId is set once per session (functional update), so this effect fires
   // exactly once when the projectId is first resolved, and again only if sessionId changes.
