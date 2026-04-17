@@ -1,4 +1,6 @@
 import type { Block, Turn } from '@/types'
+import { DiffView } from './DiffView'
+import { highlightBash } from './ToolCard'
 
 interface EventDetailModalProps {
   block: Block
@@ -16,6 +18,155 @@ function toolIcon(name: string): string {
 
 function formatTimestamp(): string {
   return new Date().toLocaleTimeString('en-US', { hour12: false })
+}
+
+const LABEL_STYLE: React.CSSProperties = {
+  fontSize: 11,
+  fontWeight: 600,
+  textTransform: 'uppercase',
+  letterSpacing: '0.5px',
+  color: 'var(--text2)',
+  marginBottom: 6,
+}
+
+const JSON_PRE_STYLE: React.CSSProperties = {
+  background: 'var(--surf2)',
+  borderRadius: 8,
+  padding: '10px 12px',
+  fontFamily: "'Menlo','Courier New',monospace",
+  fontSize: 12,
+  color: 'var(--text2)',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-all',
+  marginBottom: 14,
+  overflow: 'auto',
+  maxHeight: 300,
+}
+
+const MONO_PRE_STYLE: React.CSSProperties = {
+  background: 'var(--surf2)',
+  borderRadius: 8,
+  padding: '10px 12px',
+  fontFamily: "'Menlo','Courier New',monospace",
+  fontSize: 12,
+  color: 'var(--text2)',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-all',
+  marginBottom: 14,
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return <div style={LABEL_STYLE}>{children}</div>
+}
+
+function JsonSection({ input }: { input: unknown }) {
+  return (
+    <>
+      <SectionLabel>Input</SectionLabel>
+      <pre style={JSON_PRE_STYLE}>
+        {JSON.stringify(input, null, 2)}
+      </pre>
+    </>
+  )
+}
+
+function ToolBody({ name, input }: { name: string; input: unknown }) {
+  if (!input || typeof input !== 'object') {
+    return <JsonSection input={input} />
+  }
+  const inp = input as Record<string, unknown>
+
+  if (name === 'Bash' || name === '!') {
+    const command = String(inp['command'] ?? '')
+    return (
+      <>
+        <SectionLabel>Command</SectionLabel>
+        <pre style={MONO_PRE_STYLE}>
+          {highlightBash(command)}
+        </pre>
+        <JsonSection input={input} />
+      </>
+    )
+  }
+
+  if (name === 'Edit') {
+    const filePath = String(inp['file_path'] ?? inp['path'] ?? '')
+    const oldStr = String(inp['old_string'] ?? '')
+    const newStr = String(inp['new_string'] ?? '')
+    const patch = String(inp['patch'] ?? '')
+    const diff = oldStr && newStr
+      ? oldStr.split('\n').map(l => `-${l}`).join('\n') + '\n' +
+        newStr.split('\n').map(l => `+${l}`).join('\n')
+      : patch || null
+    return (
+      <>
+        <SectionLabel>File</SectionLabel>
+        <pre style={MONO_PRE_STYLE}>{filePath}</pre>
+        {diff && (
+          <>
+            <SectionLabel>Diff</SectionLabel>
+            <div style={{ marginBottom: 14 }}>
+              <DiffView diff={diff} />
+            </div>
+          </>
+        )}
+        <JsonSection input={input} />
+      </>
+    )
+  }
+
+  if (name === 'Write') {
+    const filePath = String(inp['file_path'] ?? inp['path'] ?? '')
+    const content = String(inp['content'] ?? '')
+    return (
+      <>
+        <SectionLabel>File</SectionLabel>
+        <pre style={MONO_PRE_STYLE}>{filePath}</pre>
+        <SectionLabel>Content</SectionLabel>
+        <pre style={MONO_PRE_STYLE}>{content.slice(0, 2000)}</pre>
+        <JsonSection input={input} />
+      </>
+    )
+  }
+
+  if (name === 'Read') {
+    const filePath = String(inp['file_path'] ?? '')
+    const offset = inp['offset'] != null ? `L${inp['offset']}` : ''
+    const limit = inp['limit'] != null ? `-${inp['limit']}` : ''
+    const range = offset ? ` ${offset}${limit}` : ''
+    return (
+      <>
+        <SectionLabel>File</SectionLabel>
+        <pre style={MONO_PRE_STYLE}>{filePath}{range}</pre>
+        <JsonSection input={input} />
+      </>
+    )
+  }
+
+  if (name === 'Grep' || name === 'Glob') {
+    const pattern = String(inp['pattern'] ?? '')
+    const path = String(inp['path'] ?? '')
+    return (
+      <>
+        {pattern && (
+          <>
+            <SectionLabel>Pattern</SectionLabel>
+            <pre style={MONO_PRE_STYLE}>{pattern}</pre>
+          </>
+        )}
+        {path && (
+          <>
+            <SectionLabel>Path</SectionLabel>
+            <pre style={MONO_PRE_STYLE}>{path}</pre>
+          </>
+        )}
+        <JsonSection input={input} />
+      </>
+    )
+  }
+
+  // All other tools
+  return <JsonSection input={input} />
 }
 
 export function EventDetailModal({ block, turn, onClose }: EventDetailModalProps) {
@@ -77,40 +228,13 @@ export function EventDetailModal({ block, turn, onClose }: EventDetailModalProps
         <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
           {block.type === 'tool_use' && (
             <>
-              {block.fullInput !== undefined && (
-                <>
-                  <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--text2)', marginBottom: 6 }}>
-                    Input
-                  </div>
-                  <pre style={{
-                    background: 'var(--surf2)',
-                    borderRadius: 8,
-                    padding: '10px 12px',
-                    fontFamily: "'Menlo','Courier New',monospace",
-                    fontSize: 12,
-                    color: 'var(--text2)',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-all',
-                    marginBottom: 14,
-                  }}>
-                    {JSON.stringify(block.fullInput, null, 2)}
-                  </pre>
-                </>
-              )}
+              <ToolBody name={block.name} input={block.fullInput} />
               {block.result && (
                 <>
-                  <div style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--text2)', marginBottom: 6 }}>
-                    {block.result.isError ? '⚠ Error' : 'Result'}
-                  </div>
+                  <SectionLabel>{block.result.isError ? '⚠ Error' : 'Result'}</SectionLabel>
                   <pre style={{
-                    background: 'var(--surf2)',
-                    borderRadius: 8,
-                    padding: '10px 12px',
-                    fontFamily: "'Menlo','Courier New',monospace",
-                    fontSize: 12,
+                    ...MONO_PRE_STYLE,
                     color: block.result.isError ? 'var(--red)' : 'var(--text2)',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-all',
                   }}>
                     {block.result.content}
                   </pre>
@@ -124,44 +248,17 @@ export function EventDetailModal({ block, turn, onClose }: EventDetailModalProps
             </>
           )}
           {(block.type === 'text' || block.type === 'streaming_text') && (
-            <pre style={{
-              background: 'var(--surf2)',
-              borderRadius: 8,
-              padding: '10px 12px',
-              fontFamily: "'Menlo','Courier New',monospace",
-              fontSize: 12,
-              color: 'var(--text2)',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-all',
-            }}>
+            <pre style={MONO_PRE_STYLE}>
               {block.type === 'text' ? block.text : block.chunks.join('')}
             </pre>
           )}
           {block.type === 'thinking' && (
-            <pre style={{
-              background: 'var(--surf2)',
-              borderRadius: 8,
-              padding: '10px 12px',
-              fontFamily: "'Menlo','Courier New',monospace",
-              fontSize: 12,
-              color: 'var(--purple)',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-all',
-            }}>
+            <pre style={{ ...MONO_PRE_STYLE, color: 'var(--purple)' }}>
               {block.text}
             </pre>
           )}
           {block.type === 'control_request' && (
-            <pre style={{
-              background: 'var(--surf2)',
-              borderRadius: 8,
-              padding: '10px 12px',
-              fontFamily: "'Menlo','Courier New',monospace",
-              fontSize: 12,
-              color: 'var(--text2)',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-all',
-            }}>
+            <pre style={MONO_PRE_STYLE}>
               {JSON.stringify({ toolName: block.toolName, input: block.input }, null, 2)}
             </pre>
           )}

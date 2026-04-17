@@ -191,17 +191,19 @@ export function DiffView({ diff, filename }: DiffViewProps) {
           const removedLineIndex = (line.type === 'remove') ? (pairedAddedIdx ?? null) : null
 
           return (
-            <div key={i} style={{ display: 'flex', ...LINE_STYLES[line.type] }}>
+            <div key={i} style={{ display: 'flex', fontSize: 12, fontFamily: "'Menlo','Courier New',monospace", ...LINE_STYLES[line.type] }}>
               <span style={{
                 width: 20,
                 textAlign: 'center',
                 flexShrink: 0,
+                fontSize: 12,
+                fontFamily: "'Menlo','Courier New',monospace",
                 color: line.type === 'add' ? 'var(--green)' : line.type === 'remove' ? 'var(--red)' : 'var(--text3)',
                 userSelect: 'none',
               }}>
                 {GUTTER[line.type]}
               </span>
-              <span style={{ whiteSpace: 'pre', padding: '1px 8px 1px 4px' }}>
+              <span style={{ whiteSpace: 'pre', padding: '1px 8px 1px 4px', fontSize: 12, fontFamily: "'Menlo','Courier New',monospace" }}>
                 {renderLineContent(line, charDiffs, removedLineIndex, pairIndex)}
               </span>
             </div>

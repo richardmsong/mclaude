@@ -89,7 +89,7 @@ const TOKEN_COLORS: Record<BashToken['kind'], string | undefined> = {
   plain: undefined,
 }
 
-function highlightBash(cmd: string): React.ReactNode {
+export function highlightBash(cmd: string): React.ReactNode {
   const tokens = tokenizeBash(cmd)
   return (
     <>
