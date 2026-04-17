@@ -119,8 +119,8 @@ function renderLineContent(
       const groups = groupSegments(diff.removed)
       return groups.map((g, i) =>
         g.highlighted
-          ? <span key={i} className="diff-hl" style={{ background: 'rgba(255,69,58,0.35)', borderRadius: 2 }}>{g.text}</span>
-          : <span key={i}>{g.text}</span>
+          ? <span key={i} className="diff-hl" style={{ background: 'rgba(255,69,58,0.35)', borderRadius: 2, fontSize: 12, fontFamily: "'Menlo','Courier New',monospace" }}>{g.text}</span>
+          : <span key={i} style={{ fontSize: 12, fontFamily: "'Menlo','Courier New',monospace" }}>{g.text}</span>
       )
     }
   }
@@ -130,8 +130,8 @@ function renderLineContent(
       const groups = groupSegments(diff.added)
       return groups.map((g, i) =>
         g.highlighted
-          ? <span key={i} className="diff-hl" style={{ background: 'rgba(255,255,255,0.25)', borderRadius: 2 }}>{g.text}</span>
-          : <span key={i}>{g.text}</span>
+          ? <span key={i} className="diff-hl" style={{ background: 'rgba(255,255,255,0.25)', borderRadius: 2, fontSize: 12, fontFamily: "'Menlo','Courier New',monospace" }}>{g.text}</span>
+          : <span key={i} style={{ fontSize: 12, fontFamily: "'Menlo','Courier New',monospace" }}>{g.text}</span>
       )
     }
   }
@@ -164,6 +164,8 @@ export function DiffView({ diff, filename }: DiffViewProps) {
       overflow: 'hidden',
       fontSize: 12,
       fontFamily: "'Menlo','Courier New',monospace",
+      WebkitTextSizeAdjust: '100%',
+      lineHeight: '1.5',
     }}>
       {filename && (
         <div style={{
@@ -174,6 +176,8 @@ export function DiffView({ diff, filename }: DiffViewProps) {
           display: 'flex',
           alignItems: 'center',
           gap: 6,
+          fontSize: 12,
+          fontFamily: "'Menlo','Courier New',monospace",
         }}>
           <span>📄</span>
           <span>{filename}</span>

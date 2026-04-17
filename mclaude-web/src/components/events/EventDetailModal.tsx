@@ -59,20 +59,32 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   return <div style={LABEL_STYLE}>{children}</div>
 }
 
-function JsonSection({ input }: { input: unknown }) {
+function highlightJson(value: unknown): React.ReactNode {
+  const text = JSON.stringify(value, null, 2)
+  // Split into tokens: keys (string followed by colon), strings, numbers, booleans/null, punctuation, whitespace
+  const tokens = text.split(/("(?:[^"\\]|\\.)*"(?:\s*:)?|true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|[{}[\],:])/g)
+  return tokens.map((t, i) => {
+    if (t === '') return null
+    if (/^"(?:[^"\\]|\\.)*":\s*$/.test(t) || /^"(?:[^"\\]|\\.)*":$/.test(t)) return <span key={i} style={{ color: 'var(--blue)' }}>{t}</span>
+    if (/^"/.test(t)) return <span key={i} style={{ color: 'var(--green)' }}>{t}</span>
+    if (/^-?\d/.test(t)) return <span key={i} style={{ color: 'var(--orange)' }}>{t}</span>
+    if (t === 'true' || t === 'false' || t === 'null') return <span key={i} style={{ color: 'var(--purple)' }}>{t}</span>
+    if (/^[{}[\],:]$/.test(t)) return <span key={i} style={{ color: 'var(--text3)' }}>{t}</span>
+    return <span key={i}>{t}</span>
+  })
+}
+
+function JsonHighlight({ input }: { input: unknown }) {
   return (
-    <>
-      <SectionLabel>Input</SectionLabel>
-      <pre style={JSON_PRE_STYLE}>
-        {JSON.stringify(input, null, 2)}
-      </pre>
-    </>
+    <pre style={JSON_PRE_STYLE}>
+      {highlightJson(input)}
+    </pre>
   )
 }
 
 function ToolBody({ name, input }: { name: string; input: unknown }) {
   if (!input || typeof input !== 'object') {
-    return <JsonSection input={input} />
+    return <JsonHighlight input={input} />
   }
   const inp = input as Record<string, unknown>
 
@@ -84,7 +96,6 @@ function ToolBody({ name, input }: { name: string; input: unknown }) {
         <pre style={MONO_PRE_STYLE}>
           {highlightBash(command)}
         </pre>
-        <JsonSection input={input} />
       </>
     )
   }
@@ -110,7 +121,6 @@ function ToolBody({ name, input }: { name: string; input: unknown }) {
             </div>
           </>
         )}
-        <JsonSection input={input} />
       </>
     )
   }
@@ -124,7 +134,6 @@ function ToolBody({ name, input }: { name: string; input: unknown }) {
         <pre style={MONO_PRE_STYLE}>{filePath}</pre>
         <SectionLabel>Content</SectionLabel>
         <pre style={MONO_PRE_STYLE}>{content.slice(0, 2000)}</pre>
-        <JsonSection input={input} />
       </>
     )
   }
@@ -138,7 +147,6 @@ function ToolBody({ name, input }: { name: string; input: unknown }) {
       <>
         <SectionLabel>File</SectionLabel>
         <pre style={MONO_PRE_STYLE}>{filePath}{range}</pre>
-        <JsonSection input={input} />
       </>
     )
   }
@@ -160,13 +168,12 @@ function ToolBody({ name, input }: { name: string; input: unknown }) {
             <pre style={MONO_PRE_STYLE}>{path}</pre>
           </>
         )}
-        <JsonSection input={input} />
       </>
     )
   }
 
-  // All other tools
-  return <JsonSection input={input} />
+  // All other tools: syntax-highlighted JSON
+  return <JsonHighlight input={input} />
 }
 
 export function EventDetailModal({ block, turn, onClose }: EventDetailModalProps) {
