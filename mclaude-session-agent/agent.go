@@ -556,14 +556,15 @@ var defaultDevHarnessAllowlist = []string{
 // Error: publish api_error event to mclaude.{userId}.{projectId}.events._api.
 func (a *Agent) handleCreate(msg *nats.Msg) {
 	var req struct {
-		Name         string             `json:"name"`
-		Branch       string             `json:"branch"`
-		CWD          string             `json:"cwd"`
-		JoinWorktree bool               `json:"joinWorktree"`
-		RequestID    string             `json:"requestId"`
-		PermPolicy   string             `json:"permPolicy"`
-		AllowedTools []string           `json:"allowedTools"`
-		QuotaMonitor *QuotaMonitorConfig `json:"quotaMonitor"`
+		Name            string             `json:"name"`
+		Branch          string             `json:"branch"`
+		CWD             string             `json:"cwd"`
+		JoinWorktree    bool               `json:"joinWorktree"`
+		RequestID       string             `json:"requestId"`
+		PermPolicy      string             `json:"permPolicy"`
+		AllowedTools    []string           `json:"allowedTools"`
+		DisallowedTools []string           `json:"disallowedTools"`
+		QuotaMonitor    *QuotaMonitorConfig `json:"quotaMonitor"`
 	}
 	if len(msg.Data) > 0 {
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
@@ -673,6 +674,10 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 			set[t] = true
 		}
 		sess.allowedTools = set
+	}
+	// Apply disallowedTools from request.
+	if len(req.DisallowedTools) > 0 {
+		sess.disallowedTools = req.DisallowedTools
 	}
 
 	// Wire the onEventPublished callback so that compact_boundary events update
