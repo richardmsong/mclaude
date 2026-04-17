@@ -20,4 +20,6 @@ data:
   projectPvcStorageClass: {{ .Values.sessionAgent.persistence.storageClass | quote }}
   nixPvcSize: {{ .Values.sessionAgent.nix.size | quote }}
   nixPvcStorageClass: {{ .Values.sessionAgent.nix.storageClass | quote }}
-  corporateCAConfigMap: {{ .Values.sessionAgent.corporateCA.configMapName | quote }}
+  corporateCAEnabled: {{ .Values.sessionAgent.corporateCA.enabled | quote }}
+  corporateCAConfigMapName: {{ .Values.sessionAgent.corporateCA.configMapName | quote }}
+  corporateCAConfigMapKey: {{ .Values.sessionAgent.corporateCA.configMapKey | quote }}

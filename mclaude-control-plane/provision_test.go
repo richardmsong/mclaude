@@ -147,9 +147,15 @@ func TestEnsureUserSecrets_Idempotent(t *testing.T) {
 
 // makeTemplateConfigMap creates the session-agent-template ConfigMap in the
 // given provisioner's control-plane namespace. Used by CA bundle tests.
-func makeTemplateConfigMap(t *testing.T, p *K8sProvisioner, corporateCAConfigMap string) {
+// caEnabled controls whether corporateCAEnabled is "true".
+// caConfigMapName is the ConfigMap name trust-manager syncs into user namespaces.
+func makeTemplateConfigMap(t *testing.T, p *K8sProvisioner, caEnabled bool, caConfigMapName string) {
 	t.Helper()
 	ctx := context.Background()
+	enabledStr := "false"
+	if caEnabled {
+		enabledStr = "true"
+	}
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      p.releaseName + "-session-agent-template",
@@ -163,7 +169,9 @@ func makeTemplateConfigMap(t *testing.T, p *K8sProvisioner, corporateCAConfigMap
 			"projectPvcStorageClass":        "",
 			"nixPvcSize":                    "10Gi",
 			"nixPvcStorageClass":            "",
-			"corporateCAConfigMap":          corporateCAConfigMap,
+			"corporateCAEnabled":            enabledStr,
+			"corporateCAConfigMapName":      caConfigMapName,
+			"corporateCAConfigMapKey":       "ca-certificates.crt",
 		},
 	}
 	if _, err := p.client.CoreV1().ConfigMaps(p.controlPlaneNs).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
@@ -173,6 +181,9 @@ func makeTemplateConfigMap(t *testing.T, p *K8sProvisioner, corporateCAConfigMap
 
 // makeCorporateCAConfigMap creates the source CA bundle ConfigMap in the control-plane
 // namespace, as an operator would do before enabling the feature.
+// NOTE: with trust-manager, the source is in control-plane namespace but the reconciler
+// no longer copies it — trust-manager handles cross-namespace sync.
+// This helper is retained for reference but tests should use makeCorporateCAConfigMapInNs.
 func makeCorporateCAConfigMap(t *testing.T, p *K8sProvisioner, cmName string) {
 	t.Helper()
 	ctx := context.Background()
@@ -190,47 +201,65 @@ func makeCorporateCAConfigMap(t *testing.T, p *K8sProvisioner, cmName string) {
 	}
 }
 
-// TestDeployment_WithCorporateCA verifies that when corporateCAConfigMap is set,
-// ensureDeployment copies the ConfigMap to the user namespace and the resulting
+// makeCorporateCAConfigMapInNs creates a CA bundle ConfigMap directly in the given namespace,
+// simulating what trust-manager would do when it syncs the bundle into a user namespace.
+func makeCorporateCAConfigMapInNs(t *testing.T, p *K8sProvisioner, ns, cmName string) {
+	t.Helper()
+	ctx := context.Background()
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cmName,
+			Namespace: ns,
+		},
+		Data: map[string]string{
+			"ca-certificates.crt": "-----BEGIN CERTIFICATE-----\nFAKECA\n-----END CERTIFICATE-----\n",
+		},
+	}
+	if _, err := p.client.CoreV1().ConfigMaps(ns).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create corporate CA configmap in %s: %v", ns, err)
+	}
+}
+
+// TestDeployment_WithCorporateCA verifies that when corporateCAEnabled is true and
+// the CA ConfigMap exists in the user namespace (synced by trust-manager), the resulting
 // Deployment has the corporate-ca volume, the volumeMount at the expected path,
-// and NODE_EXTRA_CA_CERTS env var.
+// NODE_EXTRA_CA_CERTS env var, and the mclaude.io/ca-bundle-hash annotation.
+// No cross-namespace copy is performed — trust-manager handles that.
 func TestDeployment_WithCorporateCA(t *testing.T) {
 	p := newTestProvisioner(t)
 	ctx := context.Background()
 	ns := "mclaude-user-corp"
 	cmName := "corporate-ca-bundle"
 
-	// Set up source CA ConfigMap in control-plane namespace.
-	makeCorporateCAConfigMap(t, p, cmName)
-	makeTemplateConfigMap(t, p, cmName)
-
-	tpl, err := p.loadTemplate(ctx)
-	if err != nil {
-		t.Fatalf("loadTemplate: %v", err)
-	}
-	if tpl.corporateCAConfigMap != cmName {
-		t.Fatalf("expected corporateCAConfigMap=%q, got %q", cmName, tpl.corporateCAConfigMap)
-	}
-
-	// Create the user namespace so Deployment create has somewhere to land.
+	// Create the user namespace.
 	if _, err := p.client.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: ns},
 	}, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("create namespace: %v", err)
 	}
 
+	// Simulate trust-manager syncing the CA ConfigMap into the user namespace.
+	makeCorporateCAConfigMapInNs(t, p, ns, cmName)
+
+	makeTemplateConfigMap(t, p, true, cmName)
+
+	tpl, err := p.loadTemplate(ctx)
+	if err != nil {
+		t.Fatalf("loadTemplate: %v", err)
+	}
+	if !tpl.corporateCAEnabled {
+		t.Fatal("expected corporateCAEnabled=true")
+	}
+	if tpl.corporateCAConfigMapName != cmName {
+		t.Fatalf("expected corporateCAConfigMapName=%q, got %q", cmName, tpl.corporateCAConfigMapName)
+	}
+
 	if err := p.ensureDeployment(ctx, ns, "proj-corp", "corp-user", "", tpl); err != nil {
 		t.Fatalf("ensureDeployment: %v", err)
 	}
 
-	// Verify the CA ConfigMap was copied to the user namespace.
-	copiedCM, err := p.client.CoreV1().ConfigMaps(ns).Get(ctx, cmName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("CA ConfigMap not found in user namespace: %v", err)
-	}
-	if copiedCM.Data["ca-certificates.crt"] == "" {
-		t.Error("copied CA ConfigMap missing ca-certificates.crt key")
-	}
+	// Verify NO cross-namespace copy was made from control-plane namespace — trust-manager owns that.
+	// The CA ConfigMap in the user namespace is the one we pre-created (simulating trust-manager).
 
 	// Verify the Deployment has the corporate-ca volume.
 	deploy, err := p.client.AppsV1().Deployments(ns).Get(ctx, "project-proj-corp", metav1.GetOptions{})
@@ -293,24 +322,31 @@ func TestDeployment_WithCorporateCA(t *testing.T) {
 	if !foundEnv {
 		t.Error("session-agent container missing NODE_EXTRA_CA_CERTS env var")
 	}
+
+	// Verify the ca-bundle-hash annotation is present on the pod template.
+	hashAnnotation := deploy.Spec.Template.Annotations["mclaude.io/ca-bundle-hash"]
+	if hashAnnotation == "" {
+		t.Error("Deployment pod template missing mclaude.io/ca-bundle-hash annotation")
+	}
 }
 
-// TestDeployment_WithoutCorporateCA verifies that when corporateCAConfigMap is empty,
-// no corporate-ca volume, volumeMount, or NODE_EXTRA_CA_CERTS env var is added.
+// TestDeployment_WithoutCorporateCA verifies that when corporateCAEnabled is false,
+// no corporate-ca volume, volumeMount, NODE_EXTRA_CA_CERTS env var, or
+// ca-bundle-hash annotation is added.
 func TestDeployment_WithoutCorporateCA(t *testing.T) {
 	p := newTestProvisioner(t)
 	ctx := context.Background()
 	ns := "mclaude-user-nocorp"
 
-	// Template with empty corporateCAConfigMap.
-	makeTemplateConfigMap(t, p, "")
+	// Template with corporateCAEnabled=false.
+	makeTemplateConfigMap(t, p, false, "")
 
 	tpl, err := p.loadTemplate(ctx)
 	if err != nil {
 		t.Fatalf("loadTemplate: %v", err)
 	}
-	if tpl.corporateCAConfigMap != "" {
-		t.Fatalf("expected empty corporateCAConfigMap, got %q", tpl.corporateCAConfigMap)
+	if tpl.corporateCAEnabled {
+		t.Fatal("expected corporateCAEnabled=false")
 	}
 
 	if _, err := p.client.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
@@ -353,11 +389,16 @@ func TestDeployment_WithoutCorporateCA(t *testing.T) {
 			t.Error("unexpected NODE_EXTRA_CA_CERTS env var in container")
 		}
 	}
+
+	// No ca-bundle-hash annotation.
+	if hash := deploy.Spec.Template.Annotations["mclaude.io/ca-bundle-hash"]; hash != "" {
+		t.Errorf("unexpected ca-bundle-hash annotation: %q", hash)
+	}
 }
 
 // TestDeployment_UpdatePath_CAAdded verifies that the update path also injects
-// the CA volume/mount/env when the template has a corporateCAConfigMap set.
-// (Regression guard: old code only patched image on update.)
+// the CA volume/mount/env and hash annotation when the template has corporateCAEnabled=true.
+// trust-manager syncs the ConfigMap into the user namespace; no cross-namespace copy needed.
 func TestDeployment_UpdatePath_CAAdded(t *testing.T) {
 	p := newTestProvisioner(t)
 	ctx := context.Background()
@@ -365,7 +406,7 @@ func TestDeployment_UpdatePath_CAAdded(t *testing.T) {
 	cmName := "corp-ca"
 
 	// First: create Deployment without CA.
-	makeTemplateConfigMap(t, p, "")
+	makeTemplateConfigMap(t, p, false, "")
 	tplNoCA, err := p.loadTemplate(ctx)
 	if err != nil {
 		t.Fatalf("loadTemplate (no CA): %v", err)
@@ -381,13 +422,14 @@ func TestDeployment_UpdatePath_CAAdded(t *testing.T) {
 		t.Fatalf("ensureDeployment (no CA): %v", err)
 	}
 
-	// Now add the CA ConfigMap and update the template.
-	makeCorporateCAConfigMap(t, p, cmName)
-	// Delete old template and recreate with CA set.
+	// Simulate trust-manager syncing the CA ConfigMap into the user namespace.
+	makeCorporateCAConfigMapInNs(t, p, ns, cmName)
+
+	// Delete old template and recreate with CA enabled.
 	if err := p.client.CoreV1().ConfigMaps(p.controlPlaneNs).Delete(ctx, p.releaseName+"-session-agent-template", metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("delete template cm: %v", err)
 	}
-	makeTemplateConfigMap(t, p, cmName)
+	makeTemplateConfigMap(t, p, true, cmName)
 
 	tplWithCA, err := p.loadTemplate(ctx)
 	if err != nil {
@@ -441,25 +483,23 @@ func TestDeployment_UpdatePath_CAAdded(t *testing.T) {
 	if !foundEnv {
 		t.Error("session-agent container missing NODE_EXTRA_CA_CERTS after update")
 	}
+
+	// Verify the ca-bundle-hash annotation is present after the update.
+	hashAnnotation := deploy.Spec.Template.Annotations["mclaude.io/ca-bundle-hash"]
+	if hashAnnotation == "" {
+		t.Error("Deployment pod template missing mclaude.io/ca-bundle-hash annotation after update")
+	}
 }
 
-// TestEnsureCorporateCAConfigMap_Idempotent verifies create-or-update semantics:
-// calling ensureCorporateCAConfigMap twice succeeds, and the second call updates
-// the data if the source changed.
-func TestEnsureCorporateCAConfigMap_Idempotent(t *testing.T) {
+// TestDeployment_CAHashChangeTriggersUpdate verifies that when the CA bundle ConfigMap
+// data changes (simulating trust-manager rotating the CA), the Deployment's pod template
+// annotation mclaude.io/ca-bundle-hash changes on the next ensureDeployment call.
+// This change triggers a Recreate rollout.
+func TestDeployment_CAHashChangeTriggersUpdate(t *testing.T) {
 	p := newTestProvisioner(t)
 	ctx := context.Background()
-	ns := "mclaude-user-ca-idempotent"
-	cmName := "my-corporate-ca"
-
-	// Create source CM.
-	src := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: p.controlPlaneNs},
-		Data:       map[string]string{"ca-certificates.crt": "PEM_V1"},
-	}
-	if _, err := p.client.CoreV1().ConfigMaps(p.controlPlaneNs).Create(ctx, src, metav1.CreateOptions{}); err != nil {
-		t.Fatalf("create source CA CM: %v", err)
-	}
+	ns := "mclaude-user-cahash"
+	cmName := "corp-ca-rotating"
 
 	if _, err := p.client.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: ns},
@@ -467,33 +507,87 @@ func TestEnsureCorporateCAConfigMap_Idempotent(t *testing.T) {
 		t.Fatalf("create namespace: %v", err)
 	}
 
-	// First call — creates the copy.
-	if err := p.ensureCorporateCAConfigMap(ctx, ns, cmName); err != nil {
-		t.Fatalf("first ensureCorporateCAConfigMap: %v", err)
+	// Create initial CA ConfigMap (simulating trust-manager sync).
+	caCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: ns},
+		Data:       map[string]string{"ca-certificates.crt": "-----BEGIN CERTIFICATE-----\nCAv1\n-----END CERTIFICATE-----\n"},
 	}
-	cm1, err := p.client.CoreV1().ConfigMaps(ns).Get(ctx, cmName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get copied CM after first call: %v", err)
-	}
-	if cm1.Data["ca-certificates.crt"] != "PEM_V1" {
-		t.Errorf("expected PEM_V1, got %q", cm1.Data["ca-certificates.crt"])
+	if _, err := p.client.CoreV1().ConfigMaps(ns).Create(ctx, caCM, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create initial CA CM: %v", err)
 	}
 
-	// Update the source.
-	src.Data["ca-certificates.crt"] = "PEM_V2"
-	if _, err := p.client.CoreV1().ConfigMaps(p.controlPlaneNs).Update(ctx, src, metav1.UpdateOptions{}); err != nil {
-		t.Fatalf("update source CA CM: %v", err)
+	makeTemplateConfigMap(t, p, true, cmName)
+	tpl, err := p.loadTemplate(ctx)
+	if err != nil {
+		t.Fatalf("loadTemplate: %v", err)
 	}
 
-	// Second call — updates the copy.
-	if err := p.ensureCorporateCAConfigMap(ctx, ns, cmName); err != nil {
-		t.Fatalf("second ensureCorporateCAConfigMap: %v", err)
+	// First provision.
+	if err := p.ensureDeployment(ctx, ns, "proj-cahash", "cahash-user", "", tpl); err != nil {
+		t.Fatalf("ensureDeployment (initial): %v", err)
 	}
-	cm2, err := p.client.CoreV1().ConfigMaps(ns).Get(ctx, cmName, metav1.GetOptions{})
+
+	deploy1, err := p.client.AppsV1().Deployments(ns).Get(ctx, "project-proj-cahash", metav1.GetOptions{})
 	if err != nil {
-		t.Fatalf("get copied CM after second call: %v", err)
+		t.Fatalf("get deployment (initial): %v", err)
 	}
-	if cm2.Data["ca-certificates.crt"] != "PEM_V2" {
-		t.Errorf("expected PEM_V2 after update, got %q", cm2.Data["ca-certificates.crt"])
+	hash1 := deploy1.Spec.Template.Annotations["mclaude.io/ca-bundle-hash"]
+	if hash1 == "" {
+		t.Fatal("expected ca-bundle-hash annotation after initial provision")
+	}
+
+	// Simulate trust-manager rotating the CA — update the ConfigMap data.
+	caCM.Data["ca-certificates.crt"] = "-----BEGIN CERTIFICATE-----\nCAv2\n-----END CERTIFICATE-----\n"
+	if _, err := p.client.CoreV1().ConfigMaps(ns).Update(ctx, caCM, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update CA CM (rotation): %v", err)
+	}
+
+	// Re-reconcile — should update the Deployment with the new hash.
+	if err := p.ensureDeployment(ctx, ns, "proj-cahash", "cahash-user", "", tpl); err != nil {
+		t.Fatalf("ensureDeployment (after rotation): %v", err)
+	}
+
+	deploy2, err := p.client.AppsV1().Deployments(ns).Get(ctx, "project-proj-cahash", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get deployment (after rotation): %v", err)
+	}
+	hash2 := deploy2.Spec.Template.Annotations["mclaude.io/ca-bundle-hash"]
+	if hash2 == "" {
+		t.Fatal("expected ca-bundle-hash annotation after rotation")
+	}
+	if hash1 == hash2 {
+		t.Errorf("expected ca-bundle-hash to change after CA rotation; both = %q", hash1)
+	}
+}
+
+// TestDeployment_NamespaceGetsUserNamespaceLabel verifies that when corporateCAEnabled is true,
+// ensureNamespace sets the label mclaude.io/user-namespace: "true" on the namespace so that
+// trust-manager targets it for CA bundle sync.
+func TestDeployment_NamespaceGetsUserNamespaceLabel(t *testing.T) {
+	p := newTestProvisioner(t)
+	ctx := context.Background()
+	ns := "mclaude-user-nslabel"
+	cmName := "corp-ca-label"
+
+	makeTemplateConfigMap(t, p, true, cmName)
+	tpl, err := p.loadTemplate(ctx)
+	if err != nil {
+		t.Fatalf("loadTemplate: %v", err)
+	}
+	if !tpl.corporateCAEnabled {
+		t.Fatal("expected corporateCAEnabled=true")
+	}
+
+	// ensureNamespace should set the user-namespace label.
+	if err := p.ensureNamespace(ctx, ns, "nslabel-user", tpl); err != nil {
+		t.Fatalf("ensureNamespace: %v", err)
+	}
+
+	namespace, err := p.client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get namespace: %v", err)
+	}
+	if namespace.Labels["mclaude.io/user-namespace"] != "true" {
+		t.Errorf("expected mclaude.io/user-namespace=true label, got %q", namespace.Labels["mclaude.io/user-namespace"])
 	}
 }
