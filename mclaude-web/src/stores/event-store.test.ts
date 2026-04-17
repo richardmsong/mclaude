@@ -855,4 +855,181 @@ describe('EventStore', () => {
       expect(store.conversation.turns[3].type).toBe('assistant')
     })
   })
+  // ─── Pending message inline repositioning (spec: plan-replay-user-messages) ──
+
+  describe('pending message inline repositioning on echo', () => {
+    it('idle-state send: echo with no streaming assistant turn appends user turn at end', () => {
+      // No assistant turn in progress — echo should land at the end (same as before)
+      store.addPendingMessage('uuid-idle', 'Hello Claude')
+      expect(store.conversation.turns).toHaveLength(1)
+      expect(store.conversation.turns[0].pendingUuid).toBe('uuid-idle')
+
+      // Echo arrives — no streaming assistant turn exists
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-idle',
+        isReplay: true,
+        message: { role: 'user', content: 'Hello Claude' },
+      })
+
+      // User turn confirmed at the bottom (no assistant to reorder around)
+      expect(store.conversation.turns).toHaveLength(1)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[0].pendingUuid).toBeUndefined()
+      const textBlock = store.conversation.turns[0].blocks[0]
+      expect(textBlock.type === 'text' && textBlock.text).toBe('Hello Claude')
+    })
+
+    it('mid-turn send: echo moves user turn BEFORE the streaming assistant turn', () => {
+      // Pre-populate a streaming assistant turn (Claude is mid-response)
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'thinking...' }, index: 0 },
+      })
+      expect(store.conversation.turns).toHaveLength(1)
+      expect(store.conversation.turns[0].type).toBe('assistant')
+
+      // User sends a message mid-turn: dim turn appears AFTER the streaming asst
+      store.addPendingMessage('uuid-mid', 'do it like this')
+      expect(store.conversation.turns).toHaveLength(2)
+      expect(store.conversation.turns[0].type).toBe('assistant')
+      expect(store.conversation.turns[1].type).toBe('user')
+      expect(store.conversation.turns[1].pendingUuid).toBe('uuid-mid')
+
+      // Echo arrives — user turn must move BEFORE the streaming assistant turn
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-mid',
+        isReplay: true,
+        message: { role: 'user', content: 'do it like this' },
+      })
+
+      expect(store.conversation.turns).toHaveLength(2)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[0].pendingUuid).toBeUndefined()
+      expect(store.conversation.turns[1].type).toBe('assistant')
+      const userText = store.conversation.turns[0].blocks.find(b => b.type === 'text')
+      expect(userText?.type === 'text' && userText.text).toBe('do it like this')
+    })
+
+    it('batched 3-message send: each echo promotes its pending turn inline individually', () => {
+      // Scenario: user-A is sent and a streaming response starts. Then user-B
+      // and user-C are queued as pending WHILE the response to A is streaming.
+      // This matches the spec flow where pending messages appear at the bottom
+      // of the chat below active assistant content.
+
+      // Message A sent, pending turn appears
+      store.addPendingMessage('uuid-a', 'message A')
+      // turns: [user-A(pending)]
+      expect(store.conversation.turns).toHaveLength(1)
+
+      // Streaming response to A starts
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'responding to A' }, index: 0 },
+      })
+      // turns: [user-A(pending), asst(streaming)]
+      expect(store.conversation.turns).toHaveLength(2)
+
+      // Echo for A arrives — A must move BEFORE the streaming assistant turn
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-a',
+        isReplay: true,
+        message: { role: 'user', content: 'message A' },
+      })
+      // turns: [user-A(confirmed), asst(streaming)]
+      expect(store.conversation.turns).toHaveLength(2)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[0].pendingUuid).toBeUndefined()
+      const blockA = store.conversation.turns[0].blocks.find(b => b.type === 'text')
+      expect(blockA?.type === 'text' && blockA.text).toBe('message A')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+
+      // While A's response is still streaming, user queues B and C
+      store.addPendingMessage('uuid-b', 'message B')
+      store.addPendingMessage('uuid-c', 'message C')
+      // turns: [user-A(confirmed), asst(streaming), user-B(pending), user-C(pending)]
+      expect(store.conversation.turns).toHaveLength(4)
+      expect(store.conversation.turns[2].pendingUuid).toBe('uuid-b')
+      expect(store.conversation.turns[3].pendingUuid).toBe('uuid-c')
+
+      // Finalize A's response and start streaming B's response
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-a',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'responding to A' }],
+          model: 'claude-test',
+        },
+      })
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'responding to B' }, index: 0 },
+      })
+      // turns: [user-A, asst-A(finalized), user-B(pending), user-C(pending), asst-B(streaming)]
+      expect(store.conversation.turns).toHaveLength(5)
+      expect(store.conversation.turns[4].type).toBe('assistant')
+
+      // Echo for B arrives — B moves BEFORE the new streaming asst turn
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-b',
+        isReplay: true,
+        message: { role: 'user', content: 'message B' },
+      })
+
+      // Expected: [user-A, asst-A(finalized), user-B(confirmed), asst-B(streaming), user-C(pending)]
+      expect(store.conversation.turns).toHaveLength(5)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[0].pendingUuid).toBeUndefined()
+      expect(store.conversation.turns[1].type).toBe('assistant')
+      expect(store.conversation.turns[2].type).toBe('user')
+      expect(store.conversation.turns[2].pendingUuid).toBeUndefined()
+      const blockB = store.conversation.turns[2].blocks.find(b => b.type === 'text')
+      expect(blockB?.type === 'text' && blockB.text).toBe('message B')
+      expect(store.conversation.turns[3].type).toBe('assistant')
+      expect(store.conversation.turns[4].type).toBe('user')
+      expect(store.conversation.turns[4].pendingUuid).toBe('uuid-c')
+    })
+
+    it('parentToolUseId match: echo lands before streaming asst turn under the same parent', () => {
+      const parentId = 'toolu-parent-1'
+
+      // A streaming assistant turn under parentId
+      store.applyEventForTest({
+        type: 'stream_event',
+        parent_tool_use_id: parentId,
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'sub-agent output' }, index: 0 },
+      })
+      expect(store.conversation.turns).toHaveLength(1)
+      expect(store.conversation.turns[0].type).toBe('assistant')
+      expect(store.conversation.turns[0].parentToolUseId).toBe(parentId)
+
+      // User sends a message tagged with the same parentToolUseId
+      // (addPendingMessage doesn't take parentToolUseId, but the echo event carries it)
+      store.addPendingMessage('uuid-sub', 'redirect sub-agent')
+      // turns: [asst(streaming, parent=parentId), user(pending, no parent yet)]
+      expect(store.conversation.turns).toHaveLength(2)
+
+      // Echo arrives with parentToolUseId = parentId
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-sub',
+        isReplay: true,
+        parent_tool_use_id: parentId,
+        message: { role: 'user', content: 'redirect sub-agent' },
+      })
+
+      // The user turn should be inserted before the streaming asst turn
+      // (they share the same parentToolUseId)
+      expect(store.conversation.turns).toHaveLength(2)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[0].pendingUuid).toBeUndefined()
+      expect(store.conversation.turns[1].type).toBe('assistant')
+      expect(store.conversation.turns[1].parentToolUseId).toBe(parentId)
+    })
+  })
+
 })
