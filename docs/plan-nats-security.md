@@ -10,15 +10,13 @@ NATS is the central nervous system. If NATS is compromised, the entire platform 
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| KV write authority | Control-plane is sole `$KV.>` publisher | Single source of truth. Controllers and SPAs read KV via watches, never write. Prevents split-brain. |
+| KV write authority | Split: controller writes project status, control-plane writes metadata + access | Controller knows actual resource state — no reason to round-trip through control-plane. Control-plane owns access lists and project metadata. |
 | Controller access checks | In-memory map from KV watch, not JWT scoping | Avoids mass JWT refresh when clusters/users change. Nanosecond map lookup. KV watch keeps it current. |
 | Subject scoping | Cross-dimensional: userId × clusterId | Users bound to `mclaude.{userId}.*`, controllers bound to `mclaude.*.clusters.{clusterId}.*`. Intersection enforces isolation. |
 | BYOH trust level | Same NATS permissions as managed controller | BYOH controller can only see events for its own clusterId. Cannot read other clusters. Physical access to BYOH hardware is the owner's responsibility. |
 | Rate limiting | NATS JWT-level per-client limits | `pub.max`, `data`, `payload` fields in JWT. Prevents any single identity from flooding the system. |
 | Cluster IDs | UUIDs, not user-chosen names | Prevents guessing/targeting. Even if you know a cluster exists, you need the UUID to address it. |
-| Status update path | Controller → status event → control-plane → KV | Controllers never write KV directly. Control-plane validates and writes. |
-
-**OPEN QUESTION**: Should controllers be allowed to write KV directly for status updates? Current design routes through control-plane for validation, but adds latency. If controller writes KV directly, we lose the validation layer but gain speed. Risk: a compromised controller could write arbitrary KV entries for its cluster's projects.
+| Status update path | Controller writes KV directly | Controller is the authority on resource state. Direct KV write avoids latency and removes control-plane from the critical path. |
 
 ---
 
@@ -87,35 +85,40 @@ A user can only interact with their own subjects. They publish project create/up
 ```
 Publish allow:
   mclaude.>      # all mclaude subjects
-  $KV.>          # sole KV writer
+  $KV.mclaude-access.>   # access list KV
+  $KV.mclaude-sessions.> # session state KV
   $JS.>          # JetStream management (create streams, consumers)
   _INBOX.>       # request/reply
 
 Subscribe allow:
   mclaude.>      # receives all events
-  $KV.>          # KV watch
+  $KV.>          # KV watch (all buckets)
   $JS.>          # JetStream management
   _INBOX.>       # request/reply
 ```
 
-Control-plane is the superuser. It reads all events, writes all KV, manages JetStream configuration.
+Control-plane writes access lists and session metadata to KV. Does NOT write project status — that's the controller's responsibility. Manages JetStream configuration (stream/consumer creation).
 
 ### K8s Controller / BYOH Controller
 
 ```
 Publish allow:
-  mclaude.system.clusters.{clusterId}.>     # status events only
+  $KV.mclaude-projects.>                     # writes project status directly to KV
   _INBOX.>                                   # request/reply
 
 Subscribe allow:
   mclaude.*.clusters.{clusterId}.>           # project commands for this cluster
+  $KV.mclaude-access.>                       # watch access list for authorization checks
 
 Publish deny:
-  $KV.>          # cannot write KV
-  $JS.>          # cannot manipulate JetStream
+  $KV.mclaude-access.>   # cannot write access lists
+  $KV.mclaude-sessions.> # cannot write session state
+  $JS.>                   # cannot manipulate JetStream
 ```
 
 The wildcard `*` in the subscribe pattern means the controller sees events from ALL users that target its cluster. This is by design — the controller needs to provision resources for any authorized user.
+
+The controller writes project status directly to the `mclaude-projects` KV bucket. It cannot write to other KV buckets (access lists, sessions).
 
 The controller can only PUBLISH to its own cluster's system status subjects. It cannot publish commands (create/update/delete) — those come from users.
 
@@ -135,25 +138,27 @@ Narrowest scope. A session-agent can only interact with its own session's subjec
 
 ## KV Access Control
 
-NATS KV operations map to JetStream subjects under `$KV.<bucket>.<key>`. By restricting `$KV.>` publish to control-plane only:
+NATS KV operations map to JetStream subjects under `$KV.<bucket>.<key>`. KV write authority is split by bucket:
 
-| KV Operation | Subject | Allowed For |
-|--------------|---------|-------------|
-| Put (write) | `$KV.<bucket>.<key>` | Control-plane only |
-| Get (read) | `$JS.API.DIRECT.GET.<stream>.<subject>` | All (via JetStream API) |
-| Watch | `$JS.API.CONSUMER.CREATE.<stream>` + `$KV.<bucket>.>` subscribe | All (subscribe) |
-| Delete | `$KV.<bucket>.<key>` (with purge header) | Control-plane only |
+| KV Operation | Subject | `mclaude-projects` | `mclaude-access` | `mclaude-sessions` |
+|--------------|---------|---------------------|-------------------|--------------------|
+| Put (write) | `$KV.<bucket>.<key>` | Controller | Control-plane | Control-plane |
+| Get (read) | `$JS.API.DIRECT.GET.<stream>.<subject>` | All | All | All |
+| Watch | `$KV.<bucket>.>` subscribe | All | All | All |
+| Delete | `$KV.<bucket>.<key>` (purge header) | Controller | Control-plane | Control-plane |
 
 This means:
 - **SPA can watch KV** (subscribe to `$KV.mclaude-projects.>`) — reads project status changes in real-time
-- **Controller can watch KV** (subscribe to `$KV.mclaude-access.>`) — reads access list for authorization checks
-- **Neither can write KV** — only control-plane publishes to `$KV.>` subjects
+- **Controller writes project status** (publish to `$KV.mclaude-projects.>`) — directly updates status as it provisions
+- **Controller watches access list** (subscribe to `$KV.mclaude-access.>`) — reads access list for authorization checks
+- **Control-plane writes access lists and session state** — owns user/cluster mappings and session metadata
+- **SPA and controllers cannot write each other's KV buckets** — enforced at JWT level
 
 ### KV Buckets
 
 | Bucket | Purpose | Writer | Readers |
 |--------|---------|--------|---------|
-| `mclaude-projects` | Project status, metadata | Control-plane | SPA (per-user filtered), Controller (per-cluster filtered) |
+| `mclaude-projects` | Project status, metadata | Controller (status), Control-plane (metadata on create) | SPA (per-user filtered), Controller (per-cluster filtered) |
 | `mclaude-access` | Cluster access lists (userId → clusterId mappings) | Control-plane | Controllers (watch for authorization) |
 | `mclaude-sessions` | Active session state | Control-plane | SPA |
 
@@ -225,7 +230,7 @@ NATS JWTs support per-connection rate limits:
 
 A managed K8s controller runs on infrastructure we operate. We trust the runtime environment but not the software blindly — it still gets scoped NATS permissions. If the controller binary is compromised:
 - It can only affect its own cluster's projects
-- It cannot write KV (so it can't poison the global state)
+- It can only write to the `mclaude-projects` KV bucket (project status) — cannot write access lists or session state
 - It cannot see other clusters' events
 - It cannot issue JWTs (doesn't have the account seed — **OPEN QUESTION**: it does have the account seed for signing session-agent JWTs. See "Account Seed Distribution" below.)
 
@@ -256,18 +261,21 @@ This is acceptable because:
 
 **Residual risk**: Information disclosure to BYOH owner. Acceptable if admin explicitly opted in.
 
-### T2: BYOH Spoofs Status Events
+### T2: BYOH Spoofs Project Status via KV
 
-**Threat**: A compromised BYOH controller publishes fake status events (`mclaude.system.clusters.{clusterId}.projects.{projectId}.status`) claiming a project is Ready when it's actually failed.
+**Threat**: A compromised BYOH controller writes fake project status directly to the `mclaude-projects` KV bucket, claiming a project is Ready when it's actually failed. Since the controller has `$KV.mclaude-projects.>` publish permission, it can write status for ANY project key — not just projects on its cluster.
 
-**Impact**: Users see incorrect project status. SPA shows "Ready" but the project is broken.
+**Impact**: Users see incorrect project status. SPA shows "Ready" but the project is broken. Worse: the controller could overwrite status for projects on OTHER clusters.
 
 **Mitigation**:
-- Status events flow through control-plane before hitting KV. Control-plane can validate (e.g., cross-reference with recent create events).
-- Rate limiting prevents flooding status events.
+- Controller JWT scopes KV writes to `$KV.mclaude-projects.>` but the KV key includes the project ID, not the cluster ID. A compromised controller could write any project's status.
+- Rate limiting prevents flooding KV writes.
 - Users will quickly notice the project doesn't work and report it.
+- Control-plane can detect anomalies: status updates for projects not assigned to the reporting cluster.
 
-**Residual risk**: Temporary status confusion. Low impact — the actual session won't function, and the user will see errors when they try to use it.
+**Residual risk**: A compromised controller can write bogus status for projects on other clusters. This is the main trade-off of letting controllers write KV directly. Mitigated by monitoring (control-plane watches all KV changes and can flag cross-cluster status writes) and by the fact that incorrect status is annoying but not destructive — the underlying resources are untouched.
+
+**OPEN QUESTION**: Should project KV keys include the cluster ID (e.g., `{clusterId}.{projectId}`) so controller JWT can be scoped to `$KV.mclaude-projects.{clusterId}.>`? This would prevent cross-cluster status poisoning at the NATS level. Trade-off: SPA needs to know the cluster ID to watch the right KV keys.
 
 ### T3: DoS on BYOH Target
 
@@ -290,11 +298,14 @@ This is acceptable because:
 
 ### T4: KV Poisoning
 
-**Threat**: A compromised controller or SPA attempts to write malicious data to NATS KV (e.g., overwriting project status, access lists).
+**Threat**: A compromised identity writes malicious data to NATS KV.
 
-**Mitigation**: `$KV.>` publish is restricted to control-plane only in the NATS JWT. Any attempt by other identities to publish to `$KV.>` subjects is rejected by the NATS server before the message is delivered.
+**Mitigation by bucket:**
+- `mclaude-access` (access lists): only control-plane can write. SPA and controllers are denied `$KV.mclaude-access.>` publish. **Residual risk: zero.**
+- `mclaude-sessions` (session state): only control-plane can write. **Residual risk: zero.**
+- `mclaude-projects` (project status): controllers can write. A compromised controller could write bogus status for any project (see T2). SPA is denied `$KV.mclaude-projects.>` publish. **Residual risk: status confusion, mitigated by monitoring.**
 
-**Residual risk**: Zero — enforced at the NATS server level via JWT permissions.
+The critical buckets (access lists, sessions) remain control-plane-only. The project status bucket is the trade-off zone — controllers need write access for performance, accepting the risk that a compromised controller can write cross-cluster status.
 
 ### T5: Subject Hijacking
 
