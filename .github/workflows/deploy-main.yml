@@ -6,20 +6,12 @@ on:
     branches: [main]
 
 jobs:
-  changes:
-    name: Detect changes
+  tag:
+    name: Compute image tag
     runs-on: self-hosted
-    permissions:
-      contents: read
-      pull-requests: read
     outputs:
-      control-plane: ${{ steps.filter.outputs.control-plane }}
-      spa: ${{ steps.filter.outputs.spa }}
-      session-agent: ${{ steps.filter.outputs.session-agent }}
       image_tag: ${{ steps.tag.outputs.value }}
     steps:
-      - uses: actions/checkout@v4
-
       - name: Compute image tag
         id: tag
         run: |
@@ -27,30 +19,15 @@ jobs:
           echo "value=main-${short_sha}" >> "$GITHUB_OUTPUT"
           echo "Image tag: main-${short_sha}"
 
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            control-plane:
-              - 'mclaude-control-plane/**'
-              - '.github/workflows/deploy-main.yml'
-            spa:
-              - 'mclaude-web/**'
-              - '.github/workflows/deploy-main.yml'
-            session-agent:
-              - 'mclaude-session-agent/**'
-              - '.github/workflows/deploy-main.yml'
-
   build-control-plane:
     name: Build control-plane
-    needs: changes
-    if: needs.changes.outputs.control-plane == 'true'
+    needs: tag
     runs-on: self-hosted
     permissions:
       contents: read
       packages: write
     outputs:
-      tag: ${{ needs.changes.outputs.image_tag }}
+      tag: ${{ needs.tag.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
       - name: Authenticate to GHCR
@@ -80,19 +57,18 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
-            ghcr.io/richardmsong/mclaude-control-plane:${{ needs.changes.outputs.image_tag }}
+            ghcr.io/richardmsong/mclaude-control-plane:${{ needs.tag.outputs.image_tag }}
             ghcr.io/richardmsong/mclaude-control-plane:main
 
   build-spa:
     name: Build spa
-    needs: changes
-    if: needs.changes.outputs.spa == 'true'
+    needs: tag
     runs-on: self-hosted
     permissions:
       contents: read
       packages: write
     outputs:
-      tag: ${{ needs.changes.outputs.image_tag }}
+      tag: ${{ needs.tag.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
       - name: Authenticate to GHCR
@@ -111,19 +87,18 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
-            ghcr.io/richardmsong/mclaude-spa:${{ needs.changes.outputs.image_tag }}
+            ghcr.io/richardmsong/mclaude-spa:${{ needs.tag.outputs.image_tag }}
             ghcr.io/richardmsong/mclaude-spa:main
 
   build-session-agent:
     name: Build session-agent
-    needs: changes
-    if: needs.changes.outputs.session-agent == 'true'
+    needs: tag
     runs-on: self-hosted
     permissions:
       contents: read
       packages: write
     outputs:
-      tag: ${{ needs.changes.outputs.image_tag }}
+      tag: ${{ needs.tag.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
       - name: Authenticate to GHCR
@@ -153,62 +128,27 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
-            ghcr.io/richardmsong/mclaude-session-agent:${{ needs.changes.outputs.image_tag }}
+            ghcr.io/richardmsong/mclaude-session-agent:${{ needs.tag.outputs.image_tag }}
             ghcr.io/richardmsong/mclaude-session-agent:main
 
   deploy:
     name: Deploy main
-    needs: [changes, build-control-plane, build-spa, build-session-agent]
-    if: always() && !failure() && !cancelled()
+    needs: [tag, build-control-plane, build-spa, build-session-agent]
     runs-on: [self-hosted, tailscale]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve image tags
-        id: tags
-        run: |
-          # For each component: use the newly built tag if available,
-          # otherwise read the tag from the currently deployed release
-          resolve_tag() {
-            local component="$1" new_tag="$2"
-            if [ -n "$new_tag" ]; then
-              echo "$new_tag"
-            else
-              # Get current tag from the running deployment
-              helm get values mclaude -n mclaude-system -o json 2>/dev/null \
-                | jq -r ".${component}.image.tag // empty" || true
-            fi
-          }
-
-          CP_TAG=$(resolve_tag "controlPlane" "${{ needs.build-control-plane.outputs.tag }}")
-          SPA_TAG=$(resolve_tag "spa" "${{ needs.build-spa.outputs.tag }}")
-          SA_TAG=$(resolve_tag "sessionAgent" "${{ needs.build-session-agent.outputs.tag }}")
-
-          # Final fallback: use the image tag from this commit (forces a build next time)
-          CP_TAG="${CP_TAG:-main-${GITHUB_SHA::7}}"
-          SPA_TAG="${SPA_TAG:-main-${GITHUB_SHA::7}}"
-          SA_TAG="${SA_TAG:-main-${GITHUB_SHA::7}}"
-
-          echo "cp=$CP_TAG" >> "$GITHUB_OUTPUT"
-          echo "spa=$SPA_TAG" >> "$GITHUB_OUTPUT"
-          echo "sa=$SA_TAG" >> "$GITHUB_OUTPUT"
-
-          echo "control-plane: ghcr.io/richardmsong/mclaude-control-plane:${CP_TAG}"
-          echo "spa:           ghcr.io/richardmsong/mclaude-spa:${SPA_TAG}"
-          echo "session-agent: ghcr.io/richardmsong/mclaude-session-agent:${SA_TAG}"
-
       - name: Helm deploy main
         env:
-          CP_TAG: ${{ steps.tags.outputs.cp }}
-          SPA_TAG: ${{ steps.tags.outputs.spa }}
-          SA_TAG: ${{ steps.tags.outputs.sa }}
+          IMAGE_TAG: ${{ needs.tag.outputs.image_tag }}
           DEV_OAUTH_TOKEN: ${{ secrets.DEV_OAUTH_TOKEN }}
         run: |
+          echo "Deploying all components at tag: ${IMAGE_TAG}"
           helm upgrade --install "mclaude" ./charts/mclaude \
             -f ./charts/mclaude/values-k3d-ghcr.yaml \
-            --set controlPlane.image.tag="${CP_TAG}" \
-            --set spa.image.tag="${SPA_TAG}" \
-            --set sessionAgent.image.tag="${SA_TAG}" \
+            --set controlPlane.image.tag="${IMAGE_TAG}" \
+            --set spa.image.tag="${IMAGE_TAG}" \
+            --set sessionAgent.image.tag="${IMAGE_TAG}" \
             --set controlPlane.devOAuthToken="${DEV_OAUTH_TOKEN}" \
             --namespace "mclaude-system" \
             --wait --timeout 5m \
