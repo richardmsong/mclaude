@@ -1430,6 +1430,9 @@ spec:
         - name: nix-store
           persistentVolumeClaim:
             claimName: nix-store
+        - name: corporate-ca                      # omit if no TLS interception
+          configMap:
+            name: corporate-ca-bundle
       containers:
         - name: session-agent
           image: mclaude-session-agent:{version}
@@ -1444,6 +1447,8 @@ spec:
               value: "nats://nats.mclaude-system:4222"
             - name: HTTPS_PROXY
               value: "{proxyUrl}"   # omit if no egress restriction
+            - name: NODE_EXTRA_CA_CERTS           # omit if no TLS interception
+              value: "/etc/ssl/certs/corporate-ca-certificates.crt"
           volumeMounts:
             - name: project-data
               mountPath: /data
@@ -1456,6 +1461,10 @@ spec:
               readOnly: true
             - name: user-secrets
               mountPath: /home/node/.user-secrets
+              readOnly: true
+            - name: corporate-ca                  # omit if no TLS interception
+              mountPath: /etc/ssl/certs/corporate-ca-certificates.crt
+              subPath: ca-certificates.crt
               readOnly: true
           resources:
             requests:
@@ -1615,6 +1624,51 @@ sudo systemctl enable --now squid
 ```
 
 All project pods set `HTTPS_PROXY` env var. Claude Code respects it natively. Omit the env var for environments with direct egress.
+
+### Corporate CA Bundle (TLS interception)
+
+When a corporate proxy intercepts TLS (MITM), the session-agent container must trust the proxy's CA certificate. Without it, Claude Code fails with `SSL certificate verification failed`.
+
+**Helm values:**
+
+```yaml
+sessionAgent:
+  corporateCA:
+    configMapName: ""  # Name of a ConfigMap in the control-plane namespace
+                       # containing a `ca-certificates.crt` key with PEM-encoded
+                       # CA certificates. When set, the reconciler mounts it into
+                       # session-agent pods and sets NODE_EXTRA_CA_CERTS.
+```
+
+**How it works:**
+
+1. The operator creates a ConfigMap in `mclaude-system` with the combined CA bundle:
+   ```bash
+   kubectl create configmap corporate-ca-bundle \
+     --namespace mclaude-system \
+     --from-file=ca-certificates.crt=/path/to/combined-ca-bundle.pem
+   ```
+
+2. The Helm chart writes `corporateCA.configMapName` into the `session-agent-template` ConfigMap.
+
+3. On reconcile, if `corporateCAConfigMap` is non-empty in the template, the reconciler:
+   - Copies the CA ConfigMap from the control-plane namespace into the user namespace (idempotent)
+   - Adds a volume (`corporate-ca`) referencing the copied ConfigMap
+   - Adds a volumeMount at `/etc/ssl/certs/corporate-ca-certificates.crt` (subPath, read-only)
+   - Sets `NODE_EXTRA_CA_CERTS=/etc/ssl/certs/corporate-ca-certificates.crt` env var
+
+4. Claude Code (Node.js) respects `NODE_EXTRA_CA_CERTS` natively — the extra CAs are merged with the built-in CA store at TLS handshake time. The session-agent binary (Go) also reads this env var via `x509.SystemCertPool()` when configured.
+
+**Why copy the ConfigMap**: the CA ConfigMap lives in `mclaude-system` (operator-managed). Session-agent pods run in `mclaude-{userId}` namespaces. K8s volumes cannot reference cross-namespace ConfigMaps, so the reconciler copies it. The copy is refreshed on every reconcile cycle — updating the source ConfigMap propagates to all user namespaces on the next reconcile (within 10 minutes via resync, or immediately if a watched resource triggers re-enqueue).
+
+**Local dev (k3d)**: create the ConfigMap from the macOS system keychain:
+```bash
+security find-certificate -a -p /Library/Keychains/System.keychain > /tmp/corporate-ca-bundle.pem
+kubectl create configmap corporate-ca-bundle \
+  --namespace mclaude-system \
+  --from-file=ca-certificates.crt=/tmp/corporate-ca-bundle.pem
+```
+Then set `sessionAgent.corporateCA.configMapName: corporate-ca-bundle` in values.
 
 ---
 
