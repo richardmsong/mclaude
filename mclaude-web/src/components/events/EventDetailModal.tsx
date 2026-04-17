@@ -1,6 +1,9 @@
+import { useState } from 'react'
 import type { Block, Turn } from '@/types'
 import { DiffView } from './DiffView'
 import { highlightBash } from './ToolCard'
+import { formatTokens, formatCost, computeCost, loadCalibration } from '@/lib/pricing'
+import { TurnUsageSheet } from './TurnUsageSheet'
 
 interface EventDetailModalProps {
   block: Block
@@ -176,6 +179,36 @@ function ToolBody({ name, input }: { name: string; input: unknown }) {
   return <JsonHighlight input={input} />
 }
 
+function TurnUsageFooter({ usage, model }: { usage: NonNullable<Turn['usage']>; model?: string }) {
+  const [sheetOpen, setSheetOpen] = useState(false)
+  const calibration = loadCalibration()
+  const totalTokens = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
+  const cost = computeCost(usage, calibration)
+  return (
+    <>
+      <button
+        onClick={() => setSheetOpen(true)}
+        style={{
+          color: 'var(--text3)',
+          fontSize: 11,
+          marginTop: 12,
+          textAlign: 'left',
+          cursor: 'pointer',
+        }}
+      >
+        {model} &middot; {formatTokens(totalTokens)} tokens &middot; {formatCost(cost)}
+      </button>
+      {sheetOpen && (
+        <TurnUsageSheet
+          usage={usage}
+          model={model}
+          onClose={() => setSheetOpen(false)}
+        />
+      )}
+    </>
+  )
+}
+
 export function EventDetailModal({ block, turn, onClose }: EventDetailModalProps) {
   const title = block.type === 'tool_use'
     ? `${toolIcon(block.name)} ${block.name}`
@@ -270,11 +303,7 @@ export function EventDetailModal({ block, turn, onClose }: EventDetailModalProps
             </pre>
           )}
           {/* Turn metadata */}
-          {turn.usage && (
-            <div style={{ color: 'var(--text3)', fontSize: 11, marginTop: 12 }}>
-              {turn.model} · {(turn.usage.inputTokens + turn.usage.outputTokens).toLocaleString()} tokens
-            </div>
-          )}
+          {turn.usage && <TurnUsageFooter usage={turn.usage} model={turn.model} />}
         </div>
       </div>
     </>

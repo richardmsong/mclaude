@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { NavBar } from './NavBar'
+import { PRICE_PER_M, loadCalibration, saveCalibration, formatTokens, formatCost } from '@/lib/pricing'
 
 interface UsageData {
   inputTokens: number
@@ -13,41 +14,6 @@ interface TokenUsageProps {
   usage: UsageData
   onBack: () => void
   connected: boolean
-}
-
-const PRICE_PER_M = {
-  input: 3.0,
-  output: 15.0,
-  cacheRead: 0.3,
-  cacheWrite: 3.75,
-}
-
-const CALIBRATION_KEY = 'mclaude.costCalibration'
-
-function loadCalibration(): number {
-  try {
-    const stored = localStorage.getItem(CALIBRATION_KEY)
-    const val = stored !== null ? parseFloat(stored) : NaN
-    return isNaN(val) || val <= 0 ? 1.0 : val
-  } catch {
-    return 1.0
-  }
-}
-
-function saveCalibration(factor: number): void {
-  try {
-    localStorage.setItem(CALIBRATION_KEY, String(factor))
-  } catch {}
-}
-
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return String(n)
-}
-
-function formatCost(usd: number): string {
-  return `$${usd.toFixed(3)}`
 }
 
 type TimeRange = '1H' | '6H' | '24H' | '7D' | '30D'
@@ -190,7 +156,7 @@ export function TokenUsage({ usage, onBack, connected }: TokenUsageProps) {
                 borderRadius: 8,
                 fontWeight: 600,
               }}>
-                ×{calibration.toFixed(2)}
+                &times;{calibration.toFixed(2)}
               </span>
             )}
           </div>
@@ -201,7 +167,7 @@ export function TokenUsage({ usage, onBack, connected }: TokenUsageProps) {
             {formatTokens(totalTokens)} total tokens
           </div>
           <div style={{ color: 'var(--text3)', fontSize: 11, marginTop: 8 }}>
-            Prices: input ${PRICE_PER_M.input}/M · output ${PRICE_PER_M.output}/M
+            Prices: input ${PRICE_PER_M.input}/M &middot; output ${PRICE_PER_M.output}/M
           </div>
           <button
             onClick={() => {

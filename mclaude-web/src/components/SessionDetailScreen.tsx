@@ -6,6 +6,7 @@ import { EditSessionSheet } from './EditSessionSheet'
 import type { Turn, SessionState, PendingMessage } from '@/types'
 import type { ConversationVM, ConversationVMState } from '@/viewmodels/conversation-vm'
 import type { SessionListVM } from '@/viewmodels/session-list-vm'
+import { PRICE_PER_M, formatTokens, formatCost } from '@/lib/pricing'
 
 interface SessionUsage {
   inputTokens: number
@@ -530,17 +531,10 @@ export function SessionDetailScreen({
   )
 
   // Helpers for usage overlay
-  const PRICE_PER_M = { input: 3.0, output: 15.0, cacheRead: 0.3, cacheWrite: 3.75 }
 
-  function formatTokens(n: number): string {
-    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-    return String(n)
-  }
 
-  function formatCost(usd: number): string {
-    return `$${usd.toFixed(3)}`
-  }
+
+
 
   const usageTiles = sessionUsage ? [
     { label: 'Input', tokens: sessionUsage.inputTokens, color: 'var(--blue)', cost: sessionUsage.inputTokens / 1_000_000 * PRICE_PER_M.input },

@@ -20,6 +20,7 @@ import type {
   PendingMessage,
 } from '@/types'
 import { logger } from '@/logger'
+import { computeCost, loadCalibration } from '@/lib/pricing'
 
 export interface EventStoreOptions {
   natsClient: INATSClient
@@ -538,7 +539,13 @@ export class EventStore {
             outputTokens: event.message.usage.output_tokens,
             cacheReadTokens: event.message.usage.cache_read_input_tokens ?? 0,
             cacheWriteTokens: event.message.usage.cache_creation_input_tokens ?? 0,
-            costUsd: 0,
+            costUsd: computeCost({
+              inputTokens: event.message.usage.input_tokens,
+              outputTokens: event.message.usage.output_tokens,
+              cacheReadTokens: event.message.usage.cache_read_input_tokens ?? 0,
+              cacheWriteTokens: event.message.usage.cache_creation_input_tokens ?? 0,
+              costUsd: 0,
+            }, loadCalibration()),
           }
         }
         break
