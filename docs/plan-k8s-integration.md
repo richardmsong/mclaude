@@ -1149,13 +1149,13 @@ No auth logic. No routing decisions. Bytes in, bytes out.
 
 ## Image Build Pipeline
 
-Push to `main` → `.github/workflows/deploy-main.yml` builds any component whose source changed and pushes to ghcr.io under `ghcr.io/mclaude-project/<image>`. Two tags per build: `main-<7-char-sha>` (immutable, per-commit) and `main` (moving, latest-on-main). **The `:latest` tag is never published** — consumers pinning `:latest` will always fail the pull.
+Push to `main` → `.github/workflows/deploy-main.yml` builds any component whose source changed and pushes to ghcr.io under `ghcr.io/richardmsong/<image>`. Two tags per build: `main-<7-char-sha>` (immutable, per-commit) and `main` (moving, latest-on-main). **The `:latest` tag is never published** — consumers pinning `:latest` will always fail the pull.
 
 | Image | Ghcr.io repository | Tags | Contents |
 |-------|-------------------|------|----------|
-| control-plane | `ghcr.io/mclaude-project/mclaude-control-plane` | `main`, `main-<sha>` | control-plane binary, kubectl, dbmate |
-| SPA | `ghcr.io/mclaude-project/mclaude-spa` | `main`, `main-<sha>` | built SPA static files + nginx |
-| session-agent | `ghcr.io/mclaude-project/mclaude-session-agent` | `main`, `main-<sha>` | session-agent binary, mclaude-cli binary, Claude CLI, git, Nix, zsh, pkg shim, guard hooks |
+| control-plane | `ghcr.io/richardmsong/mclaude-control-plane` | `main`, `main-<sha>` | control-plane binary, kubectl, dbmate |
+| SPA | `ghcr.io/richardmsong/mclaude-spa` | `main`, `main-<sha>` | built SPA static files + nginx |
+| session-agent | `ghcr.io/richardmsong/mclaude-session-agent` | `main`, `main-<sha>` | session-agent binary, mclaude-cli binary, Claude CLI, git, Nix, zsh, pkg shim, guard hooks |
 
 Note: tmux is no longer in the session-agent image.
 
