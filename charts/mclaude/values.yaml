@@ -227,6 +227,14 @@ sessionAgent:
     ## Storage class for Nix store PVCs (must support RWX)
     storageClass: ""
     size: 20Gi
+  ## Corporate CA bundle for TLS-intercepting proxies.
+  ## When set, the reconciler copies the named ConfigMap from the control-plane
+  ## namespace into each user namespace, mounts it into the session-agent container,
+  ## and sets NODE_EXTRA_CA_CERTS so Claude Code (Node.js) trusts the corporate CA.
+  ## The ConfigMap must contain a key named "ca-certificates.crt" with PEM-encoded
+  ## CA certificates. Empty string (default) = disabled.
+  corporateCA:
+    configMapName: ""
 
 ## ---------------------------------------------------------------------------
 ## Helm test configuration

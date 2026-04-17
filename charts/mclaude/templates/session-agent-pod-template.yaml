@@ -20,3 +20,4 @@ data:
   projectPvcStorageClass: {{ .Values.sessionAgent.persistence.storageClass | quote }}
   nixPvcSize: {{ .Values.sessionAgent.nix.size | quote }}
   nixPvcStorageClass: {{ .Values.sessionAgent.nix.storageClass | quote }}
+  corporateCAConfigMap: {{ .Values.sessionAgent.corporateCA.configMapName | quote }}

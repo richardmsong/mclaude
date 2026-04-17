@@ -64,4 +64,15 @@ if echo "$COMMAND" | grep -qE '(^|[;&|])\s*git\s+apply\b'; then
   deny "BLOCKED: 'git apply' bypasses the spec→dev-harness→evaluator loop. Use /feature-change to make code changes."
 fi
 
+# Block: mutating kubectl commands (create, apply, patch, delete, rollout restart, exec)
+# Read-only commands (get, logs, describe, port-forward, rollout status, config, cluster-info) are always allowed.
+# Exception: set KUBECTL_MUTATE=1 for one-off debugging.
+if echo "$COMMAND" | grep -qE '(^|[;&|])\s*kubectl\s+(create|apply|patch|delete|replace|edit|scale|rollout\s+restart|exec)\b'; then
+  if [ "${KUBECTL_MUTATE:-}" = "1" ]; then
+    : # allow — debug mode
+  else
+    deny "BLOCKED: mutating kubectl command. Cluster state should be managed by Helm + the reconciler, not manual kubectl. Use /feature-change for lasting changes. Set KUBECTL_MUTATE=1 if you solemnly swear this is just for debugging."
+  fi
+fi
+
 exit 0
