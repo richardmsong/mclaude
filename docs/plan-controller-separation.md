@@ -176,7 +176,7 @@ mclaude.{userId}.targets.deregister
 ### Session Events (unchanged)
 
 ```
-mclaude.{userId}.sessions.{sessionId}.>
+mclaude.{userId}.sessions.{clusterId}.{sessionId}.>
 ```
 
 Direct SPA ↔ session-agent. No routing through control-plane.
@@ -331,12 +331,7 @@ mclaude register --name "my-laptop" --server https://dev.mclaude.local
 - Shows: cluster name, type (cloud/local), status (online/offline)
 - BYOH targets show only for the owning user (unless admin-shared)
 
-**OPEN QUESTION**: How does the SPA know which targets are available for the current user? Options:
-1. Control-plane publishes target list to NATS KV on login
-2. SPA requests target list via NATS request/reply
-3. Target list included in login response
-
-**RESOLVED**: SPA knows target online/offline status via KV. Control-plane subscribes to NATS `$SYS` presence events — when a controller connects or disconnects, control-plane updates the target's status in KV. SPA watches KV.
+**RESOLVED**: SPA watches `mclaude-clusters` KV bucket, key `{userId}`. Control-plane writes each user's accessible cluster list (id, name, type, online/offline) on login and whenever access or liveness changes. SPA gets real-time updates via KV watch. Online/offline status comes from `$SYS` presence events — control-plane updates the KV entry when a controller connects or disconnects.
 
 ---
 
@@ -385,19 +380,19 @@ type MCProjectReconciler struct {
     controlPlaneNs      string
     clusterID           string
     sessionAgentNATSURL string
-    accountKP           nkeys.KeyPair
+    signingKey          nkeys.KeyPair       // scoped signing key for session-agent JWTs
     nc                  *nats.Conn          // for KV writes (project status)
     logger              zerolog.Logger
 }
 ```
 
-### Account NKey
+### Signing Credentials
 
-Both control-plane and controller need `accountKP` to sign NATS JWTs:
-- Control-plane: signs user JWTs (browser clients)
-- Controller: signs session-agent JWTs (pod NATS credentials)
+**Control-plane** holds the account seed (`NATS_ACCOUNT_SEED`). Signs SPA user JWTs, controller JWTs, and generates scoped signing keys for each cluster. Never shared with controllers.
 
-Both read from `NATS_ACCOUNT_SEED` env var. Helm chart mounts the same Secret into both deployments.
+**Controller** holds a scoped signing key issued by control-plane during cluster registration. Signs session-agent JWTs. The signing key's ceiling (`mclaude.*.sessions.{clusterId}.*.>`) is enforced by the NATS server — even a compromised controller can only mint session-scoped JWTs for its own cluster.
+
+Helm chart mounts the signing key as a Secret into the controller deployment. Control-plane's account seed is in a separate Secret, only mounted into the control-plane deployment.
 
 ---
 
