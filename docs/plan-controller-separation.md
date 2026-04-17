@@ -540,33 +540,27 @@ Control-plane checked access and forwarded the command. Between the forward and 
 
 ### v1 — Implement Now
 
-**OPEN QUESTION**: Should v1 include multi-cluster or just the controller separation?
+Full multi-cluster. Includes:
 
-Option A (controller separation only):
 - `mclaude-api/` shared types module
-- `mclaude-controller/` kubebuilder operator (K8s only)
+- `mclaude-controller/` kubebuilder operator (K8s)
+- `mclaude-controller/` local variant (BYOH)
 - Remove K8sProvisioner from control-plane
-- NATS command subjects for project lifecycle
+- Control-plane as NATS command router (access check + forward)
+- NATS `$SYS` presence detection (agent health + controller liveness)
+- Scoped signing keys per cluster (session-agent JWT minting)
 - Suspend annotations
+- Targets table + registration flow (`mclaude register`)
+- Admin cluster access API
+- `mclaude-clusters` KV bucket (per-user cluster list)
+- Cluster picker in SPA
+- Provisioner interface (K8s + local implementations)
 - Helm chart split (new deployment, RBAC split)
 - CI workflows
-- Single cluster assumed (no targets table, no cluster picker, no local controller)
-- Subject structure accommodates future multi-cluster
-
-Option B (full multi-cluster):
-- Everything in Option A, plus:
-- Targets table + registration flow
-- Local controller binary
-- Provisioner interface
-- Cluster picker in SPA
-- Admin cluster access API
-- BYOH isolation
-- Estimated 3-4x more work than Option A
 
 ### Deferred (separate plans)
 
 - S3 archiver for NATS stream backup (`plan-nats-backup.md`)
-- NATS security hardening — see `plan-nats-security.md`
 - Horizontal scaling (multiple controller replicas with leader election)
 - Cross-region failover
 
@@ -574,29 +568,17 @@ Option B (full multi-cluster):
 
 ## Implementation Plan
 
-### Option A: Controller Separation Only
-
 | Component | New/changed lines (est.) | Dev-harness tokens (est.) | Notes |
 |-----------|--------------------------|---------------------------|-------|
 | `mclaude-api/` | ~150 | ~60k | New module: types, scheme, KV types |
-| `mclaude-controller/` | ~800 | ~200k | Kubebuilder scaffold, move reconciler, add NATS subscriber, tests |
-| `mclaude-control-plane/` | ~-600 (net deletion) | ~150k | Remove provisioner/reconciler, replace K8s calls with NATS publish |
-| `charts/mclaude/` | ~200 | ~80k | New deployment, RBAC split, values |
+| `mclaude-controller/` (K8s) | ~800 | ~200k | Kubebuilder scaffold, move reconciler, NATS subscriber, signing key, tests |
+| `mclaude-controller/` (local) | ~500 | ~150k | Process management variant, shared NATS subscriber logic |
+| `mclaude-control-plane/` | ~-300 (net) | ~200k | Remove provisioner/reconciler, add command router, targets table, access API, presence handler, signing key issuance |
+| `mclaude-web/` | ~400 | ~120k | Cluster picker, `mclaude-clusters` KV watch |
+| `mclaude-cli/` | ~200 | ~80k | `mclaude register` command |
+| `charts/mclaude/` | ~200 | ~80k | New deployment, RBAC split, signing key Secret, values |
 | CI workflows | ~100 | ~40k | New docker-controller.yml, update deploy workflows |
 | `go.work` | ~10 | — | Workspace setup |
 
-**Total estimated tokens:** ~530k
-**Estimated wall-clock:** ~2-3h
-
-### Option B: Full Multi-Cluster (additive)
-
-| Component | New/changed lines (est.) | Dev-harness tokens (est.) | Notes |
-|-----------|--------------------------|---------------------------|-------|
-| Everything in Option A | — | ~530k | — |
-| `mclaude-controller/` local variant | ~500 | ~150k | Process management instead of K8s |
-| `mclaude-control-plane/` targets | ~300 | ~100k | Targets table, registration handler, access API |
-| `mclaude-web/` cluster picker | ~400 | ~120k | UI component, target list, selection flow |
-| `mclaude-cli/` register command | ~200 | ~80k | Auth + NATS registration |
-
-**Total estimated tokens:** ~980k
+**Total estimated tokens:** ~930k
 **Estimated wall-clock:** ~4-6h
