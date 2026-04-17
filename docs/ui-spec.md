@@ -613,7 +613,7 @@ Terminal input bar (the message composer) is hidden on the Terminal tab.
 
 ## Overlay: Event Detail Modal
 
-Bottom sheet sliding up over the session detail screen. Shows raw data for any tapped event.
+Bottom sheet sliding up over the session detail screen. Shows structured data for any tapped event.
 
 ```
 ┌─────────────────────────────────┐
@@ -621,18 +621,25 @@ Bottom sheet sliding up over the session detail screen. Shows raw data for any t
 ├─────────────────────────────────┤
 │  Command                        │  field label
 │  ┌─────────────────────────┐    │
-│  │ git status              │    │  monospace pre
+│  │ git status              │    │  syntax-highlighted monospace
 │  └─────────────────────────┘    │
-│  Input                          │
+│  Result                         │
 │  ┌─────────────────────────┐    │
-│  │ { "command": "git…" }   │    │
+│  │ On branch main          │    │  monospace pre
 │  └─────────────────────────┘    │
 └─────────────────────────────────┘
 ```
 
 - Tapping the scrim closes the modal
-- For Edit tools: shows unified diff with line-level and char-level highlighting
-- For Bash tools: shows syntax-highlighted command
+- **No raw JSON "Input" dump** — never show raw `JSON.stringify` of tool input
+- Tool-specific rendering (no raw JSON Input section appended after):
+  - **Bash / `!`**: syntax-highlighted command only
+  - **Edit**: full file path prominently, then unified diff (DiffView)
+  - **Write**: full file path prominently, then content in scrollable monospace block
+  - **Read**: full file path + optional line range (`L12-L60`)
+  - **Grep / Glob**: pattern and path in separate labeled fields
+  - **All others**: pretty-printed, syntax-highlighted JSON — keys in `--blue`, string values in `--green`, numbers in `--orange`, booleans/null in `--purple`, punctuation in `--text3`
+- Result section: monospace pre block, `--red` text on error
 
 ---
 
@@ -837,6 +844,7 @@ GitHub-style unified diff with char-level highlighting.
 - Char-level highlights: `<span class="diff-hl">` — darker background within the line (rgba(255,255,255,.25) for additions, rgba(255,69,58,.35) for removals)
 - Monospace font, 12px, `--surf2` base background
 - Horizontally scrollable for long lines
+- Every element (container, line div, gutter span, content span) must explicitly set `fontSize: 12` and `fontFamily: monospace` — never rely on inheritance; add `-webkit-text-size-adjust: 100%` to prevent iOS scaling
 
 ---
 
