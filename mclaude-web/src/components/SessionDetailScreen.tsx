@@ -2,8 +2,10 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { NavBar } from './NavBar'
 import { StatusDot } from './StatusDot'
 import { EventList } from './events/EventList'
+import { EditSessionSheet } from './EditSessionSheet'
 import type { Turn, SessionState, PendingMessage } from '@/types'
 import type { ConversationVM, ConversationVMState } from '@/viewmodels/conversation-vm'
+import type { SessionListVM } from '@/viewmodels/session-list-vm'
 
 interface SessionUsage {
   inputTokens: number
@@ -19,6 +21,8 @@ interface SessionDetailScreenProps {
   sessionState: SessionState
   sessionModel?: string
   sessionUsage?: SessionUsage
+  sessionExtraFlags?: string
+  sessionListVM?: SessionListVM
   conversationVM: ConversationVM
   onBack: () => void
   connected: boolean
@@ -70,6 +74,8 @@ export function SessionDetailScreen({
   sessionState,
   sessionModel,
   sessionUsage,
+  sessionExtraFlags,
+  sessionListVM,
   conversationVM,
   onBack,
   connected,
@@ -83,6 +89,7 @@ export function SessionDetailScreen({
   const [showSkills, setShowSkills] = useState(false)
   const [showUsageOverlay, setShowUsageOverlay] = useState(false)
   const [showRawOutput, setShowRawOutput] = useState(false)
+  const [showEditSession, setShowEditSession] = useState(false)
   const [stagedImage, setStagedImage] = useState<{ base64: string; mimeType: string; previewUrl: string } | null>(null)
   const [pttRecording, setPttRecording] = useState(false)
   const [pttSupported, setPttSupported] = useState<boolean | null>(null)  // null = not yet checked
@@ -512,10 +519,29 @@ export function SessionDetailScreen({
               display: 'flex',
               alignItems: 'center',
               gap: 10,
+              borderBottom: sessionListVM ? '1px solid var(--border)' : undefined,
             }}
           >
             <span>📜</span> Raw Output
           </button>
+          {/* Edit Session */}
+          {sessionListVM && (
+            <button
+              onClick={() => { setShowMenu(false); setShowEditSession(true) }}
+              style={{
+                width: '100%',
+                padding: '12px 16px',
+                textAlign: 'left',
+                color: 'var(--text)',
+                fontSize: 14,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+              }}
+            >
+              <span>⚙</span> Edit Session
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -612,6 +638,16 @@ export function SessionDetailScreen({
           </div>
         </div>
       )}
+      {/* Edit Session sheet */}
+      {showEditSession && sessionListVM && (
+        <EditSessionSheet
+          sessionId={sessionId}
+          currentExtraFlags={sessionExtraFlags ?? ''}
+          sessionListVM={sessionListVM}
+          onClose={() => setShowEditSession(false)}
+        />
+      )}
+
       <NavBar
         title={sessionName}
         onBack={onBack}

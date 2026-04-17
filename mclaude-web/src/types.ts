@@ -108,6 +108,7 @@ export interface SessionKVState {
   pendingControls: Record<string, ControlRequest>
   usage: UsageStats
   replayFromSeq: number | null
+  extraFlags?: string
 }
 
 export interface ProjectKVState {
