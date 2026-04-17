@@ -102,6 +102,13 @@ export function SessionDetailScreen({
   const [stagedImage, setStagedImage] = useState<{ base64: string; mimeType: string; previewUrl: string } | null>(null)
   const [pttRecording, setPttRecording] = useState(false)
   const [pttSupported, setPttSupported] = useState<boolean | null>(null)  // null = not yet checked
+  const [inputMode, setInputMode] = useState<'text' | 'voice'>(() => {
+    try {
+      return (localStorage.getItem('mclaude.inputMode') === 'voice') ? 'voice' : 'text'
+    } catch {
+      return 'text'
+    }
+  })
   const pttRecognitionRef = useRef<{ stop(): void } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const atBottomRef = useRef(true)
@@ -190,6 +197,17 @@ export function SessionDetailScreen({
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
   }, [showMenu])
+
+  // Sync inputMode when Settings changes it via localStorage
+  useEffect(() => {
+    const handler = (e: StorageEvent) => {
+      if (e.key === 'mclaude.inputMode') {
+        setInputMode(e.newValue === 'voice' ? 'voice' : 'text')
+      }
+    }
+    window.addEventListener('storage', handler)
+    return () => window.removeEventListener('storage', handler)
+  }, [])
 
   const turns: Turn[] = vmState.turns
   const pendingMessages: PendingMessage[] = vmState.pendingMessages ?? []
@@ -862,6 +880,7 @@ export function SessionDetailScreen({
             display: 'flex',
             alignItems: 'flex-end',
             gap: 8,
+            position: 'relative',
           }}>
             {/* Stop button (only when working) */}
             {isWorking && (
@@ -912,77 +931,138 @@ export function SessionDetailScreen({
               onChange={handleFileChange}
             />
 
-            {/* PTT button */}
-            <button
-              onPointerDown={handlePttStart}
-              onPointerUp={handlePttStop}
-              onPointerLeave={handlePttStop}
-              style={{
-                width: 32,
-                height: 32,
-                borderRadius: '50%',
-                background: pttRecording ? 'var(--red)' : 'var(--surf2)',
-                color: pttRecording ? '#fff' : (pttSupported === false ? 'var(--text3)' : 'var(--text2)'),
-                flexShrink: 0,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: 15,
-                opacity: pttSupported === false ? 0.4 : 1,
-                animation: pttRecording ? 'pulse-opacity 1.2s ease-in-out infinite' : undefined,
-                transition: 'background 0.15s, color 0.15s',
-              }}
-              title={pttRecording ? 'Recording… release to send' : 'Hold to record (push-to-talk)'}
-            >
-              🎙
-            </button>
+            {/* Text mode: small PTT button between Attach and textarea */}
+            {inputMode === 'text' && (
+              <button
+                onPointerDown={handlePttStart}
+                onPointerUp={handlePttStop}
+                onPointerLeave={handlePttStop}
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: '50%',
+                  background: pttRecording ? 'var(--red)' : 'var(--surf2)',
+                  color: pttRecording ? '#fff' : (pttSupported === false ? 'var(--text3)' : 'var(--text2)'),
+                  flexShrink: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 15,
+                  opacity: pttSupported === false ? 0.4 : 1,
+                  animation: pttRecording ? 'pulse-opacity 1.2s ease-in-out infinite' : undefined,
+                  transition: 'background 0.15s, color 0.15s',
+                }}
+                title={pttRecording ? 'Recording… release to send' : 'Hold to record (push-to-talk)'}
+              >
+                🎙
+              </button>
+            )}
 
-            {/* Textarea */}
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={handleInputChange}
-              onKeyDown={handleKeyDown}
-              placeholder="Message… or / for skills"
-              rows={1}
-              style={{
-                flex: 1,
-                background: 'var(--surf2)',
-                border: '1px solid var(--border)',
-                borderRadius: 20,
-                padding: '7px 14px',
-                color: 'var(--text)',
-                WebkitTextFillColor: 'var(--text)',
-                WebkitAppearance: 'none',
-                fontSize: 15,
-                resize: 'none',
-                minHeight: 36,
-                maxHeight: 120,
-                overflowY: 'auto',
-                lineHeight: 1.4,
-              }}
-            />
+            {/* Textarea wrapper — relative so keyboard icon can be positioned inside */}
+            <div style={{ flex: 1, position: 'relative' }}>
+              {/* Keyboard icon (voice mode only) — focuses textarea */}
+              {inputMode === 'voice' && (
+                <button
+                  onClick={() => textareaRef.current?.focus()}
+                  style={{
+                    position: 'absolute',
+                    top: 4,
+                    right: 8,
+                    width: 22,
+                    height: 22,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: 13,
+                    color: 'var(--text2)',
+                    opacity: 0.6,
+                    zIndex: 1,
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    padding: 0,
+                  }}
+                  title="Switch to keyboard"
+                >
+                  ⌨
+                </button>
+              )}
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={handleInputChange}
+                onKeyDown={handleKeyDown}
+                placeholder="Message… or / for skills"
+                rows={1}
+                style={{
+                  width: '100%',
+                  background: 'var(--surf2)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 20,
+                  padding: inputMode === 'voice' ? '7px 32px 7px 14px' : '7px 14px',
+                  color: 'var(--text)',
+                  WebkitTextFillColor: 'var(--text)',
+                  WebkitAppearance: 'none',
+                  fontSize: 15,
+                  resize: 'none',
+                  minHeight: 36,
+                  maxHeight: inputMode === 'voice' ? 72 : 120,
+                  overflowY: 'auto',
+                  lineHeight: 1.4,
+                  boxSizing: 'border-box',
+                }}
+              />
+            </div>
 
-            {/* Send button */}
-            <button
-              onClick={() => handleSend()}
-              disabled={!input.trim() || !connected}
-              style={{
-                width: 32,
-                height: 32,
-                borderRadius: '50%',
-                background: input.trim() ? 'var(--blue)' : 'var(--surf3)',
-                color: '#fff',
-                flexShrink: 0,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: 16,
-                transition: 'background 0.15s',
-              }}
-            >
-              ↑
-            </button>
+            {/* Text mode: Send button */}
+            {inputMode === 'text' && (
+              <button
+                onClick={() => handleSend()}
+                disabled={!input.trim() || !connected}
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: '50%',
+                  background: input.trim() ? 'var(--blue)' : 'var(--surf3)',
+                  color: '#fff',
+                  flexShrink: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 16,
+                  transition: 'background 0.15s',
+                }}
+              >
+                ↑
+              </button>
+            )}
+
+            {/* Voice mode: large PTT button (replaces Send button) */}
+            {inputMode === 'voice' && (
+              <button
+                onPointerDown={handlePttStart}
+                onPointerUp={handlePttStop}
+                onPointerLeave={handlePttStop}
+                style={{
+                  width: 56,
+                  height: 56,
+                  borderRadius: '50%',
+                  background: pttRecording ? 'var(--red)' : 'var(--blue)',
+                  color: '#fff',
+                  flexShrink: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 24,
+                  opacity: pttSupported === false ? 0.4 : 1,
+                  animation: pttRecording ? 'pulse-opacity 1.2s ease-in-out infinite' : undefined,
+                  transition: 'background 0.15s',
+                }}
+                title={pttRecording ? 'Recording… release to send' : 'Hold to record (push-to-talk)'}
+              >
+                🎙
+              </button>
+            )}
           </div>
         </div>
       )}

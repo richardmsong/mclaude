@@ -310,6 +310,29 @@ function GitProvidersSection({ authClient }: GitProvidersSectionProps) {
 // ── Main Settings component ───────────────────────────────────────────────────
 
 export function Settings({ userId, serverUrl, connected, sessionCount, onBack, onLogout, onCacheReset, authClient }: SettingsProps) {
+  const [inputMode, setInputMode] = useState<'text' | 'voice'>(() => {
+    try {
+      return (localStorage.getItem('mclaude.inputMode') === 'voice') ? 'voice' : 'text'
+    } catch {
+      return 'text'
+    }
+  })
+
+  const handleInputModeChange = (mode: 'text' | 'voice') => {
+    setInputMode(mode)
+    try {
+      localStorage.setItem('mclaude.inputMode', mode)
+      // Dispatch storage event so SessionDetailScreen picks up the change
+      window.dispatchEvent(new StorageEvent('storage', {
+        key: 'mclaude.inputMode',
+        newValue: mode,
+        storageArea: localStorage,
+      }))
+    } catch {
+      // ignore
+    }
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg)' }}>
       <NavBar title="Settings" onBack={onBack} connected={connected} />
@@ -352,6 +375,38 @@ export function Settings({ userId, serverUrl, connected, sessionCount, onBack, o
             <span style={{ color: 'var(--text)', fontSize: 12, fontFamily: 'monospace' }}>
               {userId.slice(0, 16)}…
             </span>
+          </div>
+        </div>
+
+        {/* INPUT section */}
+        <div style={{ ...sectionLabel, marginTop: 20 }}>INPUT</div>
+        <div style={card}>
+          <div style={row}>
+            <span style={{ color: 'var(--text2)' }}>Default method</span>
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: 14, color: 'var(--text)' }}>
+                <input
+                  type="radio"
+                  name="inputMode"
+                  value="text"
+                  checked={inputMode === 'text'}
+                  onChange={() => handleInputModeChange('text')}
+                  style={{ accentColor: 'var(--blue)' }}
+                />
+                Text
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', fontSize: 14, color: 'var(--text)' }}>
+                <input
+                  type="radio"
+                  name="inputMode"
+                  value="voice"
+                  checked={inputMode === 'voice'}
+                  onChange={() => handleInputModeChange('voice')}
+                  style={{ accentColor: 'var(--blue)' }}
+                />
+                Voice
+              </label>
+            </div>
           </div>
         </div>
 
