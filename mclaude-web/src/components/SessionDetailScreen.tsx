@@ -55,24 +55,8 @@ function storeTab(tab: 'events' | 'terminal'): void {
   } catch {}
 }
 
-// Scroll persistence: save/restore scroll position across navigation
-function getScrollKey(sessionId: string): string {
-  return `mclaude.scroll.${sessionId}`
-}
-
-function saveScrollPosition(sessionId: string, position: number): void {
-  try {
-    sessionStorage.setItem(getScrollKey(sessionId), String(position))
-  } catch {}
-}
-
-function getScrollPosition(sessionId: string): number | null {
-  try {
-    const stored = sessionStorage.getItem(getScrollKey(sessionId))
-    return stored !== null ? Number(stored) : null
-  } catch {}
-  return null
-}
+// Scroll persistence: module-level map — cleared on every page refresh, persists for in-app navigation
+const scrollPositions = new Map<string, number>()
 
 // Skills autocomplete: filter skills by query
 function filterSkills(skills: string[], query: string): string[] {
@@ -146,7 +130,7 @@ export function SessionDetailScreen({
 
   // Restore scroll position when session changes
   useEffect(() => {
-    const saved = getScrollPosition(sessionId)
+    const saved = scrollPositions.get(sessionId) ?? null
     if (saved !== null && scrollRef.current) {
       requestAnimationFrame(() => {
         if (scrollRef.current) {
@@ -162,7 +146,7 @@ export function SessionDetailScreen({
   useEffect(() => {
     return () => {
       if (scrollRef.current) {
-        saveScrollPosition(sessionId, scrollRef.current.scrollTop)
+        scrollPositions.set(sessionId, scrollRef.current.scrollTop)
       }
     }
   }, [sessionId])
@@ -175,7 +159,7 @@ export function SessionDetailScreen({
     if (!currentTurns || currentTurns.length === 0) return
     // If there is a saved scroll position this is back-navigation — the restore
     // effect handles positioning, so skip the initial scroll-to-bottom.
-    if (getScrollPosition(sessionId) !== null) {
+    if ((scrollPositions.get(sessionId) ?? null) !== null) {
       hasScrolledToBottomRef.current = true
       return
     }
