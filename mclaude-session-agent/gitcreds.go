@@ -299,6 +299,7 @@ type CredentialManager struct {
 	mu             sync.Mutex
 	lastGHHosts    []byte // last merged content of gh-hosts.yml
 	lastGLabConfig []byte // last merged content of glab-config.yml
+	setupRan       bool   // true after gh/glab auth setup-git have been called at least once
 	homeDir        string // $HOME, resolved once at construction
 	log            zerolog.Logger
 }
@@ -320,8 +321,10 @@ func NewCredentialManager(homeDir string, log zerolog.Logger) *CredentialManager
 // No gh auth switch call is made — the old-format hosts.yml already contains the
 // correct account's token per host.
 //
-// It is safe to call Setup multiple times. Steps 2-3 are re-run only if the
-// managed config content has changed since the last call.
+// It is safe to call Setup multiple times. The file-merge step (2) is re-run
+// only when managed content changes. The credential-helper registration step (3)
+// always runs on the first call and on subsequent calls that detect a content
+// change.
 func (cm *CredentialManager) Setup(gitIdentityID string) error {
 	if err := cm.symlinkPVCConfig(); err != nil {
 		return fmt.Errorf("symlink PVC config: %w", err)
@@ -419,104 +422,120 @@ func (cm *CredentialManager) mergeAndSetup(gitIdentityID string) (bool, error) {
 	cm.mu.Lock()
 	ghChanged := !equalBytes(cm.lastGHHosts, managedGHHosts)
 	glabChanged := !equalBytes(cm.lastGLabConfig, managedGLabConfig)
+	setupRan := cm.setupRan
 	cm.mu.Unlock()
 
-	if !ghChanged && !glabChanged {
+	// If nothing changed and credential helpers were already registered on a
+	// previous call, nothing to do.
+	if !ghChanged && !glabChanged && setupRan {
 		return false, nil
 	}
 
 	var mergeErr error
 
-	// Ensure ~/.config/gh/ exists and config.yml is present unconditionally.
-	// This guarantees gh 2.40+ sees version: "1" and skips the D-Bus keyring
-	// migration on Alpine even when no managed gh-hosts.yml is present.
-	ghDir := filepath.Join(cm.homeDir, ".config", "gh")
-	if err := os.MkdirAll(ghDir, 0755); err == nil {
-		ghMainConfig := filepath.Join(ghDir, "config.yml")
-		if _, statErr := os.Stat(ghMainConfig); os.IsNotExist(statErr) {
-			if writeErr := os.WriteFile(ghMainConfig, []byte("version: \"1\"\n"), 0600); writeErr != nil {
-				cm.log.Warn().Err(writeErr).Str("path", ghMainConfig).Msg("write gh config.yml failed")
+	// File-merge steps: only run when managed content has changed.
+	if ghChanged || glabChanged {
+		// Ensure ~/.config/gh/ exists and config.yml is present unconditionally.
+		// This guarantees gh 2.40+ sees version: "1" and skips the D-Bus keyring
+		// migration on Alpine even when no managed gh-hosts.yml is present.
+		ghDir := filepath.Join(cm.homeDir, ".config", "gh")
+		if err := os.MkdirAll(ghDir, 0755); err == nil {
+			ghMainConfig := filepath.Join(ghDir, "config.yml")
+			if _, statErr := os.Stat(ghMainConfig); os.IsNotExist(statErr) {
+				if writeErr := os.WriteFile(ghMainConfig, []byte("version: \"1\"\n"), 0600); writeErr != nil {
+					cm.log.Warn().Err(writeErr).Str("path", ghMainConfig).Msg("write gh config.yml failed")
+				}
 			}
 		}
-	}
 
-	// Merge gh-hosts.yml.
-	if managedGHHosts != nil {
-		ghConfigPath := filepath.Join(ghDir, "hosts.yml")
+		// Merge gh-hosts.yml.
+		if managedGHHosts != nil {
+			ghConfigPath := filepath.Join(ghDir, "hosts.yml")
 
-		if err := os.MkdirAll(ghDir, 0755); err == nil {
-			// Parse the managed multi-account config so we can resolve the identity.
-			managedCfg := make(ghHostsConfig)
-			if parseErr := yaml.Unmarshal(managedGHHosts, &managedCfg); parseErr != nil {
-				mergeErr = fmt.Errorf("parse managed gh-hosts.yml: %w", parseErr)
-			} else {
-				// Resolve GIT_IDENTITY_ID → (username, host) from the managed config.
-				activeUsername, activeHost, resolveErr := cm.resolveIdentityFromManaged(gitIdentityID, managedCfg)
-				if resolveErr != nil {
-					// Non-fatal: log and use defaults.
-					cm.log.Warn().Err(resolveErr).Str("gitIdentityID", gitIdentityID).
-						Msg("identity resolution failed — using default account (non-fatal)")
-				}
-
-				// Convert managed multi-account format → old single-account format.
-				convertedManaged, convertErr := ConvertGHHostsToOldFormat(managedGHHosts, activeUsername, activeHost)
-				if convertErr != nil {
-					mergeErr = convertErr
+			if err := os.MkdirAll(ghDir, 0755); err == nil {
+				// Parse the managed multi-account config so we can resolve the identity.
+				managedCfg := make(ghHostsConfig)
+				if parseErr := yaml.Unmarshal(managedGHHosts, &managedCfg); parseErr != nil {
+					mergeErr = fmt.Errorf("parse managed gh-hosts.yml: %w", parseErr)
 				} else {
-					// Merge converted managed (old format) with existing (old format from PVC).
-					existing, _ := os.ReadFile(ghConfigPath)
-					merged, mergeErrInner := MergeGHHostsYAML(existing, convertedManaged)
-					if mergeErrInner != nil {
-						mergeErr = mergeErrInner
+					// Resolve GIT_IDENTITY_ID → (username, host) from the managed config.
+					activeUsername, activeHost, resolveErr := cm.resolveIdentityFromManaged(gitIdentityID, managedCfg)
+					if resolveErr != nil {
+						// Non-fatal: log and use defaults.
+						cm.log.Warn().Err(resolveErr).Str("gitIdentityID", gitIdentityID).
+							Msg("identity resolution failed — using default account (non-fatal)")
+					}
+
+					// Convert managed multi-account format → old single-account format.
+					convertedManaged, convertErr := ConvertGHHostsToOldFormat(managedGHHosts, activeUsername, activeHost)
+					if convertErr != nil {
+						mergeErr = convertErr
 					} else {
-						if writeErr := os.WriteFile(ghConfigPath, merged, 0600); writeErr != nil {
-							cm.log.Warn().Err(writeErr).Str("path", ghConfigPath).Msg("write gh hosts.yml failed")
+						// Merge converted managed (old format) with existing (old format from PVC).
+						existing, _ := os.ReadFile(ghConfigPath)
+						merged, mergeErrInner := MergeGHHostsYAML(existing, convertedManaged)
+						if mergeErrInner != nil {
+							mergeErr = mergeErrInner
+						} else {
+							if writeErr := os.WriteFile(ghConfigPath, merged, 0600); writeErr != nil {
+								cm.log.Warn().Err(writeErr).Str("path", ghConfigPath).Msg("write gh hosts.yml failed")
+							}
 						}
 					}
 				}
 			}
 		}
-	}
 
-	// Merge glab-config.yml.
-	if managedGLabConfig != nil {
-		glabConfigPath := filepath.Join(cm.homeDir, ".config", "glab-cli", "config.yml")
-		existing, _ := os.ReadFile(glabConfigPath)
+		// Merge glab-config.yml.
+		if managedGLabConfig != nil {
+			glabConfigPath := filepath.Join(cm.homeDir, ".config", "glab-cli", "config.yml")
+			existing, _ := os.ReadFile(glabConfigPath)
 
-		merged, err := MergeGLabConfigYAML(existing, managedGLabConfig)
-		if err != nil {
-			if mergeErr == nil {
-				mergeErr = err
-			}
-		} else {
-			if err := os.MkdirAll(filepath.Dir(glabConfigPath), 0755); err == nil {
-				if err := os.WriteFile(glabConfigPath, merged, 0600); err != nil {
-					cm.log.Warn().Err(err).Str("path", glabConfigPath).Msg("write glab config.yml failed")
+			merged, err := MergeGLabConfigYAML(existing, managedGLabConfig)
+			if err != nil {
+				if mergeErr == nil {
+					mergeErr = err
+				}
+			} else {
+				if err := os.MkdirAll(filepath.Dir(glabConfigPath), 0755); err == nil {
+					if err := os.WriteFile(glabConfigPath, merged, 0600); err != nil {
+						cm.log.Warn().Err(err).Str("path", glabConfigPath).Msg("write glab config.yml failed")
+					}
 				}
 			}
 		}
+
+		// Update last-seen raw managed content (for change detection on next call).
+		cm.mu.Lock()
+		cm.lastGHHosts = managedGHHosts
+		cm.lastGLabConfig = managedGLabConfig
+		cm.mu.Unlock()
 	}
 
-	// Register credential helpers.
-	// gh auth setup-git — registers gh as git's credential helper for all hosts.
-	if ghSetupErr := runCmd("gh", "auth", "setup-git"); ghSetupErr != nil {
-		cm.log.Warn().Err(ghSetupErr).Msg("gh auth setup-git failed (non-fatal)")
-		// Non-fatal per spec.
+	// Register credential helpers unconditionally on the first call, and again
+	// whenever managed content changes.  Per spec: "Always run this step, even
+	// when no managed credential files exist."  In dev/local environments there
+	// are no managed files, so ghChanged/glabChanged are always false — without
+	// this guard the helper would never be registered, causing git push to fail.
+	if !setupRan || ghChanged || glabChanged {
+		// gh auth setup-git — registers gh as git's credential helper for all hosts.
+		if ghSetupErr := runCmd("gh", "auth", "setup-git"); ghSetupErr != nil {
+			cm.log.Warn().Err(ghSetupErr).Msg("gh auth setup-git failed (non-fatal)")
+			// Non-fatal per spec.
+		}
+
+		// glab auth setup-git — same for GitLab hosts.
+		if glabSetupErr := runCmd("glab", "auth", "setup-git"); glabSetupErr != nil {
+			cm.log.Warn().Err(glabSetupErr).Msg("glab auth setup-git failed (non-fatal)")
+			// Non-fatal per spec.
+		}
+
+		cm.mu.Lock()
+		cm.setupRan = true
+		cm.mu.Unlock()
 	}
 
-	// glab auth setup-git — same for GitLab hosts.
-	if glabSetupErr := runCmd("glab", "auth", "setup-git"); glabSetupErr != nil {
-		cm.log.Warn().Err(glabSetupErr).Msg("glab auth setup-git failed (non-fatal)")
-		// Non-fatal per spec.
-	}
-
-	// Update last-seen raw managed content (for change detection on next call).
-	cm.mu.Lock()
-	cm.lastGHHosts = managedGHHosts
-	cm.lastGLabConfig = managedGLabConfig
-	cm.mu.Unlock()
-
-	return true, mergeErr
+	return ghChanged || glabChanged || !setupRan, mergeErr
 }
 
 // resolveIdentityFromManaged resolves GIT_IDENTITY_ID to (username, host) by:
