@@ -94,6 +94,7 @@ export function SessionDetailScreen({
   const [stagedImage, setStagedImage] = useState<{ base64: string; mimeType: string; previewUrl: string } | null>(null)
   const [pttRecording, setPttRecording] = useState(false)
   const [pttSupported, setPttSupported] = useState<boolean | null>(null)  // null = not yet checked
+  const [planCardOpen, setPlanCardOpen] = useState(false)
   const [inputMode, setInputMode] = useState<'text' | 'voice'>(() => {
     try {
       return (localStorage.getItem('mclaude.inputMode') === 'voice') ? 'voice' : 'text'
@@ -102,6 +103,7 @@ export function SessionDetailScreen({
     }
   })
   const pttRecognitionRef = useRef<{ stop(): void } | null>(null)
+  const pttRecordingRef = useRef(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const atBottomRef = useRef(true)
   const initialMessageSentRef = useRef(false)
@@ -323,7 +325,7 @@ export function SessionDetailScreen({
       )
       return
     }
-    if (pttRecording) return
+    if (pttRecordingRef.current) return
 
     type SpeechRecAPI2 = {
       new(): {
@@ -365,25 +367,30 @@ export function SessionDetailScreen({
     }
 
     recognition.onerror = () => {
+      pttRecordingRef.current = false
       setPttRecording(false)
       pttRecognitionRef.current = null
     }
 
     recognition.onend = () => {
+      pttRecordingRef.current = false
       setPttRecording(false)
       pttRecognitionRef.current = null
     }
 
     pttRecognitionRef.current = recognition
     recognition.start()
+    pttRecordingRef.current = true
     setPttRecording(true)
   }
 
   const handlePttStop = () => {
+    if (!pttRecordingRef.current) return
     if (pttRecognitionRef.current) {
       pttRecognitionRef.current.stop()
       pttRecognitionRef.current = null
     }
+    pttRecordingRef.current = false
     setPttRecording(false)
   }
 
@@ -678,24 +685,44 @@ export function SessionDetailScreen({
           margin: '8px 16px 0',
           background: 'var(--surf)',
           border: '1px solid rgba(191,90,242,0.4)',
+          borderLeft: '3px solid var(--purple)',
           borderRadius: 12,
           overflow: 'hidden',
           flexShrink: 0,
         }}>
-          <div style={{
-            padding: '10px 14px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            color: 'var(--purple)',
-            fontWeight: 500,
-            fontSize: 13,
-            cursor: 'pointer',
-          }}>
+          <div
+            onClick={() => setPlanCardOpen(v => !v)}
+            style={{
+              padding: '10px 14px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              color: 'var(--purple)',
+              fontWeight: 500,
+              fontSize: 13,
+              cursor: 'pointer',
+              userSelect: 'none',
+            }}
+          >
             <span>📋</span>
             <span>View Plan</span>
-            <span style={{ marginLeft: 'auto', fontSize: 11 }}>▶</span>
+            <span style={{ marginLeft: 'auto', fontSize: 11 }}>{planCardOpen ? '▼' : '▶'}</span>
           </div>
+          {planCardOpen && (
+            <div style={{
+              padding: '8px 14px 12px',
+              borderTop: '1px solid rgba(191,90,242,0.2)',
+              background: 'var(--surf2)',
+              color: 'var(--text2)',
+              fontSize: 13,
+              fontFamily: "'Menlo','Courier New',monospace",
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              lineHeight: 1.5,
+            }}>
+              Plan content not available
+            </div>
+          )}
         </div>
       )}
 
@@ -885,7 +912,16 @@ export function SessionDetailScreen({
                     fontSize: 13,
                   }}
                 >
-                  <span style={{ color: 'var(--blue)', fontFamily: 'monospace' }}>/{skill}</span>
+                  <span style={{ color: 'var(--blue)', fontFamily: 'monospace', flex: 1 }}>/{skill}</span>
+                  <span style={{
+                    fontSize: 11,
+                    fontWeight: 500,
+                    padding: '2px 7px',
+                    borderRadius: 10,
+                    background: 'rgba(10,132,255,0.15)',
+                    color: 'var(--blue)',
+                    flexShrink: 0,
+                  }}>built-in</span>
                 </button>
               ))}
             </div>
@@ -948,33 +984,6 @@ export function SessionDetailScreen({
               onChange={handleFileChange}
             />
 
-            {/* Text mode: small PTT button between Attach and textarea */}
-            {inputMode === 'text' && (
-              <button
-                onPointerDown={handlePttStart}
-                onPointerUp={handlePttStop}
-                onPointerLeave={handlePttStop}
-                style={{
-                  width: 32,
-                  height: 32,
-                  borderRadius: '50%',
-                  background: pttRecording ? 'var(--red)' : 'var(--surf2)',
-                  color: pttRecording ? '#fff' : (pttSupported === false ? 'var(--text3)' : 'var(--text2)'),
-                  flexShrink: 0,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontSize: 15,
-                  opacity: pttSupported === false ? 0.4 : 1,
-                  animation: pttRecording ? 'pulse-opacity 1.2s ease-in-out infinite' : undefined,
-                  transition: 'background 0.15s, color 0.15s',
-                }}
-                title={pttRecording ? 'Recording… release to send' : 'Hold to record (push-to-talk)'}
-              >
-                🎙
-              </button>
-            )}
-
             {/* Textarea wrapper — relative so keyboard icon can be positioned inside */}
             <div style={{ flex: 1, position: 'relative' }}>
               {/* Keyboard icon (voice mode only) — focuses textarea */}
@@ -1031,6 +1040,33 @@ export function SessionDetailScreen({
                 }}
               />
             </div>
+
+            {/* Text mode: small PTT button (between textarea and Send) */}
+            {inputMode === 'text' && (
+              <button
+                onPointerDown={handlePttStart}
+                onPointerUp={handlePttStop}
+                onPointerLeave={handlePttStop}
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: '50%',
+                  background: pttRecording ? 'var(--red)' : 'var(--surf2)',
+                  color: pttRecording ? '#fff' : (pttSupported === false ? 'var(--text3)' : 'var(--text2)'),
+                  flexShrink: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 15,
+                  opacity: pttSupported === false ? 0.4 : 1,
+                  animation: pttRecording ? 'pulse-opacity 1.2s ease-in-out infinite' : undefined,
+                  transition: 'background 0.15s, color 0.15s',
+                }}
+                title={pttRecording ? 'Recording… release to send' : 'Hold to record (push-to-talk)'}
+              >
+                🎙
+              </button>
+            )}
 
             {/* Text mode: Send button */}
             {inputMode === 'text' && (
