@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/nats-io/nkeys"
@@ -42,11 +45,12 @@ type sessionAgentTpl struct {
 	projectPvcStorageClass        string
 	nixPvcSize                    string
 	nixPvcStorageClass            string
-	// corporateCAConfigMap is the name of a ConfigMap in the control-plane namespace
-	// containing a "ca-certificates.crt" key with PEM-encoded CA certificates.
-	// When non-empty, the reconciler copies it to user namespaces and mounts it
-	// into session-agent pods with NODE_EXTRA_CA_CERTS set.
-	corporateCAConfigMap string
+	// corporateCAEnabled controls whether the CA bundle volume/mount/env is injected.
+	// trust-manager handles cross-namespace sync; the reconciler only adds the label
+	// mclaude.io/user-namespace: "true" to user namespaces so trust-manager targets them.
+	corporateCAEnabled       bool
+	corporateCAConfigMapName string
+	corporateCAConfigMapKey  string
 }
 
 // NewK8sProvisioner initialises a provisioner using in-cluster service-account credentials.
@@ -108,7 +112,7 @@ func (p *K8sProvisioner) ProvisionProject(ctx context.Context, userID, projectID
 
 	userNs := "mclaude-" + userID
 
-	if err := p.ensureNamespace(ctx, userNs, userID); err != nil {
+	if err := p.ensureNamespace(ctx, userNs, userID, tpl); err != nil {
 		return fmt.Errorf("namespace %s: %w", userNs, err)
 	}
 	if err := p.ensureServiceAccount(ctx, userNs); err != nil {
@@ -148,20 +152,25 @@ func (p *K8sProvisioner) loadTemplate(ctx context.Context) (*sessionAgentTpl, er
 	}
 
 	tpl := &sessionAgentTpl{
-		image:                  cm.Data["image"],
-		imagePullPolicy:        corev1.PullPolicy(cm.Data["imagePullPolicy"]),
-		projectPvcSize:         cm.Data["projectPvcSize"],
-		projectPvcStorageClass: cm.Data["projectPvcStorageClass"],
-		nixPvcSize:             cm.Data["nixPvcSize"],
-		nixPvcStorageClass:     cm.Data["nixPvcStorageClass"],
-		corporateCAConfigMap:   cm.Data["corporateCAConfigMap"],
+		image:                    cm.Data["image"],
+		imagePullPolicy:          corev1.PullPolicy(cm.Data["imagePullPolicy"]),
+		projectPvcSize:           cm.Data["projectPvcSize"],
+		projectPvcStorageClass:   cm.Data["projectPvcStorageClass"],
+		nixPvcSize:               cm.Data["nixPvcSize"],
+		nixPvcStorageClass:       cm.Data["nixPvcStorageClass"],
+		corporateCAConfigMapName: cm.Data["corporateCAConfigMapName"],
+		corporateCAConfigMapKey:  cm.Data["corporateCAConfigMapKey"],
 	}
+	tpl.corporateCAEnabled = cm.Data["corporateCAEnabled"] == "true"
 
 	if tpl.projectPvcSize == "" {
 		tpl.projectPvcSize = "10Gi"
 	}
 	if tpl.nixPvcSize == "" {
 		tpl.nixPvcSize = "10Gi"
+	}
+	if tpl.corporateCAConfigMapKey == "" {
+		tpl.corporateCAConfigMapKey = "ca-certificates.crt"
 	}
 
 	if v := cm.Data["terminationGracePeriodSeconds"]; v != "" {
@@ -194,21 +203,37 @@ func (p *K8sProvisioner) loadTemplate(ctx context.Context) (*sessionAgentTpl, er
 	return tpl, nil
 }
 
-func (p *K8sProvisioner) ensureNamespace(ctx context.Context, ns, userID string) error {
-	_, err := p.client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
+func (p *K8sProvisioner) ensureNamespace(ctx context.Context, ns, userID string, tpl *sessionAgentTpl) error {
+	existing, err := p.client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
 	if err == nil {
-		return nil
+		// Namespace exists — ensure labels are up to date (e.g. add user-namespace label when CA enabled).
+		if existing.Labels == nil {
+			existing.Labels = make(map[string]string)
+		}
+		existing.Labels["mclaude.io/user-id"] = userID
+		existing.Labels["mclaude.io/managed"] = "true"
+		if tpl != nil && tpl.corporateCAEnabled {
+			existing.Labels["mclaude.io/user-namespace"] = "true"
+		}
+		_, updateErr := p.client.CoreV1().Namespaces().Update(ctx, existing, metav1.UpdateOptions{})
+		return updateErr
 	}
 	if !k8serrors.IsNotFound(err) {
 		return err
 	}
+
+	labels := map[string]string{
+		"mclaude.io/user-id": userID,
+		"mclaude.io/managed": "true",
+	}
+	if tpl != nil && tpl.corporateCAEnabled {
+		labels["mclaude.io/user-namespace"] = "true"
+	}
+
 	_, err = p.client.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: ns,
-			Labels: map[string]string{
-				"mclaude.io/user-id": userID,
-				"mclaude.io/managed": "true",
-			},
+			Name:   ns,
+			Labels: labels,
 		},
 	}, metav1.CreateOptions{})
 	if k8serrors.IsAlreadyExists(err) {
@@ -364,50 +389,16 @@ func (p *K8sProvisioner) ensureImagePullSecrets(ctx context.Context, destNs stri
 		if !k8serrors.IsNotFound(err) {
 			return fmt.Errorf("check secret %s: %w", src.Name, err)
 		}
-		copy := &corev1.Secret{
+		copySecret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: src.Name, Namespace: destNs},
 			Type:       src.Type,
 			Data:       src.Data,
 		}
-		if _, err := p.client.CoreV1().Secrets(destNs).Create(ctx, copy, metav1.CreateOptions{}); err != nil && !k8serrors.IsAlreadyExists(err) {
+		if _, err := p.client.CoreV1().Secrets(destNs).Create(ctx, copySecret, metav1.CreateOptions{}); err != nil && !k8serrors.IsAlreadyExists(err) {
 			return fmt.Errorf("copy secret %s: %w", src.Name, err)
 		}
 	}
 	return nil
-}
-
-// ensureCorporateCAConfigMap copies the CA bundle ConfigMap from the control-plane namespace
-// into the user namespace (idempotent create-or-update). K8s volumes cannot reference
-// cross-namespace ConfigMaps, so the reconciler must copy it. The copy is refreshed on every
-// reconcile cycle so changes to the source propagate within the resync window.
-func (p *K8sProvisioner) ensureCorporateCAConfigMap(ctx context.Context, destNs, cmName string) error {
-	src, err := p.client.CoreV1().ConfigMaps(p.controlPlaneNs).Get(ctx, cmName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("get corporate CA configmap %s from %s: %w", cmName, p.controlPlaneNs, err)
-	}
-
-	existing, err := p.client.CoreV1().ConfigMaps(destNs).Get(ctx, cmName, metav1.GetOptions{})
-	if err == nil {
-		// Already exists — update data in case the source changed.
-		existing.Data = src.Data
-		existing.BinaryData = src.BinaryData
-		_, err = p.client.CoreV1().ConfigMaps(destNs).Update(ctx, existing, metav1.UpdateOptions{})
-		return err
-	}
-	if !k8serrors.IsNotFound(err) {
-		return fmt.Errorf("check configmap %s in %s: %w", cmName, destNs, err)
-	}
-
-	newCM := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: destNs},
-		Data:       src.Data,
-		BinaryData: src.BinaryData,
-	}
-	_, err = p.client.CoreV1().ConfigMaps(destNs).Create(ctx, newCM, metav1.CreateOptions{})
-	if k8serrors.IsAlreadyExists(err) {
-		return nil
-	}
-	return err
 }
 
 func (p *K8sProvisioner) ensurePVC(ctx context.Context, ns, name, size, storageClass string) error {
@@ -444,9 +435,37 @@ func (p *K8sProvisioner) ensurePVC(ctx context.Context, ns, name, size, storageC
 	return err
 }
 
+// caConfigMapHash computes a deterministic SHA-256 hash of a ConfigMap's string and binary data.
+// Used as the mclaude.io/ca-bundle-hash pod template annotation so that CA bundle rotations
+// trigger a Recreate rollout.
+func caConfigMapHash(cm *corev1.ConfigMap) string {
+	h := sha256.New()
+	// Sort keys for determinism.
+	keys := make([]string, 0, len(cm.Data))
+	for k := range cm.Data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		h.Write([]byte(k))
+		h.Write([]byte(cm.Data[k]))
+	}
+	binKeys := make([]string, 0, len(cm.BinaryData))
+	for k := range cm.BinaryData {
+		binKeys = append(binKeys, k)
+	}
+	sort.Strings(binKeys)
+	for _, k := range binKeys {
+		h.Write([]byte(k))
+		h.Write(cm.BinaryData[k])
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
 // buildPodSpec constructs the pod template spec for a session-agent Deployment.
 // Shared between create and update paths to keep both consistent.
 func (p *K8sProvisioner) buildPodSpec(
+	ctx context.Context,
 	ns, projectID, userID, gitURL string,
 	tpl *sessionAgentTpl,
 	imagePullSecrets []corev1.LocalObjectReference,
@@ -514,26 +533,34 @@ func (p *K8sProvisioner) buildPodSpec(
 		{Name: "user-secrets", MountPath: "/home/node/.user-secrets", ReadOnly: true},
 	}
 
-	// Corporate CA bundle — only when configured (TLS-intercepting proxies).
-	if tpl.corporateCAConfigMap != "" {
-		volumes = append(volumes, corev1.Volume{
-			Name: "corporate-ca",
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: tpl.corporateCAConfigMap},
+	// Corporate CA bundle — only when enabled and the ConfigMap exists in the user namespace.
+	// trust-manager syncs the ConfigMap; it may not be present yet on first provision.
+	if tpl.corporateCAEnabled && tpl.corporateCAConfigMapName != "" {
+		_, err := p.client.CoreV1().ConfigMaps(ns).Get(ctx, tpl.corporateCAConfigMapName, metav1.GetOptions{})
+		if err == nil {
+			volumes = append(volumes, corev1.Volume{
+				Name: "corporate-ca",
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: tpl.corporateCAConfigMapName},
+					},
 				},
-			},
-		})
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      "corporate-ca",
-			MountPath: "/etc/ssl/certs/corporate-ca-certificates.crt",
-			SubPath:   "ca-certificates.crt",
-			ReadOnly:  true,
-		})
-		env = append(env, corev1.EnvVar{
-			Name:  "NODE_EXTRA_CA_CERTS",
-			Value: "/etc/ssl/certs/corporate-ca-certificates.crt",
-		})
+			})
+			subPath := tpl.corporateCAConfigMapKey
+			if subPath == "" {
+				subPath = "ca-certificates.crt"
+			}
+			volumeMounts = append(volumeMounts, corev1.VolumeMount{
+				Name:      "corporate-ca",
+				MountPath: "/etc/ssl/certs/corporate-ca-certificates.crt",
+				SubPath:   subPath,
+				ReadOnly:  true,
+			})
+			env = append(env, corev1.EnvVar{
+				Name:  "NODE_EXTRA_CA_CERTS",
+				Value: "/etc/ssl/certs/corporate-ca-certificates.crt",
+			})
+		}
 	}
 
 	return corev1.PodSpec{
@@ -559,6 +586,20 @@ func (p *K8sProvisioner) buildPodSpec(
 	}
 }
 
+// buildPodTemplateAnnotations computes pod template annotations for the session-agent Deployment.
+// When corporate CA is enabled and the ConfigMap exists in the user namespace, adds the
+// mclaude.io/ca-bundle-hash annotation so that CA bundle rotations trigger Recreate rollout.
+func (p *K8sProvisioner) buildPodTemplateAnnotations(ctx context.Context, ns string, tpl *sessionAgentTpl) map[string]string {
+	annotations := map[string]string{}
+	if tpl.corporateCAEnabled && tpl.corporateCAConfigMapName != "" {
+		cm, err := p.client.CoreV1().ConfigMaps(ns).Get(ctx, tpl.corporateCAConfigMapName, metav1.GetOptions{})
+		if err == nil {
+			annotations["mclaude.io/ca-bundle-hash"] = caConfigMapHash(cm)
+		}
+	}
+	return annotations
+}
+
 // ensureDeployment creates or updates the session-agent Deployment for a project.
 // Per docs/plan-graceful-upgrades.md: both create and update paths set Recreate strategy
 // so the old pod exits before the new pod starts during image upgrades.
@@ -568,13 +609,6 @@ func (p *K8sProvisioner) buildPodSpec(
 // to existing Deployments on the next reconcile cycle.
 func (p *K8sProvisioner) ensureDeployment(ctx context.Context, ns, projectID, userID, gitURL string, tpl *sessionAgentTpl) error {
 	name := "project-" + projectID
-
-	// Copy corporate CA ConfigMap to user namespace before creating/updating Deployment.
-	if tpl.corporateCAConfigMap != "" {
-		if err := p.ensureCorporateCAConfigMap(ctx, ns, tpl.corporateCAConfigMap); err != nil {
-			return fmt.Errorf("ensure corporate CA configmap: %w", err)
-		}
-	}
 
 	// Collect imagePullSecrets from any docker config secrets in the user namespace.
 	var imagePullSecrets []corev1.LocalObjectReference
@@ -587,13 +621,15 @@ func (p *K8sProvisioner) ensureDeployment(ctx context.Context, ns, projectID, us
 		}
 	}
 
-	podSpec := p.buildPodSpec(ns, projectID, userID, gitURL, tpl, imagePullSecrets)
+	podSpec := p.buildPodSpec(ctx, ns, projectID, userID, gitURL, tpl, imagePullSecrets)
+	annotations := p.buildPodTemplateAnnotations(ctx, ns, tpl)
 
 	existing, err := p.client.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
 		// Update path: rebuild the full pod template spec so that image, strategy,
 		// volumes, env vars, and volume mounts all reflect the current template.
 		existing.Spec.Template.Spec = podSpec
+		existing.Spec.Template.Annotations = annotations
 		existing.Spec.Strategy = appsv1.DeploymentStrategy{
 			Type: appsv1.RecreateDeploymentStrategyType,
 		}
@@ -633,6 +669,7 @@ func (p *K8sProvisioner) ensureDeployment(ctx context.Context, ns, projectID, us
 						"app":     "mclaude-project",
 						"project": projectID,
 					},
+					Annotations: annotations,
 				},
 				Spec: podSpec,
 			},

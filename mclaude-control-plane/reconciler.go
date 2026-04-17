@@ -8,8 +8,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/nats-io/nkeys"
@@ -82,7 +85,7 @@ func (r *MCProjectReconciler) Reconcile(ctx context.Context, req reconcile.Reque
 	}
 
 	// Step 2: Ensure user namespace.
-	nsErr := r.reconcileNamespace(ctx, &mcp, userNs)
+	nsErr := r.reconcileNamespace(ctx, &mcp, userNs, tpl)
 	r.updateCondition(ctx, &mcp, string(ConditionNamespaceReady), nsErr)
 	if nsErr != nil {
 		log.Error().Err(nsErr).Msg("ensure namespace")
@@ -128,7 +131,9 @@ func (r *MCProjectReconciler) Reconcile(ctx context.Context, req reconcile.Reque
 }
 
 // reconcileNamespace ensures the user namespace exists with the correct labels.
-func (r *MCProjectReconciler) reconcileNamespace(ctx context.Context, mcp *MCProject, userNs string) error {
+// When corporate CA is enabled, also sets mclaude.io/user-namespace: "true" so that
+// trust-manager targets this namespace for CA bundle sync.
+func (r *MCProjectReconciler) reconcileNamespace(ctx context.Context, mcp *MCProject, userNs string, tpl *sessionAgentTpl) error {
 	ns := &corev1.Namespace{}
 	err := r.client.Get(ctx, types.NamespacedName{Name: userNs}, ns)
 	if err == nil {
@@ -137,18 +142,25 @@ func (r *MCProjectReconciler) reconcileNamespace(ctx context.Context, mcp *MCPro
 		}
 		ns.Labels["mclaude.io/user-id"] = mcp.Spec.UserID
 		ns.Labels["mclaude.io/managed"] = "true"
+		if tpl != nil && tpl.corporateCAEnabled {
+			ns.Labels["mclaude.io/user-namespace"] = "true"
+		}
 		return r.client.Update(ctx, ns)
 	}
 	if !k8serrors.IsNotFound(err) {
 		return fmt.Errorf("get namespace: %w", err)
 	}
+	labels := map[string]string{
+		"mclaude.io/user-id": mcp.Spec.UserID,
+		"mclaude.io/managed": "true",
+	}
+	if tpl != nil && tpl.corporateCAEnabled {
+		labels["mclaude.io/user-namespace"] = "true"
+	}
 	ns = &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: userNs,
-			Labels: map[string]string{
-				"mclaude.io/user-id": mcp.Spec.UserID,
-				"mclaude.io/managed": "true",
-			},
+			Name:   userNs,
+			Labels: labels,
 		},
 	}
 	if createErr := r.client.Create(ctx, ns); createErr != nil && !k8serrors.IsAlreadyExists(createErr) {
@@ -300,6 +312,12 @@ func (r *MCProjectReconciler) reconcileSecrets(ctx context.Context, mcp *MCProje
 // It discovers imagePullSecrets dynamically by listing dockerconfigjson Secrets in userNs.
 // This is called by both the create path and the update path of reconcileDeployment so both
 // paths always produce the same, fully-synced pod template.
+//
+// When corporate CA is enabled and the CA ConfigMap exists in the user namespace, adds:
+//   - a corporate-ca volume referencing the trust-manager-synced ConfigMap
+//   - a volumeMount at /etc/ssl/certs/corporate-ca-certificates.crt (subPath from configMapKey)
+//   - NODE_EXTRA_CA_CERTS env var
+//   - mclaude.io/ca-bundle-hash pod template annotation for Recreate rollout on CA rotation
 func (r *MCProjectReconciler) buildPodTemplate(ctx context.Context, mcp *MCProject, userNs string, tpl *sessionAgentTpl) corev1.PodTemplateSpec {
 	projectID := mcp.Spec.ProjectID
 	userID := mcp.Spec.UserID
@@ -336,12 +354,75 @@ func (r *MCProjectReconciler) buildPodTemplate(ctx context.Context, mcp *MCProje
 		env = append(env, corev1.EnvVar{Name: "GIT_IDENTITY_ID", Value: gitIdentityID})
 	}
 
+	volumes := []corev1.Volume{
+		{Name: "project-data", VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "project-" + projectID},
+		}},
+		{Name: "nix-store", VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "nix-" + projectID},
+		}},
+		{Name: "claude-home", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		{Name: "user-config", VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "user-config"},
+			},
+		}},
+		{Name: "user-secrets", VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{SecretName: "user-secrets"},
+		}},
+	}
+
+	volumeMounts := []corev1.VolumeMount{
+		{Name: "project-data", MountPath: "/data"},
+		{Name: "nix-store", MountPath: "/nix"},
+		{Name: "claude-home", MountPath: "/home/node/.claude"},
+		{Name: "user-config", MountPath: "/home/node/.claude-seed", ReadOnly: true},
+		{Name: "user-secrets", MountPath: "/home/node/.user-secrets", ReadOnly: true},
+	}
+
+	// Pod template annotations — CA hash annotation for rollout on CA bundle rotation.
+	annotations := map[string]string{}
+
+	// Corporate CA bundle — only when enabled and the ConfigMap exists in the user namespace.
+	// trust-manager syncs the ConfigMap; it may not be present yet on first provision.
+	if tpl.corporateCAEnabled && tpl.corporateCAConfigMapName != "" {
+		caCM := &corev1.ConfigMap{}
+		cmErr := r.client.Get(ctx, types.NamespacedName{Name: tpl.corporateCAConfigMapName, Namespace: userNs}, caCM)
+		if cmErr == nil {
+			volumes = append(volumes, corev1.Volume{
+				Name: "corporate-ca",
+				VolumeSource: corev1.VolumeSource{
+					ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: tpl.corporateCAConfigMapName},
+					},
+				},
+			})
+			subPath := tpl.corporateCAConfigMapKey
+			if subPath == "" {
+				subPath = "ca-certificates.crt"
+			}
+			volumeMounts = append(volumeMounts, corev1.VolumeMount{
+				Name:      "corporate-ca",
+				MountPath: "/etc/ssl/certs/corporate-ca-certificates.crt",
+				SubPath:   subPath,
+				ReadOnly:  true,
+			})
+			env = append(env, corev1.EnvVar{
+				Name:  "NODE_EXTRA_CA_CERTS",
+				Value: "/etc/ssl/certs/corporate-ca-certificates.crt",
+			})
+			// Compute CA bundle hash for rollout annotation.
+			annotations["mclaude.io/ca-bundle-hash"] = reconcilerCAConfigMapHash(caCM)
+		}
+	}
+
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: map[string]string{
 				"app":     "mclaude-project",
 				"project": projectID,
 			},
+			Annotations: annotations,
 		},
 		Spec: corev1.PodSpec{
 			ServiceAccountName:            "mclaude-sa",
@@ -352,23 +433,7 @@ func (r *MCProjectReconciler) buildPodTemplate(ctx context.Context, mcp *MCProje
 				RunAsUser:    &runAsUser,
 				FSGroup:      &fsGroup,
 			},
-			Volumes: []corev1.Volume{
-				{Name: "project-data", VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "project-" + projectID},
-				}},
-				{Name: "nix-store", VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "nix-" + projectID},
-				}},
-				{Name: "claude-home", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-				{Name: "user-config", VolumeSource: corev1.VolumeSource{
-					ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "user-config"},
-					},
-				}},
-				{Name: "user-secrets", VolumeSource: corev1.VolumeSource{
-					Secret: &corev1.SecretVolumeSource{SecretName: "user-secrets"},
-				}},
-			},
+			Volumes: volumes,
 			Containers: []corev1.Container{
 				{
 					Name:            "session-agent",
@@ -376,17 +441,37 @@ func (r *MCProjectReconciler) buildPodTemplate(ctx context.Context, mcp *MCProje
 					ImagePullPolicy: tpl.imagePullPolicy,
 					Env:             env,
 					Resources:       tpl.resources,
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: "project-data", MountPath: "/data"},
-						{Name: "nix-store", MountPath: "/nix"},
-						{Name: "claude-home", MountPath: "/home/node/.claude"},
-						{Name: "user-config", MountPath: "/home/node/.claude-seed", ReadOnly: true},
-						{Name: "user-secrets", MountPath: "/home/node/.user-secrets", ReadOnly: true},
-					},
+					VolumeMounts:    volumeMounts,
 				},
 			},
 		},
 	}
+}
+
+// reconcilerCAConfigMapHash computes a deterministic SHA-256 hash of a ConfigMap's data.
+// Used as the mclaude.io/ca-bundle-hash pod template annotation so that CA bundle rotations
+// trigger a Recreate rollout. Mirrors caConfigMapHash in provision.go.
+func reconcilerCAConfigMapHash(cm *corev1.ConfigMap) string {
+	h := sha256.New()
+	keys := make([]string, 0, len(cm.Data))
+	for k := range cm.Data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		h.Write([]byte(k))
+		h.Write([]byte(cm.Data[k]))
+	}
+	binKeys := make([]string, 0, len(cm.BinaryData))
+	for k := range cm.BinaryData {
+		binKeys = append(binKeys, k)
+	}
+	sort.Strings(binKeys)
+	for _, k := range binKeys {
+		h.Write([]byte(k))
+		h.Write(cm.BinaryData[k])
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // reconcileDeployment ensures the project PVC, nix PVC, and Deployment exist.
@@ -528,12 +613,18 @@ func (r *MCProjectReconciler) loadTemplate(ctx context.Context) (*sessionAgentTp
 	}
 
 	tpl := &sessionAgentTpl{
-		image:                  cm.Data["image"],
-		imagePullPolicy:        corev1.PullPolicy(cm.Data["imagePullPolicy"]),
-		projectPvcSize:         cm.Data["projectPvcSize"],
-		projectPvcStorageClass: cm.Data["projectPvcStorageClass"],
-		nixPvcSize:             cm.Data["nixPvcSize"],
-		nixPvcStorageClass:     cm.Data["nixPvcStorageClass"],
+		image:                    cm.Data["image"],
+		imagePullPolicy:          corev1.PullPolicy(cm.Data["imagePullPolicy"]),
+		projectPvcSize:           cm.Data["projectPvcSize"],
+		projectPvcStorageClass:   cm.Data["projectPvcStorageClass"],
+		nixPvcSize:               cm.Data["nixPvcSize"],
+		nixPvcStorageClass:       cm.Data["nixPvcStorageClass"],
+		corporateCAConfigMapName: cm.Data["corporateCAConfigMapName"],
+		corporateCAConfigMapKey:  cm.Data["corporateCAConfigMapKey"],
+	}
+	tpl.corporateCAEnabled = cm.Data["corporateCAEnabled"] == "true"
+	if tpl.corporateCAConfigMapKey == "" {
+		tpl.corporateCAConfigMapKey = "ca-certificates.crt"
 	}
 	if tpl.projectPvcSize == "" {
 		tpl.projectPvcSize = "10Gi"
