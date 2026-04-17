@@ -291,12 +291,29 @@ Bottom sheet modal with scrim overlay (tapping scrim closes it).
 │     ~/work/beta                 │
 │  (loading…)                     │  while fetching
 │  (No projects found)            │  if empty
+├─────────────────────────────────┤
+│  ▶ Advanced                     │  collapsible, collapsed by default
+└─────────────────────────────────┘
+```
+
+Expanded Advanced section:
+
+```
+├─────────────────────────────────┤
+│  ▼ Advanced                     │
+│  Extra flags                    │  label
+│  ┌─────────────────────────┐    │
+│  │ --disallowedTools "Edit │    │  monospace textarea, 3 rows
+│  │ (src/**)"               │    │
+│  └─────────────────────────┘    │
 └─────────────────────────────────┘
 ```
 
 Project rows sorted: last-used project first (tracked in `localStorage` by `mclaude.lastProjectId`), then alphabetical by name.
 
-On tap: create session in that project, persist its ID to `mclaude.lastProjectId`, dismiss sheet.
+On tap: create session in that project, persist its ID to `mclaude.lastProjectId`, include `extraFlags` string if non-empty, dismiss sheet.
+
+**Advanced section**: collapsible `<details>`/`<summary>` element, collapsed by default. Contains a monospace `<textarea>` (3 rows, full width) labeled "Extra flags". The user types raw Claude Code CLI flags (e.g. `--disallowedTools "Edit(src/**)" --model claude-opus-4-7`). The raw string is sent as `extraFlags` in the session create payload — no client-side parsing. Empty or whitespace-only = omit the field.
 
 ---
 
@@ -653,12 +670,37 @@ Dropdown anchored to the `⋯` button in the session nav bar.
   │    sonnet-4-6             │
   │ 📊 Token Usage            │
   │ 📜 Raw Output             │
+  │ ⚙ Edit Session            │
   └───────────────────────────┘
 ```
 
 - **Model**: opens sub-menu to switch between Opus / Sonnet / Haiku
 - **Token Usage**: opens Token Usage overlay (same data as Token Usage screen but session-scoped)
 - **Raw Output**: opens Raw Output overlay (live-polling terminal text)
+- **Edit Session**: opens the Edit Session bottom sheet
+
+---
+
+## Sheet: Edit Session
+
+Bottom sheet modal with scrim overlay. Shows current session settings and restarts with the updated values.
+
+```
+┌─────────────────────────────────┐
+│      Edit Session           [✕] │
+├─────────────────────────────────┤
+│  Extra flags                    │  label
+│  ┌─────────────────────────┐    │
+│  │ --disallowedTools "Edit │    │  monospace textarea, 4 rows,
+│  │ (src/**)"               │    │  pre-filled with current value
+│  └─────────────────────────┘    │
+│                                 │
+│  [     Restart Session    ]     │  --blue button
+└─────────────────────────────────┘
+```
+
+- Pre-fills `extraFlags` textarea with the value from the current session's KV entry (read from `sessionVm.extraFlags`).
+- **Restart Session** button: sends `sessions.restart` with `{ sessionId, extraFlags }` (extraFlags is the trimmed textarea value; empty string if blank), then closes the sheet. The session will briefly show "restarting" state as the agent kills and relaunches the Claude process.
 
 ---
 

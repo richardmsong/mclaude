@@ -319,8 +319,9 @@ SessionListVM(sessionStore, lifecycleStore, heartbeatMonitor)
   // Actions
   createProject(name, gitUrl)
   deleteProject(projectId)
-  createSession(projectId, branch, name)
+  createSession(projectId, branch, name, opts?: { extraFlags?: string })
   deleteSession(sessionId)
+  restartSession(sessionId, opts?: { extraFlags?: string })
 ```
 
 ```
@@ -340,6 +341,7 @@ SessionVM {
   branch: string
   costUsd: number
   hasPendingPermission: boolean
+  extraFlags: string   // raw CLI flags string, empty if none
 }
 ```
 

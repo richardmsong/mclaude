@@ -149,7 +149,7 @@ mclaude.{userId}.{location}.{projectId}.api.sessions.create
 mclaude.{userId}.{location}.{projectId}.api.sessions.delete
 mclaude.{userId}.{location}.{projectId}.api.sessions.input
 mclaude.{userId}.{location}.{projectId}.api.sessions.control    → permission responses, interrupts
-mclaude.{userId}.{location}.{projectId}.api.sessions.restart
+mclaude.{userId}.{location}.{projectId}.api.sessions.restart    → accepts optional extraFlags to update before relaunching
 mclaude.{userId}.api.projects.create    → control-plane (global, not location-scoped)
 mclaude.{userId}.api.projects.update    → control-plane
 mclaude.{userId}.api.projects.delete    → control-plane
@@ -355,11 +355,11 @@ Set `terminationGracePeriodSeconds: 30` in pod spec to give enough time.
 
 | NATS subject | Action |
 |--------------|--------|
-| `…api.sessions.create` | `exec.Command("claude", "--print", "--verbose", "--output-format", "stream-json", "--input-format", "stream-json", "--include-partial-messages", "--replay-user-messages", "--session-id", id, [--disallowedTools tool1 tool2 ...])` |
+| `…api.sessions.create` | `exec.Command("claude", "--print", "--verbose", "--output-format", "stream-json", "--input-format", "stream-json", "--include-partial-messages", "--replay-user-messages", "--session-id", id, [...shell-parsed extraFlags])` |
 | `…api.sessions.delete` | Send interrupt control request → wait for exit → kill if timeout |
 | `…api.sessions.input` | Strip `session_id`, write user message JSON to stdin pipe (user messages reach the events stream via Claude's `--replay-user-messages` stdout echo) |
 | `…api.sessions.control` | Write control_response JSON to stdin pipe (permission approvals, interrupts, model changes) |
-| `…api.sessions.restart` | Kill process → relaunch with `--resume {sessionId}` |
+| `…api.sessions.restart` | Kill process → if `extraFlags` in payload, update KV entry → relaunch with `--resume {sessionId}` + shell-parsed extraFlags from KV |
 
 ### Startup / recovery
 
@@ -423,13 +423,22 @@ Session create request payload:
   "branch": "feature/auth",
   "cwd": "packages/api",
   "joinWorktree": false,
-  "disallowedTools": ["Edit(mclaude-web/src/**)", "Write(mclaude-web/src/**)"]
+  "extraFlags": "--disallowedTools \"Edit(mclaude-web/src/**)\" --disallowedTools \"Write(mclaude-web/src/**)\" --model claude-opus-4-7"
 }
 ```
 
 `branch` is optional. If omitted, the session agent derives it from `name` via slugification (`"Fix auth bug"` → `fix-auth-bug`). If both `name` and `branch` are omitted, the agent generates a default: `session-{shortId}`. Git-savvy users can specify `branch` explicitly; the SPA hides it by default and only shows the `name` field.
 
-`disallowedTools` is an optional array of tool restriction patterns passed verbatim to Claude as `--disallowedTools` spawn args. Each entry can use glob-style matching identical to Claude Code's own `--disallowedTools` flag (e.g., `"Edit(src/**)"`, `"Write(*.go)"`). If omitted or empty, no tools are restricted. The session agent appends one `--disallowedTools` flag per entry after the fixed spawn args.
+`extraFlags` is an optional string of raw CLI flags appended to the Claude Code spawn command. The session agent shell-parses this string using POSIX rules (space-separated tokens, double and single quotes supported, backslash escapes within double quotes). The resulting tokens are appended after the fixed spawn args. Empty string or omitted = no extra flags. Example: `"--disallowedTools \"Edit(src/**)\" --model claude-opus-4-7"`. Malformed flag strings (e.g. unclosed quotes) cause the session create to fail with a descriptive error. `extraFlags` is persisted in the KV session entry and re-applied on every pod restart.
+
+Restart request payload (`…api.sessions.restart`):
+```json
+{
+  "sessionId": "abc-123",
+  "extraFlags": "--disallowedTools \"Edit(src/**)\" --model claude-opus-4-7"
+}
+```
+`extraFlags` in the restart payload is optional. If present, it overwrites the stored `extraFlags` in KV before relaunching. If absent, the stored value (from create or a previous restart) is used unchanged. Restart always uses `--resume {sessionId}` so conversation history is preserved.
 
 `joinWorktree` controls behaviour when a worktree for the branch already exists (git only allows one worktree per branch):
 
@@ -479,6 +488,7 @@ Events are published as raw stream-json bytes — no envelope. The NATS subject 
   "stateSince": "2026-04-11T10:00:00Z",
   "createdAt": "2026-04-11T09:00:00Z",
   "model": "claude-sonnet-4-6",
+  "extraFlags": "--disallowedTools \"Edit(src/**)\"",
   "capabilities": {
     "skills": ["commit", "review-pr", "init"],
     "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
