@@ -255,7 +255,7 @@ Responsibilities:
   - `user` (human text, not tool_result) → inspect content before creating a turn:
       - If text starts with `"Base directory for this skill:"`: parse as `SkillInvocationBlock` — extract skill name from the path segment after `.../skills/` and extract args from the text after the `"ARGUMENTS:"` line (trimmed). Create a user turn with this block instead of a TextBlock.
       - If text starts with `"[SYSTEM NOTIFICATION"`: discard entirely — do not create a turn.
-      - Otherwise: create user `Turn` with `TextBlock`s. Client also adds an optimistic user turn on send; deduplication: if a pending turn with matching uuid exists, confirm it (keep existing turn, skip adding a new one).
+      - Otherwise: dedup against pending messages — primary: match by `event.uuid`; fallback: if uuid absent, match by exact text content. On match: clear `pendingUuid` on the existing optimistic turn in-place (no new turn created). If no match: create a new user `Turn` with `TextBlock`s at current position. `addPendingMessage` on send inserts an optimistic turn immediately (with `pendingUuid` set) so the message appears at the correct conversation position before Claude echoes it back.
   - `control_request` → creates `ControlRequestBlock` with status `pending`
   - Events with `parent_tool_use_id` → nested under the parent `ToolUseBlock`'s turn
 - On `clear` event: resets `ConversationModel` (empty turns), updates local `replayFromSeq`
