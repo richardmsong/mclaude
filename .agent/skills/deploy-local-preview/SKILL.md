@@ -1,14 +1,14 @@
 ---
 name: deploy-local-preview
-description: Stand up a local k3d cluster pulling from ghcr.io and deploy mclaude to it. Idempotent — safe to re-run. Use when airgapped from the main dev setup or when you need a fully self-contained local cluster.
+description: Stand up a local k3d cluster and deploy mclaude to it. Builds images locally if ghcr.io images are unavailable. HTTPS via Traefik with a self-signed wildcard cert. Idempotent — safe to re-run.
+user_invocable: true
 ---
 
-# Deploy Local Preview (k3d + ghcr.io)
+# Deploy Local Preview (k3d)
 
-Deploys mclaude to a local k3d cluster using pre-built images from ghcr.io.
-No local Docker builds. DNS via CoreDNS inside the cluster, surfaced to the host via NodePort on UDP 5053.
+Deploys mclaude to a local k3d cluster. Tries ghcr.io images first, falls back to local Docker builds. HTTPS via Traefik with a self-signed wildcard cert for `*.mclaude.local`. DNS via CoreDNS inside the cluster, surfaced to the host via NodePort on UDP 5053.
 
-**Ingress URL**: `http://dev.mclaude.local`
+**Ingress URL**: `https://dev.mclaude.local`
 
 ---
 
@@ -28,11 +28,13 @@ These must be in place before running. Check, don't assume.
 
 ```bash
 which k3d kubectl helm gh    # all must exist on PATH
+which bw                     # bitwarden CLI (for OAuth token)
 docker info                  # Docker Desktop must be running
-gh auth status               # must be authenticated to ghcr.io org
+gh auth status               # must be authenticated
+bw status                    # must be unlocked
 ```
 
-Also check that port 5053 UDP is free on the host (used for DNS NodePort):
+Also check that port 53 UDP is free on the host (used for DNS NodePort):
 ```bash
 lsof -iUDP:5053 2>/dev/null | grep LISTEN && echo "port in use!" || echo "free"
 ```
@@ -69,7 +71,8 @@ EOF
 
   k3d cluster create "$CLUSTER" \
     --port "80:80@loadbalancer" \
-    --port "5053:30053/udp@server:0" \
+    --port "443:443@loadbalancer" \
+    --port "53:30053/udp@server:0" \
     --registry-config /tmp/k3d-registries.yaml \
     --wait
 fi
@@ -119,10 +122,63 @@ kubectl create secret docker-registry ghcr-pull-secret \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-### Step 4 — CoreDNS custom zone for *.mclaude.local
+### Step 4 — TLS certificate for *.mclaude.local
+
+Generate a self-signed wildcard cert and install it as the default Traefik TLS cert:
 
 ```bash
+# Generate self-signed wildcard cert (valid 10 years)
+openssl req -x509 -nodes -days 3650 \
+  -newkey rsa:2048 \
+  -keyout /tmp/mclaude-local.key \
+  -out /tmp/mclaude-local.crt \
+  -subj "/CN=*.mclaude.local" \
+  -addext "subjectAltName=DNS:*.mclaude.local,DNS:mclaude.local"
+
+# Create K8s TLS secret
+kubectl create secret tls mclaude-local-tls \
+  --namespace mclaude-system \
+  --cert=/tmp/mclaude-local.crt \
+  --key=/tmp/mclaude-local.key \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Also install the cert in kube-system for Traefik's default TLS store
+kubectl create secret tls mclaude-local-tls \
+  --namespace kube-system \
+  --cert=/tmp/mclaude-local.crt \
+  --key=/tmp/mclaude-local.key \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Set as Traefik's default TLS cert via TLSStore CRD
 kubectl apply -f - <<'EOF'
+apiVersion: traefik.io/v1alpha1
+kind: TLSStore
+metadata:
+  name: default
+  namespace: kube-system
+spec:
+  defaultCertificate:
+    secretName: mclaude-local-tls
+EOF
+```
+
+Trust the cert on macOS (tell the user to run this themselves — requires sudo):
+
+```bash
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain /tmp/mclaude-local.crt
+```
+
+> **Why self-signed**: k3d is local-only. The cert is trusted via macOS Keychain so browsers don't warn. The wildcard covers `dev.mclaude.local`, `dev-nats.mclaude.local`, and any future subdomains.
+
+### Step 5 — CoreDNS custom zone for *.mclaude.local
+
+Add a custom zone to the cluster's CoreDNS so `*.mclaude.local` resolves to the host's Tailscale IP:
+
+```bash
+TS_IP=$(tailscale ip -4)
+
+kubectl apply -f - <<EOF
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -132,7 +188,7 @@ data:
   mclaude.local.server: |
     mclaude.local. {
         template IN A {
-            answer "{{ .Name }} 60 IN A 127.0.0.1"
+            answer "{{ .Name }} 60 IN A ${TS_IP}"
         }
         log
         errors
@@ -165,47 +221,131 @@ spec:
 EOF
 ```
 
-### Step 5 — macOS /etc/resolver (run once; requires sudo)
+### Step 6 — Tailscale split DNS (one-time)
 
-Tell the user to run this command themselves:
+The cluster's CoreDNS is exposed on host port 53. Configure Tailscale split DNS so all tailnet devices (including iPhones) resolve `*.mclaude.local` automatically:
 
+- Tailscale admin console → DNS → Nameservers → Add custom nameserver
+- IP: `<tailscale-ip>` (output of `tailscale ip -4`)
+- Restrict to domain: `mclaude.local`
+
+Verify:
 ```bash
-sudo mkdir -p /etc/resolver
-printf 'nameserver 127.0.0.1\nport 5053\n' | sudo tee /etc/resolver/mclaude.local
+dig @$(tailscale ip -4) dev.mclaude.local +short   # should return Tailscale IP
 ```
 
-Verify DNS resolves:
+**Enterprise setup** (no Tailscale): DNS is handled by the relay/gateway — not covered here.
+
+> **Why `.local`**: The corporate PAC file (`corporate-proxy.pac`) explicitly bypasses the proxy for `shExpMatch(host, "*.local")`. Using `.internal` or `.mclaude.internal` goes through the proxy and the browser can't reach the cluster.
+
+### Step 7 — Build images locally (if ghcr.io images are unavailable)
+
+Try pulling from ghcr.io first. If the images don't exist (no packages published yet), build locally and import into k3d:
+
 ```bash
-ping -c 1 dev.mclaude.local   # should resolve to 127.0.0.1
+REPO_ROOT=$(git rev-parse --show-toplevel)
+CP_DIR="$REPO_ROOT/mclaude-control-plane"
+SPA_DIR="$REPO_ROOT/mclaude-web"
+SA_DIR="$REPO_ROOT/mclaude-session-agent"
+
+# Try ghcr.io pull — if ANY image fails, build all locally
+if ! docker pull ghcr.io/mclaude-project/mclaude-control-plane:latest 2>/dev/null || \
+   ! docker pull ghcr.io/mclaude-project/mclaude-spa:latest 2>/dev/null || \
+   ! docker pull ghcr.io/mclaude-project/mclaude-session-agent:latest 2>/dev/null; then
+  echo "ghcr.io images not available — building locally"
+
+  # Build control-plane (Go binary → Docker)
+  cd "$CP_DIR"
+  CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o control-plane .
+  docker build -t mclaude-control-plane:dev .
+  rm -f control-plane
+  cd "$REPO_ROOT"
+
+  # Build SPA (npm build happens inside Dockerfile)
+  docker build -t mclaude-spa:dev "$SPA_DIR"
+
+  # Build session-agent (Go binary → Docker)
+  cd "$SA_DIR"
+  CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o session-agent .
+  docker build -t mclaude-session-agent:dev .
+  rm -f session-agent
+  cd "$REPO_ROOT"
+
+  # Import into k3d
+  k3d image import \
+    mclaude-control-plane:dev \
+    mclaude-spa:dev \
+    mclaude-session-agent:dev \
+    --cluster mclaude-dev
+
+  USE_LOCAL_IMAGES=true
+else
+  USE_LOCAL_IMAGES=false
+fi
 ```
 
-> **Why `.local`**: The corporate PAC file (`corporate-proxy.pac`) explicitly bypasses the proxy for `shExpMatch(host, "*.local")`. Using `.internal` or `.mclaude.internal` goes through the proxy and the browser can't reach the cluster. `.local` on macOS is mDNS/Bonjour, but `/etc/resolver/mclaude.local` overrides mDNS for the `mclaude.local` subdomain specifically.
+> **Why local build**: ghcr.io packages may not exist yet (no CI publishing configured). The Go binaries are cross-compiled for linux/arm64 (k3d runs arm64 Linux nodes on Apple Silicon). The SPA Dockerfile does the npm build internally.
 
-### Step 6 — Helm install
+### Step 8 — Helm install
 
 The `values-k3d-ghcr.yaml` file in this repo is the authoritative values for this setup.
 
-Extract the Claude OAuth token and pass it as `devOAuthToken`. The reconciler writes it into the `user-secrets` Secret in each user namespace so session-agent pods can auth Claude Code without a manual login.
+Extract the Claude OAuth token from Bitwarden (primary) or local credentials (fallback):
 
-From local credentials if available:
 ```bash
-OAUTH_TOKEN=$(python3 -c "
+# Primary: Bitwarden
+OAUTH_TOKEN=$(bw get password "YOUR_BITWARDEN_CLAUDE_TOKEN_ITEM_ID" 2>/dev/null)
+
+# Fallback: local credentials file
+if [ -z "$OAUTH_TOKEN" ]; then
+  OAUTH_TOKEN=$(python3 -c "
 import json, os
 p = os.path.expanduser('~/.claude/.credentials.json')
 print(json.load(open(p))['claudeAiOauth']['accessToken'])
-")
+" 2>/dev/null) || true
+fi
 
-LOCAL_DEPLOY=1 helm upgrade --install mclaude ./charts/mclaude \
-  -n mclaude-system \
-  -f charts/mclaude/values-k3d-ghcr.yaml \
+if [ -z "$OAUTH_TOKEN" ]; then
+  echo "WARNING: no OAuth token found — session-agent will not authenticate"
+fi
+```
+
+Build the helm install command. TLS ingress annotations and the TLS secret name are in `values-k3d-ghcr.yaml` — no `--set` needed for those. If local images were built, override the image tags:
+
+```bash
+HELM_ARGS=(
+  -n mclaude-system
+  -f charts/mclaude/values-k3d-ghcr.yaml
   --set "controlPlane.devOAuthToken=${OAUTH_TOKEN}"
+  --wait --timeout 5m
+)
+
+if [ "$USE_LOCAL_IMAGES" = true ]; then
+  HELM_ARGS+=(
+    --set "controlPlane.image.registry="
+    --set "controlPlane.image.repository=mclaude-control-plane"
+    --set "controlPlane.image.tag=dev"
+    --set "controlPlane.image.pullPolicy=Never"
+    --set "spa.image.registry="
+    --set "spa.image.repository=mclaude-spa"
+    --set "spa.image.tag=dev"
+    --set "spa.image.pullPolicy=Never"
+    --set "sessionAgent.image.registry="
+    --set "sessionAgent.image.repository=mclaude-session-agent"
+    --set "sessionAgent.image.tag=dev"
+    --set "sessionAgent.image.pullPolicy=Never"
+    --set "global.imagePullSecrets="
+  )
+fi
+
+LOCAL_DEPLOY=1 helm upgrade --install mclaude ./charts/mclaude "${HELM_ARGS[@]}"
 ```
 
 `LOCAL_DEPLOY=1` is required — the pre-tool-use hook blocks `helm upgrade/install` unless this is set (CI-only guard).
 
 > **Why this matters**: without `devOAuthToken`, the session-agent pod has no Claude credentials. It receives messages and silently does nothing. The token flows: Helm → `DEV_OAUTH_TOKEN` env on control-plane → reconciler writes `oauth-token` key into `user-secrets` Secret → session-agent mounts it at `/home/node/.user-secrets/oauth-token`.
 
-### Step 7 — Wait for pods
+### Step 9 — Wait for pods
 
 ```bash
 kubectl rollout status deployment/mclaude-control-plane -n mclaude-system --timeout=120s
@@ -215,51 +355,14 @@ kubectl get pods -n mclaude-system
 
 All pods should show `1/1 Running`.
 
-### Step 8 — Patch session-agent pods for RBC corporate TLS
-
-The corporate proxy intercepts TLS. Session-agent pods don't have the RBC CA bundle, so Claude Code's API calls fail with `SSL certificate verification failed`. Patch all session-agent deployments with `NODE_TLS_REJECT_UNAUTHORIZED=0`:
+### Step 10 — Verify
 
 ```bash
-# Wait for devSeed to provision the user namespace (may take a few seconds)
-for i in $(seq 1 20); do
-  USER_NS=$(kubectl get ns -l mclaude.io/managed=true -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-  [ -n "$USER_NS" ] && break
-  sleep 2
-done
-
-if [ -n "$USER_NS" ]; then
-  # Wait for the session-agent deployment to appear
-  for i in $(seq 1 20); do
-    DEPLOY=$(kubectl get deploy -n "$USER_NS" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
-    [ -n "$DEPLOY" ] && break
-    sleep 2
-  done
-  if [ -n "$DEPLOY" ]; then
-    kubectl patch deployment "$DEPLOY" -n "$USER_NS" \
-      --type=json \
-      -p='[{"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"NODE_TLS_REJECT_UNAUTHORIZED","value":"0"}}]'
-    kubectl rollout status deployment/"$DEPLOY" -n "$USER_NS" --timeout=60s
-    echo "patched $DEPLOY in $USER_NS"
-  else
-    echo "WARNING: no session-agent deployment found in $USER_NS — patch manually if needed"
-  fi
-else
-  echo "WARNING: no user namespace found — patch any session-agent deployments manually"
-fi
-```
-
-> **Why this is needed**: The RBC CA bundle is not baked into the session-agent container image. Until `NODE_EXTRA_CA_CERTS` support is added to the Helm chart (tracked separately), this manual patch is required for local k3d deploys behind the corporate proxy.
->
-> **Also patch new projects**: If you create a new project after this step, re-run the kubectl patch for the new namespace/deployment.
-
-### Step 9 — Verify
-
-```bash
-# Ingress resolves
-curl -s http://dev.mclaude.local/healthz   # should return 200 from control-plane
+# Ingress resolves (use -k if cert not yet trusted)
+curl -s https://dev.mclaude.local/healthz   # should return 200 from control-plane
 
 # SPA
-open http://dev.mclaude.local
+open https://dev.mclaude.local
 ```
 
 ---
@@ -268,7 +371,6 @@ open http://dev.mclaude.local
 
 ```bash
 k3d cluster delete mclaude-dev
-sudo rm -f /etc/resolver/mclaude.local
 ```
 
 ---
@@ -280,14 +382,15 @@ sudo rm -f /etc/resolver/mclaude.local
 | `server gave HTTP response to HTTPS client` | kubeconfig has `0.0.0.0` as server address | Step 2: repoint server to `127.0.0.1:<port>` |
 | `ErrImagePull` / 403 from ghcr.io | GHCR token expired in registry config | Re-run Step 1 (delete cluster first if needed): `k3d cluster delete mclaude-dev` |
 | `ErrImagePull` / TLS handshake failure | Corporate proxy intercepts TLS | Ensure `insecure_skip_verify: true` is in `/tmp/k3d-registries.yaml` and cluster was created with `--registry-config` |
-| DNS doesn't resolve (`ping dev.mclaude.local` hangs) | `/etc/resolver/mclaude.local` missing or wrong port | Step 5: check file exists with `cat /etc/resolver/mclaude.local`; dig `@127.0.0.1 -p 5053 dev.mclaude.local` to test CoreDNS directly |
+| DNS doesn't resolve (`ping dev.mclaude.local` hangs) | `/etc/resolver/mclaude.local` missing or wrong port | Step 6: check file exists with `cat /etc/resolver/mclaude.local`; dig `@127.0.0.1 -p 5053 dev.mclaude.local` to test CoreDNS directly |
 | Browser can't connect despite DNS working | Corporate proxy intercepting (wrong TLD) | Ensure using `.local` not `.internal`; `.local` is already in PAC bypass list |
 | Login 405 | Ingress not routing to control-plane | Check `kubectl get ingress -n mclaude-system`; host must be `dev.mclaude.local` |
-| NATS WebSocket fails | `natsUrl` in login response is internal cluster URL | Old binary — SPA falls back to `ws://<origin>/nats` which routes through Traefik correctly |
+| NATS WebSocket fails | `natsUrl` in login response is internal cluster URL | Old binary — SPA falls back to `wss://<origin>/nats` which routes through Traefik correctly |
 | `projects` table missing (login succeeds but projects 500s) | pgx `pool.Exec` only runs first statement in multi-statement SQL | Manually create: `kubectl exec -it deploy/mclaude-postgres -n mclaude-system -- psql -U mclaude -c "CREATE TABLE IF NOT EXISTS projects (...)"` |
 | devSeed user not created (old binary) | Old ghcr.io `latest` predates devSeed feature | Manually seed: see "Manual DB Seeding" below |
-| `helm upgrade/install` blocked by hook | Pre-tool-use hook guards against local deploys | Set `LOCAL_DEPLOY=1` env var (Step 6) |
-| Session-agent: `SSL certificate verification failed` | Corporate proxy intercepts TLS; container lacks RBC CA | Step 8: patch deployment with `NODE_TLS_REJECT_UNAUTHORIZED=0` |
+| `helm upgrade/install` blocked by hook | Pre-tool-use hook guards against local deploys | Set `LOCAL_DEPLOY=1` env var (Step 8) |
+| `StatefulSet.apps "mclaude-nats" / "mclaude-postgres" is invalid: spec: Forbidden: updates to statefulset spec for fields other than...` | An older install set `persistence.enabled: false`; chart defaults are now `true` and K8s forbids adding `volumeClaimTemplates` in place. | `helm uninstall mclaude -n mclaude-system` (wipes local NATS KV + postgres state — local dev only), then re-run `/deploy-local-preview`. |
+| Session-agent: `SSL certificate verification failed` | Corporate proxy intercepts TLS; container lacks CA bundle | Mount corporate CA bundle into container and set `NODE_EXTRA_CA_CERTS` |
 | Session-agent: `Not logged in · Please run /login` | `CLAUDE_CODE_OAUTH_TOKEN` not set in pod | Check `user-secrets` Secret has `oauth-token` key; if pod started before token was added, `kubectl rollout restart` |
 
 ---
