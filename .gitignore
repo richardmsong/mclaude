@@ -57,3 +57,6 @@ worktrees/
 
 # Claude project settings (local)
 .claude/projects/
+
+# SQLite databases (docs-mcp index)
+*.db
