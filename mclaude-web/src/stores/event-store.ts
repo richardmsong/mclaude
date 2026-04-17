@@ -524,7 +524,21 @@ export class EventStore {
           break
         }
 
-        // Step 4c: Otherwise → create a normal user turn inline at current position
+        // Step 4c: Otherwise → create a normal user turn.
+        // Ordering fix: with --replay-user-messages, Claude publishes stream_events
+        // BEFORE the user echo in the JetStream sequence. So when we receive the user
+        // echo during replay (or live, if streaming started before the echo arrived),
+        // the associated response turn is already at the END of turns[].
+        //
+        // If the last top-level assistant turn was just created for this response
+        // (it only has streaming_text blocks — no tool_use or other blocks yet),
+        // insert the user turn BEFORE it so the conversation reads:
+        //   [user message] → [assistant response]
+        // rather than:
+        //   [assistant response] → [user message]
+        //
+        // We do NOT apply this for mid-turn user messages (assistant turn has
+        // tool_use or tool_result blocks, meaning it's a complex in-progress turn).
         const turn: Turn = {
           id: this._nextTurnId(),
           type: 'user',
@@ -545,7 +559,29 @@ export class EventStore {
         }
 
         if (turn.blocks.length > 0) {
-          this._conversation.turns.push(turn)
+          // Find the last top-level assistant turn (no parentToolUseId)
+          const wantedParent = event.parent_tool_use_id ?? undefined
+          let insertIdx = -1
+          for (let i = this._conversation.turns.length - 1; i >= 0; i--) {
+            const t = this._conversation.turns[i]
+            if (t.parentToolUseId !== wantedParent) continue
+            if (t.type === 'assistant') {
+              // Only insert before this turn if it's a fresh response turn:
+              // all blocks are streaming_text (no tool_use/tool_result blocks),
+              // indicating the stream_events for this response just started.
+              const onlyStreamingText = t.blocks.length > 0 && t.blocks.every(b => b.type === 'streaming_text')
+              if (onlyStreamingText) {
+                insertIdx = i
+              }
+            }
+            break // stop at the first matching turn regardless
+          }
+
+          if (insertIdx !== -1) {
+            this._conversation.turns.splice(insertIdx, 0, turn)
+          } else {
+            this._conversation.turns.push(turn)
+          }
         }
         break
       }

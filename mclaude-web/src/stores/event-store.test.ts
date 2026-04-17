@@ -690,6 +690,95 @@ describe('EventStore', () => {
     })
   })
 
+  describe('JetStream replay ordering: stream_events arrive before user echo', () => {
+    // With --replay-user-messages, Claude publishes stream_events BEFORE the
+    // user echo in the JetStream sequence:
+    //   stream_event(47) → stream_event(48) → user-echo(49) → assistant(50)
+    //
+    // During replay the EventStore must still produce: [user] → [assistant]
+    // not: [assistant] → [user].
+
+    it('user echo inserted before the streaming assistant turn it caused', () => {
+      // Apply stream_events first (as they arrive in JetStream)
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'hello ' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'world' }, index: 0 },
+      })
+
+      // Then user echo arrives (--replay-user-messages)
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'replay-uuid-1',
+        isReplay: true,
+        message: { role: 'user', content: 'say hello' },
+      })
+
+      // Must be: [user-turn, asst-turn] — NOT [asst-turn, user-turn]
+      expect(store.conversation.turns).toHaveLength(2)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+
+      const userText = store.conversation.turns[0].blocks.find(b => b.type === 'text')
+      expect(userText?.type === 'text' && userText.text).toBe('say hello')
+
+      const streaming = store.conversation.turns[1].blocks.find(b => b.type === 'streaming_text')
+      expect(streaming?.type === 'streaming_text' && streaming.chunks.join('')).toBe('hello world')
+    })
+
+    it('full replay sequence: two exchanges produce correct order', () => {
+      // Simulate replaying two user/assistant exchanges, each with
+      // stream_events arriving before the user echo.
+
+      // --- Exchange 1 ---
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'response1' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-1',
+        isReplay: true,
+        message: { role: 'user', content: 'message1' },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: { id: 'msg-1', role: 'assistant', content: [{ type: 'text', text: 'response1' }], model: 'claude-test' },
+      })
+
+      // --- Exchange 2 ---
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'response2' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-2',
+        isReplay: true,
+        message: { role: 'user', content: 'message2' },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: { id: 'msg-2', role: 'assistant', content: [{ type: 'text', text: 'response2' }], model: 'claude-test' },
+      })
+
+      // Correct order: user1, asst1, user2, asst2
+      expect(store.conversation.turns).toHaveLength(4)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+      expect(store.conversation.turns[2].type).toBe('user')
+      expect(store.conversation.turns[3].type).toBe('assistant')
+
+      const user1Text = store.conversation.turns[0].blocks.find(b => b.type === 'text')
+      expect(user1Text?.type === 'text' && user1Text.text).toBe('message1')
+      const user2Text = store.conversation.turns[2].blocks.find(b => b.type === 'text')
+      expect(user2Text?.type === 'text' && user2Text.text).toBe('message2')
+    })
+  })
+
   describe('new message in existing session (regression: response must not append to prior turn)', () => {
     // Reproduce the bug: user sends a message in an existing session.
     // The prior assistant turn is finalized. A new stream_event for the NEW
