@@ -29,6 +29,7 @@ type QuotaMonitor struct {
 	lastU5       int                 // last 5h utilization %
 	lastR5       time.Time           // last 5h reset time
 	completionPR string              // set by onRawOutput when SESSION_JOB_COMPLETE detected
+	stopTimeout  time.Duration       // timeout before hard interrupt; 0 = use default (30 min)
 }
 
 // newQuotaMonitor creates a QuotaMonitor, subscribes to quota updates,
@@ -185,7 +186,11 @@ func (m *QuotaMonitor) run() {
 				stopReason = "permDenied"
 				_ = toolName // already published by onStrictDeny
 				m.sendGracefulStop()
-				stopTimer = time.After(30 * time.Minute)
+				d := m.stopTimeout
+				if d == 0 {
+					d = 30 * time.Minute
+				}
+				stopTimer = time.After(d)
 			}
 
 		case msg := <-m.quotaCh:
@@ -201,7 +206,11 @@ func (m *QuotaMonitor) run() {
 			if qs.HasData && m.cfg.Threshold > 0 && qs.U5 >= m.cfg.Threshold && stopReason == "" {
 				stopReason = "quota"
 				m.sendGracefulStop()
-				stopTimer = time.After(30 * time.Minute)
+				d := m.stopTimeout
+				if d == 0 {
+					d = 30 * time.Minute
+				}
+				stopTimer = time.After(d)
 			}
 
 		case <-stopTimer:

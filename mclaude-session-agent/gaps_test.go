@@ -348,29 +348,30 @@ func TestOnEventPublishedCallback(t *testing.T) {
 // Gap 4: 30s startup timeout — returns error if init not received
 // ---------------------------------------------------------------------------
 
-// slowStartTranscript is the path to a transcript that produces no init event
-// (simulates a Claude binary that hangs or fails to start properly).
-// We use a real mock-claude binary that reads from a "never" transcript —
-// a transcript with a single turn boundary so it never emits init.
+// TestStartupTimeoutKillsProcess verifies the non-blocking start() contract.
+//
+// In --input-format stream-json mode, Claude only emits the init event after
+// receiving the first user message. start() must return nil immediately so the
+// session can accept input. The background goroutine handles lifecycle (early
+// exit, timeout) asynchronously.
+//
+// Previously start() blocked on init and returned an error if init was not
+// received. That behavior was removed when stream-json mode was adopted.
+// This test verifies the new contract: start() returns nil even when the
+// mock-claude binary exits before emitting an init event.
 func TestStartupTimeoutKillsProcess(t *testing.T) {
-	if testing.Short() {
-		t.Skip("startup timeout test takes 30s; skip in short mode")
-	}
-
 	mockClaude := testutil.MockClaudePath(t)
 
-	// Create a temporary transcript that never emits an init event.
-	// The transcript contains only an empty turn (nothing on stdout).
+	// Create a transcript that never emits any events — mock-claude exits
+	// immediately with 0 without emitting init.
 	dir := t.TempDir()
 	noInitTranscript := dir + "/no_init.jsonl"
-	// An empty file: no events at all — mock-claude exits immediately with 0.
-	// This triggers the "exited before init" error path.
 	if err := writeFile(noInitTranscript, ""); err != nil {
 		t.Fatalf("write transcript: %v", err)
 	}
 
 	st := SessionState{
-		ID:        "sess-timeout",
+		ID:        "sess-no-init",
 		ProjectID: "test-proj",
 		State:     StateIdle,
 		CreatedAt: time.Now(),
@@ -381,12 +382,23 @@ func TestStartupTimeoutKillsProcess(t *testing.T) {
 	publish := func(string, []byte) error { return nil }
 	writeKV := func(SessionState) error { return nil }
 
+	// start() must return nil immediately — the non-blocking stream-json contract.
+	// The session accepts input; init arrives asynchronously on the first message.
 	err := sess.start(mockClaude, false, publish, writeKV)
-	if err == nil {
-		t.Fatal("expected error when Claude exits before emitting init, got nil")
+	if err != nil {
+		t.Fatalf("start() returned error; want nil (non-blocking stream-json contract): %v", err)
 	}
-	if !strings.Contains(err.Error(), "before emitting init") {
-		t.Errorf("error message should mention 'before emitting init', got: %q", err.Error())
+
+	// The session process may exit quickly (empty transcript). Wait for doneCh
+	// to confirm the background goroutine cleans up without panicking.
+	select {
+	case <-sess.doneCh:
+		// Process exited cleanly — correct behavior.
+	case <-time.After(5 * time.Second):
+		// Timeout is acceptable: mock-claude may be idle waiting for input.
+		// The contract only requires start() to return nil, not that the process
+		// exits by a deadline. Stop it explicitly.
+		sess.stop()
 	}
 }
 
