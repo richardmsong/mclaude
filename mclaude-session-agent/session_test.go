@@ -402,6 +402,63 @@ func TestEventSubjectFormat(t *testing.T) {
 	}
 }
 
+// TestSpawnArgsIncludeDisallowedTools verifies that start() passes
+// --disallowedTools flags to Claude for each entry in session.disallowedTools.
+// This applies to both new-session and resume paths.
+func TestSpawnArgsIncludeDisallowedTools(t *testing.T) {
+	mockClaude := testutil.MockClaudePath(t)
+	transcript := testutil.TranscriptPath("simple_message.jsonl")
+
+	for _, resume := range []bool{false, true} {
+		resume := resume
+		name := "new-session"
+		if resume {
+			name = "resume-session"
+		}
+		t.Run(name, func(t *testing.T) {
+			sessID := "sess-disallowed-" + name
+			st := SessionState{
+				ID:        sessID,
+				ProjectID: "test-proj",
+				State:     StateIdle,
+				CreatedAt: time.Now(),
+			}
+			sess := newSession(st, "test-user")
+			sess.extraEnv = []string{"MOCK_TRANSCRIPT=" + transcript}
+			sess.disallowedTools = []string{"Edit(src/**)", "Write"}
+
+			pc := &publishCapture{}
+			kc := &kvCapture{}
+
+			if err := sess.start(mockClaude, resume, pc.publish, kc.write); err != nil {
+				t.Fatalf("session.start: %v", err)
+			}
+			t.Cleanup(func() {
+				sess.stop()
+				sess.waitDone()
+			})
+
+			sess.mu.Lock()
+			args := sess.cmd.Args
+			sess.mu.Unlock()
+
+			// Each disallowedTool must appear as --disallowedTools <tool> pair.
+			for _, want := range []string{"Edit(src/**)", "Write"} {
+				var found bool
+				for i, arg := range args {
+					if arg == "--disallowedTools" && i+1 < len(args) && args[i+1] == want {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("--disallowedTools %s not found in spawn args: %v", want, args)
+				}
+			}
+		})
+	}
+}
+
 // TestSpawnArgsIncludeReplayUserMessages verifies that start() passes
 // --replay-user-messages to the Claude process for both new and resume sessions.
 // The spec (plan-replay-user-messages.md) requires this flag to enable Claude

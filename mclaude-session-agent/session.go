@@ -47,6 +47,9 @@ type Session struct {
 	// allowedTools is the set of tool names auto-approved under allowlist policy.
 	// Ignored for other policies.
 	allowedTools map[string]bool
+	// disallowedTools is the list of tool restriction patterns passed verbatim
+	// as --disallowedTools flags to the Claude spawn command.
+	disallowedTools []string
 	// onEventPublished, if non-nil, is called after each successful NATS publish
 	// with the event type and the JetStream sequence number of the published message.
 	// Used by the agent to update replayFromSeq on compact_boundary events.
@@ -153,6 +156,11 @@ func (s *Session) start(claudePath string, resume bool, publish func(subject str
 			"--replay-user-messages",
 			"--session-id", s.state.ID,
 		}
+	}
+
+	// Append --disallowedTools flags for each pattern.
+	for _, tool := range s.disallowedTools {
+		args = append(args, "--disallowedTools", tool)
 	}
 
 	cmd := exec.Command(claudePath, args...)
