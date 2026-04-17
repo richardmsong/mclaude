@@ -185,22 +185,20 @@ KV bucket: mclaude-sessions
 KV bucket: mclaude-projects
   key: {userId}/{projectId}              → Project JSON (see below)
 
-KV bucket: mclaude-heartbeats
-  key: {userId}/{location}/{projectId}  → {"ts": "..."}
-
 KV bucket: mclaude-locations
   key: {userId}/{location}              → {"type": "k8s"|"laptop", "machineId": "...", "ts": "..."}
 ```
 
 Watching a KV key gives real-time state updates to any subscriber. Clients watch their own user's keys.
 
-**Bucket initialization**: control-plane creates all four buckets idempotently on startup (`nats.KeyValueStoreOrCreate`). Session agents and launchers do not create buckets — they fail fast if a bucket doesn't exist (indicates control-plane hasn't started yet).
+**Bucket initialization**: control-plane creates all buckets idempotently on startup (`nats.KeyValueStoreOrCreate`). Session agents and launchers do not create buckets — they fail fast if a bucket doesn't exist (indicates control-plane hasn't started yet).
 
 **Entry lifetime**:
 - `mclaude-sessions`: deleted by session agent on normal session delete. Orphaned entries (ungraceful shutdown) are swept by the daily JSONL cleanup job — any KV entry whose sessionId has no corresponding JSONL file on PVC older than 7 days is purged.
 - `mclaude-projects`: deleted by control-plane on project delete.
-- `mclaude-heartbeats`: TTL 90s on the KV entry itself (NATS KV native TTL). Expires automatically if agent stops writing.
 - `mclaude-laptops`: TTL 24h. Launcher refreshes on startup and every 12h.
+
+**Agent/controller liveness**: detected via NATS `$SYS` presence events (connect/disconnect), not heartbeats. Control-plane subscribes to `$SYS.ACCOUNT.*.CONNECT` and `$SYS.ACCOUNT.*.DISCONNECT`, identifies the client type from JWT claims, and updates status in KV. See `plan-nats-security.md` for details.
 
 ---
 
@@ -265,7 +263,6 @@ Single Go binary. Runs as a container inside each K8s project pod, or as a stand
 - Caches capabilities from `init` event (skills, tools, agents, model) in NATS KV, refreshes on `reload_plugins`
 - Spawns terminal (PTY) sessions via `creack/pty`, routes raw I/O through NATS
 - Exposes unix socket for `mclaude-cli` debug attach
-- Writes heartbeat to NATS KV every 30s (staleness detection for clients)
 - On startup, reads NATS KV for existing sessions → relaunches with `--resume`
 
 No tmux. No JSONL tailing. No screen scraping. No HTTP server.
@@ -1240,14 +1237,7 @@ Clearing `pendingControls` in step 2 is safe: on `--resume`, Claude Code sees th
 
 This is the same sequence as a graceful restart — the agent doesn't distinguish between the two. It always re-derives state from Claude Code on startup.
 
-**Staleness detection** (heartbeats): the session agent writes a heartbeat to NATS KV every 30s:
-
-```
-KV bucket: mclaude-heartbeats
-  key: {userId}/{projectId}  →  {"ts": "2026-04-11T10:00:30Z"}
-```
-
-Clients check `now - lastHeartbeat > 60s` → agent is dead or unreachable, show "reconnecting" in the UI. When heartbeats resume after pod restart, client clears the warning and re-reads session state from KV.
+**Agent liveness**: detected via NATS `$SYS` presence events. When the session-agent's NATS connection drops (crash, pod eviction, network failure), NATS emits a disconnect event. Control-plane receives it, identifies the agent from JWT claims, and updates agent status in KV. SPA watches KV and shows "offline" indicator. When the agent reconnects, NATS emits a connect event and control-plane marks it healthy again. No heartbeat loop, no staleness threshold — NATS handles liveness detection natively via TCP keepalive and ping/pong.
 
 **Claude process crash**: session-agent detects child process exit, publishes lifecycle event, updates NATS KV state. Auto-restart with `--resume` if exit was unexpected (non-zero, no interrupt signal).
 

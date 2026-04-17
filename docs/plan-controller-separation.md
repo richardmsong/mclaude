@@ -24,6 +24,9 @@ Extract the MCProject reconciler from the control-plane into its own binary (`mc
 | Command bus | NATS only, HTTP only for browser auth flows | Everything is an event. HTTP for OAuth callbacks, login, health probes only. |
 | Admin break-glass | Removed | If NATS is down, the whole system is down. Use kubectl/psql directly. |
 | KV writes | Controller writes project status to KV directly | Controller knows actual resource state. No round-trip through control-plane. Control-plane writes project metadata and access lists. |
+| Access control | Control-plane routes commands to controllers | Control-plane checks Postgres access before forwarding to `mclaude.clusters.{clusterId}.>`. Controller never sees unauthorized events. No KV access map needed. |
+| Subject structure | User subjects separate from cluster subjects | SPA publishes to `mclaude.{userId}.projects.*`, control-plane forwards to `mclaude.clusters.{clusterId}.projects.*`. Cluster ID is a routing decision, not part of the user's namespace. |
+| Liveness detection | NATS `$SYS` presence events | No heartbeats. NATS emits connect/disconnect events. Control-plane subscribes and updates KV. Covers both agent health and controller liveness. |
 | NATS backup | Out of scope — separate plan for S3 archiver | NATS streams hold user session data. Needs durable backup strategy. |
 
 ---
@@ -131,18 +134,30 @@ type LocalProvisioner struct { /* process table */ }
 
 ## NATS Subject Taxonomy
 
-### Project Lifecycle
+### Project Lifecycle (user → control-plane)
 
 ```
-mclaude.{userId}.clusters.{clusterId}.projects.create
-mclaude.{userId}.clusters.{clusterId}.projects.update
-mclaude.{userId}.clusters.{clusterId}.projects.delete
+mclaude.{userId}.projects.create
+mclaude.{userId}.projects.update
+mclaude.{userId}.projects.delete
 ```
 
-- **Publisher**: SPA (user selects target cluster)
-- **Subscribers**:
-  - Control-plane: `mclaude.*.clusters.*.projects.>` — writes Postgres, writes KV (Status: Pending)
-  - Controller: `mclaude.*.clusters.{itsClusterId}.projects.>` — provisions resources
+- **Publisher**: SPA
+- **Subscriber**: Control-plane (`mclaude.*.projects.>`)
+- Payload includes `clusterId` (optional — control-plane picks default for single-cluster)
+- Control-plane validates, checks access (Postgres), writes Postgres + KV, then **forwards** to the controller
+
+### Project Commands (control-plane → controller)
+
+```
+mclaude.clusters.{clusterId}.projects.create
+mclaude.clusters.{clusterId}.projects.update
+mclaude.clusters.{clusterId}.projects.delete
+```
+
+- **Publisher**: Control-plane (after access check and Postgres write)
+- **Subscriber**: Controller (`mclaude.clusters.{itsClusterId}.>`)
+- Controller never receives unauthorized events — control-plane is the gatekeeper
 
 ### Status Updates
 
@@ -164,14 +179,26 @@ mclaude.{userId}.targets.deregister
 mclaude.{userId}.sessions.{sessionId}.>
 ```
 
+Direct SPA ↔ session-agent. No routing through control-plane.
+
+### Presence Detection
+
+```
+$SYS.ACCOUNT.{accountId}.CONNECT
+$SYS.ACCOUNT.{accountId}.DISCONNECT
+```
+
+- **Publisher**: NATS server (automatic on client connect/disconnect)
+- **Subscriber**: Control-plane (requires system account permissions)
+- Replaces all heartbeat mechanisms (agent health + controller liveness)
+
 ### Subject Permissions Per Identity
 
 | Identity | Subscribe | Publish |
 |----------|-----------|---------|
 | SPA (user) | `mclaude.{userId}.>` | `mclaude.{userId}.>` |
-| Control-plane | `mclaude.>` | `mclaude.>`, `$KV.mclaude-access.>`, `$KV.mclaude-sessions.>` |
-| K8s controller | `mclaude.*.clusters.{clusterId}.>`, `$KV.mclaude-access.>` | `$KV.mclaude-projects.>` |
-| BYOH controller | `mclaude.*.clusters.{clusterId}.>`, `$KV.mclaude-access.>` | `$KV.mclaude-projects.>` |
+| Control-plane | `mclaude.>`, `$SYS.ACCOUNT.>` | `mclaude.>`, `mclaude.clusters.>`, `$KV.mclaude-sessions.>` |
+| Controller | `mclaude.clusters.{clusterId}.>` | `$KV.mclaude-projects.>` |
 
 See `docs/plan-nats-security.md` for full threat model.
 
@@ -180,23 +207,25 @@ See `docs/plan-nats-security.md` for full threat model.
 ## Event Flow: Project Creation
 
 ```
-1. User clicks "New Project" in SPA, selects cluster
-2. SPA publishes: mclaude.{userId}.clusters.{clusterId}.projects.create
-   payload: {name, gitURL, gitIdentityID}
+1. User clicks "New Project" in SPA (selects cluster if multiple available)
+2. SPA publishes: mclaude.{userId}.projects.create
+   payload: {name, gitURL, gitIdentityID, clusterId?}
 
-3. Control-plane receives (subscribes to mclaude.*.clusters.*.projects.>):
+3. Control-plane receives (subscribes to mclaude.*.projects.>):
    a. Validates request
-   b. Creates project row in Postgres
-   c. Writes KV: {id, name, gitURL, status: "Pending"}
-   d. Replies to SPA with project ID
+   b. Resolves clusterId (default if omitted, or validates user has access)
+   c. Creates project row in Postgres
+   d. Writes KV: {id, name, gitURL, status: "Pending"}
+   e. Replies to SPA with project ID
+   f. Forwards to controller: mclaude.clusters.{clusterId}.projects.create
+      payload: {projectId, userId, name, gitURL, gitIdentityID}
 
-4. Controller receives (subscribes to mclaude.*.clusters.{itsClusterId}.projects.>):
-   a. Checks access: is userId authorized for this cluster? (in-memory map from KV watch)
-   b. If unauthorized → drop, log warning
-   c. Creates MCProject CR in mclaude-system namespace
-   d. Reconciler watches CR → provisions namespace, RBAC, secrets, PVCs, deployment
+4. Controller receives (subscribes to mclaude.clusters.{itsClusterId}.>):
+   a. Creates MCProject CR in mclaude-system namespace
+   b. Reconciler watches CR → provisions namespace, RBAC, secrets, PVCs, deployment
+   (No access check needed — control-plane already validated)
 
-5. Controller writes KV directly: mclaude-projects.{projectId} = {status: "Provisioning"}
+5. Controller writes KV: mclaude-projects.{projectId} = {status: "Provisioning"}
 
 6. SPA KV watch fires → UI shows project as Provisioning
 
@@ -239,11 +268,11 @@ Stops the controller from reconciling owned resources (deployments, secrets, RBA
 
 ### Intended State
 
-The controller compares MCProject spec to the intended state from NATS KV (the `mclaude-projects` bucket). On every reconcile:
-1. Read intended spec from KV
-2. If CR spec differs from KV and `suspend-spec` is not set → revert CR spec to KV value
-3. If `suspend-spec` is set → trust CR spec as-is
-4. Reconcile owned resources from CR spec (unless `suspend-resources` is set)
+The controller compares MCProject spec to the intended state from the last received NATS command. On every reconcile:
+1. If a new NATS command arrived and `suspend-spec` is not set → update CR spec to match
+2. If `suspend-spec` is set → trust CR spec as-is (NATS commands for this project are ignored)
+3. Reconcile owned resources from CR spec (unless `suspend-resources` is set)
+4. Write current status to KV (`mclaude-projects` bucket)
 
 ---
 
@@ -307,10 +336,7 @@ mclaude register --name "my-laptop" --server https://dev.mclaude.local
 2. SPA requests target list via NATS request/reply
 3. Target list included in login response
 
-**OPEN QUESTION**: How does the SPA know a target is online/offline? Options:
-1. Controller heartbeat to NATS → control-plane tracks in KV
-2. SPA pings controller via NATS request/reply
-3. Stale detection (last heartbeat > threshold)
+**RESOLVED**: SPA knows target online/offline status via KV. Control-plane subscribes to NATS `$SYS` presence events — when a controller connects or disconnects, control-plane updates the target's status in KV. SPA watches KV.
 
 ---
 
@@ -360,8 +386,7 @@ type MCProjectReconciler struct {
     clusterID           string
     sessionAgentNATSURL string
     accountKP           nkeys.KeyPair
-    nc                  *nats.Conn          // for status events + KV reads
-    accessMap           sync.Map            // in-memory access list from KV watch
+    nc                  *nats.Conn          // for KV writes (project status)
     logger              zerolog.Logger
 }
 ```
@@ -498,9 +523,9 @@ jobs:
 
 ## Error Handling
 
-### Controller receives unauthorized project create
+### Unauthorized project create
 
-Controller checks in-memory access map. If userId is not authorized for this clusterId, message is dropped and warning logged. No error returned to SPA (SPA doesn't know about the controller).
+Control-plane checks access in Postgres before forwarding. If the user isn't authorized for the requested cluster, control-plane replies to the SPA with an error. The command never reaches the controller.
 
 ### Controller can't reach NATS
 
@@ -510,9 +535,9 @@ Controller retries with exponential backoff. MCProject CRs continue to be reconc
 
 KV entry gets created but is orphaned. Control-plane's project-deleted handler can clean up stale KV entries. No harm — SPA ignores unknown project IDs in KV watches.
 
-### KV watch falls behind
+### Access revoked while command in flight
 
-Controller's in-memory access map may be stale. Worst case: controller provisions a project for a user who just lost access. Access map catches up on next KV update. Acceptable latency.
+Control-plane checked access and forwarded the command. Between the forward and the controller acting on it, the user's access was revoked. Worst case: one project is provisioned for a user who just lost access. Acceptable — admin can delete the project. Race window is sub-second.
 
 ---
 

@@ -19,12 +19,12 @@ Future: Figma designs linked per feature.
 
 | # | Feature | Description |
 |---|---------|-------------|
-| P1 | Project list | List projects with health status (from heartbeat monitor) |
+| P1 | Project list | List projects with health status (from NATS presence via KV) |
 | P2 | Session list | List sessions per project with state, model, branch, cost |
 | P3 | Create session | Specify project, branch, optional name |
 | P4 | Delete session | Stop Claude process, clean up worktree |
 | P5 | Session state indicator | Live idle/running/requires_action/restarting/failed badge |
-| P6 | Agent health banner | Show warning when heartbeat is stale (agent down) |
+| P6 | Agent health banner | Show warning when agent disconnects (NATS presence detection) |
 
 ## Conversation
 

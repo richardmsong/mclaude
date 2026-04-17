@@ -108,18 +108,15 @@ Watches NATS KV for session and project state.
 SessionStore(natsClient, userId)
   sessions: Map<sessionId, SessionState>
   projects: Map<projectId, ProjectState>
-  heartbeats: Map<projectId, { ts, healthy }>
   
   // Start watching KV buckets
   startWatching()
   
   // Derived state
   getSessionsForProject(projectId) → SessionState[]
-  isAgentHealthy(projectId) → boolean
   
   onSessionChanged(callback)
   onProjectChanged(callback)
-  onHealthChanged(callback)
 ```
 
 Where `SessionState` mirrors the NATS KV schema:
@@ -144,8 +141,7 @@ SessionState {
 
 Responsibilities:
 - Watches `mclaude-sessions` and `mclaude-projects` KV buckets for the user's keys
-- Watches `mclaude-heartbeats` for agent health
-- Marks agent as unhealthy when `now - heartbeat.ts > 60s`
+- Agent health is tracked via NATS `$SYS` presence events (control-plane writes health status to project KV entries)
 - Emits change events for upper layers to react to
 - No rendering — just data
 
@@ -282,27 +278,6 @@ Responsibilities:
 - Forwards lifecycle events (session_created, session_stopped, session_restarting, etc.)
 - SessionStore uses these to supplement KV watches (faster notification than KV propagation)
 
-### HeartbeatMonitor
-
-Checks agent health from NATS KV heartbeats.
-
-```
-HeartbeatMonitor(natsClient, userId)
-  health: Map<projectId, { ts, healthy }>
-  
-  start(checkIntervalMs: 5000)
-  stop()
-  
-  isHealthy(projectId) → boolean
-  onHealthChanged(callback)
-```
-
-Responsibilities:
-- Watches `mclaude-heartbeats` KV bucket
-- Every check interval, evaluates `now - ts > threshold` for each project
-- Emits health change events (healthy → unhealthy, unhealthy → healthy)
-- Threshold is configurable (default 60s)
-
 ---
 
 ## View Model Layer
@@ -312,7 +287,7 @@ Responsible for: combining store data into view-ready models, handling user acti
 ### SessionListVM
 
 ```
-SessionListVM(sessionStore, lifecycleStore, heartbeatMonitor)
+SessionListVM(sessionStore, lifecycleStore)
   // View-ready data
   projects: ProjectVM[]
   
@@ -329,7 +304,7 @@ ProjectVM {
   id: string
   name: string
   status: string
-  healthy: boolean       // from heartbeat monitor
+  healthy: boolean       // from project KV entry (set by control-plane via $SYS presence)
   sessions: SessionVM[]
 }
 
@@ -499,7 +474,6 @@ mclaude.{userId}.{projectId}.terminal.{termId}.input   → fire-and-forget
 ```
 mclaude-sessions:  {userId}/{projectId}/{sessionId}    → SessionState JSON
 mclaude-projects:  {userId}/{projectId}                → ProjectState JSON
-mclaude-heartbeats: {userId}/{projectId}               → { ts: ISO8601 }
 ```
 
 ### Stream-JSON Event Types (parse)
@@ -665,7 +639,7 @@ Several caches exist in the system. Each has different staleness characteristics
 Session state, capabilities, usage, pending control requests. Write-through — the session agent updates KV on every relevant event, so KV is always current while the agent is alive.
 
 **Goes stale when**: session agent crashes (KV retains last written value).
-**Invalidated by**: heartbeat staleness detection (>60s without heartbeat). Recovery sequence rewrites all KV entries from fresh Claude Code state.
+**Invalidated by**: NATS `$SYS` disconnect event (control-plane marks agent offline in project KV). Recovery sequence on reconnect rewrites all KV entries from fresh Claude Code state.
 
 ### ConversationModel (client-side in-memory accumulation)
 
@@ -730,7 +704,6 @@ src/
     session-store.ts      KV watches, session/project state
     event-store.ts        JetStream subscription, conversation accumulation
     lifecycle-store.ts    Lifecycle event subscription
-    heartbeat-monitor.ts  Agent health checks
   viewmodels/
     session-list-vm.ts    Project + session list
     conversation-vm.ts    Conversation view model + actions
