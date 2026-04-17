@@ -23,7 +23,7 @@ Extract the MCProject reconciler from the control-plane into its own binary (`mc
 | Provisioner interface | Shared interface, separate implementations | K8s controller: provisions pods. Local controller: manages processes. Shared NATS subscriber logic. |
 | Command bus | NATS only, HTTP only for browser auth flows | Everything is an event. HTTP for OAuth callbacks, login, health probes only. |
 | Admin break-glass | Removed | If NATS is down, the whole system is down. Use kubectl/psql directly. |
-| KV writes | Control-plane is sole KV writer | See plan-nats-security.md for threat model. Controller publishes status events → control-plane updates KV. |
+| KV writes | Controller writes project status to KV directly | Controller knows actual resource state. No round-trip through control-plane. Control-plane writes project metadata and access lists. |
 | NATS backup | Out of scope — separate plan for S3 archiver | NATS streams hold user session data. Needs durable backup strategy. |
 
 ---
@@ -144,14 +144,9 @@ mclaude.{userId}.clusters.{clusterId}.projects.delete
   - Control-plane: `mclaude.*.clusters.*.projects.>` — writes Postgres, writes KV (Status: Pending)
   - Controller: `mclaude.*.clusters.{itsClusterId}.projects.>` — provisions resources
 
-### Status Events
+### Status Updates
 
-```
-mclaude.system.clusters.{clusterId}.projects.{projectId}.status
-```
-
-- **Publisher**: Controller (after reconciliation)
-- **Subscriber**: Control-plane — updates KV with current phase
+Controller writes project status directly to NATS KV (`mclaude-projects` bucket). No status event subjects needed — KV watches propagate the update to SPA and control-plane.
 
 ### Target Registration
 
@@ -174,9 +169,9 @@ mclaude.{userId}.sessions.{sessionId}.>
 | Identity | Subscribe | Publish |
 |----------|-----------|---------|
 | SPA (user) | `mclaude.{userId}.>` | `mclaude.{userId}.>` |
-| Control-plane | `mclaude.>` | `mclaude.>`, `$KV.>` (sole KV writer) |
-| K8s controller | `mclaude.*.clusters.{clusterId}.>` | `mclaude.system.clusters.{clusterId}.status.>` |
-| BYOH controller | `mclaude.*.clusters.{clusterId}.>` | `mclaude.system.clusters.{clusterId}.status.>` |
+| Control-plane | `mclaude.>` | `mclaude.>`, `$KV.mclaude-access.>`, `$KV.mclaude-sessions.>` |
+| K8s controller | `mclaude.*.clusters.{clusterId}.>`, `$KV.mclaude-access.>` | `$KV.mclaude-projects.>` |
+| BYOH controller | `mclaude.*.clusters.{clusterId}.>`, `$KV.mclaude-access.>` | `$KV.mclaude-projects.>` |
 
 See `docs/plan-nats-security.md` for full threat model.
 
@@ -201,18 +196,14 @@ See `docs/plan-nats-security.md` for full threat model.
    c. Creates MCProject CR in mclaude-system namespace
    d. Reconciler watches CR → provisions namespace, RBAC, secrets, PVCs, deployment
 
-5. Controller publishes: mclaude.system.clusters.{clusterId}.projects.{projectId}.status
-   payload: {projectId, userId, phase: "Provisioning"}
+5. Controller writes KV directly: mclaude-projects.{projectId} = {status: "Provisioning"}
 
-6. Control-plane receives status event:
-   a. Updates KV: {status: "Provisioning"}
+6. SPA KV watch fires → UI shows project as Provisioning
 
 7. Controller reconciliation completes:
-   publishes: {phase: "Ready"}
+   Writes KV: mclaude-projects.{projectId} = {status: "Ready"}
 
-8. Control-plane updates KV: {status: "Ready"}
-
-9. SPA KV watch fires → UI shows project as Ready
+8. SPA KV watch fires → UI shows project as Ready
 ```
 
 ---
@@ -513,11 +504,11 @@ Controller checks in-memory access map. If userId is not authorized for this clu
 
 ### Controller can't reach NATS
 
-Controller retries with exponential backoff. MCProject CRs continue to be reconciled (K8s watches are independent of NATS). Status events queue locally until NATS reconnects.
+Controller retries with exponential backoff. MCProject CRs continue to be reconciled (K8s watches are independent of NATS). KV status writes queue locally until NATS reconnects.
 
-### Control-plane receives status event for unknown project
+### Controller writes status for deleted project
 
-Log warning, ignore. Project may have been deleted between status emit and receipt.
+KV entry gets created but is orphaned. Control-plane's project-deleted handler can clean up stale KV entries. No harm — SPA ignores unknown project IDs in KV watches.
 
 ### KV watch falls behind
 
