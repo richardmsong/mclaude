@@ -700,7 +700,7 @@ Bottom sheet modal with scrim overlay. Shows current session settings and restar
 ```
 
 - Pre-fills `extraFlags` textarea with the value from the current session's KV entry (read from `sessionVm.extraFlags`).
-- **Restart Session** button: sends `sessions.restart` with `{ sessionId, extraFlags }` (extraFlags is the trimmed textarea value; empty string if blank), then closes the sheet. The session will briefly show "restarting" state as the agent kills and relaunches the Claude process.
+- **Restart Session** button: sends `sessions.restart` with `{ sessionId, extraFlags }` (extraFlags is the trimmed textarea value; omit if blank/whitespace-only), then closes the sheet. The session will briefly show "restarting" state as the agent kills and relaunches the Claude process.
 
 ---
 
