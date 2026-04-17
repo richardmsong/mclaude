@@ -89,8 +89,8 @@ Migration strategy: The control plane startup sequence runs in order: (1) `Migra
 `POST /admin/clusters` — Register a new worker cluster.
 - Auth: admin bearer token (same as existing admin endpoints)
 - Request: `{ name, natsUrl, natsWsUrl?, labels? }`
-- Response (201): `{ id, name, jsDomain, leafCreds, hubNatsUrl, hubLeafPort, accountPubKey, status }`
-- Behavior: generates the JetStream domain name by slugifying the cluster name (lowercase, replace non-alphanumeric with `-`, trim, truncate to 63 chars). If the slug collides with an existing `js_domain`, appends a 4-char random suffix. Creates a leaf NKey pair, stores the cluster record, returns credentials for worker NATS configuration.
+- Response (201): `{ id, name, jsDomain, leafNkeySeed, controllerCreds, hubNatsUrl, hubLeafPort, accountPubKey, operatorJwt, accountJwt, status }` — `leafNkeySeed` is the raw NKey seed for leaf node auth (NATS leaf connections use NKey pairs directly, not JWTs). `controllerCreds` is a full NATS `.creds` file (JWT + NKey seed, formatted by `FormatNATSCredentials`).
+- Behavior: generates the JetStream domain name by slugifying the cluster name (lowercase, replace non-alphanumeric with `-`, trim, truncate to 63 chars). If the slug collides with an existing `js_domain`, appends a 4-char random suffix. Creates a leaf NKey pair (`nkeys.CreateUser()` — the seed is stored in `clusters.leaf_creds` and returned as `leafNkeySeed`). Issues a controller JWT via `IssueControllerJWT` (returned as `controllerCreds` in `.creds` format). Stores the cluster record in Postgres, returns credentials for worker NATS configuration.
 - Error: 409 if `name` already exists.
 
 `GET /admin/clusters` — List all clusters.
@@ -141,7 +141,46 @@ Migration strategy: The control plane startup sequence runs in order: (1) `Migra
 
 The `natsUrl` is always the hub. `directNatsUrl` per cluster/project is the worker's WebSocket URL (empty if not externally accessible).
 
-The `AuthTokens` type gains `projects` and `clusters` arrays matching the JSON above. `AuthStore` stores these after login and exposes them to other stores. `SessionStore` reads `clusters` from `AuthStore` on initialization to open per-cluster KV watches. `EventStore` reads `projects` to look up `jsDomain` and `directNatsUrl` for the active session's project.
+The `AuthTokens` type gains `projects` and `clusters` arrays matching the JSON above:
+
+```typescript
+export interface ClusterInfo {
+  id: string
+  name: string
+  jsDomain: string
+  directNatsUrl: string  // empty if not externally accessible
+}
+
+export interface ProjectInfo {
+  id: string
+  name: string
+  clusterId: string
+  clusterName: string
+  jsDomain: string
+  directNatsUrl: string
+}
+
+export interface AuthTokens {
+  jwt: string
+  nkeySeed: string
+  userId: string
+  natsUrl?: string        // hub NATS URL (always set in multi-cluster)
+  projects?: ProjectInfo[]
+  clusters?: ClusterInfo[]
+}
+```
+
+`AuthStore` stores these after login and exposes typed accessors:
+
+```typescript
+// Added to AuthStore:
+getProjects(): ProjectInfo[] { return this._tokens?.projects ?? [] }
+getClusters(): ClusterInfo[] { return this._tokens?.clusters ?? [] }
+getJwt(): string { return this._tokens?.jwt ?? '' }
+getNkeySeed(): string { return this._tokens?.nkeySeed ?? '' }
+```
+
+`SessionStore` reads `getClusters()` on initialization to open per-cluster KV watches. `EventStore`'s caller reads `getProjects()`, `getJwt()`, and `getNkeySeed()` to populate `EventStoreOptions` with the direct connection credentials.
 
 **Modified project creation** — cluster assignment:
 
@@ -155,19 +194,22 @@ Reply: `{ status: "ok" | "error", message? }`
 
 The control plane publishes this as a NATS request (request/reply). The message routes through the hub's leaf node to the target worker. For the local cluster (degenerate single-cluster mode), the control plane can still create CRDs directly as today — the NATS path is for remote workers.
 
-**Hub NATS configuration** — the control plane cluster's NATS adds a leaf node listener and account-based authorization:
+**Hub NATS configuration** — the control plane cluster's NATS adds a leaf node listener and JWT-based authorization:
 
 ```
 leafnodes {
   port: 7422
 }
 
-authorization {
-  account: $MCLAUDE_ACCOUNT_PUBLIC_KEY
+# JWT auth: operator → account → user chain
+operator: $OPERATOR_JWT
+resolver: MEMORY
+resolver_preload: {
+  $ACCOUNT_PUBLIC_KEY: $ACCOUNT_JWT
 }
 ```
 
-The `authorization` block with an `account` field configures NATS to verify user JWTs signed by the mclaude account NKey. This is the NATS "account-only" auth mode — no operator, no resolver, just a single account public key baked into the config. The account public key is injected via Helm values (derived from the account NKey seed the control plane generates at initial setup). Worker NATS instances use the same `authorization { account: ... }` block with the same public key (shared account key), plus a `system_account` NKey for the worker controller (see Worker Controller section).
+NATS JWT auth requires a three-tier trust chain: operator signs account JWTs, account signs user JWTs. The control plane generates both the operator and account NKey pairs at initial setup and issues an account JWT signed by the operator. The NATS server config uses `resolver: MEMORY` with the account JWT preloaded — no external resolver needed for a single-account setup. The operator JWT, account JWT, and account public key are injected via Helm values / K8s secrets. Worker NATS instances use the same `operator` + `resolver_preload` block (same trust chain), so user JWTs issued by the control plane are valid on all NATS instances.
 
 All other NATS config (WebSocket, JetStream, max payload) remains as today.
 
@@ -181,18 +223,23 @@ New component deployed by the mclaude-worker Helm chart. Runs in the worker clus
 - The existing reconciler (already part of the codebase) watches MCProject CRDs and provisions namespaces, PVCs, deployments, secrets — unchanged
 - Publishes provisioning status back via NATS reply
 
-**NATS connection:** Connects to the local worker NATS using an NKey seed credential. The control plane generates a controller NKey pair during cluster registration (separate from user NKeys and leaf NKeys). The NKey seed is included in the `POST /admin/clusters` registration response (alongside `leafCreds`) and stored as a K8s secret in the worker's `mclaude-system` namespace. The worker NATS config includes a `users` block that trusts this NKey public key with full publish/subscribe permissions on `mclaude.clusters.>` subjects:
+**NATS connection:** Connects to the local worker NATS using a controller credentials file (JWT + NKey seed in standard `.creds` format). The control plane generates a controller user JWT during cluster registration (separate from end-user JWTs — permissions are scoped to `mclaude.clusters.{clusterId}.>` subjects for provisioning and heartbeats). The full credentials file (`controllerCreds`) is included in the `POST /admin/clusters` registration response (alongside `leafCreds`) and stored as a K8s secret in the worker's `mclaude-system` namespace. The controller JWT is issued by the same account key as user JWTs, so the worker NATS (which trusts the same account) validates it automatically:
 
-```
-authorization {
-  account: $MCLAUDE_ACCOUNT_PUBLIC_KEY
-  users: [
-    { nkey: $CONTROLLER_NKEY_PUBLIC, permissions: { publish: "mclaude.clusters.>", subscribe: "mclaude.clusters.>" } }
-  ]
+```go
+// IssueControllerJWT issues a NATS user JWT for a worker controller,
+// scoped to mclaude.clusters.{clusterId}.> subjects. No expiry.
+func IssueControllerJWT(clusterId string, accountKP nkeys.KeyPair) (jwt string, seed []byte, err error) {
+    userKP, userSeed, err := GenerateUserNKey()
+    claims := natsjwt.NewUserClaims(userKP.PublicKey)
+    claims.Name = "controller-" + clusterId
+    claims.Permissions.Pub.Allow = []string{"mclaude.clusters." + clusterId + ".>"}
+    claims.Permissions.Sub.Allow = []string{"mclaude.clusters." + clusterId + ".>"}
+    encoded, _ := claims.Encode(accountKP)
+    return encoded, userSeed, nil
 }
 ```
 
-The controller connects with `nats.NkeyOptionFromSeed(seedFile)`. Messages reach the hub transparently via the leaf node.
+The controller connects with `nats.UserCredentials(credsFilePath)`. Messages reach the hub transparently via the leaf node.
 
 **K8s access:** Full cluster access (same ServiceAccount/RBAC as the existing reconciler). Only operates on its own cluster.
 
@@ -224,20 +271,26 @@ The SPA maintains up to two NATS connections:
 
 **Dashboard / session list:**
 
-On login, the SPA opens domain-qualified KV watches through the hub for each cluster the user has projects on:
+On login, `SessionStore.startWatching()` opens domain-qualified KV watches through the hub for each cluster the user has projects on. State changes on any cluster update the session list in real time.
 
-```typescript
-for (const cluster of loginResponse.clusters) {
-  natsClient.kvWatch(
-    'mclaude-sessions',
-    `${userId}.>`,
-    (entry) => sessionStore.handleKVUpdate(entry, cluster),
-    cluster.jsDomain   // domain parameter
-  )
-}
-```
+**SessionStore constructor changes:** `SessionStore` constructor gains an optional `clusters: ClusterInfo[]` parameter. `startWatching()` behavior depends on `clusters`:
 
-State changes on any cluster update the session list in real time. The SessionStore aggregates entries from all cluster watchers into a single list. Each `SessionKVState` is tagged with cluster metadata: `clusterId`, `clusterName`, and `jsDomain` are added to the KV update callback, not stored in the KV value itself (the session-agent doesn't know about clusters).
+- **Multi-cluster** (`clusters.length > 1`): iterates each cluster and opens a domain-qualified KV watch per cluster:
+  ```typescript
+  // Inside startWatching():
+  for (const cluster of this._clusters) {
+    const unsub = this._natsClient.kvWatch(
+      'mclaude-sessions',
+      `${this._userId}.>`,
+      (entry) => this.handleKVUpdate(entry, cluster),
+      cluster.jsDomain   // domain parameter
+    )
+    this._unwatchers.push(unsub)  // cleaned up by _stopWatching()
+  }
+  ```
+- **Single-cluster** (`clusters` absent or length ≤ 1): uses the existing non-qualified `kvWatch` — backwards compatible, no code change.
+
+`handleKVUpdate(entry: KVEntry, cluster?: ClusterInfo)` is a new private method that parses the KV entry, tags the resulting `SessionKVState` with cluster metadata (stored in a parallel `Map<sessionId, ClusterInfo>`), and adds/updates the session in the aggregated list. The `sessions` getter returns all sessions across clusters.
 
 **Session detail view:**
 
@@ -249,6 +302,38 @@ When the user opens a session, the SPA determines the connection strategy:
 Switching from direct to hub (or vice versa) resubscribes with the appropriate domain parameter and `startSeq`. The user sees a brief reconnection indicator but no data loss.
 
 Input messages (`sessions.input`, `sessions.control`) are published on whichever connection is active. Leaf node routing ensures they reach the worker's session-agent regardless.
+
+**EventStore constructor changes:** `EventStoreOptions` gains optional fields:
+
+```typescript
+interface EventStoreOptions {
+  natsClient: INATSClient  // existing — hub connection
+  userId: string           // existing
+  projectId: string        // existing
+  sessionId: string        // existing
+  jsDomain?: string        // new — worker's JetStream domain for hub fallback
+  directNatsUrl?: string   // new — worker's WebSocket URL for direct connection
+  jwt?: string             // new — from AuthStore, for direct connection auth
+  nkeySeed?: string        // new — from AuthStore, for direct connection auth
+  createNATSClient?: () => INATSClient  // new — factory for direct connection client
+}
+```
+
+When `directNatsUrl` is present, `EventStore` calls `createNATSClient()` in `start()` to instantiate a secondary client and attempts a direct connection using the provided `jwt`/`nkeySeed`. If successful, the direct client is used for `jsSubscribe` and `kvWatch` (no domain parameter). If the direct connection fails, the hub client is used with `jsDomain` passed to `jsSubscribe` and `kvWatch`. The secondary client is closed in `stop()`, called when the user navigates away from the session detail view.
+
+**ConversationVM constructor changes:** `ConversationVM` gains an `authStore: AuthStore` parameter (added after the existing `natsClient` parameter). When creating `EventStoreOptions`, it reads cluster credentials from `authStore`:
+
+```typescript
+const project = authStore.getProjects().find(p => p.id === projectId)
+const opts: EventStoreOptions = {
+  natsClient, userId, projectId, sessionId,
+  jsDomain: project?.jsDomain,
+  directNatsUrl: project?.directNatsUrl,
+  jwt: authStore.getJwt(),
+  nkeySeed: authStore.getNkeySeed(),
+  createNATSClient: () => new NATSClient(),
+}
+```
 
 **Project creation:**
 
@@ -300,7 +385,7 @@ nats:
   leafnodes:
     remotes:
       - url: ""              # hub NATS leaf URL (nats-leaf://hub:7422)
-        credentials: ""      # path to leaf credentials file
+        nkey: ""              # path to leaf NKey seed file (.nk)
   jetstream:
     domain: ""               # same as worker.jsDomain
 
@@ -319,7 +404,7 @@ controller:
 
 **Backwards compatibility — single-cluster deployment:**
 
-A single-cluster deployment installs both charts on the same cluster. In this mode, a single NATS instance serves both hub and worker roles — no leaf node connection to itself. The NATS config includes `leafnodes { port: 7422 }` (listener for future workers) and a JetStream domain matching the auto-registered cluster's `js_domain`. The SPA connects to this NATS directly without domain qualification (since all KV and streams are local). The control plane provisions projects via direct CRD creation (no NATS provisioning request needed — it detects the local cluster by checking if the target `cluster_id` matches the auto-registered cluster). Adding a second cluster later is seamless: the new worker connects as a leaf to the existing NATS, and the SPA starts using domain-qualified watches for the new cluster.
+A single-cluster deployment installs both charts on the same cluster. In this mode, a single NATS instance serves both hub and worker roles — no leaf node connection to itself. The NATS config includes `leafnodes { port: 7422 }` (listener for future workers) and a JetStream domain matching the auto-registered cluster's `js_domain`. The SPA detects single-cluster mode by checking `loginResponse.clusters.length === 1` — when true, `SessionStore` uses non-domain-qualified KV watches (backwards compatible with the existing single-cluster code path). When `clusters.length > 1`, `SessionStore` opens domain-qualified watches per cluster. The control plane provisions projects via direct CRD creation in single-cluster mode (detects by checking if the target `cluster_id` matches the auto-registered cluster — stored as `LOCAL_CLUSTER_ID` in the control plane's startup state). Adding a second cluster later is seamless: the new worker connects as a leaf to the existing NATS, the login response returns two clusters, and the SPA starts using domain-qualified watches for both.
 
 **Auto-registration:** On startup, if the `clusters` table is empty, the control plane auto-registers a local cluster with:
 - `name`: value of `HELM_RELEASE_NAME` env var (default "mclaude")
@@ -329,7 +414,13 @@ A single-cluster deployment installs both charts on the same cluster. In this mo
 - `leaf_creds`: empty (local cluster — no leaf connection needed)
 - `status`: "active"
 
-After auto-registration, backfills any existing `projects` rows that have NULL `cluster_id` with the auto-registered cluster's ID, then grants all existing users access to this cluster with `is_default = TRUE`.
+**Idempotent startup sequence** (steps 2-4 from migration strategy run on every startup, not just first run):
+- Step 2: `INSERT INTO clusters (...) ON CONFLICT (name) DO NOTHING` — safe to re-run.
+- Step 3: `UPDATE projects SET cluster_id = $1 WHERE cluster_id IS NULL` — no-op if all rows already have a cluster_id. Runs unconditionally.
+- Step 4: `ALTER TABLE projects ALTER COLUMN cluster_id SET NOT NULL` — idempotent (Postgres silently succeeds if the constraint already exists). Only fails if step 3 left NULL rows, which would indicate a bug.
+- User grants: `INSERT INTO user_clusters (...) SELECT ... FROM users ... ON CONFLICT DO NOTHING` — safe to re-run.
+
+This ensures crash recovery between any two steps completes correctly on restart.
 
 ## Data Model
 
@@ -352,9 +443,16 @@ jetstream {
   store_dir: /data/jetstream
   domain: hub
 }
+
+# JWT auth
+operator: $OPERATOR_JWT
+resolver: MEMORY
+resolver_preload: {
+  $ACCOUNT_PUBLIC_KEY: $ACCOUNT_JWT
+}
 ```
 
-Note on JetStream domain migration: adding `domain: hub` to an existing NATS instance does not break existing clients. Clients connected directly to that NATS continue using the default (unqualified) JetStream API. The domain only matters for cross-cluster access — when a client on the hub wants to reach a worker's JetStream, it qualifies with the worker's domain. Existing single-cluster deployments gain the `domain` config during the upgrade but experience no behavioral change.
+Note on JetStream domain migration: adding `domain: hub` to an existing NATS instance does not break existing clients. Clients connected directly to that NATS continue using the default (unqualified) JetStream API (`$JS.API.>` still works alongside `$JS.hub.API.>`). The domain only matters for cross-cluster access — when a client on the hub wants to reach a worker's JetStream, it qualifies with the worker's domain. Existing single-cluster deployments gain the `domain` config during the upgrade but experience no behavioral change.
 
 **Worker NATS** (each worker cluster):
 ```
@@ -363,12 +461,19 @@ websocket { port: 8080 }
 leafnodes {
   remotes [{
     url: nats-leaf://hub.mclaude.internal:7422
-    credentials: /etc/nats/leaf.creds
+    nkey: /etc/nats/leaf.nk
   }]
 }
 jetstream {
   store_dir: /data/jetstream
   domain: {jsDomain}    # e.g. "worker-a"
+}
+
+# Same JWT auth trust chain as hub
+operator: $OPERATOR_JWT
+resolver: MEMORY
+resolver_preload: {
+  $ACCOUNT_PUBLIC_KEY: $ACCOUNT_JWT
 }
 ```
 
@@ -381,7 +486,7 @@ jetstream {
 
 The control plane subscribes to `mclaude.clusters.*.status` on startup. On each heartbeat, it updates an in-memory map of cluster liveness. If no heartbeat is received for 90s (3 missed intervals), the control plane marks the cluster as `offline` in Postgres and stops routing new project provisioning requests to it. When heartbeats resume, the cluster is marked `active` again.
 
-Existing subjects (`mclaude.{userId}.{projectId}.events.*`, `mclaude.{userId}.{projectId}.api.sessions.*`, etc.) are unchanged. They flow between hub and worker automatically via leaf node subject routing.
+Existing subjects (`mclaude.{userId}.{projectId}.events.*`, `mclaude.{userId}.{projectId}.api.sessions.*`, etc.) are unchanged. They flow between hub and worker automatically via leaf node subject routing. NATS leaf nodes import/export all core NATS subjects by default — no explicit `allow`/`deny` rules are needed in the `remotes` block. JetStream domain routing (`$JS.{domain}.API.>`) is also handled automatically by the NATS leaf node protocol.
 
 ### KV Buckets — Unchanged
 
@@ -402,16 +507,16 @@ No new KV buckets are needed. The cluster registry is in Postgres, not NATS.
 | Worker controller crashes | K8s restarts pod; provisioning requests queue in NATS | Provisioning requests are NATS request/reply — control plane times out and returns error to user. Retry when controller comes back. |
 | Cluster registration with duplicate domain | Postgres UNIQUE constraint on `js_domain` | `POST /api/clusters` returns 409 Conflict. |
 | Project creation on inaccessible cluster | RBAC check in control plane | `POST /api/projects` returns 403 if user lacks cluster access. |
-| Project creation on offline cluster | Provisioning NATS request times out (10s) | Control plane returns 503 with error message. Project record created in Postgres with `status = 'pending'` (new status value alongside `active` and `archived`). When the cluster heartbeat resumes (marking it `active`), the control plane queries for projects with `status = 'pending'` on that cluster and re-sends provisioning requests. On successful provisioning reply, status is updated to `active`. |
+| Project creation on offline cluster | Provisioning NATS request times out (10s) | Control plane returns 503 with error message. Project record created in Postgres with `status = 'pending'` (new status value alongside `active` and `archived`; enforced by CHECK constraint `status IN ('active', 'pending', 'archived')`). The control plane's cluster heartbeat handler (which processes `mclaude.clusters.*.status` messages) checks for `pending` projects on a cluster whenever it transitions from `offline` to `active`: `SELECT id, user_id, git_url FROM projects WHERE cluster_id = $1 AND status = 'pending'`. For each, it re-sends the provisioning request. On successful reply, updates `status = 'active'`. |
 | Hub NATS goes down | SPA and daemon lose connection | All real-time monitoring stops. Direct worker connections (if active) continue working. SPA shows disconnected state, auto-reconnects when hub returns. |
 
 ## Security
 
 **Account key distribution:** The control plane generates one account NKey pair at initial setup. The account seed (private key) is stored as a K8s secret in the control plane namespace. The account public key is distributed to every worker NATS via the leaf credentials exchange during cluster registration.
 
-**Leaf node credentials:** Each worker gets a unique leaf NKey pair. The private key is stored in Postgres (`clusters.leaf_creds`) and returned once during registration. The worker stores it as a K8s secret and references it in NATS config. Revoking a worker = deleting its leaf credential and restarting hub NATS (or using NATS credential revocation).
+**Leaf node credentials:** Each worker gets a unique leaf NKey pair. The NKey seed (private key) is stored in Postgres (`clusters.leaf_creds`) and returned once during registration as `leafNkeySeed`. The worker stores it as a K8s secret and references it in the NATS leaf node config (`nkey: /etc/nats/leaf.nk`). Leaf node auth uses raw NKey challenge-response — no JWT is needed. Revoking a worker = deleting its leaf credential and restarting hub NATS (or using NATS credential revocation).
 
-**User JWTs:** Unchanged — signed by the account seed, verified by the account public key. Valid on hub and all workers. JWT contains user ID and publish/subscribe permissions scoped to `mclaude.{userId}.>`.
+**User JWTs:** Signed by the account seed, verified by the account public key. Valid on hub and all workers. JWT permissions are extended for cross-domain JetStream access — `UserSubjectPermissions` adds `$JS.*.API.>` to both pub and sub allow-lists (needed for domain-qualified KV watch and stream consumer creation through the hub). The existing `mclaude.{userId}.>`, `_INBOX.>`, and `$KV.*` permissions are unchanged.
 
 **Cluster RBAC:** Enforced at the control plane HTTP layer. Users can only create projects on clusters they have access to. The NATS layer doesn't enforce cluster-level access — a user JWT technically works on any NATS instance with the shared account key. Cluster RBAC is an authorization policy, not a cryptographic boundary.
 
@@ -461,3 +566,19 @@ The event streams are the heavy part. A single active Claude session produces hu
 - Automated cluster decommissioning (drain sessions, migrate projects)
 - Per-cluster account keys (currently shared — acceptable given CP is single trust root)
 - BYOM (bring your own model) per cluster
+
+## Implementation Plan
+
+Estimated effort to implement via dev-harness.
+
+| Component | New/changed lines (est.) | Dev-harness tokens (est.) | Notes |
+|-----------|--------------------------|---------------------------|-------|
+| control-plane | ~1,200-1,500 | ~450k | 2 tables, 4 endpoints, login changes, NATS hub config, JWT/NKey issuance, auto-registration, migration |
+| session-agent | ~200-300 | ~130k | Minor — leaf node config consumed from env, no new handlers |
+| spa | ~800-1,000 | ~400k | AuthStore cluster accessors, SessionStore domain-qualified watches, EventStore dual NATS, ConversationVM cluster routing |
+| helm | ~600-800 | ~200k | Split into mclaude-cp and mclaude-worker charts, NATS leaf config, new values |
+| cli | ~100-150 | ~65k | Cluster selection flag, pass-through to session-agent |
+
+**Total estimated lines:** ~2,900-3,750
+**Total estimated tokens:** ~1.25M
+**Estimated wall-clock:** ~1.5h of 5h budget (25%)
