@@ -444,6 +444,29 @@ Right-aligned bubble (or left-aligned on platforms that prefer it), `--blue` bac
                        └──────────────────┘
 ```
 
+### Skill Invocation Chip (`.ev-skill`)
+
+Rendered in place of a user message when the event is a skill expansion (text starts with `"Base directory for this skill:"`).
+
+```
+┌────────────────────────────────┐
+│ 🔧 feature-change  [Skill]   ▶│  header row (collapsed)
+└────────────────────────────────┘
+
+┌────────────────────────────────┐
+│ 🔧 feature-change  [Skill]   ▼│  header row (expanded)
+│                                │
+│   Fix two event-store bugs…    │  args text (full, --text2)
+│                                │
+│   ‹ raw skill text ›           │  full expansion in --surf2 block, monospace, scrollable
+└────────────────────────────────┘
+```
+
+- Blue left border (user-originated), `--surf` background, border-radius 12px
+- Header: `🔧` icon + skill name (bold) + `[Skill]` badge (blue pill, same style as Agent type badge) + count of args chars or blank + expand chevron
+- Collapsed by default; tapping header toggles expansion
+- Expanded body shows args text first, then full raw expansion in a `--surf2` monospace block
+
 ### Assistant Text (`.ev-text`)
 
 Full-width, no background, `--text` color. Content is markdown-rendered:
