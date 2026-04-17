@@ -899,6 +899,13 @@ On WebSocket disconnect:
 3. On reconnect: re-fetch sessions list; events continue from last received
 4. No page reload
 
+### Initial Scroll Position
+
+On first load of a session (fresh navigation, not back-navigation):
+- Scroll the conversation list to the **bottom** immediately after the initial batch of events renders, so the user sees the most recent messages.
+- Use `scrollIntoView` or `scrollTop = scrollHeight` on the conversation container after the first non-empty render.
+- If the session has no events yet (new session), no scroll action is needed.
+
 ### Scroll Persistence
 
 When navigating back from session detail → dashboard → session detail, restore scroll position (saved to sessionStorage on navigate away, restored after events load).
