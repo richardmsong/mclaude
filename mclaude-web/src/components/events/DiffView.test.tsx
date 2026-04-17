@@ -60,4 +60,45 @@ describe('DiffView', () => {
     const longLine = '+' + 'x'.repeat(600)
     expect(() => render(<DiffView diff={longLine} />)).not.toThrow()
   })
+
+  it('outer container has WebkitTextSizeAdjust to prevent iOS scaling', () => {
+    const { container } = render(<DiffView diff="+line" />)
+    const outer = container.firstElementChild as HTMLElement
+    // The outer div should set -webkit-text-size-adjust: 100%
+    expect(outer.style.webkitTextSizeAdjust ?? (outer.style as unknown as Record<string, string>)['-webkit-text-size-adjust']).toBe('100%')
+  })
+
+  it('outer container has consistent lineHeight', () => {
+    const { container } = render(<DiffView diff="+line" />)
+    const outer = container.firstElementChild as HTMLElement
+    expect(outer.style.lineHeight).toBe('1.5')
+  })
+
+  it('outer container has fontSize 12px', () => {
+    const { container } = render(<DiffView diff="+line" />)
+    const outer = container.firstElementChild as HTMLElement
+    expect(outer.style.fontSize).toBe('12px')
+  })
+
+  it('filename header div has explicit fontSize 12px', () => {
+    const { container } = render(<DiffView diff="+line" filename="app.ts" />)
+    // The filename header is the first child div of the outer container
+    const outer = container.firstElementChild as HTMLElement
+    const header = outer.firstElementChild as HTMLElement
+    expect(header.style.fontSize).toBe('12px')
+  })
+
+  it('line divs have explicit fontSize 12px', () => {
+    const diff = '+added line\n-removed line'
+    const { container } = render(<DiffView diff={diff} />)
+    // Line divs are flex containers (display: flex) inside the overflow wrapper
+    const allDivs = Array.from(container.querySelectorAll('div'))
+    const lineDivs = allDivs.filter(
+      div => (div as HTMLElement).style.display === 'flex'
+    )
+    expect(lineDivs.length).toBeGreaterThan(0)
+    lineDivs.forEach(div => {
+      expect((div as HTMLElement).style.fontSize).toBe('12px')
+    })
+  })
 })
