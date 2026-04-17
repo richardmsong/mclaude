@@ -187,7 +187,7 @@ Turn {
 }
 
 Block = TextBlock | StreamingTextBlock | ToolUseBlock | ToolResultBlock
-      | ThinkingBlock | ControlRequestBlock | CompactionBlock
+      | ThinkingBlock | ControlRequestBlock | CompactionBlock | SkillInvocationBlock
 
 TextBlock {
   type: "text"
@@ -234,6 +234,13 @@ CompactionBlock {
   type: "compaction"
   summary: string
 }
+
+SkillInvocationBlock {
+  type: "skill_invocation"
+  skillName: string    // e.g. "feature-change", extracted from "Base directory for this skill: .../skills/<name>"
+  args: string         // content after the "ARGUMENTS:" line, trimmed; empty string if absent
+  rawContent: string   // full original text for expand view
+}
 ```
 
 Responsibilities:
@@ -245,7 +252,10 @@ Responsibilities:
   - `tool_use` → creates `ToolUseBlock`
   - `tool_progress` → updates `ToolUseBlock.elapsed`
   - `tool_result` → attaches to matching `ToolUseBlock` by toolUseId
-  - `user` (human text, not tool_result) → creates user `Turn` with `TextBlock`s. Session-agent publishes these (Claude Code does not echo human input). Client also adds an optimistic user turn on send; deduplication: if the last turn is already a user turn with matching text, skip the event.
+  - `user` (human text, not tool_result) → inspect content before creating a turn:
+      - If text starts with `"Base directory for this skill:"`: parse as `SkillInvocationBlock` — extract skill name from the path segment after `.../skills/` and extract args from the text after the `"ARGUMENTS:"` line (trimmed). Create a user turn with this block instead of a TextBlock.
+      - If text starts with `"[SYSTEM NOTIFICATION"`: discard entirely — do not create a turn.
+      - Otherwise: create user `Turn` with `TextBlock`s. Client also adds an optimistic user turn on send; deduplication: if a pending turn with matching uuid exists, confirm it (keep existing turn, skip adding a new one).
   - `control_request` → creates `ControlRequestBlock` with status `pending`
   - Events with `parent_tool_use_id` → nested under the parent `ToolUseBlock`'s turn
 - On `clear` event: resets `ConversationModel` (empty turns), updates local `replayFromSeq`
