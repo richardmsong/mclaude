@@ -373,6 +373,13 @@ export interface Turn {
   parentToolUseId?: string
   /** Set on optimistic user turns added by addPendingMessage; cleared when server echo arrives. */
   pendingUuid?: string
+  /**
+   * Anthropic message ID from the `assistant` event (e.g. "msg_01Abc...").
+   * Set when the `assistant` event finalizes a turn. Used to distinguish
+   * adjacent assistant turns that share the same parentToolUseId — two turns
+   * with different messageIds are distinct exchange boundaries.
+   */
+  messageId?: string
 }
 
 export interface ConversationModel {
