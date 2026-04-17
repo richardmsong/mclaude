@@ -171,6 +171,23 @@ export class EventStore {
   addPendingMessage(uuid: string, content: string | Array<{ type: string; text?: string }>): void {
     const pending: PendingMessage = { uuid, content, sentAt: Date.now() }
     this._pendingMessages.push(pending)
+
+    // Immediately add an optimistic user turn so the message appears in the
+    // correct position (before any subsequent assistant turns).
+    const text = typeof content === 'string'
+      ? content
+      : content.filter(c => c.type === 'text').map(c => c.text ?? '').join('')
+    if (text) {
+      const turn: Turn = {
+        id: this._nextTurnId(),
+        type: 'user',
+        blocks: [{ type: 'text', text }],
+        // Tag with uuid so the server-echo dedup can find and replace it
+        pendingUuid: uuid,
+      }
+      this._conversation.turns.push(turn)
+    }
+
     this._notify()
   }
 
@@ -182,10 +199,10 @@ export class EventStore {
     return `turn-${++this._turnCounter}`
   }
 
-  private _currentAssistantTurn(): Turn | null {
+  private _currentAssistantTurn(parentToolUseId?: string): Turn | null {
     for (let i = this._conversation.turns.length - 1; i >= 0; i--) {
       const t = this._conversation.turns[i]
-      if (t.type === 'assistant') return t
+      if (t.type === 'assistant' && t.parentToolUseId === parentToolUseId) return t
     }
     return null
   }
@@ -275,13 +292,14 @@ export class EventStore {
       case 'stream_event': {
         if (event.stream_event.delta?.type === 'text_delta') {
           const text = event.stream_event.delta.text ?? ''
-          let current = this._currentAssistantTurn()
+          const wantedParent = event.parent_tool_use_id ?? undefined
+          let current = this._currentAssistantTurn(wantedParent)
           if (!current) {
             current = {
               id: this._nextTurnId(),
               type: 'assistant',
               blocks: [],
-              parentToolUseId: event.parent_tool_use_id ?? undefined,
+              parentToolUseId: wantedParent,
             }
             this._conversation.turns.push(current)
           }
@@ -298,13 +316,14 @@ export class EventStore {
 
       case 'assistant': {
         // Finalize any streaming text block
-        let turn = this._currentAssistantTurn()
+        const wantedParentA = event.parent_tool_use_id ?? undefined
+        let turn = this._currentAssistantTurn(wantedParentA)
         if (!turn) {
           turn = {
             id: this._nextTurnId(),
             type: 'assistant',
             blocks: [],
-            parentToolUseId: event.parent_tool_use_id ?? undefined,
+            parentToolUseId: wantedParentA,
           }
           this._conversation.turns.push(turn)
         }
@@ -387,10 +406,20 @@ export class EventStore {
         }
 
         // Step 2: If event has uuid and matching pending message → remove from _pendingMessages
+        // and dedup the optimistic turn that addPendingMessage already inserted.
         if (event.uuid) {
           const idx = this._pendingMessages.findIndex(p => p.uuid === event.uuid)
           if (idx !== -1) {
             this._pendingMessages.splice(idx, 1)
+            // Find the optimistic turn we already inserted and clear its pendingUuid
+            // so it becomes a fully-confirmed turn.  Skip creating a new turn.
+            const optimisticIdx = this._conversation.turns.findIndex(
+              t => t.type === 'user' && t.pendingUuid === event.uuid,
+            )
+            if (optimisticIdx !== -1) {
+              delete this._conversation.turns[optimisticIdx].pendingUuid
+              break
+            }
           }
         }
 

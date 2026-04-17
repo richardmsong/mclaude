@@ -243,9 +243,9 @@ describe('EventStore', () => {
 
         // Pending message still present (uuid didn't match)
         expect(store.pendingMessages).toHaveLength(1)
-        // But inline user turn still created
+        // addPendingMessage already inserted 1 optimistic turn; event with non-matching uuid inserts a second
         const userTurns = store.conversation.turns.filter(t => t.type === 'user')
-        expect(userTurns).toHaveLength(1)
+        expect(userTurns).toHaveLength(2)
       })
 
       it('creates inline user turn when no uuid present', () => {
@@ -339,6 +339,232 @@ describe('EventStore', () => {
       unsub()
       store.applyEventForTest({ type: 'user', message: { role: 'user', content: 'Hi 2' } })
       expect(callCount).toBe(1)
+    })
+  })
+
+  // ─── Bug 1: user turn ordering ───────────────────────────────────────────────
+
+  describe('Bug 1 — user turn ordering', () => {
+    it('addPendingMessage immediately inserts an optimistic user turn into turns[]', () => {
+      store.addPendingMessage('uuid-opt', 'Do something')
+      const turns = store.conversation.turns
+      const userTurns = turns.filter(t => t.type === 'user')
+      expect(userTurns).toHaveLength(1)
+      expect(userTurns[0].blocks[0].type === 'text' && userTurns[0].blocks[0].text).toBe('Do something')
+    })
+
+    it('optimistic user turn appears BEFORE subsequent assistant turns', () => {
+      store.addPendingMessage('uuid-opt', 'Do something')
+
+      // Assistant starts streaming
+      const streamEvt: StreamJsonEvent = {
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Sure!' }, index: 0 },
+      }
+      store.applyEventForTest(streamEvt)
+
+      const turns = store.conversation.turns
+      const userIdx = turns.findIndex(t => t.type === 'user')
+      const assistantIdx = turns.findIndex(t => t.type === 'assistant')
+      expect(userIdx).toBeGreaterThanOrEqual(0)
+      expect(assistantIdx).toBeGreaterThanOrEqual(0)
+      expect(userIdx).toBeLessThan(assistantIdx)
+    })
+
+    it('server echo with matching uuid does NOT create a duplicate user turn', () => {
+      store.addPendingMessage('uuid-opt', 'Do something')
+
+      // Assistant streams and finalizes
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Sure!' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: { id: 'msg-x', role: 'assistant', content: [{ type: 'text', text: 'Sure!' }], model: 'claude-sonnet-4-6' },
+      })
+
+      // Server echoes the user message back
+      store.applyEventForTest({
+        type: 'user',
+        message: { role: 'user', content: 'Do something' },
+        uuid: 'uuid-opt',
+        isReplay: true,
+      })
+
+      const userTurns = store.conversation.turns.filter(t => t.type === 'user')
+      // Still exactly one user turn — the optimistic turn was confirmed, not duplicated
+      expect(userTurns).toHaveLength(1)
+    })
+
+    it('confirmed user turn (after echo) has no pendingUuid', () => {
+      store.addPendingMessage('uuid-opt', 'Do something')
+
+      store.applyEventForTest({
+        type: 'user',
+        message: { role: 'user', content: 'Do something' },
+        uuid: 'uuid-opt',
+        isReplay: true,
+      })
+
+      const userTurns = store.conversation.turns.filter(t => t.type === 'user')
+      expect(userTurns).toHaveLength(1)
+      expect(userTurns[0].pendingUuid).toBeUndefined()
+    })
+
+    it('optimistic turn remains in turns[] before echo, with pendingUuid set', () => {
+      store.addPendingMessage('uuid-opt', 'In flight')
+      const userTurns = store.conversation.turns.filter(t => t.type === 'user')
+      expect(userTurns).toHaveLength(1)
+      expect(userTurns[0].pendingUuid).toBe('uuid-opt')
+    })
+
+    it('user turn appears before assistant turns in turns[] index after full cycle', () => {
+      store.addPendingMessage('uuid-opt', 'Do something')
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Sure!' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: { id: 'msg-x', role: 'assistant', content: [{ type: 'text', text: 'Sure!' }], model: 'claude-sonnet-4-6' },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        message: { role: 'user', content: 'Do something' },
+        uuid: 'uuid-opt',
+        isReplay: true,
+      })
+
+      const turns = store.conversation.turns
+      const userIdx = turns.findIndex(t => t.type === 'user')
+      const assistantIdx = turns.findIndex(t => t.type === 'assistant')
+      expect(userIdx).toBeLessThan(assistantIdx)
+    })
+  })
+
+  // ─── Bug 2: sub-agent turn scoping ───────────────────────────────────────────
+
+  describe('Bug 2 — sub-agent turn scoping', () => {
+    it('stream_event with parent_tool_use_id creates assistant turn with that parentToolUseId', () => {
+      const event: StreamJsonEvent = {
+        type: 'stream_event',
+        parent_tool_use_id: 'toolu_agent_abc',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'sub output' }, index: 0 },
+      }
+      store.applyEventForTest(event)
+      const turns = store.conversation.turns
+      const subTurn = turns.find(t => t.type === 'assistant' && t.parentToolUseId === 'toolu_agent_abc')
+      expect(subTurn).toBeDefined()
+      expect(subTurn?.parentToolUseId).toBe('toolu_agent_abc')
+    })
+
+    it('stream_event with parent_tool_use_id does NOT append to a top-level assistant turn', () => {
+      // First create a top-level assistant turn
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'top level' }, index: 0 },
+      })
+      // Now sub-agent event with parent_tool_use_id
+      store.applyEventForTest({
+        type: 'stream_event',
+        parent_tool_use_id: 'toolu_agent_abc',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'sub' }, index: 0 },
+      })
+      const topLevelTurns = store.conversation.turns.filter(t => t.type === 'assistant' && !t.parentToolUseId)
+      const subTurns = store.conversation.turns.filter(t => t.type === 'assistant' && t.parentToolUseId === 'toolu_agent_abc')
+      // There must be exactly 1 top-level assistant turn and 1 sub-agent turn
+      expect(topLevelTurns).toHaveLength(1)
+      expect(subTurns).toHaveLength(1)
+      // The top-level turn must NOT contain sub-agent text
+      const topText = topLevelTurns[0].blocks.find(b => b.type === 'streaming_text')
+      expect(topText?.type === 'streaming_text' && topText.chunks.join('')).toBe('top level')
+    })
+
+    it('assistant event with parent_tool_use_id creates turn with that parentToolUseId', () => {
+      const event: StreamJsonEvent = {
+        type: 'assistant',
+        parent_tool_use_id: 'toolu_agent_xyz',
+        message: {
+          id: 'msg-sub',
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'bash-1', name: 'Bash', input: { command: 'ls' } }],
+          model: 'claude-sonnet-4-6',
+        },
+      }
+      store.applyEventForTest(event)
+      const subTurn = store.conversation.turns.find(t => t.type === 'assistant' && t.parentToolUseId === 'toolu_agent_xyz')
+      expect(subTurn).toBeDefined()
+      const toolBlock = subTurn?.blocks.find(b => b.type === 'tool_use')
+      expect(toolBlock?.type === 'tool_use' && toolBlock.name).toBe('Bash')
+    })
+
+    it('assistant event with parent_tool_use_id does NOT append to top-level turn', () => {
+      // Top-level assistant turn (no parent)
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-top',
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'agent-tool', name: 'Agent', input: {} }],
+          model: 'claude-sonnet-4-6',
+        },
+      })
+      // Sub-agent assistant event
+      store.applyEventForTest({
+        type: 'assistant',
+        parent_tool_use_id: 'agent-tool',
+        message: {
+          id: 'msg-sub',
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'bash-sub', name: 'Bash', input: { command: 'pwd' } }],
+          model: 'claude-sonnet-4-6',
+        },
+      })
+
+      const topLevelTurns = store.conversation.turns.filter(t => t.type === 'assistant' && !t.parentToolUseId)
+      const subTurns = store.conversation.turns.filter(t => t.type === 'assistant' && t.parentToolUseId === 'agent-tool')
+      expect(topLevelTurns).toHaveLength(1)
+      expect(subTurns).toHaveLength(1)
+      // Top-level should only have the Agent tool block
+      expect(topLevelTurns[0].blocks).toHaveLength(1)
+      expect(topLevelTurns[0].blocks[0].type === 'tool_use' && topLevelTurns[0].blocks[0].name).toBe('Agent')
+      // Sub turn should have the Bash tool block
+      expect(subTurns[0].blocks[0].type === 'tool_use' && subTurns[0].blocks[0].name).toBe('Bash')
+    })
+
+    it('consecutive sub-agent stream_events with the same parent_tool_use_id append to the same sub turn', () => {
+      store.applyEventForTest({
+        type: 'stream_event',
+        parent_tool_use_id: 'toolu_agent_abc',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'chunk1' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'stream_event',
+        parent_tool_use_id: 'toolu_agent_abc',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'chunk2' }, index: 0 },
+      })
+      const subTurns = store.conversation.turns.filter(t => t.type === 'assistant' && t.parentToolUseId === 'toolu_agent_abc')
+      expect(subTurns).toHaveLength(1)
+      const block = subTurns[0].blocks.find(b => b.type === 'streaming_text')
+      expect(block?.type === 'streaming_text' && block.chunks.join('')).toBe('chunk1chunk2')
+    })
+
+    it('two different sub-agents create separate turns', () => {
+      store.applyEventForTest({
+        type: 'stream_event',
+        parent_tool_use_id: 'toolu_agent_1',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'agent1' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'stream_event',
+        parent_tool_use_id: 'toolu_agent_2',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'agent2' }, index: 0 },
+      })
+      const turns1 = store.conversation.turns.filter(t => t.parentToolUseId === 'toolu_agent_1')
+      const turns2 = store.conversation.turns.filter(t => t.parentToolUseId === 'toolu_agent_2')
+      expect(turns1).toHaveLength(1)
+      expect(turns2).toHaveLength(1)
     })
   })
 })

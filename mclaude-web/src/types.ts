@@ -363,6 +363,8 @@ export interface Turn {
   model?: string
   usage?: UsageStats
   parentToolUseId?: string
+  /** Set on optimistic user turns added by addPendingMessage; cleared when server echo arrives. */
+  pendingUuid?: string
 }
 
 export interface ConversationModel {

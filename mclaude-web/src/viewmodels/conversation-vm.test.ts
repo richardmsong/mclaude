@@ -56,11 +56,13 @@ describe('ConversationVM', () => {
       expect(payload.uuid).toMatch(/^[0-9a-f-]{36}$/)
     })
 
-    it('adds a pending message to the event store (not a conversation turn)', () => {
+    it('adds a pending message to the event store and an optimistic user turn', () => {
       vm.sendMessage('hello world')
-      // No conversation turns — pending messages don't go to turns
-      expect(eventStore.conversation.turns).toHaveLength(0)
-      // Pending message added
+      // addPendingMessage immediately inserts an optimistic user turn
+      expect(eventStore.conversation.turns).toHaveLength(1)
+      expect(eventStore.conversation.turns[0].type).toBe('user')
+      expect(eventStore.conversation.turns[0].pendingUuid).toBeDefined()
+      // Pending message also tracked in pendingMessages
       expect(eventStore.pendingMessages).toHaveLength(1)
       expect(eventStore.pendingMessages[0].content).toBe('hello world')
       expect(typeof eventStore.pendingMessages[0].uuid).toBe('string')

@@ -1,5 +1,7 @@
 interface UserMessageProps {
   text: string
+  /** When true the message is optimistic (not yet echoed by server) — rendered dimmed. */
+  pending?: boolean
 }
 
 // Check if text is a screenshot path
@@ -7,10 +9,10 @@ function isScreenshotPath(text: string): boolean {
   return /\/tmp\/mclaude-screenshots\/.*\.png$/i.test(text.trim())
 }
 
-export function UserMessage({ text }: UserMessageProps) {
+export function UserMessage({ text, pending = false }: UserMessageProps) {
   const isImage = isScreenshotPath(text)
   return (
-    <div style={{ display: 'flex', justifyContent: 'flex-end', margin: '4px 0' }}>
+    <div style={{ display: 'flex', justifyContent: 'flex-end', margin: '4px 0', opacity: pending ? 0.5 : 1 }}>
       {isImage ? (
         <div style={{
           maxWidth: '80%',

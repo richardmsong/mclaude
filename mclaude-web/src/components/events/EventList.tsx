@@ -98,13 +98,25 @@ export function EventList({ turns, pendingMessages = [], onApprove, onDeny }: Ev
   // Only render top-level turns (no parentToolUseId)
   const topLevelTurns = turns.filter(t => !t.parentToolUseId)
 
+  // Collect the set of uuids that already have an optimistic turn in turns[].
+  // pendingMessages whose uuid appears here are already rendered as a user turn,
+  // so we must not render them again in the pending section.
+  const pendingUuidsInTurns = new Set(
+    turns.map(t => t.pendingUuid).filter((u): u is string => u !== undefined),
+  )
+  const unrenderedPending = pendingMessages.filter(pm => !pendingUuidsInTurns.has(pm.uuid))
+
   return (
     <div>
       {topLevelTurns.map(turn => {
         if (turn.type === 'user') {
           const textBlocks = turn.blocks.filter(b => b.type === 'text')
           return textBlocks.map((b, i) => (
-            <UserMessage key={`${turn.id}-${i}`} text={(b as { text: string }).text} />
+            <UserMessage
+              key={`${turn.id}-${i}`}
+              text={(b as { text: string }).text}
+              pending={turn.pendingUuid !== undefined}
+            />
           ))
         }
 
@@ -135,7 +147,7 @@ export function EventList({ turns, pendingMessages = [], onApprove, onDeny }: Ev
 
         return null
       })}
-      {pendingMessages.map(pm => (
+      {unrenderedPending.map(pm => (
         <div
           key={pm.uuid}
           style={{
