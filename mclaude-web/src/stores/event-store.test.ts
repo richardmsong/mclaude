@@ -1304,4 +1304,443 @@ describe('EventStore', () => {
     })
   })
 
+  // ─── Turn boundary regression: messageId discrimination ───────────────────────
+  // These tests verify the fix for the bug where multiple assistant responses
+  // were merged into a single turn because _currentAssistantTurn in case 'assistant'
+  // returned the most recent turn regardless of whether it belonged to a different
+  // Anthropic message (exchange boundary).
+
+  describe('turn boundary: messageId discrimination (regression)', () => {
+    // Test case A: single exchange on empty session — user echo lands BEFORE assistant
+    it('test A: single exchange — user echo before assistant response', () => {
+      // Protocol: stream_events → assistant → user-echo
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'mango' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-mango',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'mango' }],
+          model: 'claude-sonnet-4-6',
+          usage: { input_tokens: 10, output_tokens: 1 },
+        },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-mango',
+        isReplay: true,
+        message: { role: 'user', content: 'say the word mango and nothing else' },
+      })
+
+      // Must be: [user, assistant] — NOT [assistant, user]
+      expect(store.conversation.turns).toHaveLength(2)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+
+      const userText = store.conversation.turns[0].blocks.find(b => b.type === 'text')
+      expect(userText?.type === 'text' && userText.text).toBe('say the word mango and nothing else')
+
+      // The assistant turn must be stamped with the message ID
+      expect(store.conversation.turns[1].messageId).toBe('msg-mango')
+    })
+
+    // Test case B: three consecutive exchanges, protocol order, distinct turns
+    it('test B: three consecutive exchanges — 6 turns alternating user/assistant', () => {
+      // Each exchange: stream_event(s) → assistant → user-echo
+      // This is the exact protocol order from the live NATS dump.
+
+      // Exchange 1
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: "Got it — everything's working" }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-1',
+          role: 'assistant',
+          content: [{ type: 'text', text: "Got it — everything's working" }],
+          model: 'claude-sonnet-4-6',
+        },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-test',
+        isReplay: true,
+        message: { role: 'user', content: 'Test' },
+      })
+
+      // Exchange 2
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'pineapple' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-2',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'pineapple' }],
+          model: 'claude-sonnet-4-6',
+        },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-pineapple',
+        isReplay: true,
+        message: { role: 'user', content: 'say the word pineapple and nothing else' },
+      })
+
+      // Exchange 3
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'watermelon' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-3',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'watermelon' }],
+          model: 'claude-sonnet-4-6',
+        },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-watermelon',
+        isReplay: true,
+        message: { role: 'user', content: 'say the word watermelon and nothing else' },
+      })
+
+      // Must be exactly 6 turns: 3 user + 3 assistant, strictly alternating
+      expect(store.conversation.turns).toHaveLength(6)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+      expect(store.conversation.turns[2].type).toBe('user')
+      expect(store.conversation.turns[3].type).toBe('assistant')
+      expect(store.conversation.turns[4].type).toBe('user')
+      expect(store.conversation.turns[5].type).toBe('assistant')
+
+      // Verify each assistant turn has a distinct messageId
+      expect(store.conversation.turns[1].messageId).toBe('msg-1')
+      expect(store.conversation.turns[3].messageId).toBe('msg-2')
+      expect(store.conversation.turns[5].messageId).toBe('msg-3')
+
+      // Verify content
+      const u1 = store.conversation.turns[0].blocks.find(b => b.type === 'text')
+      expect(u1?.type === 'text' && u1.text).toBe('Test')
+      const u2 = store.conversation.turns[2].blocks.find(b => b.type === 'text')
+      expect(u2?.type === 'text' && u2.text).toBe('say the word pineapple and nothing else')
+      const u3 = store.conversation.turns[4].blocks.find(b => b.type === 'text')
+      expect(u3?.type === 'text' && u3.text).toBe('say the word watermelon and nothing else')
+    })
+
+    // Test case B extension: 4th live send after 3 replayed exchanges
+    it('test B+: live 4th send after 3 replayed exchanges — all 4 turns alternating', () => {
+      // Replay exchanges 1-3
+      for (const [msgId, userText, asstText, uuid] of [
+        ['msg-1', 'Test', "Got it", 'uuid-test'],
+        ['msg-2', 'say pineapple', 'pineapple', 'uuid-pineapple'],
+        ['msg-3', 'say watermelon', 'watermelon', 'uuid-watermelon'],
+      ] as [string, string, string, string][]) {
+        store.applyEventForTest({
+          type: 'stream_event',
+          stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: asstText }, index: 0 },
+        })
+        store.applyEventForTest({
+          type: 'assistant',
+          message: { id: msgId, role: 'assistant', content: [{ type: 'text', text: asstText }], model: 'claude-test' },
+        })
+        store.applyEventForTest({
+          type: 'user',
+          uuid,
+          isReplay: true,
+          message: { role: 'user', content: userText },
+        })
+      }
+
+      expect(store.conversation.turns).toHaveLength(6)
+
+      // Now do a LIVE 4th send (with addPendingMessage) then receive events
+      store.addPendingMessage('uuid-mango', 'say mango')
+      // turns: [...(6), user-mango(pending)]
+      expect(store.conversation.turns).toHaveLength(7)
+
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'mango' }, index: 0 },
+      })
+      // Must create a NEW assistant turn (not reuse any prior one)
+      expect(store.conversation.turns).toHaveLength(8)
+      expect(store.conversation.turns[7].type).toBe('assistant')
+
+      store.applyEventForTest({
+        type: 'assistant',
+        message: { id: 'msg-4', role: 'assistant', content: [{ type: 'text', text: 'mango' }], model: 'claude-test' },
+      })
+      // The NEW turn must be stamped msg-4, not any prior turn
+      expect(store.conversation.turns[7].messageId).toBe('msg-4')
+
+      // Echo arrives and deduplicates the pending turn
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-mango',
+        isReplay: true,
+        message: { role: 'user', content: 'say mango' },
+      })
+
+      // Final: 8 turns, strictly alternating
+      expect(store.conversation.turns).toHaveLength(8)
+      expect(store.conversation.turns[6].type).toBe('user')
+      expect(store.conversation.turns[7].type).toBe('assistant')
+      expect(store.conversation.turns[6].pendingUuid).toBeUndefined()
+
+      const u4 = store.conversation.turns[6].blocks.find(b => b.type === 'text')
+      expect(u4?.type === 'text' && u4.text).toBe('say mango')
+    })
+
+    // Test case B edge: assistant event arrives WITHOUT a preceding stream_event
+    // (e.g. tool-use only turn, then immediately another assistant event for a text turn).
+    // The second assistant event must NOT merge into the first.
+    it('test B edge: two assistant events with different message IDs never merge into same turn', () => {
+      // First assistant event (e.g. tool_use response, no stream_event)
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-a',
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'ls' } }],
+          model: 'claude-test',
+        },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'ok', is_error: false }] },
+      })
+
+      // User echo
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-cmd',
+        isReplay: true,
+        message: { role: 'user', content: 'run ls' },
+      })
+
+      // State: [user, asst(msg-a, tool_use)]
+      expect(store.conversation.turns).toHaveLength(2)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+      expect(store.conversation.turns[1].messageId).toBe('msg-a')
+
+      // Second exchange: stream_event + assistant event (new message ID)
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'result: ok' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-b',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'result: ok' }],
+          model: 'claude-test',
+        },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-follow',
+        isReplay: true,
+        message: { role: 'user', content: 'what happened?' },
+      })
+
+      // Must be 4 turns: [user1, asst-a, user2, asst-b]
+      expect(store.conversation.turns).toHaveLength(4)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+      expect(store.conversation.turns[1].messageId).toBe('msg-a')
+      expect(store.conversation.turns[2].type).toBe('user')
+      expect(store.conversation.turns[3].type).toBe('assistant')
+      expect(store.conversation.turns[3].messageId).toBe('msg-b')
+
+      // asst-a must still only have the Bash tool_use block
+      const asstABlocks = store.conversation.turns[1].blocks
+      expect(asstABlocks).toHaveLength(1)
+      expect(asstABlocks[0].type).toBe('tool_use')
+    })
+
+    // Test case C: nested tool use — user/assistant pairs inside a subtree alternate correctly
+    it('test C: tool_use subtree — nested user/assistant pairs alternate correctly', () => {
+      const parentId = 'toolu-agent-1'
+
+      // Top-level: assistant starts an agent tool call
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-top',
+          role: 'assistant',
+          content: [{ type: 'tool_use', id: parentId, name: 'Agent', input: {} }],
+          model: 'claude-test',
+        },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        isReplay: true,
+        uuid: 'uuid-top',
+        message: { role: 'user', content: 'run agent task' },
+      })
+
+      // Sub-agent exchange 1 (parentToolUseId = parentId)
+      store.applyEventForTest({
+        type: 'stream_event',
+        parent_tool_use_id: parentId,
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'step 1' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        parent_tool_use_id: parentId,
+        message: {
+          id: 'msg-sub-1',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'step 1' }],
+          model: 'claude-test',
+        },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        parent_tool_use_id: parentId,
+        uuid: 'uuid-sub-1',
+        isReplay: true,
+        message: { role: 'user', content: 'sub-task 1' },
+      })
+
+      // Sub-agent exchange 2 (parentToolUseId = parentId)
+      store.applyEventForTest({
+        type: 'stream_event',
+        parent_tool_use_id: parentId,
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'step 2' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        parent_tool_use_id: parentId,
+        message: {
+          id: 'msg-sub-2',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'step 2' }],
+          model: 'claude-test',
+        },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        parent_tool_use_id: parentId,
+        uuid: 'uuid-sub-2',
+        isReplay: true,
+        message: { role: 'user', content: 'sub-task 2' },
+      })
+
+      // Filter sub-agent turns (parentToolUseId = parentId)
+      const subTurns = store.conversation.turns.filter(t => t.parentToolUseId === parentId)
+      // 2 user + 2 assistant sub turns
+      expect(subTurns).toHaveLength(4)
+
+      // Must strictly alternate: user, asst, user, asst
+      expect(subTurns[0].type).toBe('user')
+      expect(subTurns[1].type).toBe('assistant')
+      expect(subTurns[1].messageId).toBe('msg-sub-1')
+      expect(subTurns[2].type).toBe('user')
+      expect(subTurns[3].type).toBe('assistant')
+      expect(subTurns[3].messageId).toBe('msg-sub-2')
+
+      // The sub-agent assistant turns must be SEPARATE (not merged)
+      expect(subTurns[1].blocks).toHaveLength(1)
+      expect(subTurns[3].blocks).toHaveLength(1)
+      const step1 = subTurns[1].blocks[0]
+      expect(step1.type === 'streaming_text' && step1.chunks.join('')).toBe('step 1')
+      const step2 = subTurns[3].blocks[0]
+      expect(step2.type === 'streaming_text' && step2.chunks.join('')).toBe('step 2')
+    })
+
+    // Test case D: batched sends — each pending message pairs with its own response
+    it('test D: batched user sends — each pending pairs with its own assistant response', () => {
+      // 3 pending messages queued before responses arrive
+      store.addPendingMessage('uuid-d1', 'batch one')
+      store.addPendingMessage('uuid-d2', 'batch two')
+      store.addPendingMessage('uuid-d3', 'batch three')
+
+      expect(store.conversation.turns).toHaveLength(3)
+      // All are pending user turns
+      expect(store.conversation.turns.every(t => t.pendingUuid !== undefined)).toBe(true)
+
+      // Response 1 streams and finalizes
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'response one' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: { id: 'msg-d1', role: 'assistant', content: [{ type: 'text', text: 'response one' }], model: 'claude-test' },
+      })
+      // Echo for batch one
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-d1',
+        isReplay: true,
+        message: { role: 'user', content: 'batch one' },
+      })
+
+      // Response 2 streams and finalizes
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'response two' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: { id: 'msg-d2', role: 'assistant', content: [{ type: 'text', text: 'response two' }], model: 'claude-test' },
+      })
+      // Echo for batch two
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-d2',
+        isReplay: true,
+        message: { role: 'user', content: 'batch two' },
+      })
+
+      // Response 3 streams and finalizes
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'response three' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: { id: 'msg-d3', role: 'assistant', content: [{ type: 'text', text: 'response three' }], model: 'claude-test' },
+      })
+      // Echo for batch three
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-d3',
+        isReplay: true,
+        message: { role: 'user', content: 'batch three' },
+      })
+
+      // Final: 6 turns, strictly alternating user/assistant
+      expect(store.conversation.turns).toHaveLength(6)
+      for (let i = 0; i < 6; i++) {
+        const expected = i % 2 === 0 ? 'user' : 'assistant'
+        expect(store.conversation.turns[i].type).toBe(expected)
+      }
+
+      // Each user confirmed (no pendingUuid)
+      const userTurns = store.conversation.turns.filter(t => t.type === 'user')
+      expect(userTurns.every(t => t.pendingUuid === undefined)).toBe(true)
+
+      // Each assistant has a distinct messageId
+      const asstTurns = store.conversation.turns.filter(t => t.type === 'assistant')
+      expect(asstTurns[0].messageId).toBe('msg-d1')
+      expect(asstTurns[1].messageId).toBe('msg-d2')
+      expect(asstTurns[2].messageId).toBe('msg-d3')
+    })
+  })
+
 })
