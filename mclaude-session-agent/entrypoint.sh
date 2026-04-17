@@ -1,6 +1,21 @@
 #!/bin/bash
 set -e
 
+# Bootstrap Nix store on first boot (empty PVC).
+# The image ships /nix-bootstrap.tar.gz created during docker build.
+# If the PVC is empty (no /nix/store), extract the tarball to seed it.
+if [ ! -d "/nix/store" ] && [ -f "/nix-bootstrap.tar.gz" ]; then
+    echo "[entrypoint] Seeding /nix from bootstrap tarball..."
+    tar xzf /nix-bootstrap.tar.gz -C /
+    echo "[entrypoint] Nix store seeded"
+fi
+
+# Add nix profile dirs to PATH for all subsequent commands
+export PATH="/nix/var/nix/profiles/default/bin:/home/node/.nix-profile/bin:$PATH"
+# Source nix env if available
+[ -f "/nix/var/nix/profiles/default/etc/profile.d/nix.sh" ] && \
+    . "/nix/var/nix/profiles/default/etc/profile.d/nix.sh" || true
+
 # Consume secrets
 [ -f "/home/node/.user-secrets/id_rsa" ] && {
     mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
