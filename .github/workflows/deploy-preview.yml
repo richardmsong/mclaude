@@ -82,7 +82,7 @@ jobs:
           context: ./mclaude-control-plane
           platforms: linux/arm64
           push: true
-          tags: ghcr.io/mclaude-project/mclaude-control-plane:${{ needs.changes.outputs.image_tag }}
+          tags: ghcr.io/richardmsong/mclaude-control-plane:${{ needs.changes.outputs.image_tag }}
 
   build-spa:
     name: Build spa (branch)
@@ -111,7 +111,7 @@ jobs:
           context: ./mclaude-web
           platforms: linux/arm64
           push: true
-          tags: ghcr.io/mclaude-project/mclaude-spa:${{ needs.changes.outputs.image_tag }}
+          tags: ghcr.io/richardmsong/mclaude-spa:${{ needs.changes.outputs.image_tag }}
 
   build-session-agent:
     name: Build session-agent (branch)
@@ -151,7 +151,7 @@ jobs:
           context: ./mclaude-session-agent
           platforms: linux/arm64
           push: true
-          tags: ghcr.io/mclaude-project/mclaude-session-agent:${{ needs.changes.outputs.image_tag }}
+          tags: ghcr.io/richardmsong/mclaude-session-agent:${{ needs.changes.outputs.image_tag }}
 
   deploy:
     name: Deploy preview
@@ -195,9 +195,9 @@ jobs:
           PREVIEW_HOST="preview-${BRANCH_SLUG}.mclaude.internal"
           echo "host=$PREVIEW_HOST" >> "$GITHUB_OUTPUT"
 
-          echo "control-plane: ghcr.io/mclaude-project/mclaude-control-plane:${CP_TAG}"
-          echo "spa:           ghcr.io/mclaude-project/mclaude-spa:${SPA_TAG}"
-          echo "session-agent: ghcr.io/mclaude-project/mclaude-session-agent:${SA_TAG}"
+          echo "control-plane: ghcr.io/richardmsong/mclaude-control-plane:${CP_TAG}"
+          echo "spa:           ghcr.io/richardmsong/mclaude-spa:${SPA_TAG}"
+          echo "session-agent: ghcr.io/richardmsong/mclaude-session-agent:${SA_TAG}"
           echo "preview URL:   http://${PREVIEW_HOST}"
 
       - name: Helm deploy preview

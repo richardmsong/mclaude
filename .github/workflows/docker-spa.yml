@@ -12,7 +12,7 @@ on:
         type: string
 
 env:
-  IMAGE: ghcr.io/mclaude-project/mclaude-spa
+  IMAGE: ghcr.io/richardmsong/mclaude-spa
 
 jobs:
   build-push:

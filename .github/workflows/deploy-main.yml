@@ -80,8 +80,8 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
-            ghcr.io/mclaude-project/mclaude-control-plane:${{ needs.changes.outputs.image_tag }}
-            ghcr.io/mclaude-project/mclaude-control-plane:main
+            ghcr.io/richardmsong/mclaude-control-plane:${{ needs.changes.outputs.image_tag }}
+            ghcr.io/richardmsong/mclaude-control-plane:main
 
   build-spa:
     name: Build spa
@@ -111,8 +111,8 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
-            ghcr.io/mclaude-project/mclaude-spa:${{ needs.changes.outputs.image_tag }}
-            ghcr.io/mclaude-project/mclaude-spa:main
+            ghcr.io/richardmsong/mclaude-spa:${{ needs.changes.outputs.image_tag }}
+            ghcr.io/richardmsong/mclaude-spa:main
 
   build-session-agent:
     name: Build session-agent
@@ -153,8 +153,8 @@ jobs:
           platforms: linux/arm64
           push: true
           tags: |
-            ghcr.io/mclaude-project/mclaude-session-agent:${{ needs.changes.outputs.image_tag }}
-            ghcr.io/mclaude-project/mclaude-session-agent:main
+            ghcr.io/richardmsong/mclaude-session-agent:${{ needs.changes.outputs.image_tag }}
+            ghcr.io/richardmsong/mclaude-session-agent:main
 
   deploy:
     name: Deploy main
@@ -193,9 +193,9 @@ jobs:
           echo "spa=$SPA_TAG" >> "$GITHUB_OUTPUT"
           echo "sa=$SA_TAG" >> "$GITHUB_OUTPUT"
 
-          echo "control-plane: ghcr.io/mclaude-project/mclaude-control-plane:${CP_TAG}"
-          echo "spa:           ghcr.io/mclaude-project/mclaude-spa:${SPA_TAG}"
-          echo "session-agent: ghcr.io/mclaude-project/mclaude-session-agent:${SA_TAG}"
+          echo "control-plane: ghcr.io/richardmsong/mclaude-control-plane:${CP_TAG}"
+          echo "spa:           ghcr.io/richardmsong/mclaude-spa:${SPA_TAG}"
+          echo "session-agent: ghcr.io/richardmsong/mclaude-session-agent:${SA_TAG}"
 
       - name: Helm deploy main
         env:

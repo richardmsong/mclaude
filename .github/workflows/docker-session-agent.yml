@@ -12,7 +12,7 @@ on:
         type: string
 
 env:
-  IMAGE: ghcr.io/mclaude-project/mclaude-session-agent
+  IMAGE: ghcr.io/richardmsong/mclaude-session-agent
 
 jobs:
   build-push:
