@@ -200,10 +200,26 @@ export class EventStore {
     return `turn-${++this._turnCounter}`
   }
 
-  private _currentAssistantTurn(parentToolUseId?: string): Turn | null {
+  /**
+   * Return the most recent assistant turn whose parentToolUseId matches.
+   *
+   * If `messageId` is provided, only returns the turn when its own messageId
+   * matches (same Anthropic message) OR the turn has no messageId yet (it was
+   * created by a stream_event and has not yet been claimed by an assistant event).
+   * A turn whose messageId is set to a DIFFERENT value is a distinct exchange
+   * boundary — return null so the caller creates a fresh turn.
+   */
+  private _currentAssistantTurn(parentToolUseId?: string, messageId?: string): Turn | null {
     for (let i = this._conversation.turns.length - 1; i >= 0; i--) {
       const t = this._conversation.turns[i]
-      if (t.type === 'assistant' && t.parentToolUseId === parentToolUseId) return t
+      if (t.type === 'assistant' && t.parentToolUseId === parentToolUseId) {
+        if (messageId !== undefined) {
+          // If this turn already belongs to a different message, it is a
+          // finalized boundary — treat as no match so a new turn is created.
+          if (t.messageId !== undefined && t.messageId !== messageId) return null
+        }
+        return t
+      }
     }
     return null
   }
@@ -434,7 +450,13 @@ export class EventStore {
       case 'assistant': {
         // Finalize any streaming text block
         const wantedParentA = event.parent_tool_use_id ?? undefined
-        let turn = this._currentAssistantTurn(wantedParentA)
+        const incomingMessageId = event.message.id
+        // Pass incomingMessageId so _currentAssistantTurn returns null when the
+        // most recent assistant turn belongs to a DIFFERENT Anthropic message —
+        // i.e., it has already been finalized and stamped with a different
+        // message ID. This prevents new responses from being merged into the
+        // prior exchange's turn.
+        let turn = this._currentAssistantTurn(wantedParentA, incomingMessageId)
         if (!turn) {
           turn = {
             id: this._nextTurnId(),
@@ -444,6 +466,10 @@ export class EventStore {
           }
           this._conversation.turns.push(turn)
         }
+
+        // Stamp the turn with this message's ID so future calls can detect a
+        // turn boundary (different messageId → different exchange).
+        turn.messageId = incomingMessageId
 
         // Finalize streaming block if present
         for (const block of turn.blocks) {
