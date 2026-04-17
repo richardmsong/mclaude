@@ -40,6 +40,7 @@ type SessionState struct {
 	Usage       UsageStats        `json:"usage"`
 	ReplayFromSeq uint64          `json:"replayFromSeq,omitempty"`
 	JoinWorktree bool             `json:"joinWorktree"`
+	ExtraFlags   string           `json:"extraFlags,omitempty"`
 }
 
 // Capabilities are populated from the init event and refreshed on reload_plugins.

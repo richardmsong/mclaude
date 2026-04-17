@@ -47,9 +47,9 @@ type Session struct {
 	// allowedTools is the set of tool names auto-approved under allowlist policy.
 	// Ignored for other policies.
 	allowedTools map[string]bool
-	// disallowedTools is the list of tool restriction patterns passed verbatim
-	// as --disallowedTools flags to the Claude spawn command.
-	disallowedTools []string
+	// extraFlags is an optional string of raw CLI flags appended to the Claude
+	// spawn command.  It is shell-parsed (POSIX quoting rules) before appending.
+	extraFlags string
 	// onEventPublished, if non-nil, is called after each successful NATS publish
 	// with the event type and the JetStream sequence number of the published message.
 	// Used by the agent to update replayFromSeq on compact_boundary events.
@@ -66,6 +66,8 @@ type Session struct {
 
 // newSession creates a Session but does not start the Claude process yet.
 // The default permission policy is managed (forward all to client).
+// ExtraFlags from the state are copied into sess.extraFlags so they are
+// re-applied on every start() call (new session and resume paths both use start).
 func newSession(state SessionState, userID string) *Session {
 	return &Session{
 		state:      state,
@@ -75,6 +77,7 @@ func newSession(state SessionState, userID string) *Session {
 		doneCh:     make(chan struct{}),
 		initCh:     make(chan struct{}),
 		permPolicy: PermissionPolicyManaged,
+		extraFlags: state.ExtraFlags,
 	}
 }
 
@@ -158,9 +161,13 @@ func (s *Session) start(claudePath string, resume bool, publish func(subject str
 		}
 	}
 
-	// Append --disallowedTools flags for each pattern.
-	for _, tool := range s.disallowedTools {
-		args = append(args, "--disallowedTools", tool)
+	// Append shell-parsed extraFlags if set.
+	if s.extraFlags != "" {
+		extra, err := shellSplit(s.extraFlags)
+		if err != nil {
+			return fmt.Errorf("extraFlags shell parse: %w", err)
+		}
+		args = append(args, extra...)
 	}
 
 	cmd := exec.Command(claudePath, args...)

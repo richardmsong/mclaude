@@ -556,15 +556,15 @@ var defaultDevHarnessAllowlist = []string{
 // Error: publish api_error event to mclaude.{userId}.{projectId}.events._api.
 func (a *Agent) handleCreate(msg *nats.Msg) {
 	var req struct {
-		Name            string             `json:"name"`
-		Branch          string             `json:"branch"`
-		CWD             string             `json:"cwd"`
-		JoinWorktree    bool               `json:"joinWorktree"`
-		RequestID       string             `json:"requestId"`
-		PermPolicy      string             `json:"permPolicy"`
-		AllowedTools    []string           `json:"allowedTools"`
-		DisallowedTools []string           `json:"disallowedTools"`
-		QuotaMonitor    *QuotaMonitorConfig `json:"quotaMonitor"`
+		Name         string             `json:"name"`
+		Branch       string             `json:"branch"`
+		CWD          string             `json:"cwd"`
+		JoinWorktree bool               `json:"joinWorktree"`
+		RequestID    string             `json:"requestId"`
+		PermPolicy   string             `json:"permPolicy"`
+		AllowedTools []string           `json:"allowedTools"`
+		ExtraFlags   string             `json:"extraFlags"`
+		QuotaMonitor *QuotaMonitorConfig `json:"quotaMonitor"`
 	}
 	if len(msg.Data) > 0 {
 		if err := json.Unmarshal(msg.Data, &req); err != nil {
@@ -641,6 +641,7 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 		StateSince:      now,
 		CreatedAt:       now,
 		JoinWorktree:    req.JoinWorktree,
+		ExtraFlags:      req.ExtraFlags,
 		PendingControls: make(map[string]any),
 	}
 
@@ -675,10 +676,8 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 		}
 		sess.allowedTools = set
 	}
-	// Apply disallowedTools from request.
-	if len(req.DisallowedTools) > 0 {
-		sess.disallowedTools = req.DisallowedTools
-	}
+	// extraFlags is already set in the state struct literal above and propagated
+	// into sess.extraFlags via newSession(state, ...). No additional assignment needed.
 
 	// Wire the onEventPublished callback so that compact_boundary events update
 	// replayFromSeq in KV.  The seq argument is the JetStream sequence number
@@ -943,8 +942,9 @@ func (a *Agent) handleControl(msg *nats.Msg) {
 // Error: publish api_error event.
 func (a *Agent) handleRestart(msg *nats.Msg) {
 	var req struct {
-		SessionID string `json:"sessionId"`
-		RequestID string `json:"requestId"`
+		SessionID  string `json:"sessionId"`
+		RequestID  string `json:"requestId"`
+		ExtraFlags string `json:"extraFlags"`
 	}
 	if err := json.Unmarshal(msg.Data, &req); err != nil || req.SessionID == "" {
 		errMsg := "invalid request: missing sessionId"
@@ -973,6 +973,10 @@ func (a *Agent) handleRestart(msg *nats.Msg) {
 	// Read current state, clear pending controls.
 	st := sess.getState()
 	clearPendingControlsForResume(&st)
+	// If the restart payload includes extraFlags, overwrite the stored value.
+	if req.ExtraFlags != "" {
+		st.ExtraFlags = req.ExtraFlags
+	}
 	if err := a.writeSessionKV(st); err != nil {
 		a.log.Warn().Err(err).Str("sessionId", req.SessionID).Msg("failed to write KV before restart")
 	}
