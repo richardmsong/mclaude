@@ -14,7 +14,7 @@ An MCP server that indexes the `docs/` directory into a SQLite + FTS5 database, 
 | Doc categorization | Filename prefix convention | `plan-*`, `design-*` → design docs. `spec-*`, `schema-*`, `ui-spec*` → specs. No frontmatter needed. Aligns with planned doc reorganization. |
 | Section granularity | `##` (H2) level | Primary structural unit in all design docs. Each H2 section becomes one searchable row with its own lineage. Sub-headings (###, ####) are included in the parent section's content. |
 | Content reindex trigger | `fs.watch` on `docs/` | Always reflects what's on disk, even uncommitted changes. Agent sees current file state in real time. |
-| Lineage reindex trigger | Git log scan on startup + on new commits detected | Lineage is historical (co-committed changes). Rebuilt when the server starts, then incrementally when `fs.watch` detects a `.git/` change or a periodic check finds new commits. |
+| Lineage reindex trigger | Git log scan on startup + on new commits detected | Lineage is historical (co-committed changes). Rebuilt when the server starts, then incrementally when the file watcher fires and `HEAD` has changed since the last scan. |
 | DB location | `mclaude-docs-mcp/.docs-index.db` | Co-located with server code. Gitignored via `mclaude-docs-mcp/.gitignore` (pattern: `.docs-index.db`). Also add `*.db` to repo root `.gitignore`. Rebuilt from scratch if deleted. |
 | Server directory | `mclaude-docs-mcp/` | Separate package from mclaude-mcp (different concern: doc knowledge vs session management). |
 
@@ -105,7 +105,7 @@ Full-text search across all indexed sections.
 
 Returns: array of `{ doc_path, doc_title, category, heading, snippet, line_start, line_end, rank }` sorted by BM25 relevance.
 
-The `snippet` is a FTS5 snippet (highlighted match context, ~200 chars). For the full section content, use `get_section`.
+The `snippet` is a FTS5 snippet (highlighted match context, ~32 tokens / ~200 chars, bracketed highlights). For the full section content, use `get_section`.
 
 ### `get_section`
 
