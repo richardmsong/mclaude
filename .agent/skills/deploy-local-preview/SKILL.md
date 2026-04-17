@@ -120,6 +120,18 @@ kubectl create secret docker-registry ghcr-pull-secret \
   --docker-username=YOUR_GITHUB_USERNAME \
   --docker-password="$GHCR_TOKEN" \
   --dry-run=client -o yaml | kubectl apply -f -
+
+# GitHub OAuth client-secret (matches controlPlane.providers[github].clientSecretRef
+# in values-k3d-ghcr.yaml). Pulled from Bitwarden entry "Mclaude dev GitHub app".
+GH_OAUTH_SECRET=$(bw get password "YOUR_BITWARDEN_GITHUB_OAUTH_ITEM_ID" 2>/dev/null)
+if [ -z "$GH_OAUTH_SECRET" ]; then
+  echo "WARNING: GitHub OAuth client-secret not found in Bitwarden — /auth/providers will fail for GitHub"
+else
+  kubectl create secret generic github-oauth-secret \
+    --namespace "$NS" \
+    --from-literal=client-secret="$GH_OAUTH_SECRET" \
+    --dry-run=client -o yaml | kubectl apply -f -
+fi
 ```
 
 ### Step 4 — TLS certificate for *.mclaude.local
