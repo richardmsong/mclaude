@@ -244,7 +244,7 @@ SkillInvocationBlock {
 ```
 
 Responsibilities:
-- Subscribes to `mclaude.{userId}.{location}.{projectId}.events.{sessionId}`
+- Subscribes to `mclaude.{userId}.{projectId}.events.{sessionId}`
 - Parses raw stream-json events into typed `Event` objects
 - Accumulates events into `ConversationModel`:
   - `stream_event` deltas → appended to current `StreamingTextBlock.chunks`
@@ -278,7 +278,7 @@ LifecycleStore(natsClient, userId, projectId)
 ```
 
 Responsibilities:
-- Subscribes to `mclaude.{userId}.{location}.{projectId}.lifecycle.>`
+- Subscribes to `mclaude.{userId}.{projectId}.lifecycle.>`
 - Forwards lifecycle events (session_created, session_stopped, session_restarting, etc.)
 - SessionStore uses these to supplement KV watches (faster notification than KV propagation)
 
@@ -475,23 +475,23 @@ Every client, regardless of platform, implements the same protocol.
 ### NATS Subjects (subscribe)
 
 ```
-mclaude.{userId}.{location}.{projectId}.events.{sessionId}       → stream-json events (JetStream)
-mclaude.{userId}.{location}.{projectId}.lifecycle.{sessionId}     → lifecycle events (JetStream)
-mclaude.{userId}.{location}.{projectId}.terminal.{termId}.output  → PTY output bytes (core NATS)
+mclaude.{userId}.{projectId}.events.{sessionId}       → stream-json events (JetStream)
+mclaude.{userId}.{projectId}.lifecycle.{sessionId}     → lifecycle events (JetStream)
+mclaude.{userId}.{projectId}.terminal.{termId}.output  → PTY output bytes (core NATS)
 ```
 
 ### NATS Subjects (publish)
 
 ```
-mclaude.{userId}.{location}.{projectId}.api.sessions.create       → request/reply
-mclaude.{userId}.{location}.{projectId}.api.sessions.delete       → request/reply
-mclaude.{userId}.{location}.{projectId}.api.sessions.input        → fire-and-forget
-mclaude.{userId}.{location}.{projectId}.api.sessions.control      → fire-and-forget
-mclaude.{userId}.{location}.{projectId}.api.sessions.restart      → request/reply
-mclaude.{userId}.{location}.{projectId}.api.terminal.create       → request/reply
-mclaude.{userId}.{location}.{projectId}.api.terminal.delete       → request/reply
-mclaude.{userId}.{location}.{projectId}.api.terminal.resize       → fire-and-forget
-mclaude.{userId}.{location}.{projectId}.terminal.{termId}.input   → fire-and-forget
+mclaude.{userId}.{projectId}.api.sessions.create       → request/reply
+mclaude.{userId}.{projectId}.api.sessions.delete       → request/reply
+mclaude.{userId}.{projectId}.api.sessions.input        → fire-and-forget
+mclaude.{userId}.{projectId}.api.sessions.control      → fire-and-forget
+mclaude.{userId}.{projectId}.api.sessions.restart      → request/reply
+mclaude.{userId}.{projectId}.api.terminal.create       → request/reply
+mclaude.{userId}.{projectId}.api.terminal.delete       → request/reply
+mclaude.{userId}.{projectId}.api.terminal.resize       → fire-and-forget
+mclaude.{userId}.{projectId}.terminal.{termId}.input   → fire-and-forget
 ```
 
 ### NATS KV (watch)

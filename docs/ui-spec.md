@@ -91,8 +91,11 @@ Shown when no access token is stored.
 │                                 │
 │              ⚡                  │  (large icon, centered)
 │           MClaude               │  (title, 28px bold)
-│  Enter your access token        │  (subtitle, --text2)
+│  Sign in to your account        │  (subtitle, --text2)
 │                                 │
+│  ┌─────────────────────────┐    │
+│  │  email@example.com      │    │  (email field)
+│  └─────────────────────────┘    │
 │  ┌─────────────────────────┐    │
 │  │  •••••••••••••          │    │  (password field)
 │  └─────────────────────────┘    │
