@@ -249,9 +249,7 @@ export function SessionDetailScreen({
     fileInputRef.current?.click()
   }
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
+  const stageImageFile = (file: File) => {
     const reader = new FileReader()
     reader.onload = (ev) => {
       const result = ev.target?.result as string
@@ -261,8 +259,31 @@ export function SessionDetailScreen({
       setStagedImage({ base64: base64 ?? '', mimeType, previewUrl: result })
     }
     reader.readAsDataURL(file)
+  }
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    stageImageFile(file)
     // Reset so same file can be picked again
     e.target.value = ''
+  }
+
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items
+    if (!items) return
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      if (item.kind === 'file' && item.type.startsWith('image/')) {
+        const file = item.getAsFile()
+        if (file) {
+          e.preventDefault()
+          stageImageFile(file)
+          return
+        }
+      }
+    }
+    // No image found — let the event propagate so text paste works normally
   }
 
   const handleTabChange = (tab: 'events' | 'terminal') => {
@@ -988,6 +1009,7 @@ export function SessionDetailScreen({
                 value={input}
                 onChange={handleInputChange}
                 onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
                 placeholder="Message… or / for skills"
                 rows={1}
                 style={{
