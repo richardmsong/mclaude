@@ -318,6 +318,7 @@ HELM_ARGS=(
   -f charts/mclaude/values-k3d-ghcr.yaml
   --set "controlPlane.devOAuthToken=${OAUTH_TOKEN}"
   --wait --timeout 5m
+  --force-conflicts
 )
 
 if [ "$USE_LOCAL_IMAGES" = true ]; then
