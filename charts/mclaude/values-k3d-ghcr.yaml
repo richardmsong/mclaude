@@ -10,7 +10,7 @@ controlPlane:
   image:
     registry: ghcr.io
     repository: mclaude-project/mclaude-control-plane
-    tag: "latest"
+    tag: "main"
     pullPolicy: IfNotPresent
   migrations:
     enabled: false
@@ -28,7 +28,7 @@ spa:
   image:
     registry: ghcr.io
     repository: mclaude-project/mclaude-spa
-    tag: "latest"
+    tag: "main"
     pullPolicy: IfNotPresent
   containerPort: 8080
   service:
@@ -39,7 +39,7 @@ sessionAgent:
   image:
     registry: ghcr.io
     repository: mclaude-project/mclaude-session-agent
-    tag: "latest"
+    tag: "main"
     pullPolicy: IfNotPresent
 
 ## ── namespace managed by k3d-ghcr.sh, not by helm ─────────────────────────
