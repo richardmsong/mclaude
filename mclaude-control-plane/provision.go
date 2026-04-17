@@ -42,6 +42,11 @@ type sessionAgentTpl struct {
 	projectPvcStorageClass        string
 	nixPvcSize                    string
 	nixPvcStorageClass            string
+	// corporateCAConfigMap is the name of a ConfigMap in the control-plane namespace
+	// containing a "ca-certificates.crt" key with PEM-encoded CA certificates.
+	// When non-empty, the reconciler copies it to user namespaces and mounts it
+	// into session-agent pods with NODE_EXTRA_CA_CERTS set.
+	corporateCAConfigMap string
 }
 
 // NewK8sProvisioner initialises a provisioner using in-cluster service-account credentials.
@@ -149,6 +154,7 @@ func (p *K8sProvisioner) loadTemplate(ctx context.Context) (*sessionAgentTpl, er
 		projectPvcStorageClass: cm.Data["projectPvcStorageClass"],
 		nixPvcSize:             cm.Data["nixPvcSize"],
 		nixPvcStorageClass:     cm.Data["nixPvcStorageClass"],
+		corporateCAConfigMap:   cm.Data["corporateCAConfigMap"],
 	}
 
 	if tpl.projectPvcSize == "" {
@@ -370,6 +376,40 @@ func (p *K8sProvisioner) ensureImagePullSecrets(ctx context.Context, destNs stri
 	return nil
 }
 
+// ensureCorporateCAConfigMap copies the CA bundle ConfigMap from the control-plane namespace
+// into the user namespace (idempotent create-or-update). K8s volumes cannot reference
+// cross-namespace ConfigMaps, so the reconciler must copy it. The copy is refreshed on every
+// reconcile cycle so changes to the source propagate within the resync window.
+func (p *K8sProvisioner) ensureCorporateCAConfigMap(ctx context.Context, destNs, cmName string) error {
+	src, err := p.client.CoreV1().ConfigMaps(p.controlPlaneNs).Get(ctx, cmName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get corporate CA configmap %s from %s: %w", cmName, p.controlPlaneNs, err)
+	}
+
+	existing, err := p.client.CoreV1().ConfigMaps(destNs).Get(ctx, cmName, metav1.GetOptions{})
+	if err == nil {
+		// Already exists — update data in case the source changed.
+		existing.Data = src.Data
+		existing.BinaryData = src.BinaryData
+		_, err = p.client.CoreV1().ConfigMaps(destNs).Update(ctx, existing, metav1.UpdateOptions{})
+		return err
+	}
+	if !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("check configmap %s in %s: %w", cmName, destNs, err)
+	}
+
+	newCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: destNs},
+		Data:       src.Data,
+		BinaryData: src.BinaryData,
+	}
+	_, err = p.client.CoreV1().ConfigMaps(destNs).Create(ctx, newCM, metav1.CreateOptions{})
+	if k8serrors.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
+}
+
 func (p *K8sProvisioner) ensurePVC(ctx context.Context, ns, name, size, storageClass string) error {
 	_, err := p.client.CoreV1().PersistentVolumeClaims(ns).Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
@@ -404,31 +444,137 @@ func (p *K8sProvisioner) ensurePVC(ctx context.Context, ns, name, size, storageC
 	return err
 }
 
-// ensureDeployment creates or updates the session-agent Deployment for a project.
-// Per docs/plan-graceful-upgrades.md: both create and update paths set Recreate strategy
-// so the old pod exits before the new pod starts during image upgrades.
-func (p *K8sProvisioner) ensureDeployment(ctx context.Context, ns, projectID, userID, gitURL string, tpl *sessionAgentTpl) error {
-	name := "project-" + projectID
-
-	existing, err := p.client.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
-	if err == nil {
-		// Update path: set image and migrate to Recreate strategy.
-		existing.Spec.Template.Spec.Containers[0].Image = tpl.image
-		existing.Spec.Strategy = appsv1.DeploymentStrategy{
-			Type: appsv1.RecreateDeploymentStrategyType,
-		}
-		_, err = p.client.AppsV1().Deployments(ns).Update(ctx, existing, metav1.UpdateOptions{})
-		return err
-	}
-	if !k8serrors.IsNotFound(err) {
-		return err
-	}
-
-	replicas := int32(1)
-	grace := tpl.terminationGracePeriodSeconds
+// buildPodSpec constructs the pod template spec for a session-agent Deployment.
+// Shared between create and update paths to keep both consistent.
+func (p *K8sProvisioner) buildPodSpec(
+	ns, projectID, userID, gitURL string,
+	tpl *sessionAgentTpl,
+	imagePullSecrets []corev1.LocalObjectReference,
+) corev1.PodSpec {
 	runAsUser := int64(1000)
 	fsGroup := int64(1000)
 	runAsNonRoot := true
+	grace := tpl.terminationGracePeriodSeconds
+
+	env := []corev1.EnvVar{
+		{Name: "USER_ID", Value: userID},
+		{Name: "PROJECT_ID", Value: projectID},
+		{Name: "NATS_URL", Value: p.sessionAgentNATSURL},
+	}
+	if gitURL != "" {
+		env = append(env, corev1.EnvVar{Name: "GIT_URL", Value: gitURL})
+	}
+
+	volumes := []corev1.Volume{
+		{
+			Name: "project-data",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: "project-" + projectID,
+				},
+			},
+		},
+		{
+			Name: "nix-store",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: "nix-" + projectID,
+				},
+			},
+		},
+		{
+			Name: "claude-home",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
+		{
+			Name: "user-config",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "user-config"},
+				},
+			},
+		},
+		{
+			Name: "user-secrets",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: "user-secrets",
+				},
+			},
+		},
+	}
+
+	volumeMounts := []corev1.VolumeMount{
+		{Name: "project-data", MountPath: "/data"},
+		{Name: "nix-store", MountPath: "/nix"},
+		{Name: "claude-home", MountPath: "/home/node/.claude"},
+		{Name: "user-config", MountPath: "/home/node/.claude-seed", ReadOnly: true},
+		{Name: "user-secrets", MountPath: "/home/node/.user-secrets", ReadOnly: true},
+	}
+
+	// Corporate CA bundle — only when configured (TLS-intercepting proxies).
+	if tpl.corporateCAConfigMap != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: "corporate-ca",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: tpl.corporateCAConfigMap},
+				},
+			},
+		})
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "corporate-ca",
+			MountPath: "/etc/ssl/certs/corporate-ca-certificates.crt",
+			SubPath:   "ca-certificates.crt",
+			ReadOnly:  true,
+		})
+		env = append(env, corev1.EnvVar{
+			Name:  "NODE_EXTRA_CA_CERTS",
+			Value: "/etc/ssl/certs/corporate-ca-certificates.crt",
+		})
+	}
+
+	return corev1.PodSpec{
+		ServiceAccountName:            "mclaude-sa",
+		ImagePullSecrets:              imagePullSecrets,
+		TerminationGracePeriodSeconds: &grace,
+		SecurityContext: &corev1.PodSecurityContext{
+			RunAsNonRoot: &runAsNonRoot,
+			RunAsUser:    &runAsUser,
+			FSGroup:      &fsGroup,
+		},
+		Volumes: volumes,
+		Containers: []corev1.Container{
+			{
+				Name:            "session-agent",
+				Image:           tpl.image,
+				ImagePullPolicy: tpl.imagePullPolicy,
+				Env:             env,
+				Resources:       tpl.resources,
+				VolumeMounts:    volumeMounts,
+			},
+		},
+	}
+}
+
+// ensureDeployment creates or updates the session-agent Deployment for a project.
+// Per docs/plan-graceful-upgrades.md: both create and update paths set Recreate strategy
+// so the old pod exits before the new pod starts during image upgrades.
+//
+// The update path rebuilds the full pod template spec (volumes, containers, env, mounts)
+// to match the current template — this ensures that CA configuration changes propagate
+// to existing Deployments on the next reconcile cycle.
+func (p *K8sProvisioner) ensureDeployment(ctx context.Context, ns, projectID, userID, gitURL string, tpl *sessionAgentTpl) error {
+	name := "project-" + projectID
+
+	// Copy corporate CA ConfigMap to user namespace before creating/updating Deployment.
+	if tpl.corporateCAConfigMap != "" {
+		if err := p.ensureCorporateCAConfigMap(ctx, ns, tpl.corporateCAConfigMap); err != nil {
+			return fmt.Errorf("ensure corporate CA configmap: %w", err)
+		}
+	}
 
 	// Collect imagePullSecrets from any docker config secrets in the user namespace.
 	var imagePullSecrets []corev1.LocalObjectReference
@@ -441,14 +587,24 @@ func (p *K8sProvisioner) ensureDeployment(ctx context.Context, ns, projectID, us
 		}
 	}
 
-	env := []corev1.EnvVar{
-		{Name: "USER_ID", Value: userID},
-		{Name: "PROJECT_ID", Value: projectID},
-		{Name: "NATS_URL", Value: p.sessionAgentNATSURL},
+	podSpec := p.buildPodSpec(ns, projectID, userID, gitURL, tpl, imagePullSecrets)
+
+	existing, err := p.client.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
+	if err == nil {
+		// Update path: rebuild the full pod template spec so that image, strategy,
+		// volumes, env vars, and volume mounts all reflect the current template.
+		existing.Spec.Template.Spec = podSpec
+		existing.Spec.Strategy = appsv1.DeploymentStrategy{
+			Type: appsv1.RecreateDeploymentStrategyType,
+		}
+		_, err = p.client.AppsV1().Deployments(ns).Update(ctx, existing, metav1.UpdateOptions{})
+		return err
 	}
-	if gitURL != "" {
-		env = append(env, corev1.EnvVar{Name: "GIT_URL", Value: gitURL})
+	if !k8serrors.IsNotFound(err) {
+		return err
 	}
+
+	replicas := int32(1)
 
 	// Create path: Recreate strategy so old pod exits before new pod starts.
 	deploy := &appsv1.Deployment{
@@ -478,72 +634,7 @@ func (p *K8sProvisioner) ensureDeployment(ctx context.Context, ns, projectID, us
 						"project": projectID,
 					},
 				},
-				Spec: corev1.PodSpec{
-					ServiceAccountName:            "mclaude-sa",
-					ImagePullSecrets:              imagePullSecrets,
-					TerminationGracePeriodSeconds: &grace,
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: &runAsNonRoot,
-						RunAsUser:    &runAsUser,
-						FSGroup:      &fsGroup,
-					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "project-data",
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-									ClaimName: name,
-								},
-							},
-						},
-						{
-							Name: "nix-store",
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-									ClaimName: "nix-" + projectID,
-								},
-							},
-						},
-						{
-							Name: "claude-home",
-							VolumeSource: corev1.VolumeSource{
-								EmptyDir: &corev1.EmptyDirVolumeSource{},
-							},
-						},
-						{
-							Name: "user-config",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{Name: "user-config"},
-								},
-							},
-						},
-						{
-							Name: "user-secrets",
-							VolumeSource: corev1.VolumeSource{
-								Secret: &corev1.SecretVolumeSource{
-									SecretName: "user-secrets",
-								},
-							},
-						},
-					},
-					Containers: []corev1.Container{
-						{
-							Name:            "session-agent",
-							Image:           tpl.image,
-							ImagePullPolicy: tpl.imagePullPolicy,
-							Env:             env,
-							Resources:       tpl.resources,
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: "project-data", MountPath: "/data"},
-								{Name: "nix-store", MountPath: "/nix"},
-								{Name: "claude-home", MountPath: "/home/node/.claude"},
-								{Name: "user-config", MountPath: "/home/node/.claude-seed", ReadOnly: true},
-								{Name: "user-secrets", MountPath: "/home/node/.user-secrets", ReadOnly: true},
-							},
-						},
-					},
-				},
+				Spec: podSpec,
 			},
 		},
 	}
