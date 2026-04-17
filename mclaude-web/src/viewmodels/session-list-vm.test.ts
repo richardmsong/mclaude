@@ -396,19 +396,29 @@ describe('SessionListVM', () => {
   })
 
   describe('restartSession', () => {
-    it('publishes to mclaude.{userId}.api.sessions.restart with sessionId', async () => {
+    it('publishes to mclaude.{userId}.{projectId}.api.sessions.restart with sessionId', async () => {
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-abc', makeSessionKVState({
+        id: 'session-abc', projectId: 'project-1',
+      }))
+      sessionStore.startWatching()
+
       await vm.restartSession('session-abc')
 
-      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.api.sessions.restart')
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.project-1.api.sessions.restart')
       expect(pub).toBeDefined()
       const payload = parsePublished(pub!.data) as Record<string, unknown>
       expect(payload['sessionId']).toBe('session-abc')
     })
 
     it('includes extraFlags in payload when provided', async () => {
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-abc', makeSessionKVState({
+        id: 'session-abc', projectId: 'project-1',
+      }))
+      sessionStore.startWatching()
+
       await vm.restartSession('session-abc', { extraFlags: '--model claude-opus-4-7' })
 
-      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.api.sessions.restart')
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.project-1.api.sessions.restart')
       expect(pub).toBeDefined()
       const payload = parsePublished(pub!.data) as Record<string, unknown>
       expect(payload['sessionId']).toBe('session-abc')
@@ -416,21 +426,38 @@ describe('SessionListVM', () => {
     })
 
     it('omits extraFlags from payload when not provided', async () => {
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-abc', makeSessionKVState({
+        id: 'session-abc', projectId: 'project-1',
+      }))
+      sessionStore.startWatching()
+
       await vm.restartSession('session-abc')
 
-      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.api.sessions.restart')
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.project-1.api.sessions.restart')
       expect(pub).toBeDefined()
       const payload = parsePublished(pub!.data) as Record<string, unknown>
       expect('extraFlags' in payload).toBe(false)
     })
 
     it('omits extraFlags from payload when opts.extraFlags is undefined', async () => {
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-abc', makeSessionKVState({
+        id: 'session-abc', projectId: 'project-1',
+      }))
+      sessionStore.startWatching()
+
       await vm.restartSession('session-abc', { extraFlags: undefined })
 
-      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.api.sessions.restart')
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.user-1.project-1.api.sessions.restart')
       expect(pub).toBeDefined()
       const payload = parsePublished(pub!.data) as Record<string, unknown>
       expect('extraFlags' in payload).toBe(false)
+    })
+
+    it('does nothing when session is not found', async () => {
+      await vm.restartSession('nonexistent-session')
+
+      const pub = mockNats.published.find(p => p.subject.includes('api.sessions.restart'))
+      expect(pub).toBeUndefined()
     })
   })
 

@@ -213,7 +213,9 @@ export class SessionListVM {
   }
 
   async restartSession(sessionId: string, opts?: { extraFlags?: string }): Promise<void> {
-    const subject = `mclaude.${this.userId}.api.sessions.restart`
+    const session = this.sessionStore.sessions.get(sessionId)
+    if (!session) return
+    const subject = `mclaude.${this.userId}.${session.projectId}.api.sessions.restart`
     const payload = {
       sessionId,
       ...(opts?.extraFlags !== undefined ? { extraFlags: opts.extraFlags } : {}),
