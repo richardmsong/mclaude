@@ -222,80 +222,101 @@ export class EventStore {
   /**
    * Insert a user turn at the correct position in _conversation.turns.
    *
-   * With --replay-user-messages, Claude publishes stream_events BEFORE the user
-   * echo in the JetStream sequence. So when the user echo arrives (live or replay),
-   * the associated assistant response turn may already be at the END of turns[].
+   * With --replay-user-messages, Claude publishes stream_events (and in some
+   * protocol orderings even the full assistant event) BEFORE the user echo in the
+   * JetStream sequence. So when the user echo arrives (live or replay), the
+   * associated assistant response turn may already be at or near the END of turns[].
    *
-   * If the last matching assistant turn is a "fresh" response turn (all blocks are
-   * streaming_text, meaning the response just started), insert the user turn BEFORE
-   * it so the conversation reads [user] -> [assistant], not [assistant] -> [user].
+   * We insert the user turn BEFORE the last matching assistant turn under
+   * wantedParent, UNLESS that assistant turn is already "claimed" — i.e. a
+   * confirmed (non-pending) user turn immediately precedes it, meaning it was
+   * already correctly paired with an earlier user message.
    *
    * "Matching" means the turn's parentToolUseId equals wantedParent (both may be
    * undefined for top-level turns).
    *
-   * If no fresh streaming assistant turn is found, append to the end (correct for
+   * If no eligible assistant turn is found, append to the end (correct for
    * idle-state sends where no response has started yet).
    */
   private _insertUserTurn(turn: Turn, wantedParent: string | undefined): void {
-    // Goal: insert a confirmed user turn BEFORE the fresh streaming assistant
-    // turn that responded to it, keeping any remaining pending user turns at
-    // the very end of the conversation (below all active content).
+    // Goal: insert a confirmed user turn BEFORE the most-recent "unclaimed"
+    // assistant turn under wantedParent, keeping any remaining pending user
+    // turns at the very end of the conversation (below all active content).
     //
     // Algorithm:
-    //  1. Find the last fresh streaming assistant turn under wantedParent
-    //     (all blocks are streaming_text). If none, just append and return.
-    //  2. Collect all pending user turns from the array (they may be anywhere —
-    //     before or after the streaming asst turn — due to batched sends).
-    //  3. Remove the streaming asst turn from the array.
-    //  4. Push the confirmed turn, then re-push the streaming asst turn.
-    //  5. Re-append all collected pending turns at the very end.
+    //  1. Find the last assistant turn under wantedParent.
+    //  2. Check whether that turn is "claimed": scan backward from its index,
+    //     skipping system turns, to find the nearest non-system predecessor.
+    //     If that predecessor is a CONFIRMED (non-pending) user turn, the
+    //     assistant turn is already paired — fall through to append.
+    //  3. Otherwise (predecessor is an assistant turn, a pending user turn,
+    //     or nothing), the turn is unclaimed — eligible for insertion before.
+    //  4. Collect all pending user turns from the array (they may be anywhere
+    //     due to batched sends).
+    //  5. Remove the unclaimed asst turn from the array.
+    //  6. Push the confirmed turn, then re-push the asst turn.
+    //  7. Re-append all collected pending turns at the very end.
 
-    // Step 1: find the fresh streaming assistant turn.
-    let streamingAsstIdx = -1
+    // Step 1: find the last assistant turn under wantedParent.
+    let asstIdx = -1
     for (let i = this._conversation.turns.length - 1; i >= 0; i--) {
       const t = this._conversation.turns[i]
-      if (
-        t.type === 'assistant' &&
-        t.parentToolUseId === wantedParent &&
-        t.blocks.length > 0 &&
-        t.blocks.every(b => b.type === 'streaming_text')
-      ) {
-        streamingAsstIdx = i
+      if (t.type === 'assistant' && t.parentToolUseId === wantedParent) {
+        asstIdx = i
         break
       }
     }
 
-    if (streamingAsstIdx === -1) {
-      // No fresh streaming assistant turn — just append.
+    if (asstIdx === -1) {
+      // No assistant turn at all — just append.
       this._conversation.turns.push(turn)
       return
     }
 
-    const streamingAsstTurn = this._conversation.turns[streamingAsstIdx]
+    // Step 2: check whether the found assistant turn is already "claimed" by
+    // a confirmed user turn immediately preceding it (skipping system turns).
+    let predecessorIdx = asstIdx - 1
+    while (predecessorIdx >= 0 && this._conversation.turns[predecessorIdx].type === 'system') {
+      predecessorIdx--
+    }
+    const predecessor = predecessorIdx >= 0 ? this._conversation.turns[predecessorIdx] : null
+    const isClaimedByConfirmedUser =
+      predecessor !== null &&
+      predecessor.type === 'user' &&
+      predecessor.pendingUuid === undefined // confirmed (not pending)
 
-    // Step 2: collect all pending user turns from the array.
+    if (isClaimedByConfirmedUser) {
+      // The assistant turn is already paired with a confirmed user turn — just append.
+      this._conversation.turns.push(turn)
+      return
+    }
+
+    // Steps 3-7: insert before the unclaimed assistant turn.
+    const asstTurn = this._conversation.turns[asstIdx]
+
+    // Step 4: collect all pending user turns from the array.
     // We scan the entire array because pending turns can appear before or
-    // after the streaming assistant turn in a batched-send scenario.
+    // after the assistant turn in a batched-send scenario.
     const pendingTurns: Turn[] = []
     for (let i = this._conversation.turns.length - 1; i >= 0; i--) {
       const t = this._conversation.turns[i]
       if (t.type === 'user' && t.pendingUuid !== undefined) {
         pendingTurns.unshift(this._conversation.turns.splice(i, 1)[0])
-        // Adjust streamingAsstIdx if we removed an element before it.
-        if (i < streamingAsstIdx) {
-          streamingAsstIdx--
+        // Adjust asstIdx if we removed an element before it.
+        if (i < asstIdx) {
+          asstIdx--
         }
       }
     }
 
-    // Step 3: remove the streaming assistant turn.
-    this._conversation.turns.splice(streamingAsstIdx, 1)
+    // Step 5: remove the assistant turn.
+    this._conversation.turns.splice(asstIdx, 1)
 
-    // Step 4: push confirmed turn then streaming asst turn.
+    // Step 6: push confirmed turn then assistant turn.
     this._conversation.turns.push(turn)
-    this._conversation.turns.push(streamingAsstTurn)
+    this._conversation.turns.push(asstTurn)
 
-    // Step 5: re-append pending turns at the very end.
+    // Step 7: re-append pending turns at the very end.
     for (const p of pendingTurns) {
       this._conversation.turns.push(p)
     }
