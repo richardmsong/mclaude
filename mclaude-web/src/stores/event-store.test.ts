@@ -689,4 +689,81 @@ describe('EventStore', () => {
       expect(turns2).toHaveLength(1)
     })
   })
+
+  describe('new message in existing session (regression: response must not append to prior turn)', () => {
+    // Reproduce the bug: user sends a message in an existing session.
+    // The prior assistant turn is finalized. A new stream_event for the NEW
+    // response must create a fresh assistant turn AFTER the user's message —
+    // not append into the old finalized assistant turn.
+    it('new stream_event after a finalized assistant turn creates a new assistant turn', () => {
+      // Simulate a completed prior exchange
+      store.applyEventForTest({
+        type: 'user',
+        message: { role: 'user', content: 'first message' },
+      })
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'first ' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'response' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-1',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'first response' }],
+          model: 'claude-test',
+        },
+      })
+
+      // Confirm prior exchange: [user, asst(finalized)]
+      expect(store.conversation.turns).toHaveLength(2)
+      const priorAsst = store.conversation.turns[1]
+      expect(priorAsst.type).toBe('assistant')
+      const streamBlock = priorAsst.blocks.find(b => b.type === 'streaming_text')
+      expect(streamBlock?.type === 'streaming_text' && streamBlock.complete).toBe(true)
+
+      // User sends second message (optimistic turn added first)
+      store.addPendingMessage('uuid-2nd', 'second message')
+      expect(store.conversation.turns).toHaveLength(3)
+      expect(store.conversation.turns[2].pendingUuid).toBe('uuid-2nd')
+
+      // New response starts streaming BEFORE the echo arrives
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'second ' }, index: 0 },
+      })
+
+      // Must have created a NEW assistant turn, NOT appended to the prior one
+      expect(store.conversation.turns).toHaveLength(4)
+      const newAsst = store.conversation.turns[3]
+      expect(newAsst.type).toBe('assistant')
+
+      // Prior assistant turn must be unchanged (no new streaming appended)
+      const priorStreamBlock = priorAsst.blocks.find(b => b.type === 'streaming_text')
+      expect(priorStreamBlock?.type === 'streaming_text' && priorStreamBlock.chunks.join('')).toBe('first response')
+
+      // Order: [user-0, asst-1(old), user-2(pending), asst-3(new)]
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+      expect(store.conversation.turns[2].type).toBe('user')
+      expect(store.conversation.turns[3].type).toBe('assistant')
+
+      // Echo arrives and confirms the optimistic turn
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-2nd',
+        isReplay: true,
+        message: { role: 'user', content: 'second message' },
+      })
+      // Still 4 turns — optimistic turn confirmed, no duplicate
+      expect(store.conversation.turns).toHaveLength(4)
+      expect(store.conversation.turns[2].pendingUuid).toBeUndefined()
+      expect(store.conversation.turns[2].type).toBe('user')
+      expect(store.conversation.turns[3].type).toBe('assistant')
+    })
+  })
 })

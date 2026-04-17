@@ -295,6 +295,19 @@ export class EventStore {
           const text = event.stream_event.delta.text ?? ''
           const wantedParent = event.parent_tool_use_id ?? undefined
           let current = this._currentAssistantTurn(wantedParent)
+
+          // Only reuse a turn that has an active (not-yet-finalized) streaming block.
+          // If the existing turn is finalized (all streaming_text blocks complete),
+          // treat it as a new response and push a fresh assistant turn at the end.
+          // This prevents new responses from being appended into a prior session's
+          // last assistant turn when the user sends a message from an existing session.
+          if (current) {
+            const hasActiveStreaming = current.blocks.some(
+              b => b.type === 'streaming_text' && !(b as StreamingTextBlock).complete,
+            )
+            if (!hasActiveStreaming) current = null
+          }
+
           if (!current) {
             current = {
               id: this._nextTurnId(),
