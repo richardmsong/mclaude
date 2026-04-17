@@ -112,6 +112,39 @@ describe('SessionListVM', () => {
       expect(groups[0]!.project.id).toBe('p-1')
     })
 
+    it('filtered group includes sessions belonging to the selected project', () => {
+      // Two projects, p-1 has two sessions, p-2 has one session.
+      // After filtering to p-1, the group must contain both sessions — not zero.
+      // This is the regression test for the "No sessions in this project" bug.
+      mockNats.kvSet('mclaude-projects', 'user-1.p-1', makeProjectKVState({ id: 'p-1', name: 'Alpha' }))
+      mockNats.kvSet('mclaude-projects', 'user-1.p-2', makeProjectKVState({ id: 'p-2', name: 'Beta' }))
+      mockNats.kvSet('mclaude-sessions', 'user-1.p-1.sess-a', makeSessionKVState({ id: 'sess-a', projectId: 'p-1' }))
+      mockNats.kvSet('mclaude-sessions', 'user-1.p-1.sess-b', makeSessionKVState({ id: 'sess-b', projectId: 'p-1' }))
+      mockNats.kvSet('mclaude-sessions', 'user-1.p-2.sess-c', makeSessionKVState({ id: 'sess-c', projectId: 'p-2' }))
+
+      vm.setFilter('p-1')
+      const groups = vm.sortedGroups
+      expect(groups).toHaveLength(1)
+      expect(groups[0]!.project.id).toBe('p-1')
+      // Must include p-1's sessions — not show empty "No sessions in this project" state
+      expect(groups[0]!.sessions).toHaveLength(2)
+      expect(groups[0]!.sessions.map(s => s.id)).toContain('sess-a')
+      expect(groups[0]!.sessions.map(s => s.id)).toContain('sess-b')
+    })
+
+    it('filtered group sessions are empty only when project genuinely has no sessions', () => {
+      // p-2 has no sessions. Filtering to p-2 should yield an empty sessions array.
+      mockNats.kvSet('mclaude-projects', 'user-1.p-1', makeProjectKVState({ id: 'p-1', name: 'Alpha' }))
+      mockNats.kvSet('mclaude-projects', 'user-1.p-2', makeProjectKVState({ id: 'p-2', name: 'Beta' }))
+      mockNats.kvSet('mclaude-sessions', 'user-1.p-1.sess-a', makeSessionKVState({ id: 'sess-a', projectId: 'p-1' }))
+
+      vm.setFilter('p-2')
+      const groups = vm.sortedGroups
+      expect(groups).toHaveLength(1)
+      expect(groups[0]!.project.id).toBe('p-2')
+      expect(groups[0]!.sessions).toHaveLength(0)
+    })
+
     it('sorts sessions within a project by descending stateSince', () => {
       mockNats.kvSet('mclaude-projects', 'user-1.p-1', makeProjectKVState({ id: 'p-1', name: 'Alpha' }))
       // Add three sessions with different stateSince values
