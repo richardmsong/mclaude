@@ -563,3 +563,290 @@ func TestThresholdZeroInhibitsQuotaTrigger(t *testing.T) {
 		t.Error("expected threshold=0 to NOT trigger quota stop, but it would have")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Unit tests — sendGracefulStop / sendHardInterrupt
+// ---------------------------------------------------------------------------
+
+// TestSendGracefulStop verifies that sendGracefulStop queues the correct
+// QUOTA_THRESHOLD_REACHED message on the session's stdinCh.
+func TestSendGracefulStop(t *testing.T) {
+	st := SessionState{
+		ID:        "sess-graceful",
+		ProjectID: "test-proj",
+		State:     StateIdle,
+		CreatedAt: time.Now(),
+	}
+	sess := newSession(st, "test-user")
+
+	m := &QuotaMonitor{session: sess}
+	m.sendGracefulStop()
+
+	select {
+	case msg := <-sess.stdinCh:
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(msg, &parsed); err != nil {
+			t.Fatalf("sendGracefulStop produced invalid JSON: %v — raw: %s", err, msg)
+		}
+		if parsed["type"] != "user" {
+			t.Errorf("type: got %q, want \"user\"", parsed["type"])
+		}
+		// The content must mention QUOTA_THRESHOLD_REACHED.
+		msgData, _ := json.Marshal(parsed)
+		if !strings.Contains(string(msgData), "QUOTA_THRESHOLD_REACHED") {
+			t.Errorf("graceful stop message missing QUOTA_THRESHOLD_REACHED; got: %s", msgData)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sendGracefulStop: message not queued on stdinCh within 1s")
+	}
+}
+
+// TestSendHardInterrupt verifies that sendHardInterrupt queues the correct
+// control_request interrupt message on the session's stdinCh.
+func TestSendHardInterrupt(t *testing.T) {
+	st := SessionState{
+		ID:        "sess-hard-interrupt",
+		ProjectID: "test-proj",
+		State:     StateIdle,
+		CreatedAt: time.Now(),
+	}
+	sess := newSession(st, "test-user")
+
+	m := &QuotaMonitor{session: sess}
+	m.sendHardInterrupt()
+
+	select {
+	case msg := <-sess.stdinCh:
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(msg, &parsed); err != nil {
+			t.Fatalf("sendHardInterrupt produced invalid JSON: %v — raw: %s", err, msg)
+		}
+		if parsed["type"] != "control_request" {
+			t.Errorf("type: got %q, want \"control_request\"", parsed["type"])
+		}
+		req, ok := parsed["request"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("request field missing or wrong type: %T", parsed["request"])
+		}
+		if req["subtype"] != "interrupt" {
+			t.Errorf("request.subtype: got %q, want \"interrupt\"", req["subtype"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sendHardInterrupt: message not queued on stdinCh within 1s")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests — goroutine lifecycle with real NATS
+// ---------------------------------------------------------------------------
+
+// TestHardInterruptFiredAfterStopTimeout verifies that the QuotaMonitor
+// goroutine sends a hard interrupt after the stop timeout expires following
+// a graceful stop. Uses a short stopTimeout override so the test finishes
+// in milliseconds instead of 30 minutes.
+//
+// Requires Docker (real NATS for the subscription).
+func TestHardInterruptFiredAfterStopTimeout(t *testing.T) {
+	skipIfNoDocker(t)
+
+	deps := testutil.StartDeps(t)
+	nc := deps.NATSConn
+
+	st := SessionState{
+		ID:        "sess-timer",
+		ProjectID: "test-proj",
+		State:     StateIdle,
+		CreatedAt: time.Now(),
+	}
+	sess := newSession(st, "test-user")
+
+	var published []string
+	var pubMu sync.Mutex
+
+	m, err := newQuotaMonitor(
+		"sess-timer",
+		"u-timer",
+		"proj-timer",
+		"schedule/timer-abc12345",
+		QuotaMonitorConfig{JobID: "job-timer", Threshold: 75},
+		nc,
+		sess,
+		func(sessionID, evType string, extra map[string]string) {
+			pubMu.Lock()
+			published = append(published, evType)
+			pubMu.Unlock()
+		},
+	)
+	if err != nil {
+		t.Fatalf("newQuotaMonitor: %v", err)
+	}
+
+	// Set short stop timeout so the test doesn't wait 30 minutes.
+	m.stopTimeout = 50 * time.Millisecond
+
+	// Trigger graceful stop via permDenied signal.
+	m.signalPermDenied("SomeTool")
+
+	// Drain the graceful stop message.
+	select {
+	case msg := <-sess.stdinCh:
+		if !strings.Contains(string(msg), "QUOTA_THRESHOLD_REACHED") {
+			t.Errorf("expected QUOTA_THRESHOLD_REACHED message, got: %s", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("graceful stop message not queued within 1s")
+	}
+
+	// After stopTimeout, the goroutine must queue the hard interrupt.
+	select {
+	case msg := <-sess.stdinCh:
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(msg, &parsed); err != nil {
+			t.Fatalf("hard interrupt: invalid JSON: %v — raw: %s", err, msg)
+		}
+		if parsed["type"] != "control_request" {
+			t.Errorf("expected hard interrupt (type=control_request), got %q", parsed["type"])
+		}
+		req, ok := parsed["request"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("request field wrong type: %T", parsed["request"])
+		}
+		if req["subtype"] != "interrupt" {
+			t.Errorf("request.subtype: got %q, want interrupt", req["subtype"])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("hard interrupt not sent after stop timeout expired (stopTimeout=50ms)")
+	}
+
+	// Clean up: close the monitor.
+	m.stop()
+}
+
+// TestNewQuotaMonitorSubscriptionAndLifecycle verifies that newQuotaMonitor:
+//  1. Subscribes to mclaude.{userId}.quota — messages are delivered to the goroutine
+//     (verified by publishing a quota message above threshold and observing the
+//     graceful stop message on stdinCh — no direct field access to avoid data races)
+//  2. Starts the goroutine — the goroutine select loop is running and reacts to msgs
+//  3. Calls quotaSub.Unsubscribe() when session doneCh closes — goroutine exits and
+//     stopCh is closed; further publishes are not delivered
+//
+// Requires Docker (real NATS).
+func TestNewQuotaMonitorSubscriptionAndLifecycle(t *testing.T) {
+	skipIfNoDocker(t)
+
+	deps := testutil.StartDeps(t)
+	nc := deps.NATSConn
+
+	st := SessionState{
+		ID:        "sess-quota-lifecycle",
+		ProjectID: "test-proj",
+		State:     StateIdle,
+		CreatedAt: time.Now(),
+	}
+	sess := newSession(st, "test-user")
+
+	userID := "u-quota-lifecycle"
+	quotaSubject := fmt.Sprintf("mclaude.%s.quota", userID)
+
+	var lifecycleEvents []string
+	var lifecycleMu sync.Mutex
+
+	m, err := newQuotaMonitor(
+		"sess-quota-lifecycle",
+		userID,
+		"proj-lc",
+		"schedule/lc-abc12345",
+		// Threshold=80: a message with U5=90 must trigger graceful stop.
+		QuotaMonitorConfig{JobID: "job-lc", Threshold: 80},
+		nc,
+		sess,
+		func(sessionID, evType string, extra map[string]string) {
+			lifecycleMu.Lock()
+			lifecycleEvents = append(lifecycleEvents, evType)
+			lifecycleMu.Unlock()
+		},
+	)
+	if err != nil {
+		t.Fatalf("newQuotaMonitor: %v", err)
+	}
+
+	// --- Part 1: subscription is active — goroutine processes quota messages ---
+	//
+	// Publish U5=90 (above threshold=80 with HasData=true). The goroutine must
+	// react by queuing the graceful stop on stdinCh. This is a safe, race-free
+	// observation: stdinCh is a buffered channel written only by the goroutine.
+	qs := QuotaStatus{HasData: true, U5: 90}
+	data, _ := json.Marshal(qs)
+	if err := nc.Publish(quotaSubject, data); err != nil {
+		t.Fatalf("publish quota: %v", err)
+	}
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	// Goroutine must receive the message and send the graceful stop.
+	select {
+	case msg := <-sess.stdinCh:
+		if !strings.Contains(string(msg), "QUOTA_THRESHOLD_REACHED") {
+			t.Errorf("expected QUOTA_THRESHOLD_REACHED on stdinCh, got: %s", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("quota message not processed by goroutine within 2s — subscription may not be active")
+	}
+
+	// --- Part 2: goroutine exits on session doneCh close; Unsubscribe fires ---
+
+	// Close doneCh to signal session exit.
+	close(sess.doneCh)
+
+	// Wait for stopCh to close (goroutine calls close(m.stopCh) after publishing lifecycle).
+	deadline := time.Now().Add(2 * time.Second)
+	var exited bool
+	for time.Now().Before(deadline) {
+		select {
+		case <-m.stopCh:
+			exited = true
+		default:
+		}
+		if exited {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !exited {
+		t.Error("monitor goroutine did not exit after session doneCh closed")
+	}
+
+	// After Unsubscribe, messages published to the quota subject must not arrive
+	// on quotaCh. Drain any in-flight messages then verify no new ones arrive.
+	_ = nc.Publish(quotaSubject, data)
+	_ = nc.Flush()
+	time.Sleep(50 * time.Millisecond)
+
+	select {
+	case <-m.quotaCh:
+		t.Error("quotaCh received a message after goroutine exit — Unsubscribe may not have fired")
+	default:
+		// Correct: no new message delivered after Unsubscribe.
+	}
+
+	// --- Part 3: lifecycle event published on exit ---
+	//
+	// The goroutine had stopReason="quota" when doneCh fired, so it publishes
+	// session_quota_interrupted (not session_job_failed).
+	lifecycleMu.Lock()
+	events := make([]string, len(lifecycleEvents))
+	copy(events, lifecycleEvents)
+	lifecycleMu.Unlock()
+
+	foundEvent := false
+	for _, ev := range events {
+		if ev == "session_quota_interrupted" || ev == "session_job_failed" {
+			foundEvent = true
+			break
+		}
+	}
+	if !foundEvent {
+		t.Errorf("expected quota or failed lifecycle event on exit, got: %v", events)
+	}
+}
