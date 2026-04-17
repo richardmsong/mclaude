@@ -7,9 +7,17 @@
 # Subagents (dev-harness, etc.) inherit only .claude/settings.json
 # which allows everything, so they can edit/build/test freely.
 
-# Prefer Opus 4.6 1M context if available, fall back to Opus 200k.
-MODEL="claude-opus-4-6[1m]"
-echo "" | claude --model "$MODEL" --print --max-turns 0 &>/dev/null || MODEL="opus"
+# Prefer Opus 4.7 1M context if available on this machine/plan.
+# Result is cached per-machine; delete the cache file to re-probe.
+CACHE_FILE="$HOME/.cache/mclaude/master-model"
+if [ -r "$CACHE_FILE" ]; then
+  MODEL=$(cat "$CACHE_FILE")
+else
+  MODEL="claude-opus-4-7[1m]"
+  timeout 10 claude --model "$MODEL" -p "probe" --max-turns 0 </dev/null &>/dev/null || MODEL="opus"
+  mkdir -p "$(dirname "$CACHE_FILE")"
+  printf '%s' "$MODEL" > "$CACHE_FILE"
+fi
 
 exec claude \
   --model "$MODEL" \
