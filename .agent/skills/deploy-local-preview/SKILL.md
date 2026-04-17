@@ -261,9 +261,9 @@ SPA_DIR="$REPO_ROOT/mclaude-web"
 SA_DIR="$REPO_ROOT/mclaude-session-agent"
 
 # Try ghcr.io pull — if ANY image fails, build all locally
-if ! docker pull ghcr.io/mclaude-project/mclaude-control-plane:latest 2>/dev/null || \
-   ! docker pull ghcr.io/mclaude-project/mclaude-spa:latest 2>/dev/null || \
-   ! docker pull ghcr.io/mclaude-project/mclaude-session-agent:latest 2>/dev/null; then
+if ! docker pull ghcr.io/richardmsong/mclaude-control-plane:latest 2>/dev/null || \
+   ! docker pull ghcr.io/richardmsong/mclaude-spa:latest 2>/dev/null || \
+   ! docker pull ghcr.io/richardmsong/mclaude-session-agent:latest 2>/dev/null; then
   echo "ghcr.io images not available — building locally"
 
   # Build control-plane (Go binary → Docker)

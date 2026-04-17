@@ -391,7 +391,7 @@ nats:
 
 controller:
   image:
-    repository: mclaude-project/mclaude-worker-controller
+    repository: richardmsong/mclaude-worker-controller
     tag: 0.1.0
   resources:
     requests:
