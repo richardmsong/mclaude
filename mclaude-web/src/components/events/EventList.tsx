@@ -1,4 +1,4 @@
-import type { Turn, Block, StreamingTextBlock, PendingMessage } from '@/types'
+import type { Turn, Block, StreamingTextBlock, SkillInvocationBlock, PendingMessage } from '@/types'
 import { UserMessage } from './UserMessage'
 import { AssistantText } from './AssistantText'
 import { ThinkingBlock } from './ThinkingBlock'
@@ -6,6 +6,7 @@ import { ToolCard } from './ToolCard'
 import { AskUserQuestion } from './AskUserQuestion'
 import { AgentGroup } from './AgentGroup'
 import { SystemEvent } from './SystemEvent'
+import { SkillChip } from './SkillChip'
 
 interface EventListProps {
   turns: Turn[]
@@ -89,6 +90,9 @@ function renderBlock(block: Block, turn: Turn, allTurns: Turn[], onApprove: (id:
     case 'system_message':
       return <SystemEvent key={'sysmsg' + turn.id + block.text.slice(0, 8)} text={block.text} variant="compaction" />
 
+    case 'skill_invocation':
+      return <SkillChip key={'skill' + turn.id} block={block as SkillInvocationBlock} />
+
     default:
       return null
   }
@@ -110,14 +114,25 @@ export function EventList({ turns, pendingMessages = [], onApprove, onDeny }: Ev
     <div>
       {topLevelTurns.map(turn => {
         if (turn.type === 'user') {
-          const textBlocks = turn.blocks.filter(b => b.type === 'text')
-          return textBlocks.map((b, i) => (
-            <UserMessage
-              key={`${turn.id}-${i}`}
-              text={(b as { text: string }).text}
-              pending={turn.pendingUuid !== undefined}
-            />
-          ))
+          return turn.blocks.map((block, i) => {
+            if (block.type === 'skill_invocation') {
+              return (
+                <div key={`${turn.id}-${i}`}>
+                  {renderBlock(block, turn, turns, onApprove, onDeny)}
+                </div>
+              )
+            }
+            if (block.type === 'text') {
+              return (
+                <UserMessage
+                  key={`${turn.id}-${i}`}
+                  text={block.text}
+                  pending={turn.pendingUuid !== undefined}
+                />
+              )
+            }
+            return null
+          })
         }
 
         if (turn.type === 'assistant') {

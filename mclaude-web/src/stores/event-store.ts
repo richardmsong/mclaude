@@ -11,6 +11,7 @@ import type {
   ThinkingBlock,
   ControlRequestBlock,
   SystemMessageBlock,
+  SkillInvocationBlock,
   SessionState,
   SystemInitEvent,
   SystemStateChangedEvent,
@@ -442,7 +443,55 @@ export class EventStore {
           break
         }
 
-        // Step 4: Otherwise → create a normal user turn inline at current position
+        // Step 4: Inspect raw text content for special prefixes before creating a turn
+        const rawText = typeof event.message.content === 'string'
+          ? event.message.content
+          : Array.isArray(event.message.content)
+            ? event.message.content
+                .filter(c => c.type === 'text' && c.text)
+                .map(c => c.text ?? '')
+                .join('')
+            : ''
+
+        // Step 4a: System notifications → discard entirely
+        if (rawText.startsWith('[SYSTEM NOTIFICATION')) {
+          break
+        }
+
+        // Step 4b: Skill invocation expansion → SkillInvocationBlock
+        if (rawText.startsWith('Base directory for this skill:')) {
+          const lines = rawText.split('\n')
+          // Extract skill name from the path segment after the last /skills/
+          const firstLine = lines[0]
+          const skillsIdx = firstLine.lastIndexOf('/skills/')
+          const skillName = skillsIdx !== -1
+            ? firstLine.slice(skillsIdx + '/skills/'.length).trim()
+            : firstLine.replace('Base directory for this skill:', '').trim()
+
+          // Extract args: everything after the line containing "ARGUMENTS:"
+          let args = ''
+          const argsLineIdx = lines.findIndex(l => l.includes('ARGUMENTS:'))
+          if (argsLineIdx !== -1) {
+            args = lines.slice(argsLineIdx + 1).join('\n').trim()
+          }
+
+          const block: SkillInvocationBlock = {
+            type: 'skill_invocation',
+            skillName,
+            args,
+            rawContent: rawText,
+          }
+          const skillTurn: Turn = {
+            id: this._nextTurnId(),
+            type: 'user',
+            blocks: [block],
+            parentToolUseId: event.parent_tool_use_id ?? undefined,
+          }
+          this._conversation.turns.push(skillTurn)
+          break
+        }
+
+        // Step 4c: Otherwise → create a normal user turn inline at current position
         const turn: Turn = {
           id: this._nextTurnId(),
           type: 'user',

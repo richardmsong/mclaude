@@ -340,6 +340,13 @@ export interface CompactionBlock {
   summary: string
 }
 
+export interface SkillInvocationBlock {
+  type: 'skill_invocation'
+  skillName: string
+  args: string
+  rawContent: string
+}
+
 export type Block =
   | TextBlock
   | StreamingTextBlock
@@ -349,6 +356,7 @@ export type Block =
   | ControlRequestBlock
   | CompactionBlock
   | SystemMessageBlock
+  | SkillInvocationBlock
 
 export interface PendingMessage {
   uuid: string
