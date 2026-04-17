@@ -128,12 +128,18 @@ export interface UserEvent extends BaseEvent {
 }
 ```
 
-Add `SystemMessageBlock` to the `Block` union:
+Add `SystemMessageBlock` and `UserImageBlock` to the `Block` union:
 
 ```typescript
 export interface SystemMessageBlock {
   type: 'system_message'
   text: string
+}
+
+export interface UserImageBlock {
+  type: 'user_image'
+  dataUrl: string   // "data:image/png;base64,..." — full data URL, valid for <img src>
+  mimeType: string  // e.g. "image/png"
 }
 
 export type Block =
@@ -145,6 +151,7 @@ export type Block =
   | ControlRequestBlock
   | CompactionBlock
   | SystemMessageBlock
+  | UserImageBlock
 ```
 
 Add pending message type:
@@ -162,6 +169,12 @@ interface PendingMessage {
 **New state**: `_pendingMessages: PendingMessage[]` — messages sent by the user but not yet echoed by Claude.
 
 **addPendingMessage(uuid, content)**: Replaces the old `addUserTurn()`. Adds to `_pendingMessages` AND immediately inserts an optimistic user turn into `_conversation.turns` (with `pendingUuid` set to the uuid and the turn styled as dimmed/pending). Notifies listeners. This ensures the message appears at the correct position in the conversation instantly, without waiting for Claude's echo.
+
+When `content` is an array, the optimistic turn's `blocks` include both text and image entries:
+- `{type: 'text', ...}` entries → `TextBlock`
+- `{type: 'image', source: {type: 'base64', media_type, data}}` entries → `UserImageBlock` with `dataUrl = "data:{media_type};base64,{data}"`
+
+The same `blocks` construction applies in step 4 (creating a turn from server echo) — image content blocks in `event.message.content` produce `UserImageBlock` entries.
 
 **Modified `case 'user'` handler in `_applyEvent()`**:
 

@@ -355,7 +355,7 @@ Set `terminationGracePeriodSeconds: 30` in pod spec to give enough time.
 
 | NATS subject | Action |
 |--------------|--------|
-| `…api.sessions.create` | `exec.Command("claude", "--print", "--verbose", "--output-format", "stream-json", "--input-format", "stream-json", "--session-id", id, "-w", cwd)` |
+| `…api.sessions.create` | `exec.Command("claude", "--print", "--verbose", "--output-format", "stream-json", "--input-format", "stream-json", "--include-partial-messages", "--replay-user-messages", "--session-id", id, [--disallowedTools tool1 tool2 ...])` |
 | `…api.sessions.delete` | Send interrupt control request → wait for exit → kill if timeout |
 | `…api.sessions.input` | Strip `session_id`, write user message JSON to stdin pipe (user messages reach the events stream via Claude's `--replay-user-messages` stdout echo) |
 | `…api.sessions.control` | Write control_response JSON to stdin pipe (permission approvals, interrupts, model changes) |
@@ -422,11 +422,14 @@ Session create request payload:
   "name": "Fix auth bug",
   "branch": "feature/auth",
   "cwd": "packages/api",
-  "joinWorktree": false
+  "joinWorktree": false,
+  "disallowedTools": ["Edit(mclaude-web/src/**)", "Write(mclaude-web/src/**)"]
 }
 ```
 
 `branch` is optional. If omitted, the session agent derives it from `name` via slugification (`"Fix auth bug"` → `fix-auth-bug`). If both `name` and `branch` are omitted, the agent generates a default: `session-{shortId}`. Git-savvy users can specify `branch` explicitly; the SPA hides it by default and only shows the `name` field.
+
+`disallowedTools` is an optional array of tool restriction patterns passed verbatim to Claude as `--disallowedTools` spawn args. Each entry can use glob-style matching identical to Claude Code's own `--disallowedTools` flag (e.g., `"Edit(src/**)"`, `"Write(*.go)"`). If omitted or empty, no tools are restricted. The session agent appends one `--disallowedTools` flag per entry after the fixed spawn args.
 
 `joinWorktree` controls behaviour when a worktree for the branch already exists (git only allows one worktree per branch):
 
