@@ -4,101 +4,92 @@
 
 | Spec (doc:line) | Spec text | Code location | Verdict | Notes |
 |-----------------|-----------|---------------|---------|-------|
-| plan-k8s-integration.md:9 | session-agent spawns headless Claude Code processes, routes stream-json events to/from NATS | agent.go, session.go | IMPLEMENTED | Core structure present |
-| plan-k8s-integration.md:63-70 | Spawn args: --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --session-id | session.go:138-156 | IMPLEMENTED | All flags present |
-| plan-k8s-integration.md:73-80 | Resume: uses --resume {sessionId} | session.go:138-146 | IMPLEMENTED | resume=true path |
-| plan-k8s-integration.md:163 | Events subject: mclaude.{userId}.{location}.{projectId}.events.{sessionId} | session.go:202-206 | PARTIAL | Subject is mclaude.%s.%s.events.%s (3 segments: userID, projectID, sessionID). Missing {location} segment. |
-| plan-k8s-integration.md:164 | Lifecycle subject: mclaude.{userId}.{location}.{projectId}.lifecycle.{sessionId} | agent.go:1048 | PARTIAL | Subject mclaude.%s.%s.lifecycle.%s — missing {location} segment. |
-| plan-k8s-integration.md:171 | Stream MCLAUDE_EVENTS captures mclaude.*.*.*.events.* | agent.go:99-108 | PARTIAL | Filter is mclaude.*.*.events.* (3 wildcards), not 4. Missing location wildcard. |
-| plan-k8s-integration.md:172 | Stream MCLAUDE_LIFECYCLE captures mclaude.*.*.*.lifecycle.* subjects | — | GAP | No MCLAUDE_LIFECYCLE stream is created anywhere in session-agent code. |
-| plan-k8s-integration.md:178-199 | KV buckets: mclaude-sessions, mclaude-projects, mclaude-heartbeats, mclaude-locations | agent.go:82-93 | PARTIAL | Spec names bucket mclaude-locations; code uses mclaude-laptops. |
-| plan-k8s-integration.md:194 | Session agents fail fast if bucket doesn't exist | agent.go:82-93 | IMPLEMENTED | Returns error if bucket not found |
-| plan-k8s-integration.md:197 | mclaude-sessions: deleted by session agent on normal session delete | agent.go:817 | IMPLEMENTED | sessKV.Delete in handleDelete |
-| plan-k8s-integration.md:199 | mclaude-heartbeats: TTL 90s on the KV entry | — | GAP | runHeartbeat writes to mclaude-heartbeats every 30s but no TTL is configured on the bucket or per-entry. |
-| plan-k8s-integration.md:200 | mclaude-laptops: TTL 24h; Launcher refreshes on startup and every 12h | daemon.go:27-28,177-189 | IMPLEMENTED | laptopHeartbeatInterval=12h, writes on startup |
-| plan-k8s-integration.md:253-254 | Subscribes to mclaude.{userId}.{location}.{projectId}.api.> | agent.go:267-309 | PARTIAL | Consumers filter mclaude.{userId}.{projectId}.api.sessions.* — missing {location} segment. |
-| plan-k8s-integration.md:257-265 | Routes stdout events → NATS; routes NATS input → Claude stdin; tracks state; spawns PTY; unix socket; heartbeat; startup resume | session.go, agent.go, debug.go, terminal.go | IMPLEMENTED | All behaviors present |
-| plan-k8s-integration.md:261 | Caches capabilities from init event; refreshes on reload_plugins | session.go:284-302 | PARTIAL | init event handled. reload_plugins refresh not handled — no case for reload_plugins control response updating capabilities. |
-| plan-k8s-integration.md:338-349 | Graceful shutdown on SIGTERM: stop accepting new sessions, interrupt each Claude, wait 10s, SIGKILL, flush, publish lifecycle, close NATS, exit 0 | agent.go:418-498 | IMPLEMENTED | Spec (k8s integration) is superseded by plan-graceful-upgrades; actual impl follows graceful-upgrades spec. |
-| plan-k8s-integration.md:378 | Unix socket at /tmp/mclaude-session-{id}.sock | debug.go:12 | IMPLEMENTED | debugSocketFmt matches |
-| plan-k8s-integration.md:407 | Location collision check on startup | daemon.go:143-162 | IMPLEMENTED | checkHostnameCollision() |
-| plan-k8s-integration.md:409-411 | JWT refresh: background goroutine, TTL decode, 15min threshold | daemon.go:308-345 | IMPLEMENTED | |
-| plan-k8s-integration.md:417-429 | Worktrees: slugification, branch derivation | worktree.go:16-25, agent.go:579-593 | IMPLEMENTED | SlugifyBranch |
-| plan-k8s-integration.md:430-455 | joinWorktree collision logic, git worktree add/remove | agent.go:598-813 | IMPLEMENTED | |
-| plan-k8s-integration.md:466-498 | Session state KV JSON schema | state.go:27-43 | IMPLEMENTED | All fields present |
-| plan-k8s-integration.md:500 | capabilities refreshed when reload_plugins response received | — | GAP | No code path updates capabilities on reload_plugins control response. init event is the only update point. |
-| plan-k8s-integration.md:502 | replayFromSeq updated on /clear and compaction | agent.go:1106-1143 | PARTIAL | Updated on compact_boundary. clear event produces no replayFromSeq update. |
-| plan-k8s-integration.md:519-533 | Lifecycle events: session_created, session_stopped, session_restarting, session_resumed, session_failed, debug_attached, debug_detached | agent.go:740,819,956,1005,729; debug.go | IMPLEMENTED | All published |
-| plan-graceful-upgrades.md:51-57 | MCLAUDE_API stream: subjects mclaude.*.*.api.sessions.> | agent.go:110-121 | PARTIAL | Subjects filter is mclaude.*.*.api.sessions.> (3 wildcards), not mclaude.*.*.*.api.sessions.> (4). Missing location segment. |
-| plan-graceful-upgrades.md:69-95 | Two durable pull consumers: cmd (create/delete/input/restart) and ctl (control) | agent.go:267-309 | IMPLEMENTED | Both consumers configured correctly |
-| plan-graceful-upgrades.md:99-115 | JetStream fetch loop: batch 10, FetchMaxWait 5s, ack after handler | agent.go:314-347 | IMPLEMENTED | |
-| plan-graceful-upgrades.md:119-130 | jsToNatsMsg adapter | agent.go:353-359 | IMPLEMENTED | |
-| plan-graceful-upgrades.md:133-145 | dispatchCmd routes by subject suffix | agent.go:362-376 | IMPLEMENTED | |
-| plan-graceful-upgrades.md:155-169 | SIGTERM 8-step graceful shutdown | agent.go:418-498 | IMPLEMENTED | |
-| plan-graceful-upgrades.md:185-199 | Run() startup sequence: recoverSessions, createJetStreamConsumers, subscribeTerminalAPI, clearUpdatingState, runHeartbeat | agent.go:152-169 | IMPLEMENTED | |
-| plan-graceful-upgrades.md:195-199 | recoverSessions: skip KV write for updating sessions | agent.go:202-218 | IMPLEMENTED | wasUpdating logic |
-| plan-graceful-upgrades.md:202-215 | Reply mechanism: reply() no-op when msg.Reply==""; errors go to events._api | agent.go:1148-1161, 529-538 | IMPLEMENTED | |
-| plan-graceful-upgrades.md:231-252 | RequestID in create/delete/restart request structs | agent.go:552-561, 761-764, 934-937 | IMPLEMENTED | |
-| plan-replay-user-messages.md:68-88 | --replay-user-messages flag on spawn args (new sessions and resume) | session.go:138-156 | IMPLEMENTED | Flag present in both paths |
-| plan-replay-user-messages.md:90 | handleInput: remove manual publish to events stream; only strip session_id and write to stdin | agent.go:837-879 | IMPLEMENTED | No events publish in handleInput |
-| plan-replay-user-messages.md:91 | uuid preserved (only session_id stripped) | agent.go:870 | IMPLEMENTED | delete(fields, "session_id") only |
-| plan-quota-aware-scheduling.md:78-87 | Daemon struct: sessKV, jobQueueKV, projectsKV fields; opened in NewDaemon() | daemon.go:54-57, 85-96 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:89-90 | DaemonConfig.CredentialsPath | daemon.go:43 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:95-109 | runQuotaPublisher: polls 60s, reads OAuth token, calls quota API with correct headers | daemon_jobs.go:130-157 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:107-109 | Publishes QuotaStatus to mclaude.{userId}.quota; sends on quotaCh | daemon_jobs.go:131-141 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:111-127 | runLifecycleSubscriber: subscribes mclaude.{userId}.*.lifecycle.*, handles 5 event types | daemon_jobs.go:245-313 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:129-155 | runJobDispatcher: KV watch + quota updates, dispatches queued jobs | daemon_jobs.go:507-699 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:147 | 5% hysteresis: stop enough sessions so headroom drops below threshold-5 | daemon_jobs.go:606-649 | PARTIAL | Stops all running jobs where u5 >= job.Threshold; does not implement the per-job headroom accumulation to stop exactly enough jobs. |
-| plan-quota-aware-scheduling.md:151-155 | Startup recovery: starting→queued, running→check sessKV, paused with past ResumeAt→queued | daemon_jobs.go:451-503 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:157-175 | Spec path → component mapping | daemon_jobs.go:160-175 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:204-220 | strict-allowlist: auto-denies unlisted tools, sends deny control_response, calls onStrictDeny | session.go:333-358 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:221-243 | onStrictDeny, onRawOutput callbacks on Session; wired in handleCreate before start() | session.go:57-61; agent.go:691-706 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:259-288 | publishLifecycleExtra and publishPermDenied methods on Agent | agent.go:1074-1099 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:291-292 | Default dev-harness allowlist (Read, Write, Edit, Glob, Grep, Bash, Agent, Task*) | agent.go:542-545 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:296-312 | Extended sessions.create payload: PermPolicy, AllowedTools, QuotaMonitor; QuotaMonitorConfig struct | agent.go:552-561; state.go:126-131 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:315-351 | QuotaMonitor struct, newQuotaMonitor: ChanSubscribe, goroutine | quota_monitor.go:16-67 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:353-430 | QuotaMonitor goroutine: select loop, sendGracefulStop, sendHardInterrupt, publishExitLifecycle, onRawOutput, signalPermDenied | quota_monitor.go:80-215 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:453-474 | Jobs HTTP server on localhost:8378; 5 endpoints | daemon_jobs.go:702-902 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:523-551 | JobEntry struct | state.go:133-154 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:558-566 | QuotaStatus struct: HasData, U5, R5, U7, R7, TS | state.go:115-122 | PARTIAL | TS (timestamp of fetch) field missing from QuotaStatus struct. Spec defines TS time.Time field. |
-| plan-quota-aware-scheduling.md:570-582 | session_quota_interrupted payload includes threshold field | quota_monitor.go:150-155 | PARTIAL | publishExitLifecycle passes u5, r5, jobId but not threshold. Spec shows threshold in payload. |
-| plan-quota-aware-scheduling.md:585-593 | session_permission_denied payload: type, sessionId, tool, jobId, ts | agent.go:1090-1099 | IMPLEMENTED | |
-| plan-quota-aware-scheduling.md:595-606 | session_job_complete payload includes branch field | quota_monitor.go:146-148 | PARTIAL | Passes prUrl and jobId but not branch. Spec shows branch in session_job_complete payload. |
+| plan-github-oauth.md:370 | "entire credential setup and initial clone happen inside the Go session-agent binary, NOT in entrypoint.sh" | gitcreds.go:1-684, main.go:149-186 | IMPLEMENTED | gitcreds.go contains all credential logic; main.go invokes it before NewAgent |
+| plan-github-oauth.md:370 | "entrypoint.sh remains minimal: SSH key setup, env vars, home directory, then exec session-agent. The existing git clone/init block moves entirely to Go." | entrypoint.sh:1-63 | IMPLEMENTED | entrypoint.sh has no git clone/init block; comment at line 35-37 confirms it moved to Go |
+| plan-github-oauth.md:376 | "Step 1: Symlink PVC config: Remove any pre-existing ~/.config/ ... symlink /data/.config/ → ~/.config/" | gitcreds.go:324-346 | IMPLEMENTED | symlinkPVCConfig() does exactly this: RemoveAll, MkdirAll /data/.config/, then Symlink |
+| plan-github-oauth.md:379 | "Read gh-hosts.yml from Secret mount (/home/node/.user-secrets/gh-hosts.yml)" | gitcreds.go:353-358, gitcreds.go:18 | IMPLEMENTED | ReadSecretFile("gh-hosts.yml") reads from secretMountPath=/home/node/.user-secrets |
+| plan-github-oauth.md:380-381 | "Merge strategy: For each host in Secret's gh-hosts.yml, add/update the managed accounts. Do NOT remove accounts only in existing file. Managed token wins on same username." | gitcreds.go:121-186 | IMPLEMENTED | MergeGHHostsYAML implements exactly this logic with per-username merge |
+| plan-github-oauth.md:382 | "Same merge for glab-config.yml → ~/.config/glab-cli/config.yml" | gitcreds.go:188-219, gitcreds.go:390-405 | IMPLEMENTED | MergeGLabConfigYAML + mergeAndSetup writes to glab-cli/config.yml |
+| plan-github-oauth.md:384-385 | "Register credential helpers: Run gh auth setup-git ... Run glab auth setup-git" | gitcreds.go:409-419 | IMPLEMENTED | Both commands run with non-fatal error handling |
+| plan-github-oauth.md:388-389 | "Switch to project identity: If GIT_IDENTITY_ID set, parse hosts.yml to find host for username. Run gh auth switch --user {username} --hostname {host}" | gitcreds.go:432-467 | IMPLEMENTED | switchProjectIdentity reads conn-{id}-username key, finds host, runs gh auth switch |
+| plan-github-oauth.md:393 | "conn-{GIT_IDENTITY_ID}-username keys ... session-agent reads conn-{GIT_IDENTITY_ID}-username to resolve UUID to username" | gitcreds.go:469-476 | IMPLEMENTED | resolveUsername reads fmt.Sprintf("conn-%s-username", connectionID) from Secret mount |
+| plan-github-oauth.md:397-402 | "Before each git operation: Re-read gh-hosts.yml and glab-config.yml from Secret mount. If changed, re-merge and re-run setup-git. Ensure correct account active." | gitcreds.go:282-298, gitcreds.go:636-659 | IMPLEMENTED | RefreshIfChanged() + RunGitOpWithCredsRefresh() implement this pattern |
+| plan-github-oauth.md:403-404 | "SSH→HTTPS normalization: if URL is SCP-style (git@{host}:{path}) and credential helper registered for that host, normalize to HTTPS. Only SCP-style, not ssh:// scheme." | gitcreds.go:52-86 | IMPLEMENTED | NormalizeGitURL correctly handles git@ prefix, excludes ssh://, checks registeredHosts |
+| plan-github-oauth.md:406 | "No GIT_ASKPASS, no custom credential provider interface, no hostname matching, no per-provider username mapping." | gitcreds.go:1-684 | IMPLEMENTED | No GIT_ASKPASS implementation exists; credential helpers handle everything |
+| plan-github-oauth.md:408 | "Manual auth within sessions ... survives pod restarts (PVC persistence) and is not overwritten by merge step" | gitcreds.go:130-133, gitcreds.go:149-175 | IMPLEMENTED | MergeGHHostsYAML adds managed accounts without removing existing ones |
+| plan-github-oauth.md:410 | "Error handling: git fails with auth error (exit code 128 + stderr matching: 'Authentication failed', 'HTTP Basic: Access denied', 'Invalid username or password', 'could not read Username')" | gitcreds.go:27-48 | IMPLEMENTED | gitAuthErrPatterns matches all four, IsGitAuthError checks exitCode==128 |
+| plan-github-oauth.md:410 | "session-agent publishes a session_failed event with reason provider_auth_failed" | main.go:169-184 | IMPLEMENTED | GitAuthError detected in main.go, publishes session_failed with provider_auth_failed |
+| plan-github-oauth.md:413-425 | "Dockerfile changes: Add gh and glab to session-agent image. gh via apk (github-cli), glab via binary download (not via Nix). ARG TARGETARCH; specific glab version 1.46.0" | Dockerfile:4-17 | IMPLEMENTED | Dockerfile adds github-cli via apk and glab_1.46.0 via curl; ARG TARGETARCH=arm64; curl deleted at end |
+| plan-github-oauth.md:415 | "Note: curl is already installed for Claude CLI setup. The glab download must happen BEFORE the existing apk del curl cleanup step." | Dockerfile:9-17 | IMPLEMENTED | glab download is before apk del curl in the same RUN layer |
+| plan-github-oauth.md:427 | "gh requires version 2.40+ for multi-account users: map. Alpine github-cli package in node:22-alpine ships gh 2.49+." | Dockerfile:3,9 | IMPLEMENTED | Uses node:22-alpine; installs github-cli package without version pin |
+| plan-github-oauth.md:549 | "gh auth setup-git fails: Non-zero exit code at session start. Session-agent logs the error, proceeds without credential helper. Not session-fatal." | gitcreds.go:410-413 | IMPLEMENTED | logs Warn and continues; non-fatal per spec |
+| plan-github-oauth.md:550 | "gh auth switch fails: Username not found in hosts.yml. Session-agent logs warning, uses default active account." | gitcreds.go:271-276 | IMPLEMENTED | logs Warn with 'using default active account (non-fatal)' |
+| plan-github-oauth.md:277 | "GIT_IDENTITY_ID env var ... session-agent checks os.Getenv('GIT_IDENTITY_ID') != '' to decide whether to switch accounts" | main.go:158-159, gitcreds.go:260-277 | IMPLEMENTED | main.go reads GIT_IDENTITY_ID; Setup() passes to switchProjectIdentity which is no-op when empty |
+| plan-k8s-integration.md:267-268 | "Startup/recovery: Read NATS KV for all sessions with this projectId. For each session with sessionId: claude --resume {sessionId}" | agent.go:171-256 | IMPLEMENTED | recoverSessions() watches KV and calls sess.start(claudePath, true, ...) for each |
+| plan-k8s-integration.md:263-270 | "What session-agent does: Subscribes to api.>; Spawns Claude as child processes; Routes stdout events → NATS; Routes NATS → stdin; Publishes all stdout events; Tracks session state; Caches capabilities; Spawns PTY sessions; Exposes unix socket; Writes heartbeat; On startup reads KV → resumes" | agent.go:1-1326, session.go:1-473 | IMPLEMENTED | All behaviors present |
+| plan-k8s-integration.md:357-361 | "Session operations table: create, delete, input, control, restart" | agent.go:547-1013 | IMPLEMENTED | handleCreate, handleDelete, handleInput, handleControl, handleRestart all implemented |
+| plan-k8s-integration.md:340-350 | "Graceful shutdown sequence: Stop accepting new sessions, interrupt each Claude, wait 10s, SIGKILL if running, flush events, publish lifecycle, close NATS, exit 0" | agent.go:418-498 | PARTIAL | gracefulShutdown writes 'updating' state and drains subscriptions, but does NOT send interrupt control_request to each Claude process and wait 10s for exit. Instead it polls for idle/updating state. The spec says 'Send interrupt control_request to stdin' and 'Wait up to 10s for process exit' for each session, but gracefulShutdown() doesn't call sess.stopAndWait(). |
+| plan-k8s-integration.md:415 | "Slugification: feature/auth → feature-auth (replace / and non-alphanumeric with -, lowercase)" | worktree.go:8-25 | IMPLEMENTED | SlugifyBranch handles all cases correctly |
+| plan-k8s-integration.md:418-446 | "Session create request: name, branch, cwd, joinWorktree. Branch derivation rules. Worktree collision detection. git worktree add." | agent.go:551-754 | IMPLEMENTED | Full create logic matching spec |
+| plan-k8s-integration.md:451-456 | "Session delete: interrupt → wait for Claude exit. Remove worktree if last session on branch. Delete from KV." | agent.go:760-830 | IMPLEMENTED | stopAndWait, gitWorktreeRemove, KV delete all present |
+| plan-k8s-integration.md:463-502 | "Session state KV schema: id, projectId, branch, worktree, cwd, name, state, stateSince, createdAt, model, capabilities, pendingControls, usage, replayFromSeq" | state.go:27-43 | IMPLEMENTED | All fields present with correct json tags |
+| plan-k8s-integration.md:493-494 | "replayFromSeq updated on /clear and compaction. Clients read this before subscribing." | agent.go:1106-1143, session.go:678-686 | IMPLEMENTED | updateReplayFromSeq on compact_boundary event |
+| plan-k8s-integration.md:264 | "Writes heartbeat to NATS KV every 30s" | agent.go:1016-1031 | IMPLEMENTED | runHeartbeat with 30s ticker |
+| plan-k8s-integration.md:376-378 | "Debug attach unix socket per session at /tmp/mclaude-session-{id}.sock" | debug.go:12-13, debug.go:41-67 | IMPLEMENTED | debugSocketFmt pattern and Start() implementation |
+| plan-k8s-integration.md:1016-1064 | "Terminal sessions: spawn via creack/pty, routes raw I/O through NATS; terminal create/delete/resize" | terminal.go:1-133, agent.go:1214-1325 | IMPLEMENTED | startTerminal, NATSTermPubSub, handleTerminalCreate/Delete/Resize all present |
+| plan-k8s-integration.md:380-394 | "Startup recovery after ungraceful termination: set all sessions to restarting, clear pendingControls, publish session_restarting, claude --resume each, mark failed after 30s" | agent.go:171-256 | PARTIAL | Code clears pendingControls and resumes sessions, but does NOT set state to "restarting" for ungraceful recovery, does NOT publish "session_restarting" lifecycle events during recovery (only "session_resumed"), and does NOT enforce a 30s timeout for sessions that fail to start |
+| plan-k8s-integration.md:1217-1224 | "Staleness detection: heartbeat to mclaude-heartbeats KV, key: {userId}/{projectId}" | agent.go:1016-1031, state.go:71-73 | IMPLEMENTED | heartbeatKVKey uses userId.projectId format |
+| plan-state-schema.md:79-113 | "mclaude-sessions KV: key format {userId}.{projectId}.{sessionId}" | state.go:64-66 | IMPLEMENTED | sessionKVKey uses dot-separated format |
+| plan-state-schema.md:143-148 | "mclaude-heartbeats KV: key format {userId}.{projectId}" | state.go:70-72 | IMPLEMENTED | heartbeatKVKey uses userId.projectId |
+| plan-state-schema.md:86-88 | "SessionState: state field values idle | busy | error" | state.go:27-43, events.go:24-30 | GAP | Spec schema says state: 'idle | busy | error'; code defines StateIdle='idle', StateRunning='running', StateRequiresAction='requires_action', StateUpdating='updating'. The value 'busy' and 'error' from plan-state-schema.md are not used; code uses 'running' and 'requires_action'. plan-k8s-integration.md says idle/running/requires_action (matching code). plan-state-schema.md is inconsistent with plan-k8s-integration.md. |
+| plan-state-schema.md:209-237 | "MCLAUDE_EVENTS stream: subjects mclaude.*.*.events.* (3 wildcards)" | agent.go:99-108 | GAP | Code creates stream with subjects []string{"mclaude.*.*.events.*"} which is 3 wildcards. plan-state-schema.md defines pattern as mclaude.{userId}.{projectId}.events.{sessionId} (no location segment). But plan-k8s-integration.md shows mclaude.{userId}.{location}.{projectId}.events.{sessionId} (4 segments). Code uses 3-segment pattern matching state schema. |
+| plan-state-schema.md:229-244 | "MCLAUDE_API stream: subjects mclaude.*.*.api.sessions.>" | agent.go:112-121 | GAP | Code creates MCLAUDE_API with subjects mclaude.*.*.api.sessions.> (3-segment). plan-k8s-integration.md defines 4-segment subjects including {location}. Same inconsistency as EVENTS stream. |
+| plan-k8s-integration.md:460-461 | "Projects state KV: gitUrl, status, sessionCount, worktrees, createdAt, lastActiveAt" | state.go:103-113 | IMPLEMENTED | ProjectState struct matches |
+| plan-k8s-integration.md:261 | "Caches capabilities from init event in NATS KV, refreshes on reload_plugins" | session.go:281-301 | PARTIAL | init event updates capabilities in KV. But reload_plugins control request handling: the code broadcasts all control_request subtypes to stdin but doesn't specifically refresh capabilities from the new init event that reload_plugins would generate. |
+| plan-k8s-integration.md:262 | "Spawns terminal (PTY) sessions via creack/pty, routes raw I/O through NATS" | terminal.go:1-133 | IMPLEMENTED | Uses creack/pty |
+| plan-github-oauth.md:34 | "gh and glab baked into session image as system dependencies. Not via Nix — /nix/ PVC mount hides image-layer packages." | Dockerfile:9-17 | IMPLEMENTED | Both installed in base image layer |
+| plan-github-oauth.md:35 | "PVC-backed ~/.config/: Symlink /data/.config/ → ~/.config/ so gh auth login and glab auth login survive pod restarts" | gitcreds.go:324-346 | IMPLEMENTED | symlinkPVCConfig() implements this |
+| plan-github-oauth.md:36 | "Config merge strategy: Merge, not overwrite. Session-agent adds managed tokens without removing entries from manual gh auth login." | gitcreds.go:121-186 | IMPLEMENTED | MergeGHHostsYAML preserves existing entries |
+| plan-k8s-integration.md:380-394 | "Recovery after ungraceful termination: Set all session KV entries to state: restarting, clear pendingControls, publish session_restarting lifecycle events" | agent.go:171-256 | GAP | recoverSessions() clears pendingControls and sets state to idle (not 'restarting'). It publishes 'session_resumed' not 'session_restarting'. The spec explicitly says step 2 = 'Set all session KV entries to state: "restarting"' and step 3 = 'Publish session_restarting lifecycle events'. These are missing from the recovery path (they exist in handleRestart but not in recoverSessions). |
+| plan-k8s-integration.md:390-392 | "Recovery step 7: Sessions that fail to start within 30s: mark state: 'failed', publish session_failed" | agent.go:171-256 | GAP | No 30-second timeout is implemented in recoverSessions(). Sessions that fail to start during recovery just get a log.Warn and are skipped; they are not marked failed in KV and no session_failed lifecycle event is published for them. |
+| plan-k8s-integration.md:340-350 | "Graceful shutdown: For each active Claude process: Send interrupt control_request to stdin, Wait up to 10s for process exit, SIGKILL if still running" | agent.go:418-498 | GAP | gracefulShutdown() does NOT call sess.stopAndWait() for running sessions. It writes 'updating' state and then polls for idle/updating, but it does not actually send an interrupt to Claude processes or kill them. Sessions left running are not stopped. |
 
 ### Phase 2 — Code → Spec
 
 | File:lines | Classification | Explanation |
 |------------|---------------|-------------|
-| agent.go:24-27 | INFRA | Constants heartbeatInterval, sessionDeleteTimeout, kvBucketSessions/Projects/Heartbeats — infra for spec'd behavior |
-| agent.go:30-65 | INFRA | Agent struct definition — required scaffold for all spec'd behaviors |
-| agent.go:71-148 | INFRA | NewAgent constructor — required wiring |
-| agent.go:530-538 | INFRA | publishAPIError — implements spec'd error event from plan-graceful-upgrades |
-| agent.go:540-545 | INFRA | defaultDevHarnessAllowlist var — explicitly spec'd in plan-quota-aware-scheduling.md:291-292 |
-| agent.go:1188-1212 | INFRA | controlResponse type, gitWorktreeAdd, gitWorktreeRemove — required helpers for spec'd worktree behavior |
-| daemon.go:22-31 | INFRA | Constants and types for daemon — infra |
-| daemon.go:34-58 | INFRA | DaemonConfig and Daemon structs — spec'd structures |
-| daemon.go:60-65 | INFRA | managedChild struct — helper for child process management |
-| daemon.go:67-70 | INFRA | laptopEntry struct — used for mclaude-laptops KV entries (spec'd) |
-| daemon.go:223-303 | INFRA | spawnChild, manageChild, buildChildCmd, shutdownChildren — child process lifecycle management (spec'd in laptop mode) |
-| events.go:1-103 | INFRA | Event type constants and struct definitions for stream-json parsing — required for spec'd event routing |
-| worktree.go:1-38 | INFRA | SlugifyBranch + worktreeExists helpers — used by spec'd worktree logic |
-| state.go:62-101 | INFRA | sessionKVKey, heartbeatKVKey, addPendingControl, removePendingControl, clearPendingControlsForResume, accumulateUsage helpers — required infrastructure for spec'd KV operations |
-| debug.go:1-148 | INFRA | DebugServer implementation — spec'd in plan-k8s-integration.md unix socket section |
-| session.go:433-467 | INFRA | flushKV, sendInput, clearPendingControl, stop, waitDone helpers — required for Session lifecycle |
-| session.go:379-431 | INFRA | shouldAutoApprove, buildAutoApproveResponse, truncateEventIfNeeded — spec'd in permission policy and NATS size sections |
-| terminal.go | INFRA | PTY terminal session management — spec'd in plan-k8s-integration.md PTY section |
-| metrics.go | INFRA | Prometheus metrics — observability, not specifically spec'd but valid infrastructure |
-| main.go:1-167 | INFRA | main(), flag parsing, NATS connect — required entry point |
-| daemon_jobs.go:159-184 | INFRA | specPathToComponent, specPathToSlug, scheduledSessionPrompt helpers — spec'd in plan-quota-aware-scheduling |
-| daemon_jobs.go:220-243 | INFRA | readJobEntry, writeJobEntry helpers — infra for spec'd job queue operations |
-| agent.go:1102-1143 | INFRA | updateReplayFromSeq — spec'd in plan-k8s-integration.md replayFromSeq section |
-| agent.go:63-77 | INFRA | newSession constructor — required session initialization |
+| main.go:19-50 | INFRA | main() setup: log level parsing, health/readiness probe mode (--health, --ready flags) are spec'd in plan-k8s-integration.md health probes section |
+| main.go:51-143 | INFRA | CLI flag parsing, daemon mode dispatch, observability setup — all infrastructure for spec'd behavior |
+| main.go:144-198 | INFRA | Standalone mode: credential setup, InitRepo, NewAgent, Run — implements spec'd session-agent startup sequence |
+| main.go:200-208 | INFRA | natsConnect helper — necessary infrastructure for NATS connection |
+| gitcreds.go:636-659 | INFRA | RunGitOpWithCredsRefresh — helper for future worktree git ops with cred refresh; referenced by spec "Before each git operation" section |
+| gitcreds.go:661-683 | INFRA | runCmd and equalBytes helpers — necessary infrastructure for spec'd commands |
+| agent.go:1-65 | INFRA | Agent struct, constants — necessary for spec'd session management |
+| agent.go:71-148 | INFRA | NewAgent, JetStream setup, stream creation — spec'd in "Bucket initialization" and agent startup sections |
+| agent.go:349-359 | INFRA | jsToNatsMsg — adapter bridging JetStream to NATS message type; necessary infrastructure |
+| agent.go:527-538 | INFRA | publishAPIError — error response mechanism for API operations; needed infrastructure |
+| agent.go:540-545 | UNSPEC'd | defaultDevHarnessAllowlist — hardcoded list of tools for strict-allowlist sessions. plan-k8s-integration.md doesn't specify this default; it's only referenced by the quota-aware-scheduling feature |
+| agent.go:1148-1162 | INFRA | reply() method — NATS reply helper for request/reply pattern |
+| session.go:379-408 | INFRA | shouldAutoApprove, buildAutoApproveResponse — permission policy auto-approve infrastructure for spec'd permissionPolicy feature |
+| session.go:414-430 | INFRA | truncateEventIfNeeded — spec says events >8MB are truncated with truncated:true flag; IMPLEMENTED |
+| session.go:453-473 | INFRA | stop, waitDone helpers on Session — internal lifecycle helpers |
+| state.go:74-101 | INFRA | addPendingControl, removePendingControl, clearPendingControlsForResume, accumulateUsage — state manipulation helpers for spec'd behaviors |
+| state.go:115-155 | INFRA | QuotaStatus, QuotaMonitorConfig, JobEntry types — defined for quota-aware-scheduling spec (plan-quota-aware-scheduling.md) |
+| worktree.go:30-37 | INFRA | worktreeExists helper — used by agent for worktree collision detection |
+| events.go:1-103 | INFRA | Event type constants and struct definitions — necessary for spec'd event routing |
+| debug.go:1-148 | INFRA | DebugServer — implements spec'd unix socket debug attach |
+| terminal.go:1-133 | INFRA | TerminalSession, startTerminal, NATSTermPubSub — implements spec'd PTY terminal sessions |
+| metrics.go:1-192 | INFRA | Prometheus metrics + OTEL tracing helpers — spec'd in Observability section of plan-k8s-integration.md |
+| daemon.go:1-473 | INFRA | Daemon, laptop mode, JWT refresh, laptop KV heartbeat — implements spec'd laptop daemon mode |
+| daemon_jobs.go:1-903 | INFRA | Job queue dispatcher, quota publisher, lifecycle subscriber, jobs HTTP server — implements plan-quota-aware-scheduling.md |
+| quota_monitor.go:1-219 | INFRA | QuotaMonitor — implements per-session quota threshold monitoring per plan-quota-aware-scheduling.md |
+| worktree.go:1-37 | INFRA | SlugifyBranch and worktreeExists — implements spec'd branch slugification |
 
 ### Summary
 
-- Implemented: 61
-- Gap: 3
-- Partial: 14
+- Implemented: 35
+- Gap: 5
+- Partial: 3
 - Infra: 24
-- Unspec'd: 0
+- Unspec'd: 1
 - Dead: 0

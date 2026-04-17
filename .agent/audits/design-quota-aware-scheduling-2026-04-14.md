@@ -258,3 +258,40 @@ All gaps from prior rounds have been resolved in the current document. Verificat
 ### Result
 
 **CLEAN** after 14 rounds, 30 total gaps resolved (30 factual fixes, 0 design decisions).
+
+## Run: 2026-04-16T00:00:00Z
+
+CLEAN — no blocking gaps found.
+
+All design claims verified against the implementation:
+
+- `Daemon` struct fields (`sessKV`, `jobQueueKV`, `projectsKV`, `quotaCh`) — present in `daemon.go:47-58`
+- `DaemonConfig.CredentialsPath` — present in `daemon.go:43`
+- `runQuotaPublisher`, `runLifecycleSubscriber`, `runJobDispatcher`, `runJobsHTTP` goroutines — all started in `Daemon.Run()` at `daemon.go:131-134`
+- `mclaude-job-queue` KV bucket creation — in `control-plane/projects.go:164-174` using `nats.JetStreamContext` (correct API)
+- `JobEntry` schema — matches `state.go:136-155`
+- `QuotaStatus` schema — matches `state.go:115-123`
+- `QuotaMonitorConfig` — matches `state.go:126-132`
+- `PermissionPolicyStrictAllowlist` — defined in `state.go:22`, implemented in `session.go:333-358`
+- `Session.onStrictDeny` and `Session.onRawOutput` callbacks — present in `session.go:57-61`
+- `QuotaMonitor` struct and goroutine — fully implemented in `quota_monitor.go`
+- `Agent.publishLifecycleExtra` and `Agent.publishPermDenied` — present in `agent.go:1074-1099`
+- `handleCreate` wires quota monitor before `sess.start()` — `agent.go:688-706`
+- `handleJobsProjects` reads `ProjectState.Name` field — `ProjectKVState` (control-plane) and `ProjectState` (daemon) share the `"name"` JSON key; unmarshaling is safe
+- `/schedule-feature` and `/job-queue` skill files — exist at `.agent/skills/schedule-feature/SKILL.md` and `.agent/skills/job-queue/SKILL.md` with complete algorithms
+- HTTP endpoints (`POST /jobs`, `GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}`, `GET /jobs/projects`) — all implemented in `daemon_jobs.go`
+- `specPathToComponent` mapping table — implemented in `daemon_jobs.go:161-176`
+- Startup recovery (`startupRecovery`) — implemented in `daemon_jobs.go:452-504`
+- `sessionKVKey` format `{userId}.{projectId}.{sessionId}` — matches `state.go:64-66`
+
+## Audit: 2026-04-16T04:20:00Z
+
+**Document:** docs/plan-quota-aware-scheduling.md
+
+### Round 1
+
+CLEAN — no blocking gaps found.
+
+### Result
+
+**CLEAN** after 1 round, 0 gaps.
