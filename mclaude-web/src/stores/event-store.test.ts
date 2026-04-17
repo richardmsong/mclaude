@@ -1032,4 +1032,276 @@ describe('EventStore', () => {
     })
   })
 
+  // ─── Regression: protocol order stream_events → assistant → user echo ─────────
+  // With --replay-user-messages the actual JetStream sequence is:
+  //   stream_event(N) → ... → assistant(N+k) → user-echo(N+k+1)
+  // The user echo arrives AFTER the assistant event has already finalized the
+  // streaming turn. The old code only repositioned when blocks were ALL
+  // streaming_text (i.e. before finalization), so it failed here.
+
+  describe('regression: protocol order stream_events → assistant event → user echo', () => {
+    it('single exchange: user echo arrives AFTER assistant event, user still appears before assistant', () => {
+      // Exact pattern from NATS dump seqs 23992-23996:
+      //   stream_event → stream_event → stream_event → assistant → user
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'water' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'melon' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: '.' }, index: 0 },
+      })
+
+      // Assistant event arrives and finalizes the streaming turn
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-wm',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'watermelon.' }],
+          model: 'claude-sonnet-4-6',
+          usage: { input_tokens: 9, output_tokens: 1 },
+        },
+      })
+
+      // At this point: one finalized assistant turn
+      expect(store.conversation.turns).toHaveLength(1)
+      expect(store.conversation.turns[0].type).toBe('assistant')
+
+      // User echo arrives last (--replay-user-messages protocol)
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'replay-wm',
+        isReplay: true,
+        message: { role: 'user', content: 'say the word watermelon and nothing else' },
+      })
+
+      // Must be: [user, assistant] — NOT [assistant, user]
+      expect(store.conversation.turns).toHaveLength(2)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+
+      const userText = store.conversation.turns[0].blocks.find(b => b.type === 'text')
+      expect(userText?.type === 'text' && userText.text).toBe('say the word watermelon and nothing else')
+
+      const asstStreaming = store.conversation.turns[1].blocks.find(b => b.type === 'streaming_text')
+      expect(asstStreaming?.type === 'streaming_text' && asstStreaming.chunks.join('')).toBe('watermelon.')
+    })
+
+    it('full session replay with multiple exchanges all in reverse order: user turns appear before their responses', () => {
+      // Simulates replaying a session where EVERY exchange follows the
+      // stream_events → assistant → user-echo protocol order.
+      // This is the exact bug scenario from the live session:
+      //   "Test", "say pineapple", "say watermelon" — all user turns at bottom.
+
+      // ─── Exchange 1: "Test" ───────────────────────────────────────────────
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: "Got it — everything's working" }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-1',
+          role: 'assistant',
+          content: [{ type: 'text', text: "Got it — everything's working" }],
+          model: 'claude-sonnet-4-6',
+        },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-test',
+        isReplay: true,
+        message: { role: 'user', content: 'Test' },
+      })
+
+      // After exchange 1: [user("Test"), asst("Got it")]
+      expect(store.conversation.turns).toHaveLength(2)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+
+      // ─── Exchange 2: "say pineapple" ──────────────────────────────────────
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'pineapple' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-2',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'pineapple' }],
+          model: 'claude-sonnet-4-6',
+        },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-pineapple',
+        isReplay: true,
+        message: { role: 'user', content: 'say the word "pineapple" and nothing else' },
+      })
+
+      // After exchange 2: [user1, asst1, user2, asst2]
+      expect(store.conversation.turns).toHaveLength(4)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+      expect(store.conversation.turns[2].type).toBe('user')
+      expect(store.conversation.turns[3].type).toBe('assistant')
+
+      // ─── Exchange 3: "say watermelon" ─────────────────────────────────────
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'water' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'melon' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: '.' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-3',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'watermelon.' }],
+          model: 'claude-sonnet-4-6',
+          usage: { input_tokens: 9, output_tokens: 1 },
+        },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-watermelon',
+        isReplay: true,
+        message: { role: 'user', content: 'say the word watermelon and nothing else' },
+      })
+
+      // After exchange 3: [user1, asst1, user2, asst2, user3, asst3]
+      // NOT: [asst1, asst2, asst3, user1, user2, user3]
+      expect(store.conversation.turns).toHaveLength(6)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+      expect(store.conversation.turns[2].type).toBe('user')
+      expect(store.conversation.turns[3].type).toBe('assistant')
+      expect(store.conversation.turns[4].type).toBe('user')
+      expect(store.conversation.turns[5].type).toBe('assistant')
+
+      // Verify content ordering
+      const user1Text = store.conversation.turns[0].blocks.find(b => b.type === 'text')
+      expect(user1Text?.type === 'text' && user1Text.text).toBe('Test')
+
+      const user2Text = store.conversation.turns[2].blocks.find(b => b.type === 'text')
+      expect(user2Text?.type === 'text' && user2Text.text).toBe('say the word "pineapple" and nothing else')
+
+      const user3Text = store.conversation.turns[4].blocks.find(b => b.type === 'text')
+      expect(user3Text?.type === 'text' && user3Text.text).toBe('say the word watermelon and nothing else')
+    })
+
+    it('three consecutive live sends: after full cycle each user appears before its response', () => {
+      // Simulates the "batched" scenario described in the spec:
+      // three separate user sends, each with its own assistant response,
+      // all processed in reverse order (assistant arrives before echo).
+      // After ALL events are replayed, each user turn must appear BEFORE
+      // (not after) its corresponding assistant response.
+
+      // ─── Send 1 (live, with pending turn) ────────────────────────────────
+      store.addPendingMessage('uuid-s1', 'send one')
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'response one' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-s1',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'response one' }],
+          model: 'claude-test',
+        },
+      })
+      // Echo: dedup path → positions user before finalized assistant
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-s1',
+        isReplay: true,
+        message: { role: 'user', content: 'send one' },
+      })
+
+      expect(store.conversation.turns).toHaveLength(2)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+
+      // ─── Send 2 (live, with pending turn) ────────────────────────────────
+      store.addPendingMessage('uuid-s2', 'send two')
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'response two' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-s2',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'response two' }],
+          model: 'claude-test',
+        },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-s2',
+        isReplay: true,
+        message: { role: 'user', content: 'send two' },
+      })
+
+      expect(store.conversation.turns).toHaveLength(4)
+      expect(store.conversation.turns[2].type).toBe('user')
+      expect(store.conversation.turns[3].type).toBe('assistant')
+
+      // ─── Send 3 (live, with pending turn) ────────────────────────────────
+      store.addPendingMessage('uuid-s3', 'send three')
+      store.applyEventForTest({
+        type: 'stream_event',
+        stream_event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'response three' }, index: 0 },
+      })
+      store.applyEventForTest({
+        type: 'assistant',
+        message: {
+          id: 'msg-s3',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'response three' }],
+          model: 'claude-test',
+        },
+      })
+      store.applyEventForTest({
+        type: 'user',
+        uuid: 'uuid-s3',
+        isReplay: true,
+        message: { role: 'user', content: 'send three' },
+      })
+
+      // Final state: [user1, asst1, user2, asst2, user3, asst3]
+      expect(store.conversation.turns).toHaveLength(6)
+      expect(store.conversation.turns[0].type).toBe('user')
+      expect(store.conversation.turns[1].type).toBe('assistant')
+      expect(store.conversation.turns[2].type).toBe('user')
+      expect(store.conversation.turns[3].type).toBe('assistant')
+      expect(store.conversation.turns[4].type).toBe('user')
+      expect(store.conversation.turns[5].type).toBe('assistant')
+
+      // Verify text content
+      const s1Text = store.conversation.turns[0].blocks.find(b => b.type === 'text')
+      expect(s1Text?.type === 'text' && s1Text.text).toBe('send one')
+      const s2Text = store.conversation.turns[2].blocks.find(b => b.type === 'text')
+      expect(s2Text?.type === 'text' && s2Text.text).toBe('send two')
+      const s3Text = store.conversation.turns[4].blocks.find(b => b.type === 'text')
+      expect(s3Text?.type === 'text' && s3Text.text).toBe('send three')
+    })
+  })
+
 })
