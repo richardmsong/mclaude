@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "docs": {
+      "type": "stdio",
+      "command": "bun",
+      "args": ["run", "mclaude-docs-mcp/src/index.ts"]
+    }
+  }
+}
