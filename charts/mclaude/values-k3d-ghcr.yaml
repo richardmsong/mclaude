@@ -42,9 +42,6 @@ spa:
     repository: mclaude-project/mclaude-spa
     tag: "main"
     pullPolicy: IfNotPresent
-  containerPort: 8080
-  service:
-    port: 8080
 
 ## ── session-agent image (pulled when projects are provisioned) ─────────────
 sessionAgent:
