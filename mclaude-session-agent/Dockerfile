@@ -25,16 +25,18 @@ RUN NIX_VERSION="2.28.3" && \
     curl -fsSL "https://releases.nixos.org/nix/nix-${NIX_VERSION}/nix-${NIX_VERSION}-${ARCH}-linux.tar.xz" \
       | xz -d | tar -xC /tmp/nix-src && \
     export HOME=/tmp/nixhome && mkdir -p "$HOME" && \
-    mkdir -p /nix && \
+    mkdir -p /nix /etc/nix && \
+    # Write nix.conf BEFORE the installer runs so the bundled nix binary does not
+    # fail looking for the 'nixbld' group (Alpine has no such group by default).
+    # build-users-group empty = single-user mode, no daemon builds needed.
+    printf 'build-users-group =\nexperimental-features = nix-command flakes\nsandbox = false\ntarball-ttl = 0\n' > /etc/nix/nix.conf && \
+    export NIX_CONF_DIR=/etc/nix && \
     (cd "/tmp/nix-src/nix-${NIX_VERSION}-${ARCH}-linux" && \
      NIX_INSTALLER_NO_MODIFY_PROFILE=1 bash ./install --no-daemon) && \
     # Copy the nix binary out before we remove the store
     NIX_BIN=$(find /nix/store -name "nix" -path "*/bin/nix" -type f 2>/dev/null | head -1) && \
     cp "$NIX_BIN" /usr/local/bin/nix && \
     chmod +x /usr/local/bin/nix && \
-    # Write nix config (sandbox=false required in containers; flakes enabled)
-    mkdir -p /etc/nix && \
-    printf 'experimental-features = nix-command flakes\nsandbox = false\ntarball-ttl = 0\n' > /etc/nix/nix.conf && \
     # Tarball the full /nix store so entrypoint can seed an empty PVC on first boot
     tar czf /nix-bootstrap.tar.gz -C / nix && \
     # Remove /nix store from the image layer — PVC provides it at runtime
