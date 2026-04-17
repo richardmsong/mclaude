@@ -8,6 +8,7 @@ import { AskUserQuestion } from './AskUserQuestion'
 import { AgentGroup } from './AgentGroup'
 import { SystemEvent } from './SystemEvent'
 import { SkillChip } from './SkillChip'
+import { TurnUsageBadge } from './TurnUsageBadge'
 
 interface EventListProps {
   turns: Turn[]
@@ -198,9 +199,7 @@ export function EventList({ turns, pendingMessages = [], onApprove, onDeny }: Ev
                 </div>
               ))}
               {turn.usage && (
-                <div style={{ color: 'var(--text3)', fontSize: 11, marginTop: 4, textAlign: 'right' }}>
-                  {turn.model} · {(turn.usage.inputTokens + turn.usage.outputTokens).toLocaleString()} tokens
-                </div>
+                <TurnUsageBadge usage={turn.usage} model={turn.model} />
               )}
             </div>
           )
