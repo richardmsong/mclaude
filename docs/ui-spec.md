@@ -904,14 +904,20 @@ On WebSocket disconnect:
 
 ### Initial Scroll Position
 
-On first load of a session (fresh navigation, not back-navigation):
-- Scroll the conversation list to the **bottom** immediately after the initial batch of events renders, so the user sees the most recent messages.
-- Use `scrollIntoView` or `scrollTop = scrollHeight` on the conversation container after the first non-empty render.
-- If the session has no events yet (new session), no scroll action is needed.
+**On fresh load (page refresh, direct URL, first navigation to a session)**:
+- Continuously scroll to the bottom on every event/turn update until the user manually scrolls away.
+- "User manually scrolled away" = the scroll container is more than 100px from the bottom (`scrollHeight - scrollTop - clientHeight > 100`). Once detected, stop auto-scrolling.
+- On send, always scroll to bottom and reset the "user scrolled away" flag.
+
+**On back-navigation (SPA: user navigated away then back within the same page session)**:
+- Restore the saved scroll position immediately.
+- Treat the restored position as if the user manually scrolled there — stop auto-scrolling.
+
+**Implementation**: save scroll positions in a **module-level in-memory Map** (not `sessionStorage`). The Map is cleared on every page refresh (JS module re-evaluation), so page refreshes always trigger the continuous-scroll-to-bottom path. In-app navigation saves/restores from the Map.
 
 ### Scroll Persistence
 
-When navigating back from session detail → dashboard → session detail, restore scroll position (saved to sessionStorage on navigate away, restored after events load).
+Scroll position is saved into the module-level Map when the user navigates away from a session (component unmount / sessionId change). Restored from the Map on back-navigation. **Not** stored in `sessionStorage` — page refresh always starts from the bottom.
 
 ---
 
