@@ -252,5 +252,15 @@ func TestIntegration_StartProjectsSubscriberCreatesKVBuckets(t *testing.T) {
 		if kv.Bucket() != bucket {
 			t.Errorf("bucket name = %q; want %q", kv.Bucket(), bucket)
 		}
+
+		// Spec requires History:1 for both buckets.
+		status, err := kv.Status()
+		if err != nil {
+			t.Errorf("KeyValue(%q).Status(): %v", bucket, err)
+			continue
+		}
+		if history := status.History(); history != 1 {
+			t.Errorf("bucket %q: History() = %d, want 1", bucket, history)
+		}
 	}
 }
