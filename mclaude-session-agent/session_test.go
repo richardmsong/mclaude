@@ -402,10 +402,104 @@ func TestEventSubjectFormat(t *testing.T) {
 	}
 }
 
-// TestSpawnArgsIncludeDisallowedTools verifies that start() passes
-// --disallowedTools flags to Claude for each entry in session.disallowedTools.
+// TestShellSplit verifies the shellSplit function handles all quoting cases.
+func TestShellSplit(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    []string
+		wantErr bool
+	}{
+		{
+			name:  "basic space-separated",
+			input: "a b c",
+			want:  []string{"a", "b", "c"},
+		},
+		{
+			name:  "double-quoted with spaces",
+			input: `"foo bar"`,
+			want:  []string{"foo bar"},
+		},
+		{
+			name:  "single-quoted with spaces",
+			input: `'foo bar'`,
+			want:  []string{"foo bar"},
+		},
+		{
+			name:  "mixed flag and quoted value",
+			input: `--flag "value with spaces"`,
+			want:  []string{"--flag", "value with spaces"},
+		},
+		{
+			name:  "double-quote escape sequences",
+			input: `"a\"b\\c"`,
+			want:  []string{`a"b\c`},
+		},
+		{
+			name:  "single-quote no escaping",
+			input: `'a\"b'`,
+			want:  []string{`a\"b`},
+		},
+		{
+			name:  "extra whitespace between tokens",
+			input: "  a   b   c  ",
+			want:  []string{"a", "b", "c"},
+		},
+		{
+			name:  "empty string",
+			input: "",
+			want:  nil,
+		},
+		{
+			name:  "full extraFlags example",
+			input: `--disallowedTools "Edit(src/**)" --model claude-opus-4-7`,
+			want:  []string{"--disallowedTools", "Edit(src/**)", "--model", "claude-opus-4-7"},
+		},
+		{
+			name:  "multiple disallowedTools",
+			input: `--disallowedTools "Edit(mclaude-web/src/**)" --disallowedTools "Write(mclaude-web/src/**)" --model claude-opus-4-7`,
+			want:  []string{"--disallowedTools", "Edit(mclaude-web/src/**)", "--disallowedTools", "Write(mclaude-web/src/**)", "--model", "claude-opus-4-7"},
+		},
+		{
+			name:    "unclosed double quote",
+			input:   `--foo "unclosed`,
+			wantErr: true,
+		},
+		{
+			name:    "unclosed single quote",
+			input:   "--foo 'unclosed",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := shellSplit(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("shellSplit(%q) expected error, got %v", tc.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("shellSplit(%q) unexpected error: %v", tc.input, err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("shellSplit(%q) = %v (len %d), want %v (len %d)", tc.input, got, len(got), tc.want, len(tc.want))
+			}
+			for i, w := range tc.want {
+				if got[i] != w {
+					t.Errorf("shellSplit(%q)[%d] = %q, want %q", tc.input, i, got[i], w)
+				}
+			}
+		})
+	}
+}
+
+// TestSpawnArgsExtraFlags verifies that start() shell-parses extraFlags and
+// appends the resulting tokens to the Claude spawn args.
 // This applies to both new-session and resume paths.
-func TestSpawnArgsIncludeDisallowedTools(t *testing.T) {
+func TestSpawnArgsExtraFlags(t *testing.T) {
 	mockClaude := testutil.MockClaudePath(t)
 	transcript := testutil.TranscriptPath("simple_message.jsonl")
 
@@ -416,16 +510,16 @@ func TestSpawnArgsIncludeDisallowedTools(t *testing.T) {
 			name = "resume-session"
 		}
 		t.Run(name, func(t *testing.T) {
-			sessID := "sess-disallowed-" + name
+			sessID := "sess-extraflags-" + name
 			st := SessionState{
-				ID:        sessID,
-				ProjectID: "test-proj",
-				State:     StateIdle,
-				CreatedAt: time.Now(),
+				ID:         sessID,
+				ProjectID:  "test-proj",
+				State:      StateIdle,
+				CreatedAt:  time.Now(),
+				ExtraFlags: `--disallowedTools "Edit(src/**)" --model claude-opus-4-7`,
 			}
 			sess := newSession(st, "test-user")
 			sess.extraEnv = []string{"MOCK_TRANSCRIPT=" + transcript}
-			sess.disallowedTools = []string{"Edit(src/**)", "Write"}
 
 			pc := &publishCapture{}
 			kc := &kvCapture{}
@@ -442,20 +536,102 @@ func TestSpawnArgsIncludeDisallowedTools(t *testing.T) {
 			args := sess.cmd.Args
 			sess.mu.Unlock()
 
-			// Each disallowedTool must appear as --disallowedTools <tool> pair.
-			for _, want := range []string{"Edit(src/**)", "Write"} {
+			// Verify all four parsed tokens appear in the args.
+			wantTokens := []string{"--disallowedTools", "Edit(src/**)", "--model", "claude-opus-4-7"}
+			for _, want := range wantTokens {
 				var found bool
-				for i, arg := range args {
-					if arg == "--disallowedTools" && i+1 < len(args) && args[i+1] == want {
+				for _, arg := range args {
+					if arg == want {
 						found = true
 						break
 					}
 				}
 				if !found {
-					t.Errorf("--disallowedTools %s not found in spawn args: %v", want, args)
+					t.Errorf("expected token %q in spawn args: %v", want, args)
 				}
 			}
+
+			// Verify the tokens appear as a contiguous pair: --disallowedTools Edit(src/**)
+			var pairFound bool
+			for i, arg := range args {
+				if arg == "--disallowedTools" && i+1 < len(args) && args[i+1] == "Edit(src/**)" {
+					pairFound = true
+					break
+				}
+			}
+			if !pairFound {
+				t.Errorf("--disallowedTools Edit(src/**) pair not found in spawn args: %v", args)
+			}
 		})
+	}
+}
+
+// TestSpawnArgsExtraFlagsEmpty verifies that no extra tokens are appended when
+// extraFlags is empty.
+func TestSpawnArgsExtraFlagsEmpty(t *testing.T) {
+	mockClaude := testutil.MockClaudePath(t)
+	transcript := testutil.TranscriptPath("simple_message.jsonl")
+
+	st := SessionState{
+		ID:        "sess-noflags",
+		ProjectID: "test-proj",
+		State:     StateIdle,
+		CreatedAt: time.Now(),
+		// ExtraFlags deliberately empty
+	}
+	sess := newSession(st, "test-user")
+	sess.extraEnv = []string{"MOCK_TRANSCRIPT=" + transcript}
+
+	pc := &publishCapture{}
+	kc := &kvCapture{}
+
+	if err := sess.start(mockClaude, false, pc.publish, kc.write); err != nil {
+		t.Fatalf("session.start: %v", err)
+	}
+	t.Cleanup(func() {
+		sess.stop()
+		sess.waitDone()
+	})
+
+	sess.mu.Lock()
+	args := sess.cmd.Args
+	sess.mu.Unlock()
+
+	// The fixed args for a non-resume session are:
+	// [claudePath --print --verbose --output-format stream-json --input-format stream-json
+	//  --include-partial-messages --replay-user-messages --session-id <id>]
+	// Index 0 is the binary path, so total = 11.
+	const wantArgCount = 11
+	if len(args) != wantArgCount {
+		t.Errorf("expected %d spawn args (no extra flags), got %d: %v", wantArgCount, len(args), args)
+	}
+}
+
+// TestSpawnArgsMalformedExtraFlags verifies that start() returns an error when
+// extraFlags contains unclosed quotes.
+func TestSpawnArgsMalformedExtraFlags(t *testing.T) {
+	mockClaude := testutil.MockClaudePath(t)
+	transcript := testutil.TranscriptPath("simple_message.jsonl")
+
+	st := SessionState{
+		ID:         "sess-malformed",
+		ProjectID:  "test-proj",
+		State:      StateIdle,
+		CreatedAt:  time.Now(),
+		ExtraFlags: "--foo 'unclosed",
+	}
+	sess := newSession(st, "test-user")
+	sess.extraEnv = []string{"MOCK_TRANSCRIPT=" + transcript}
+
+	pc := &publishCapture{}
+	kc := &kvCapture{}
+
+	err := sess.start(mockClaude, false, pc.publish, kc.write)
+	if err == nil {
+		t.Fatal("expected error from start() with malformed extraFlags, got nil")
+	}
+	if !strings.Contains(err.Error(), "extraFlags shell parse") {
+		t.Errorf("expected 'extraFlags shell parse' in error message, got: %v", err)
 	}
 }
 
