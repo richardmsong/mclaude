@@ -69,7 +69,7 @@ Conditional:
 
 - If the Deployment update fails, the reconciler returns an error and controller-runtime retries with backoff (existing behavior).
 - If the CRD update from `PatchMCProjectGitIdentity` fails, it logs a warning and continues (existing behavior, non-fatal).
-- If the session-agent pod crashes after a restart (e.g., invalid git credentials), it enters CrashLoopBackOff — the user sees this in the UI as a stale heartbeat and can fix the identity in Settings.
+- If the session-agent pod crashes after a restart (e.g., invalid git credentials), it enters CrashLoopBackOff — the user sees this in the UI as an offline agent (via NATS presence detection) and can fix the identity in Settings.
 
 ## Scope
 

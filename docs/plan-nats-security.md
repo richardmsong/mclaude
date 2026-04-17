@@ -11,12 +11,14 @@ NATS is the central nervous system. If NATS is compromised, the entire platform 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | KV write authority | Split: controller writes project status, control-plane writes metadata + access | Controller knows actual resource state — no reason to round-trip through control-plane. Control-plane owns access lists and project metadata. |
-| Controller access checks | In-memory map from KV watch, not JWT scoping | Avoids mass JWT refresh when clusters/users change. Nanosecond map lookup. KV watch keeps it current. |
-| Subject scoping | Cross-dimensional: userId × clusterId | Users bound to `mclaude.{userId}.*`, controllers bound to `mclaude.*.clusters.{clusterId}.*`. Intersection enforces isolation. |
-| BYOH trust level | Same NATS permissions as managed controller | BYOH controller can only see events for its own clusterId. Cannot read other clusters. Physical access to BYOH hardware is the owner's responsibility. |
+| Access control | Control-plane routes commands to controllers | Control-plane checks Postgres access, then forwards to `mclaude.clusters.{clusterId}.>`. Controller never sees unauthorized events. No KV access map, no JWT-encoded user lists. |
+| Subject structure | User subjects separate from cluster subjects | SPA publishes to `mclaude.{userId}.projects.*`. Control-plane forwards to `mclaude.clusters.{clusterId}.projects.*`. Controllers subscribe only to their cluster's private subjects. |
+| GP cluster permissions | Wildcard — all users | GP (managed) clusters accept any user. Control-plane forwards without per-user restriction. |
+| BYOH trust level | Same NATS permissions as managed controller | BYOH controller only sees pre-validated commands on its `mclaude.clusters.{clusterId}.>` subject. Cannot see other clusters. Cannot see unauthorized user events. |
 | Rate limiting | NATS JWT-level per-client limits | `pub.max`, `data`, `payload` fields in JWT. Prevents any single identity from flooding the system. |
 | Cluster IDs | UUIDs, not user-chosen names | Prevents guessing/targeting. Even if you know a cluster exists, you need the UUID to address it. |
 | Status update path | Controller writes KV directly | Controller is the authority on resource state. Direct KV write avoids latency and removes control-plane from the critical path. |
+| Liveness detection | NATS `$SYS` presence events | No heartbeats. NATS emits connect/disconnect. Control-plane subscribes with system account permissions, updates KV. Covers agent health and controller liveness. |
 
 ---
 
@@ -84,20 +86,21 @@ A user can only interact with their own subjects. They publish project create/up
 
 ```
 Publish allow:
-  mclaude.>      # all mclaude subjects
-  $KV.mclaude-access.>   # access list KV
+  mclaude.>              # all user subjects (receives user events)
+  mclaude.clusters.>     # forwards commands to controllers
   $KV.mclaude-sessions.> # session state KV
-  $JS.>          # JetStream management (create streams, consumers)
-  _INBOX.>       # request/reply
+  $JS.>                  # JetStream management (create streams, consumers)
+  _INBOX.>               # request/reply
 
 Subscribe allow:
-  mclaude.>      # receives all events
-  $KV.>          # KV watch (all buckets)
-  $JS.>          # JetStream management
-  _INBOX.>       # request/reply
+  mclaude.>              # receives all user events
+  $SYS.ACCOUNT.>         # presence detection (connect/disconnect events)
+  $KV.>                  # KV watch (all buckets)
+  $JS.>                  # JetStream management
+  _INBOX.>               # request/reply
 ```
 
-Control-plane writes access lists and session metadata to KV. Does NOT write project status — that's the controller's responsibility. Manages JetStream configuration (stream/consumer creation).
+Control-plane is the router: receives user commands on `mclaude.*.projects.>`, checks access in Postgres, forwards to `mclaude.clusters.{clusterId}.projects.*`. Writes access lists and session metadata to KV. Does NOT write project status — that's the controller's responsibility. Subscribes to `$SYS` for presence detection (agent/controller liveness).
 
 ### K8s Controller / BYOH Controller
 
@@ -107,20 +110,17 @@ Publish allow:
   _INBOX.>                                   # request/reply
 
 Subscribe allow:
-  mclaude.*.clusters.{clusterId}.>           # project commands for this cluster
-  $KV.mclaude-access.>                       # watch access list for authorization checks
+  mclaude.clusters.{clusterId}.>             # pre-validated commands from control-plane
 
 Publish deny:
-  $KV.mclaude-access.>   # cannot write access lists
+  mclaude.*.projects.>   # cannot publish user-level commands
   $KV.mclaude-sessions.> # cannot write session state
   $JS.>                   # cannot manipulate JetStream
 ```
 
-The wildcard `*` in the subscribe pattern means the controller sees events from ALL users that target its cluster. This is by design — the controller needs to provision resources for any authorized user.
+The controller subscribes only to its own cluster's private command subject (`mclaude.clusters.{clusterId}.>`). It never sees raw user events — control-plane validates access and forwards only authorized commands. No wildcard user subscriptions, no access map, no information disclosure.
 
 The controller writes project status directly to the `mclaude-projects` KV bucket. It cannot write to other KV buckets (access lists, sessions).
-
-The controller can only PUBLISH to its own cluster's system status subjects. It cannot publish commands (create/update/delete) — those come from users.
 
 ### Session-Agent
 
@@ -140,27 +140,67 @@ Narrowest scope. A session-agent can only interact with its own session's subjec
 
 NATS KV operations map to JetStream subjects under `$KV.<bucket>.<key>`. KV write authority is split by bucket:
 
-| KV Operation | Subject | `mclaude-projects` | `mclaude-access` | `mclaude-sessions` |
-|--------------|---------|---------------------|-------------------|--------------------|
-| Put (write) | `$KV.<bucket>.<key>` | Controller | Control-plane | Control-plane |
-| Get (read) | `$JS.API.DIRECT.GET.<stream>.<subject>` | All | All | All |
-| Watch | `$KV.<bucket>.>` subscribe | All | All | All |
-| Delete | `$KV.<bucket>.<key>` (purge header) | Controller | Control-plane | Control-plane |
+| KV Operation | Subject | `mclaude-projects` | `mclaude-sessions` |
+|--------------|---------|---------------------|--------------------|
+| Put (write) | `$KV.<bucket>.<key>` | Controller | Control-plane |
+| Get (read) | `$JS.API.DIRECT.GET.<stream>.<subject>` | All | All |
+| Watch | `$KV.<bucket>.>` subscribe | All | All |
+| Delete | `$KV.<bucket>.<key>` (purge header) | Controller | Control-plane |
+
+Access control is enforced in Postgres at routing time, not via a KV bucket.
 
 This means:
 - **SPA can watch KV** (subscribe to `$KV.mclaude-projects.>`) — reads project status changes in real-time
 - **Controller writes project status** (publish to `$KV.mclaude-projects.>`) — directly updates status as it provisions
-- **Controller watches access list** (subscribe to `$KV.mclaude-access.>`) — reads access list for authorization checks
-- **Control-plane writes access lists and session state** — owns user/cluster mappings and session metadata
+- **Control-plane writes session state** — owns session metadata
 - **SPA and controllers cannot write each other's KV buckets** — enforced at JWT level
 
 ### KV Buckets
 
 | Bucket | Purpose | Writer | Readers |
 |--------|---------|--------|---------|
-| `mclaude-projects` | Project status, metadata | Controller (status), Control-plane (metadata on create) | SPA (per-user filtered), Controller (per-cluster filtered) |
-| `mclaude-access` | Cluster access lists (userId → clusterId mappings) | Control-plane | Controllers (watch for authorization) |
+| `mclaude-projects` | Project status, metadata | Controller (status), Control-plane (metadata on create) | SPA (per-user filtered) |
 | `mclaude-sessions` | Active session state | Control-plane | SPA |
+
+---
+
+## Presence Detection
+
+NATS emits system events when clients connect and disconnect. This replaces all heartbeat-based liveness detection.
+
+### How It Works
+
+NATS server publishes to `$SYS.ACCOUNT.{accountId}.CONNECT` and `$SYS.ACCOUNT.{accountId}.DISCONNECT` on every client connect/disconnect. The event payload includes the client's JWT claims (identity type, cluster ID, user ID, session ID).
+
+Control-plane subscribes to `$SYS.ACCOUNT.>` (requires system account permissions in NATS config). On each event:
+
+| Client type | Connect action | Disconnect action |
+|-------------|---------------|-------------------|
+| Controller | Mark cluster online in KV | Mark cluster offline in KV, stop routing new projects |
+| Session-agent | Mark agent healthy in project KV | Mark agent offline in project KV |
+| SPA | (no action) | (no action — SPA reconnects automatically) |
+
+### Why Not Heartbeats
+
+- **Zero latency on disconnect**: NATS detects TCP drop immediately. Heartbeats have a staleness window (miss 2-3 intervals before declaring dead).
+- **No polling or timers**: No 30s heartbeat loop in session-agent, no 5s health check in SPA, no 90s staleness threshold.
+- **Handles crashes and hangs**: NATS has built-in ping/pong. If a client hangs (process alive but unresponsive), NATS kills the connection and emits disconnect.
+- **Less code**: Eliminates HeartbeatMonitor (client), heartbeat loop (session-agent), `mclaude-heartbeats` KV bucket, staleness detection logic.
+
+### NATS Config Requirement
+
+Control-plane needs system account permissions to subscribe to `$SYS.>`:
+
+```
+# In NATS server config
+system_account: SYS
+accounts: {
+  SYS: { users: [{ user: sys, password: ... }] }
+  MCLAUDE: { ... }
+}
+```
+
+Or via operator JWT: the control-plane's user JWT includes `"bearerToken": true` with system account access.
 
 ---
 
@@ -230,8 +270,9 @@ NATS JWTs support per-connection rate limits:
 
 A managed K8s controller runs on infrastructure we operate. We trust the runtime environment but not the software blindly — it still gets scoped NATS permissions. If the controller binary is compromised:
 - It can only affect its own cluster's projects
-- It can only write to the `mclaude-projects` KV bucket (project status) — cannot write access lists or session state
-- It cannot see other clusters' events
+- It only receives pre-validated commands from control-plane (never raw user events)
+- It can only write to the `mclaude-projects` KV bucket (project status) — cannot write session state
+- It cannot see other clusters' commands
 - It cannot issue JWTs (doesn't have the account seed — **OPEN QUESTION**: it does have the account seed for signing session-agent JWTs. See "Account Seed Distribution" below.)
 
 ### What "Minimally Trusted" Means
@@ -251,15 +292,13 @@ This is acceptable because:
 
 ## Threat Scenarios
 
-### T1: Rogue BYOH Yoinks Events
+### T1: Rogue BYOH Reads Other Users' Commands
 
-**Threat**: A BYOH controller subscribes to `mclaude.*.clusters.{clusterId}.>` and reads project create events intended for another user who was admin-assigned to the same BYOH target.
+**Threat**: A BYOH controller tries to see commands for users who aren't authorized on its cluster.
 
-**Impact**: The BYOH operator sees project names, git URLs, and configuration for other users' projects routed to their hardware.
+**Impact**: None. The BYOH controller subscribes to `mclaude.clusters.{clusterId}.>` — a private subject that only control-plane publishes to. Control-plane only forwards commands from authorized users. The controller never sees raw user events (it has no `mclaude.*.>` subscribe permission).
 
-**Mitigation**: This is by design — if an admin routes User B's projects to User A's BYOH hardware, User A can see those project specs. Admins must understand this when sharing BYOH targets. The BYOH target listing in the admin UI should clearly warn about this.
-
-**Residual risk**: Information disclosure to BYOH owner. Acceptable if admin explicitly opted in.
+**Residual risk**: If admin shares a BYOH cluster with multiple users, the BYOH controller sees the forwarded commands for all authorized users. This is inherent — the controller needs the project spec to provision it. The BYOH owner has physical access to the hardware running the controller, so they could read the data anyway. Admin must make an informed decision when sharing BYOH targets.
 
 ### T2: BYOH Spoofs Project Status via KV
 
@@ -281,37 +320,33 @@ This is acceptable because:
 
 **Threat**: A malicious user spams project create events targeting a BYOH controller's cluster ID: `mclaude.{userId}.clusters.{byohClusterId}.projects.create`.
 
-**Analysis**: The user would need:
-1. Know the BYOH cluster's UUID (randomly generated, not guessable)
-2. Have NATS permissions to publish to their own `mclaude.{userId}.clusters.{byohClusterId}.projects.create`
-3. The BYOH controller subscribes to `mclaude.*.clusters.{byohClusterId}.>`, so it would see these events
+**Analysis**: The user publishes to `mclaude.{userId}.projects.create` with the BYOH cluster's UUID in the payload. Control-plane receives it.
 
-**But**: The controller checks the in-memory access map before acting. If userId is not authorized for this clusterId, the event is dropped immediately.
+**But**: Control-plane checks Postgres access before forwarding. If the user isn't authorized for the BYOH cluster, the command is rejected at control-plane — it never reaches the controller.
 
 **Mitigation**:
 - UUID cluster IDs prevent guessing
-- Access map check drops unauthorized events (nanosecond operation)
-- NATS rate limiting on the user's connection caps the spam rate
-- Even if events arrive, they're dropped without provisioning anything
+- Control-plane rejects unauthorized commands before forwarding (Postgres access check)
+- NATS rate limiting on the user's connection caps the spam rate at control-plane
+- Even if the user spams, only control-plane sees the load — the BYOH controller sees nothing
 
-**Residual risk**: Minimal CPU waste on unauthorized event drops. Not a viable DoS vector.
+**Residual risk**: CPU waste on control-plane for rejected commands. Mitigated by rate limiting. Not a viable DoS vector against the BYOH target.
 
 ### T4: KV Poisoning
 
 **Threat**: A compromised identity writes malicious data to NATS KV.
 
 **Mitigation by bucket:**
-- `mclaude-access` (access lists): only control-plane can write. SPA and controllers are denied `$KV.mclaude-access.>` publish. **Residual risk: zero.**
 - `mclaude-sessions` (session state): only control-plane can write. **Residual risk: zero.**
 - `mclaude-projects` (project status): controllers can write. A compromised controller could write bogus status for any project (see T2). SPA is denied `$KV.mclaude-projects.>` publish. **Residual risk: status confusion, mitigated by monitoring.**
 
-The critical buckets (access lists, sessions) remain control-plane-only. The project status bucket is the trade-off zone — controllers need write access for performance, accepting the risk that a compromised controller can write cross-cluster status.
+Access control is enforced in Postgres at routing time (no KV access bucket). The project status bucket is the trade-off zone — controllers need write access for performance, accepting the risk that a compromised controller can write cross-cluster status.
 
 ### T5: Subject Hijacking
 
-**Threat**: A controller subscribes to subjects outside its authorized cluster ID, e.g., `mclaude.*.clusters.*.>` instead of `mclaude.*.clusters.{itsClusterId}.>`.
+**Threat**: A controller subscribes to subjects outside its authorized cluster ID, e.g., `mclaude.clusters.*.>` instead of `mclaude.clusters.{itsClusterId}.>`, or to user subjects like `mclaude.*.projects.>`.
 
-**Mitigation**: JWT permissions restrict the subscribe pattern. The NATS server rejects subscribe requests that don't match the JWT's allowed subjects. The controller literally cannot subscribe to other clusters' subjects.
+**Mitigation**: JWT permissions restrict the subscribe pattern. The NATS server rejects subscribe requests that don't match the JWT's allowed subjects. The controller literally cannot subscribe to other clusters' command subjects or to raw user subjects.
 
 **Residual risk**: Zero — enforced at the NATS server level.
 
@@ -362,13 +397,15 @@ The critical buckets (access lists, sessions) remain control-plane-only. The pro
 
 ### T9: Mass JWT Refresh Attack
 
-**Threat**: A cluster access change (add/remove cluster, add/remove user from cluster) requires refreshing all affected JWTs. If permissions were encoded in JWTs, changing cluster access would require refreshing every affected user's JWT simultaneously.
+**Threat**: A cluster access change (add/remove cluster, add/remove user from cluster) requires refreshing all affected JWTs.
 
-**Analysis**: This is why controllers self-check access from KV rather than relying on JWT scoping for cluster authorization. The JWT gives the controller permission to SUBSCRIBE to its cluster's subjects. But the controller additionally checks the KV-backed access map before ACTING on events.
+**Analysis**: In the current design, this is a non-issue. Controller JWTs encode a static subscribe pattern (`mclaude.clusters.{clusterId}.>`). Access control is enforced by control-plane at routing time (Postgres check), not by JWT scoping. When a user's cluster access changes, control-plane simply starts or stops forwarding their commands — no JWT refresh needed for anyone.
 
-**Mitigation**: Controller JWTs encode the subscribe pattern (`mclaude.*.clusters.{clusterId}.>`), which is static. Access changes are reflected in KV, which controllers watch. No JWT refresh needed for access list changes.
+User JWTs are also unaffected: they publish to `mclaude.{userId}.projects.*` regardless of which clusters they can access. The access decision happens at control-plane, not at NATS.
 
-**Residual risk**: Brief window where a removed user's events are still received but dropped by access check. Acceptable latency (sub-second for KV watch propagation).
+**Mitigation**: N/A — the architecture avoids the problem entirely.
+
+**Residual risk**: None. The only JWT refresh scenario is account seed rotation (nuclear option, see Account Seed Distribution).
 
 ---
 

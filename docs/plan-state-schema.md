@@ -141,18 +141,6 @@ Writers: control-plane (on project creation)
 Readers: SPA (KV watch for project list), session-agent, daemon (`GET /jobs/projects`)
 History: 1
 
-### `mclaude-heartbeats`
-
-Created by: control-plane (implicitly via session-agent first write; or explicitly if bucket pre-created)
-
-Key format: `{userId}.{projectId}`
-
-Value: `{"ts": "RFC3339"}`
-
-Writers: session-agent (every 30s via heartbeat loop)
-Readers: SPA (KV watch for agent liveness)
-History: 1
-
 ### `mclaude-laptops`
 
 Created by: control-plane (pre-created; opened by daemon in `NewDaemon`)

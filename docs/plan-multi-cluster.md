@@ -482,15 +482,13 @@ resolver_preload: {
 | Subject | Publisher | Subscriber | Payload | Transport |
 |---------|-----------|------------|---------|-----------|
 | `mclaude.clusters.{clusterId}.projects.provision` | control-plane | worker controller | `{ userId, projectId, gitUrl }` | Core NATS request/reply via leaf |
-| `mclaude.clusters.{clusterId}.status` | worker controller | control-plane | `{ clusterId, status, sessionCount, capacity, ts }` | Core NATS (periodic heartbeat, every 30s) |
-
-The control plane subscribes to `mclaude.clusters.*.status` on startup. On each heartbeat, it updates an in-memory map of cluster liveness. If no heartbeat is received for 90s (3 missed intervals), the control plane marks the cluster as `offline` in Postgres and stops routing new project provisioning requests to it. When heartbeats resume, the cluster is marked `active` again.
+Controller liveness is detected via NATS `$SYS` presence events (connect/disconnect), not heartbeats. Control-plane subscribes to `$SYS.ACCOUNT.*.CONNECT` and `$SYS.ACCOUNT.*.DISCONNECT`, identifies the controller from JWT claims, and updates cluster status in Postgres and KV. When a controller disconnects (crash, network loss), control-plane marks the cluster `offline` and stops routing. When it reconnects, control-plane marks it `active` again. See `plan-nats-security.md` for details.
 
 Existing subjects (`mclaude.{userId}.{projectId}.events.*`, `mclaude.{userId}.{projectId}.api.sessions.*`, etc.) are unchanged. They flow between hub and worker automatically via leaf node subject routing. NATS leaf nodes import/export all core NATS subjects by default — no explicit `allow`/`deny` rules are needed in the `remotes` block. JetStream domain routing (`$JS.{domain}.API.>`) is also handled automatically by the NATS leaf node protocol.
 
 ### KV Buckets — Unchanged
 
-All existing KV buckets (`mclaude-sessions`, `mclaude-projects`, `mclaude-heartbeats`, `mclaude-job-queue`) remain on the worker NATS where the session-agents run. They are accessible from hub-connected clients via domain-qualified JetStream (`js.KeyValue('mclaude-sessions', { domain: 'worker-a' })`).
+All existing KV buckets (`mclaude-sessions`, `mclaude-projects`, `mclaude-job-queue`) remain on the worker NATS where the session-agents run. They are accessible from hub-connected clients via domain-qualified JetStream (`js.KeyValue('mclaude-sessions', { domain: 'worker-a' })`).
 
 No new KV buckets are needed. The cluster registry is in Postgres, not NATS.
 
