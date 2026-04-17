@@ -1130,15 +1130,19 @@ No auth logic. No routing decisions. Bytes in, bytes out.
 
 ## Image Build Pipeline
 
-All images tagged with semver. Never `:latest` in production. Push to main → build → push to Artifactory with git SHA + semver tag. Semver bump triggers promotion.
+Push to `main` → `.github/workflows/deploy-main.yml` builds any component whose source changed and pushes to ghcr.io under `ghcr.io/mclaude-project/<image>`. Two tags per build: `main-<7-char-sha>` (immutable, per-commit) and `main` (moving, latest-on-main). **The `:latest` tag is never published** — consumers pinning `:latest` will always fail the pull.
 
-| Image | Contents |
-|-------|----------|
-| `mclaude-session-agent:{v}` | session-agent binary, mclaude-cli binary, Claude CLI, git, Nix, zsh, pkg shim, guard hooks |
-| `mclaude-control-plane:{v}` | control-plane binary, kubectl, dbmate |
-| `mclaude-config-sync:{v}` | inotify-tools, kubectl, jq — pre-installed, no runtime package installs |
+| Image | Ghcr.io repository | Tags | Contents |
+|-------|-------------------|------|----------|
+| control-plane | `ghcr.io/mclaude-project/mclaude-control-plane` | `main`, `main-<sha>` | control-plane binary, kubectl, dbmate |
+| SPA | `ghcr.io/mclaude-project/mclaude-spa` | `main`, `main-<sha>` | built SPA static files + nginx |
+| session-agent | `ghcr.io/mclaude-project/mclaude-session-agent` | `main`, `main-<sha>` | session-agent binary, mclaude-cli binary, Claude CLI, git, Nix, zsh, pkg shim, guard hooks |
 
 Note: tmux is no longer in the session-agent image.
+
+Helm values files that target ghcr.io must pin `tag: "main"` (default-latest on main) or a specific `main-<sha>` (reproducible). Never `tag: "latest"`. For local-preview defaults, see `charts/mclaude/values-k3d-ghcr.yaml`.
+
+**Aspirational (not yet wired):** semver release promotion, Artifactory mirror, and immutable `:{v}` tags for production channels. When that lands, update this section and the values files together.
 
 ---
 
