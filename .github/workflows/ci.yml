@@ -78,8 +78,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: mclaude-web/package-lock.json
       - run: npm ci
         working-directory: mclaude-web
       - run: npm test
