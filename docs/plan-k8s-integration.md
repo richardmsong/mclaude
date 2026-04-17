@@ -780,6 +780,12 @@ Pod: project-{projectId}            namespace: mclaude-{userId}
 - K8s Secret: SSH keys, OAuth token, `.gitconfig`
 - ConfigMap: `settings.json`, `CLAUDE.md`, commands, skills
 
+**Git credential helper registration** is performed by the session-agent binary (via `CredentialManager.Setup`) on every pod start, unconditionally:
+1. Symlink `/data/.config → ~/.config` (PVC-backed, survives pod restart)
+2. Merge managed gh/glab token files from Secret mount into `~/.config/gh/hosts.yml` and `~/.config/glab-cli/config.yml` (only when Secret files exist and content has changed)
+3. Run `gh auth setup-git` — registers gh as a git HTTPS credential helper in `~/.gitconfig`. **Always run this step, even when no managed credential files exist.** In dev/local environments where `gh` is already authenticated via a pre-existing `hosts.yml`, this ensures git push succeeds without requiring a managed Secret.
+4. Run `glab auth setup-git` (non-fatal if glab is not installed)
+
 **config-sync sidecar** watches `~/.claude/settings.json` and `CLAUDE.md` for writes via inotify. On change, patches the `user-config` ConfigMap. Survives pod restarts via re-seeding.
 
 `mclaude-config-sync` is a **dedicated image** with inotify-tools, kubectl, and jq pre-installed. Do not use runtime `apk add` — it fails in air-gapped environments.
