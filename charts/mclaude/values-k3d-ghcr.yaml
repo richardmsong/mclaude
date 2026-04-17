@@ -8,7 +8,7 @@ controlPlane:
   externalUrl: "https://dev.mclaude.local"
   image:
     registry: ghcr.io
-    repository: mclaude-project/mclaude-control-plane
+    repository: richardmsong/mclaude-control-plane
     tag: "main"
     pullPolicy: IfNotPresent
   migrations:
@@ -39,7 +39,7 @@ controlPlane:
 spa:
   image:
     registry: ghcr.io
-    repository: mclaude-project/mclaude-spa
+    repository: richardmsong/mclaude-spa
     tag: "main"
     pullPolicy: IfNotPresent
 
@@ -47,7 +47,7 @@ spa:
 sessionAgent:
   image:
     registry: ghcr.io
-    repository: mclaude-project/mclaude-session-agent
+    repository: richardmsong/mclaude-session-agent
     tag: "main"
     pullPolicy: IfNotPresent
 

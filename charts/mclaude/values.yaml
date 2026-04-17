@@ -102,7 +102,7 @@ controlPlane:
   #   scopes: "repo read:org gist workflow read:user user:email"
   image:
     registry: ghcr.io
-    repository: mclaude-project/mclaude-control-plane
+    repository: richardmsong/mclaude-control-plane
     tag: "0.1.0"
     pullPolicy: IfNotPresent
   replicas: 1
@@ -159,7 +159,7 @@ spa:
   enabled: true
   image:
     registry: ghcr.io
-    repository: mclaude-project/mclaude-spa
+    repository: richardmsong/mclaude-spa
     tag: "0.1.0"
     pullPolicy: IfNotPresent
   replicas: 1
@@ -208,7 +208,7 @@ ingress:
 sessionAgent:
   image:
     registry: ghcr.io
-    repository: mclaude-project/mclaude-session-agent
+    repository: richardmsong/mclaude-session-agent
     tag: "0.1.0"
     pullPolicy: IfNotPresent
   resources:
