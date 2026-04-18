@@ -16,7 +16,6 @@ import { SessionDetailScreen } from './SessionDetailScreen'
 import { Settings } from './Settings'
 import { TokenUsage } from './TokenUsage'
 import { UserManagement } from './UserManagement'
-import type { UsageStats } from '@/types'
 
 // ── Hash routing ──────────────────────────────────────────────────────────
 function getRoute(): { screen: string; sessionId?: string } {
@@ -444,19 +443,6 @@ export function App() {
     navigate('/')
   }
 
-  // Aggregate usage across all sessions
-  const totalUsage: UsageStats = useMemo(() => {
-    if (!sessionStore) return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 }
-    let agg = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 }
-    for (const s of sessionStore.sessions.values()) {
-      agg.inputTokens += s.usage.inputTokens
-      agg.outputTokens += s.usage.outputTokens
-      agg.cacheReadTokens += s.usage.cacheReadTokens
-      agg.cacheWriteTokens += s.usage.cacheWriteTokens
-      agg.costUsd += s.usage.costUsd
-    }
-    return agg
-  }, [sessionStore])
 
   // ── X4: Version block screen ──────────────────────────────────────────
   // Shown when the client is below minClientVersion and a reload didn't fix it.
@@ -533,7 +519,7 @@ export function App() {
     return (
       <Fragment>
         <TokenUsage
-          usage={totalUsage}
+          sessions={sessionStore ? Array.from(sessionStore.sessions.values()) : []}
           onBack={() => navigate('/')}
           connected={connected}
         />
