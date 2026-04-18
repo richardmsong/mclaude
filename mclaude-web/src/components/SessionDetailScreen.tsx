@@ -117,6 +117,9 @@ export function SessionDetailScreen({
   const menuRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const rawScrollRef = useRef<HTMLDivElement>(null)
+  const rawAtBottomRef = useRef(true)
+  const [rawTranscript, setRawTranscript] = useState('')
 
   // Send pre-seeded onboarding message once the session is ready
   useEffect(() => {
@@ -580,13 +583,73 @@ export function SessionDetailScreen({
   const totalUsageCost = usageTiles.reduce((s, t) => s + t.cost, 0)
   const totalUsageTokens = usageTiles.reduce((s, t) => s + t.tokens, 0)
 
-  // Raw output: extract all assistant text from turns
-  const rawTextLines = vmState.turns
-    .filter(t => t.type === 'assistant')
-    .flatMap(t => t.blocks)
-    .filter(b => b.type === 'text' || b.type === 'streaming_text')
-    .map(b => b.type === 'text' ? b.text : (b as { chunks: string[] }).chunks.join(''))
-    .join('\n')
+  // Raw output: build rich transcript from all turns
+  function buildRawTranscript(turns: typeof vmState.turns): string {
+    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*[mGKHF]/g, '')
+    const lines: string[] = []
+    for (const turn of turns) {
+      if (turn.type === 'user') {
+        for (const block of turn.blocks) {
+          if (block.type === 'text') {
+            lines.push('[User] ' + stripAnsi(block.text))
+          } else if (block.type === 'streaming_text') {
+            const text = (block as { chunks: string[] }).chunks.join('')
+            if (text) lines.push('[User] ' + stripAnsi(text))
+          }
+          // skip image blocks in raw view
+        }
+      } else if (turn.type === 'assistant') {
+        for (const block of turn.blocks) {
+          if (block.type === 'text') {
+            lines.push('[Claude] ' + stripAnsi(block.text))
+          } else if (block.type === 'streaming_text') {
+            const text = (block as { chunks: string[] }).chunks.join('')
+            if (text) lines.push('[Claude] ' + stripAnsi(text))
+          } else if (block.type === 'tool_use') {
+            const inputStr = block.inputSummary || JSON.stringify(block.fullInput ?? '')
+            lines.push('[' + block.name + '] ' + stripAnsi(inputStr))
+            if (block.result) {
+              const resultText = stripAnsi(block.result.content)
+              const prefix = block.result.isError ? '[Error] ' : '[Result] '
+              lines.push(prefix + resultText)
+            }
+          } else if (block.type === 'thinking') {
+            lines.push('[Thinking] ' + stripAnsi(block.text))
+          } else if (block.type === 'control_request') {
+            lines.push('[Permission] ' + block.toolName + ': ' + JSON.stringify(block.input) + ' (' + block.status + ')')
+          } else if (block.type === 'system_message') {
+            lines.push('[System] ' + stripAnsi(block.text))
+          } else if (block.type === 'compaction') {
+            lines.push('[Compaction] ' + stripAnsi(block.summary))
+          }
+        }
+      } else if (turn.type === 'system') {
+        for (const block of turn.blocks) {
+          if (block.type === 'system_message') {
+            lines.push('[System] ' + stripAnsi(block.text))
+          }
+        }
+      }
+    }
+    return lines.join('\n')
+  }
+
+  // Auto-refresh raw transcript every 500ms while overlay is open
+  useEffect(() => {
+    if (!showRawOutput) return
+    const update = () => {
+      const text = buildRawTranscript(vmState.turns)
+      setRawTranscript(text)
+      // Auto-scroll if at bottom
+      if (rawAtBottomRef.current && rawScrollRef.current) {
+        rawScrollRef.current.scrollTop = rawScrollRef.current.scrollHeight
+      }
+    }
+    update() // immediate update on open
+    const id = setInterval(update, 500)
+    return () => clearInterval(id)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showRawOutput, vmState.turns])
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg)' }}>
@@ -630,21 +693,30 @@ export function SessionDetailScreen({
 
       {/* Raw Output overlay */}
       {showRawOutput && (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 500, display: 'flex', flexDirection: 'column', background: '#0d1117' }}>
-          <div style={{ display: 'flex', alignItems: 'center', padding: '14px 16px', borderBottom: '1px solid rgba(255,255,255,0.1)', flexShrink: 0 }}>
-            <button onClick={() => setShowRawOutput(false)} style={{ color: 'var(--blue)', fontSize: 15, marginRight: 12 }}>‹ Back</button>
-            <span style={{ fontWeight: 600, fontSize: 17, color: '#eee' }}>Raw Output</span>
+        <div style={{ position: 'fixed', inset: 0, zIndex: 500, display: 'flex', flexDirection: 'column', background: '#000' }}>
+          <div style={{ display: 'flex', alignItems: 'center', padding: '14px 16px', borderBottom: '1px solid rgba(255,255,255,0.1)', flexShrink: 0, background: '#111' }}>
+            <button onClick={() => { setShowRawOutput(false) }} style={{ color: 'var(--blue)', fontSize: 15, marginRight: 12, background: 'none', border: 'none', cursor: 'pointer' }}>‹ Back</button>
+            <span style={{ fontWeight: 600, fontSize: 17, color: 'var(--text)' }}>Raw Output</span>
           </div>
-          <div style={{ flex: 1, overflowY: 'auto', padding: 12 }}>
+          <div
+            ref={rawScrollRef}
+            onScroll={() => {
+              if (!rawScrollRef.current) return
+              const { scrollTop, scrollHeight, clientHeight } = rawScrollRef.current
+              rawAtBottomRef.current = scrollHeight - scrollTop - clientHeight < 40
+            }}
+            style={{ flex: 1, overflowY: 'auto', padding: 12, background: '#000' }}
+          >
             <pre style={{
               fontFamily: "'Menlo','Courier New',monospace",
               fontSize: 12,
-              color: '#eee',
+              color: 'var(--text)',
               whiteSpace: 'pre-wrap',
-              wordBreak: 'break-all',
+              wordBreak: 'break-word',
               lineHeight: 1.5,
+              margin: 0,
             }}>
-              {rawTextLines || '(no output yet)'}
+              {rawTranscript || '(no output yet)'}
             </pre>
           </div>
         </div>
