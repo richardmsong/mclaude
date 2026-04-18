@@ -14,6 +14,9 @@ interface SessionUsage {
   cacheReadTokens: number
   cacheWriteTokens: number
   costUsd: number
+  // M4: context meter fields — optional, populated when server provides usage data
+  contextTokensUsed?: number
+  contextWindowSize?: number
 }
 
 interface SessionDetailScreenProps {
@@ -677,6 +680,25 @@ export function SessionDetailScreen({
         <span style={{ color: 'var(--text2)', fontSize: 13 }}>
           {STATE_LABELS[sessionState] ?? sessionState} · #{sessionId.slice(0, 8)}
         </span>
+        {/* M4: Context meter — only shown when server provides context usage data */}
+        {sessionUsage?.contextTokensUsed !== undefined && sessionUsage?.contextWindowSize !== undefined && sessionUsage.contextWindowSize > 0 && (
+          <div
+            title={`Context: ${sessionUsage.contextTokensUsed.toLocaleString()} / ${sessionUsage.contextWindowSize.toLocaleString()} tokens`}
+            style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}
+          >
+            <div style={{ width: 64, height: 4, background: 'var(--surf3)', borderRadius: 2, overflow: 'hidden' }}>
+              <div style={{
+                width: `${Math.min(100, (sessionUsage.contextTokensUsed / sessionUsage.contextWindowSize) * 100).toFixed(1)}%`,
+                height: '100%',
+                background: sessionUsage.contextTokensUsed / sessionUsage.contextWindowSize > 0.8 ? 'var(--red)' : 'var(--blue)',
+                borderRadius: 2,
+              }} />
+            </div>
+            <span style={{ color: 'var(--text3)', fontSize: 11 }}>
+              {Math.round((sessionUsage.contextTokensUsed / sessionUsage.contextWindowSize) * 100)}%
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Plan card (plan_mode only) */}
