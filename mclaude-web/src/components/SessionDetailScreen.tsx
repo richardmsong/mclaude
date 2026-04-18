@@ -583,50 +583,96 @@ export function SessionDetailScreen({
   const totalUsageCost = usageTiles.reduce((s, t) => s + t.cost, 0)
   const totalUsageTokens = usageTiles.reduce((s, t) => s + t.tokens, 0)
 
-  // Raw output: build rich transcript from all turns
+  // Raw output: build rich transcript from all turns as HTML with ANSI colorization
   function buildRawTranscript(turns: typeof vmState.turns): string {
-    const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*[mGKHF]/g, '')
+    // SGR color code → CSS color value
+    const SGR_COLORS: Record<number, string> = {
+      30: 'black', 31: '#ff453a', 32: '#30d158', 33: '#ff9f0a',
+      34: '#0a84ff', 35: '#bf5af2', 36: '#64d2ff', 37: 'white',
+      // Bright variants (90-97)
+      90: '#555', 91: '#ff6961', 92: '#5dde7c', 93: '#ffbd4a',
+      94: '#409cff', 95: '#cf8eff', 96: '#93e4ff', 97: '#f5f5f5',
+    }
+
+    // Escape HTML entities to prevent injection
+    const escapeHtml = (s: string) => s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+
+    // Convert a string with ANSI SGR color codes to HTML.
+    // Unrecognized escape sequences are stripped.
+    const ansiToHtml = (raw: string): string => {
+      let out = ''
+      let openSpan = false
+      // Split on ANSI escape sequences (capture them)
+      const parts = raw.split(/(\x1b\[[0-9;]*m)/)
+      for (const part of parts) {
+        const escMatch = /^\x1b\[([0-9;]*)m$/.exec(part)
+        if (escMatch) {
+          const codes = (escMatch[1] ?? '').split(';').map(Number)
+          for (const code of codes) {
+            if (code === 0 || code === 39) {
+              // Reset
+              if (openSpan) { out += '</span>'; openSpan = false }
+            } else if (SGR_COLORS[code] !== undefined) {
+              if (openSpan) { out += '</span>' }
+              out += `<span style="color:${SGR_COLORS[code]}">`
+              openSpan = true
+            }
+            // Unrecognized codes are silently ignored
+          }
+        } else if (part) {
+          // Also strip any other escape sequences (cursor movement, etc.)
+          const clean = part.replace(/\x1b\[[0-9;]*[^m]/g, '')
+          out += escapeHtml(clean)
+        }
+      }
+      if (openSpan) out += '</span>'
+      return out
+    }
+
     const lines: string[] = []
     for (const turn of turns) {
       if (turn.type === 'user') {
         for (const block of turn.blocks) {
           if (block.type === 'text') {
-            lines.push('[User] ' + stripAnsi(block.text))
+            lines.push('[User] ' + ansiToHtml(block.text))
           } else if (block.type === 'streaming_text') {
             const text = (block as { chunks: string[] }).chunks.join('')
-            if (text) lines.push('[User] ' + stripAnsi(text))
+            if (text) lines.push('[User] ' + ansiToHtml(text))
           }
           // skip image blocks in raw view
         }
       } else if (turn.type === 'assistant') {
         for (const block of turn.blocks) {
           if (block.type === 'text') {
-            lines.push('[Claude] ' + stripAnsi(block.text))
+            lines.push('[Claude] ' + ansiToHtml(block.text))
           } else if (block.type === 'streaming_text') {
             const text = (block as { chunks: string[] }).chunks.join('')
-            if (text) lines.push('[Claude] ' + stripAnsi(text))
+            if (text) lines.push('[Claude] ' + ansiToHtml(text))
           } else if (block.type === 'tool_use') {
             const inputStr = block.inputSummary || JSON.stringify(block.fullInput ?? '')
-            lines.push('[' + block.name + '] ' + stripAnsi(inputStr))
+            lines.push('[' + escapeHtml(block.name) + '] ' + ansiToHtml(inputStr))
             if (block.result) {
-              const resultText = stripAnsi(block.result.content)
+              const resultText = ansiToHtml(block.result.content)
               const prefix = block.result.isError ? '[Error] ' : '[Result] '
               lines.push(prefix + resultText)
             }
           } else if (block.type === 'thinking') {
-            lines.push('[Thinking] ' + stripAnsi(block.text))
+            lines.push('[Thinking] ' + ansiToHtml(block.text))
           } else if (block.type === 'control_request') {
-            lines.push('[Permission] ' + block.toolName + ': ' + JSON.stringify(block.input) + ' (' + block.status + ')')
+            lines.push('[Permission] ' + escapeHtml(block.toolName) + ': ' + escapeHtml(JSON.stringify(block.input)) + ' (' + escapeHtml(block.status) + ')')
           } else if (block.type === 'system_message') {
-            lines.push('[System] ' + stripAnsi(block.text))
+            lines.push('[System] ' + ansiToHtml(block.text))
           } else if (block.type === 'compaction') {
-            lines.push('[Compaction] ' + stripAnsi(block.summary))
+            lines.push('[Compaction] ' + ansiToHtml(block.summary))
           }
         }
       } else if (turn.type === 'system') {
         for (const block of turn.blocks) {
           if (block.type === 'system_message') {
-            lines.push('[System] ' + stripAnsi(block.text))
+            lines.push('[System] ' + ansiToHtml(block.text))
           }
         }
       }
@@ -707,17 +753,19 @@ export function SessionDetailScreen({
             }}
             style={{ flex: 1, overflowY: 'auto', padding: 12, background: '#000' }}
           >
-            <pre style={{
-              fontFamily: "'Menlo','Courier New',monospace",
-              fontSize: 12,
-              color: 'var(--text)',
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-              lineHeight: 1.5,
-              margin: 0,
-            }}>
-              {rawTranscript || '(no output yet)'}
-            </pre>
+            <pre
+              // eslint-disable-next-line react/no-danger
+              dangerouslySetInnerHTML={{ __html: rawTranscript || '(no output yet)' }}
+              style={{
+                fontFamily: "'Menlo','Courier New',monospace",
+                fontSize: 12,
+                color: 'var(--text)',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+                lineHeight: 1.5,
+                margin: 0,
+              }}
+            />
           </div>
         </div>
       )}
