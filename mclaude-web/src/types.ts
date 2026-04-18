@@ -75,6 +75,11 @@ export interface UsageStats {
   cacheReadTokens: number
   cacheWriteTokens: number
   costUsd: number
+  // M4: Context window utilization. Populated when the session-agent reports
+  // get_context_usage data. UI should render a progress bar in the det-meta
+  // row when these fields are present. Currently not populated by the server.
+  contextTokensUsed?: number
+  contextWindowSize?: number
 }
 
 export interface Capabilities {

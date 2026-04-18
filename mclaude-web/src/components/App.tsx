@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, Fragment } from 'react'
+import { useEffect, useMemo, useRef, useState, Fragment } from 'react'
 import { useVersionPoller } from '@/hooks/useVersionPoller'
 import { AuthClient } from '@/transport/auth-client'
 import { NATSClient } from '@/transport/nats-client'
@@ -241,6 +241,40 @@ export function App() {
   // App re-renders and picks up fresh session data (name, projectId, state).
   const [sessionVersion, setSessionVersion] = useState(0)
 
+  // R2: Desktop notification permission — request once on first NATS connect.
+  useEffect(() => {
+    if (connected && typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {
+        // Permission request failed or was denied — ignore silently
+      })
+    }
+  }, [connected])
+
+  // R2: Fire a desktop notification when any session transitions to requires_action
+  // and the tab is not visible.
+  const prevSessionStatesRef = useRef<Map<string, string>>(new Map())
+  useEffect(() => {
+    if (!sessionStore) return
+    return sessionStore.onSessionChanged((sessions) => {
+      if (typeof Notification === 'undefined') return
+      if (Notification.permission !== 'granted') return
+      if (document.visibilityState === 'visible') return
+
+      for (const [id, session] of sessions) {
+        const prev = prevSessionStatesRef.current.get(id)
+        if (session.state === 'requires_action' && prev !== 'requires_action') {
+          new Notification('MClaude — Permission needed', {
+            body: 'A session needs your approval',
+          })
+        }
+      }
+      // Snapshot current states for next comparison
+      for (const [id, session] of sessions) {
+        prevSessionStatesRef.current.set(id, session.state)
+      }
+    })
+  }, [sessionStore])
+
   // Bootstrap session store after login
   useEffect(() => {
     if (authState.status === 'authenticated' && authState.userId) {
@@ -357,7 +391,7 @@ export function App() {
   }, [route.sessionId, authState.userId, resolvedProjectId])
 
   // ── Version poller ───────────────────────────────────────────────────
-  const { updateAvailable } = useVersionPoller()
+  const { updateAvailable, blocked: versionBlocked, blockMessage: versionBlockMessage } = useVersionPoller()
 
   // ── Login handler ─────────────────────────────────────────────────────
   const handleConnect = async (email: string, password: string) => {
@@ -418,6 +452,46 @@ export function App() {
     }
     return agg
   }, [sessionStore])
+
+  // ── X4: Version block screen ──────────────────────────────────────────
+  // Shown when the client is below minClientVersion and a reload didn't fix it.
+  if (versionBlocked) {
+    return (
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: '100vh',
+        gap: 16,
+        padding: 24,
+        textAlign: 'center',
+        background: 'var(--bg)',
+      }}>
+        <div style={{ fontSize: 32 }}>↻</div>
+        <div style={{ fontWeight: 600, fontSize: 18, color: 'var(--text)' }}>
+          {versionBlockMessage ?? 'Server is updating, please wait…'}
+        </div>
+        <div style={{ color: 'var(--text2)', fontSize: 14 }}>
+          Reload the page once the update is complete.
+        </div>
+        <button
+          onClick={() => window.location.reload()}
+          style={{
+            marginTop: 8,
+            padding: '10px 24px',
+            background: 'var(--blue)',
+            color: '#fff',
+            borderRadius: 10,
+            fontSize: 15,
+            fontWeight: 600,
+          }}
+        >
+          Reload now
+        </button>
+      </div>
+    )
+  }
 
   // ── Auth gate ─────────────────────────────────────────────────────────
   if (authState.status === 'unauthenticated' || authState.status === 'expired') {
