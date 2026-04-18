@@ -443,10 +443,10 @@ When a screenshot is staged, a preview strip appears above the input bar showing
 
 When input starts with `/`, a popup appears above the input bar listing matching skills:
 ```
-  /skill-name   Brief description       [source]
-  /other-skill  Another description     [source]
+  /skill-name   [built-in]
+  /other-skill  [built-in]
 ```
-Each row tappable; fills the input field with `/skill-name `.
+Each row tappable; fills the input field with `/skill-name `. Skills data is a flat name list — no description field is available in the data model.
 
 ---
 
