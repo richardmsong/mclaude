@@ -161,7 +161,18 @@ export function App() {
   // NATS connection lifecycle
   useEffect(() => {
     const unsub1 = natsClient.onDisconnect(() => setConnected(false))
-    const unsub2 = natsClient.onReconnect(() => setConnected(true))
+    const unsub2 = natsClient.onReconnect(() => {
+      setConnected(true)
+      // Spec (plan-client-architecture.md): on reconnect, EventStore must
+      // re-subscribe from max(lastSequence + 1, replayFromSeq) so no events
+      // are missed and no duplicates are delivered.
+      const store = eventStoreRef.current
+      if (store) {
+        const resumeSeq = Math.max(store.lastSequence + 1, store.replayFromSeq)
+        store.stop()
+        store.start(resumeSeq)
+      }
+    })
     return () => { unsub1(); unsub2() }
   }, [])
 
@@ -346,6 +357,11 @@ export function App() {
 
   // Per-session EventStore + ConversationVM + TerminalVM
   const [eventStore, setEventStore] = useState<EventStore | null>(null)
+  // Ref kept in sync so the NATS reconnect handler can access the current store
+  // without a stale closure (the handler effect runs only once, on mount).
+  const eventStoreRef = useRef<EventStore | null>(null)
+  // Sync ref immediately on every render so it's always current.
+  eventStoreRef.current = eventStore
   const [conversationVM, setConversationVM] = useState<ConversationVM | null>(null)
   const [terminalVm, setTerminalVm] = useState<TerminalVM | null>(null)
 

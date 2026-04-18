@@ -50,7 +50,7 @@ export function AuthScreen({ onConnect, error }: AuthScreenProps) {
         <div style={{ textAlign: 'center', marginBottom: 36 }}>
           <div style={{ fontSize: 52, marginBottom: 12 }}>⚡</div>
           <div data-testid="auth-title" style={{ fontSize: 28, fontWeight: 700, color: 'var(--text)' }}>MClaude</div>
-          <div style={{ color: 'var(--text2)', marginTop: 6 }}>Enter your access token</div>
+          <div style={{ color: 'var(--text2)', marginTop: 6 }}>Sign in to your account</div>
         </div>
 
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
