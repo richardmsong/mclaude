@@ -192,13 +192,17 @@ export function ToolCard({ block, turn }: ToolCardProps) {
         </div>
       </div>
 
-      {/* Result body */}
+      {/* Result body — separately tappable to open detail modal */}
       {block.result && (
-        <div style={{
-          borderTop: `1px solid var(--border)`,
-          padding: '8px 12px',
-          background: 'var(--surf2)',
-        }}>
+        <div
+          onClick={() => turn ? setShowModal(true) : undefined}
+          style={{
+            borderTop: `1px solid var(--border)`,
+            padding: '8px 12px',
+            background: 'var(--surf2)',
+            cursor: turn ? 'pointer' : undefined,
+          }}
+        >
           {isDiff && diff ? (
             <DiffView diff={diff} />
           ) : (
