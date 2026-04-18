@@ -3,9 +3,11 @@ import { NavBar } from './NavBar'
 import { StatusDot } from './StatusDot'
 import { EventList } from './events/EventList'
 import { EditSessionSheet } from './EditSessionSheet'
+import { TerminalTab } from './TerminalTab'
 import type { Turn, SessionState, PendingMessage } from '@/types'
 import type { ConversationVM, ConversationVMState } from '@/viewmodels/conversation-vm'
 import type { SessionListVM } from '@/viewmodels/session-list-vm'
+import type { TerminalVM } from '@/viewmodels/terminal-vm'
 import { PRICE_PER_M, formatTokens, formatCost } from '@/lib/pricing'
 
 interface SessionUsage {
@@ -28,6 +30,7 @@ interface SessionDetailScreenProps {
   sessionExtraFlags?: string
   sessionListVM?: SessionListVM
   conversationVM: ConversationVM
+  terminalVm?: TerminalVM
   onBack: () => void
   connected: boolean
   initialMessage?: string
@@ -81,6 +84,7 @@ export function SessionDetailScreen({
   sessionExtraFlags,
   sessionListVM,
   conversationVM,
+  terminalVm,
   onBack,
   connected,
   initialMessage,
@@ -843,7 +847,14 @@ export function SessionDetailScreen({
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        style={{ flex: 1, overflowY: 'auto', padding: '12px 16px' }}
+        style={{
+          flex: 1,
+          overflowY: activeTab === 'terminal' ? 'hidden' : 'auto',
+          padding: activeTab === 'terminal' ? 0 : '12px 16px',
+          display: 'flex',
+          flexDirection: 'column',
+          minHeight: 0,
+        }}
       >
         {activeTab === 'events' ? (
           <EventList
@@ -853,19 +864,23 @@ export function SessionDetailScreen({
             onDeny={id => conversationVM.denyPermission(id)}
           />
         ) : (
-          <div style={{
-            background: '#000',
-            borderRadius: 8,
-            padding: 12,
-            fontFamily: "'Menlo','Courier New',monospace",
-            fontSize: 13,
-            color: '#eee',
-            minHeight: 200,
-          }}>
-            <div style={{ color: 'var(--text3)', fontSize: 12, marginBottom: 8 }}>
-              Terminal — connect via NATS
+          terminalVm ? (
+            <TerminalTab terminalVm={terminalVm} />
+          ) : (
+            <div style={{
+              background: '#000',
+              borderRadius: 8,
+              padding: 12,
+              fontFamily: "'Menlo','Courier New',monospace",
+              fontSize: 13,
+              color: '#eee',
+              minHeight: 200,
+            }}>
+              <div style={{ color: 'var(--text3)', fontSize: 12, marginBottom: 8 }}>
+                Terminal — connect via NATS
+              </div>
             </div>
-          </div>
+          )
         )}
       </div>
 

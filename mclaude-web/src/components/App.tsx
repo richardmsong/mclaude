@@ -9,6 +9,7 @@ import { HeartbeatMonitor } from '@/stores/heartbeat-monitor'
 import { LifecycleStore } from '@/stores/lifecycle-store'
 import { SessionListVM } from '@/viewmodels/session-list-vm'
 import { ConversationVM } from '@/viewmodels/conversation-vm'
+import { TerminalVM } from '@/viewmodels/terminal-vm'
 import { AuthScreen } from './AuthScreen'
 import { DashboardScreen } from './DashboardScreen'
 import { SessionDetailScreen } from './SessionDetailScreen'
@@ -331,9 +332,10 @@ export function App() {
     return () => clearTimeout(timer)
   }, [sessionListVM])
 
-  // Per-session EventStore + ConversationVM
+  // Per-session EventStore + ConversationVM + TerminalVM
   const [eventStore, setEventStore] = useState<EventStore | null>(null)
   const [conversationVM, setConversationVM] = useState<ConversationVM | null>(null)
+  const [terminalVm, setTerminalVm] = useState<TerminalVM | null>(null)
 
   // Resolve projectId from session KV once, without recreating the EventStore
   // on every subsequent KV update (which would lose accumulated conversation data).
@@ -356,13 +358,14 @@ export function App() {
     }
   }, [route.screen, route.sessionId, sessionStore, sessionVersion])
 
-  // Per-session EventStore + ConversationVM + LifecycleStore — created ONCE per sessionId+projectId.
+  // Per-session EventStore + ConversationVM + TerminalVM + LifecycleStore — created ONCE per sessionId+projectId.
   // Does NOT depend on sessionVersion so KV updates (idle→running→idle) don't destroy
   // and recreate the store, which would lose all accumulated conversation data.
   useEffect(() => {
     if (!route.sessionId || !authState.userId || !resolvedProjectId || !sessionStore) {
       setEventStore(null)
       setConversationVM(null)
+      setTerminalVm(null)
       return
     }
     const store = new EventStore({
@@ -378,8 +381,10 @@ export function App() {
     const vm = new ConversationVM(store, sessionStore, natsClient, authState.userId, resolvedProjectId, route.sessionId)
     const lifecycle = new LifecycleStore(natsClient, authState.userId, resolvedProjectId)
     lifecycle.start()
+    const tvm = new TerminalVM(natsClient, authState.userId, resolvedProjectId)
     setEventStore(store)
     setConversationVM(vm)
+    setTerminalVm(tvm)
     return () => {
       store.stop()
       vm.destroy()
@@ -565,6 +570,7 @@ export function App() {
           sessionExtraFlags={session?.extraFlags ?? ''}
           sessionListVM={sessionListVM ?? undefined}
           conversationVM={conversationVM}
+          terminalVm={terminalVm ?? undefined}
           onBack={() => navigate('/')}
           connected={connected}
           initialMessage={initialMessage ?? undefined}
