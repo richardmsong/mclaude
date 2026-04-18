@@ -95,6 +95,75 @@ function renderMarkdown(text: string): React.ReactNode {
       continue
     }
 
+    // GFM Table — lines starting with | that form header / separator / rows
+    if (/^\|/.test(line)) {
+      const tableLines: string[] = []
+      while (i < lines.length && /^\|/.test(lines[i])) {
+        tableLines.push(lines[i])
+        i++
+      }
+      // Need at least header + separator
+      if (tableLines.length >= 2 && /^\|[\s|:-]+\|/.test(tableLines[1])) {
+        const headerCells = tableLines[0].split('|').slice(1, -1).map(c => c.trim())
+        const bodyRows = tableLines.slice(2).map(row =>
+          row.split('|').slice(1, -1).map(c => c.trim())
+        )
+        elements.push(
+          <div key={i} style={{ overflowX: 'auto', margin: '6px 0' }}>
+            <table style={{
+              borderCollapse: 'collapse',
+              fontFamily: "'Menlo','Courier New',monospace",
+              fontSize: 13,
+              background: 'var(--surf2)',
+              width: '100%',
+            }}>
+              <thead>
+                <tr>
+                  {headerCells.map((cell, j) => (
+                    <th key={j} style={{
+                      padding: '6px 10px',
+                      borderBottom: '2px solid var(--border)',
+                      borderRight: j < headerCells.length - 1 ? '1px solid var(--border)' : undefined,
+                      textAlign: 'left',
+                      color: 'var(--text)',
+                      fontWeight: 600,
+                      whiteSpace: 'nowrap',
+                    }}>
+                      {renderInline(cell)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {bodyRows.map((cells, ri) => (
+                  <tr key={ri}>
+                    {cells.map((cell, j) => (
+                      <td key={j} style={{
+                        padding: '6px 10px',
+                        borderTop: '1px solid var(--border)',
+                        borderRight: j < cells.length - 1 ? '1px solid var(--border)' : undefined,
+                        color: 'var(--text)',
+                        background: 'var(--surf)',
+                        whiteSpace: 'nowrap',
+                      }}>
+                        {renderInline(cell)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      } else {
+        // Doesn't look like a proper table — render lines as paragraphs
+        for (const tl of tableLines) {
+          elements.push(<p key={i + tl} style={{ margin: '2px 0' }}>{renderInline(tl)}</p>)
+        }
+      }
+      continue
+    }
+
     // Blank line — spacer
     if (line.trim() === '') {
       elements.push(<div key={i} style={{ height: 8 }} />)

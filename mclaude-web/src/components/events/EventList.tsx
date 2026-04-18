@@ -9,6 +9,7 @@ import { AgentGroup } from './AgentGroup'
 import { SystemEvent } from './SystemEvent'
 import { SkillChip } from './SkillChip'
 import { TurnUsageBadge } from './TurnUsageBadge'
+import { EventDetailModal } from './EventDetailModal'
 
 interface EventListProps {
   turns: Turn[]
@@ -61,21 +62,34 @@ function UserImageThumbnail({ dataUrl, pending }: { dataUrl: string; pending: bo
   )
 }
 
+function TappableTextBlock({ block, turn }: { block: Block; turn: Turn }) {
+  const [showModal, setShowModal] = useState(false)
+  const text = block.type === 'text'
+    ? (block as { type: 'text'; text: string }).text
+    : ((block as StreamingTextBlock).chunks.join(''))
+  const streaming = block.type === 'streaming_text' ? !(block as StreamingTextBlock).complete : false
+  return (
+    <>
+      {showModal && (
+        <EventDetailModal block={block} turn={turn} onClose={() => setShowModal(false)} />
+      )}
+      <div
+        onClick={() => setShowModal(true)}
+        style={{ cursor: 'pointer' }}
+      >
+        <AssistantText text={text} streaming={streaming} />
+      </div>
+    </>
+  )
+}
+
 function renderBlock(block: Block, turn: Turn, allTurns: Turn[], onApprove: (id: string) => void, onDeny: (id: string) => void): React.ReactNode {
   switch (block.type) {
     case 'text':
-      return <AssistantText key={block.type + turn.id} text={block.text} />
+      return <TappableTextBlock key={block.type + turn.id} block={block} turn={turn} />
 
-    case 'streaming_text': {
-      const sb = block as StreamingTextBlock
-      return (
-        <AssistantText
-          key={'streaming' + turn.id}
-          text={sb.chunks.join('')}
-          streaming={!sb.complete}
-        />
-      )
-    }
+    case 'streaming_text':
+      return <TappableTextBlock key={'streaming' + turn.id} block={block} turn={turn} />
 
     case 'thinking':
       return <ThinkingBlock key={'think' + turn.id + block.text.slice(0, 8)} text={block.text} />
