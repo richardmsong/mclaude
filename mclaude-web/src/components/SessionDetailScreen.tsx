@@ -4,7 +4,8 @@ import { StatusDot } from './StatusDot'
 import { EventList } from './events/EventList'
 import { EditSessionSheet } from './EditSessionSheet'
 import { TerminalTab } from './TerminalTab'
-import type { Turn, SessionState, PendingMessage } from '@/types'
+import { AssistantText } from './events/AssistantText'
+import type { Turn, SessionState, PendingMessage, ToolUseBlock } from '@/types'
 import type { ConversationVM, ConversationVMState } from '@/viewmodels/conversation-vm'
 import type { SessionListVM } from '@/viewmodels/session-list-vm'
 import type { TerminalVM } from '@/viewmodels/terminal-vm'
@@ -102,6 +103,10 @@ export function SessionDetailScreen({
   const [pttRecording, setPttRecording] = useState(false)
   const [pttSupported, setPttSupported] = useState<boolean | null>(null)  // null = not yet checked
   const [planCardOpen, setPlanCardOpen] = useState(false)
+  const [planContent, setPlanContent] = useState<string | null>(null)
+  const [planLoading, setPlanLoading] = useState(false)
+  const [planError, setPlanError] = useState<string | null>(null)
+  const planFetchedRef = useRef(false)
   const [inputMode, setInputMode] = useState<'text' | 'voice'>(() => {
     try {
       return (localStorage.getItem('mclaude.inputMode') === 'voice') ? 'voice' : 'text'
@@ -185,6 +190,52 @@ export function SessionDetailScreen({
     window.addEventListener('storage', handler)
     return () => window.removeEventListener('storage', handler)
   }, [])
+
+  // Fetch plan content on first expand of the plan card.
+  // No dedicated server endpoint exists — plan content is extracted from
+  // conversation turns: look for a Read tool result that read a plan file.
+  useEffect(() => {
+    if (!planCardOpen) return
+    if (planFetchedRef.current) return
+    planFetchedRef.current = true
+
+    setPlanLoading(true)
+
+    // Scan turns synchronously for a Read tool result whose input path looks
+    // like a plan file (PLAN.md, plan.md, or any *.md containing "plan").
+    const planFilePattern = /plan.*\.md$/i
+    const allTurns: Turn[] = vmState.turns
+    let found: string | null = null
+
+    for (const turn of allTurns) {
+      for (const block of turn.blocks) {
+        if (block.type === 'tool_use') {
+          const tb = block as ToolUseBlock
+          const name = tb.name.toLowerCase()
+          if ((name === 'read' || name === 'read_file') && tb.result && !tb.result.isError) {
+            const input = tb.fullInput as Record<string, unknown> | undefined
+            const filePath =
+              (typeof input?.file_path === 'string' ? input.file_path :
+               typeof input?.path === 'string' ? input.path : null)
+            if (filePath && planFilePattern.test(filePath)) {
+              found = tb.result.content
+              break
+            }
+          }
+        }
+      }
+      if (found !== null) break
+    }
+
+    if (found !== null) {
+      setPlanContent(found)
+      setPlanError(null)
+    } else {
+      setPlanContent(null)
+      setPlanError(null)
+    }
+    setPlanLoading(false)
+  }, [planCardOpen, vmState.turns])
 
   const turns: Turn[] = vmState.turns
   const pendingMessages: PendingMessage[] = vmState.pendingMessages ?? []
@@ -859,14 +910,20 @@ export function SessionDetailScreen({
               padding: '8px 14px 12px',
               borderTop: '1px solid rgba(191,90,242,0.2)',
               background: 'var(--surf2)',
-              color: 'var(--text2)',
               fontSize: 13,
-              fontFamily: "'Menlo','Courier New',monospace",
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
               lineHeight: 1.5,
             }}>
-              Plan content not available
+              {planLoading ? (
+                <span style={{ color: 'var(--text2)' }}>Loading plan…</span>
+              ) : planError ? (
+                <span style={{ color: 'var(--red)' }}>{planError}</span>
+              ) : planContent !== null ? (
+                <AssistantText text={planContent} />
+              ) : (
+                <span style={{ color: 'var(--text2)', fontFamily: "'Menlo','Courier New',monospace", whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  Plan content not available
+                </span>
+              )}
             </div>
           )}
         </div>
