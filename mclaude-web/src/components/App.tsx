@@ -129,6 +129,19 @@ export function App() {
   const [connected, setConnected] = useState(false)
   const [route, setRoute] = useState(getRoute)
 
+  // Decode role from JWT payload — returns 'admin' | 'user' | undefined
+  const userRole = useMemo(() => {
+    if (!authState.jwt) return undefined
+    try {
+      const parts = authState.jwt.split('.')
+      if (parts.length !== 3) return undefined
+      const payload = JSON.parse(atob(parts[1]!)) as { role?: string }
+      return payload.role
+    } catch {
+      return undefined
+    }
+  }, [authState.jwt])
+
   // Session store and heartbeat (created after login)
   const [sessionStore, setSessionStore] = useState<SessionStore | null>(null)
   const [heartbeatMonitor, setHeartbeatMonitor] = useState<HeartbeatMonitor | null>(null)
@@ -508,6 +521,10 @@ export function App() {
           onLogout={handleLogout}
           onCacheReset={handleCacheReset}
           authClient={authClient}
+          sessions={sessionStore?.sessions}
+          projects={sessionStore?.projects}
+          role={userRole}
+          onNavigate={navigate}
         />
         {toast && <Toast message={toast.message} isError={toast.isError} />}
         {updateAvailable && <UpdateBanner />}

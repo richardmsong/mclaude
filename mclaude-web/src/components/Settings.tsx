@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { NavBar } from './NavBar'
 import { StatusDot } from './StatusDot'
-import type { ConnectedProvider, AdminProvider } from '@/types'
+import type { ConnectedProvider, AdminProvider, SessionKVState, ProjectKVState } from '@/types'
 import type { AuthClient } from '@/transport/auth-client'
 
 interface SettingsProps {
@@ -13,6 +13,14 @@ interface SettingsProps {
   onLogout: () => void
   onCacheReset?: () => void
   authClient?: AuthClient
+  /** All sessions from SessionStore, used to build the CONNECTED HOSTS section. */
+  sessions?: Map<string, SessionKVState>
+  /** All projects from SessionStore, used to label the CONNECTED HOSTS section. */
+  projects?: Map<string, ProjectKVState>
+  /** Current user's role, decoded from JWT payload. Shows ADMINISTRATION section when 'admin'. */
+  role?: string
+  /** Navigate to a hash route (e.g. 'users'). */
+  onNavigate?: (hash: string) => void
 }
 
 // ── PAT form ─────────────────────────────────────────────────────────────────
@@ -309,7 +317,7 @@ function GitProvidersSection({ authClient }: GitProvidersSectionProps) {
 
 // ── Main Settings component ───────────────────────────────────────────────────
 
-export function Settings({ userId, serverUrl, connected, sessionCount, onBack, onLogout, onCacheReset, authClient }: SettingsProps) {
+export function Settings({ userId, serverUrl, connected, sessionCount, onBack, onLogout, onCacheReset, authClient, sessions, projects, role, onNavigate }: SettingsProps) {
   const [inputMode, setInputMode] = useState<'text' | 'voice'>(() => {
     try {
       return (localStorage.getItem('mclaude.inputMode') === 'voice') ? 'voice' : 'text'
@@ -366,6 +374,63 @@ export function Settings({ userId, serverUrl, connected, sessionCount, onBack, o
             <span style={{ color: 'var(--text)', fontSize: 13 }}>{sessionCount}</span>
           </div>
         </div>
+
+        {/* CONNECTED HOSTS section */}
+        {sessions && sessions.size > 0 && (() => {
+          // Group sessions by projectId — one row per project showing name + count.
+          const byProject = new Map<string, { name: string; count: number }>()
+          for (const s of sessions.values()) {
+            const existing = byProject.get(s.projectId)
+            const name = projects?.get(s.projectId)?.name ?? s.projectId
+            if (existing) {
+              existing.count++
+            } else {
+              byProject.set(s.projectId, { name, count: 1 })
+            }
+          }
+          const rows = Array.from(byProject.entries())
+          return (
+            <>
+              <div style={{ ...sectionLabel, marginTop: 20 }}>CONNECTED HOSTS</div>
+              <div style={card}>
+                {rows.map(([projectId, { name, count }], i) => (
+                  <div key={projectId} style={{ ...row, borderTop: i > 0 ? '1px solid var(--border)' : undefined }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <StatusDot state="connected" size={8} />
+                      <span style={{ color: 'var(--text)', fontSize: 14 }}>{name}</span>
+                    </div>
+                    <span style={{ color: 'var(--text2)', fontSize: 13 }}>
+                      {count} {count === 1 ? 'sess' : 'sess'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )
+        })()}
+
+        {/* ADMINISTRATION section — admin only */}
+        {role === 'admin' && (
+          <>
+            <div style={{ ...sectionLabel, marginTop: 20 }}>ADMINISTRATION</div>
+            <div style={card}>
+              <button
+                onClick={() => onNavigate?.('users')}
+                style={{
+                  ...row,
+                  width: '100%',
+                  background: 'none',
+                  textAlign: 'left',
+                  color: 'var(--text)',
+                  cursor: 'pointer',
+                }}
+              >
+                <span style={{ color: 'var(--text2)' }}>User Management</span>
+                <span style={{ color: 'var(--text3)', fontSize: 16 }}>›</span>
+              </button>
+            </div>
+          </>
+        )}
 
         {/* ACCOUNT section */}
         <div style={{ ...sectionLabel, marginTop: 20 }}>ACCOUNT</div>
