@@ -132,7 +132,7 @@ SessionState {
   worktree: string
   cwd: string
   name: string
-  state: "idle" | "running" | "requires_action" | "restarting" | "failed"
+  state: "idle" | "running" | "requires_action" | "plan_mode" | "restarting" | "failed" | "updating" | "unknown" | "waiting_for_input"
   stateSince: timestamp
   model: string
   capabilities: { skills: string[], tools: string[], agents: string[] }
