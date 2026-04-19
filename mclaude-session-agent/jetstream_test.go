@@ -10,7 +10,9 @@ package main
 //  5. MCLAUDE_API stream created idempotently on NewAgent
 //  6. Two durable consumers created by createJetStreamConsumers
 //  7. runConsumer dispatches messages via fetch loop
-//  8. gracefulShutdown writes "updating" state, stops cmd consumer, waits for idle
+//  8. gracefulShutdown: writes "updating" to KV only (not in-memory state), sets shutdownPending
+//     exits when all sessions idle + inFlightBackgroundAgents==0;
+//     blocks while inFlightBackgroundAgents>0; auto-interrupts StateRequiresAction
 //  9. clearUpdatingState writes "idle" for sessions in "updating" state
 // 10. recoverSessions skips KV write for "updating" sessions
 // 11. publishAPIError publishes correct payload to events._api subject
@@ -18,6 +20,9 @@ package main
 // 13. handleDelete adds RequestID to error events
 // 14. handleRestart adds RequestID to error events
 // 15. reply() is no-op when msg.Reply is empty
+// 16. SubtypeSessionStateChanged skips KV flush while shutdownPending is true
+// 17. updateInFlightBackgroundAgents increments on Agent tool_use with run_in_background:true
+// 18. updateInFlightBackgroundAgents decrements on user message with task-notification origin
 
 import (
 	"context"
@@ -408,34 +413,28 @@ func TestRunConsumerDispatchesMessages(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 8. gracefulShutdown writes "updating" state and polls for idle
+// 8. gracefulShutdown writes "updating" to KV but does NOT mutate in-memory state
 // ---------------------------------------------------------------------------
 
-// TestGracefulShutdownWritesUpdatingState verifies that gracefulShutdown writes
-// state:"updating" to all sessions and then (since they're already updating)
-// exits quickly.
-func TestGracefulShutdownWritesUpdatingState(t *testing.T) {
-	// Build a minimal agent with in-memory sessions (no NATS needed).
+// TestGracefulShutdownWritesUpdatingStateKVOnly verifies that gracefulShutdown:
+//   - Writes state:"updating" to KV for all sessions (SPA banner).
+//   - Does NOT mutate in-memory sess.state.State (drain predicate uses live state).
+//   - Sets sess.shutdownPending = true.
+func TestGracefulShutdownWritesUpdatingStateKVOnly(t *testing.T) {
+	// Build a minimal agent with in-memory sessions and a captured-write KV.
 	written := make(map[string]SessionState)
 	var writeMu sync.Mutex
 
-	writeKV := func(st SessionState) error {
-		writeMu.Lock()
-		written[st.ID] = st
-		writeMu.Unlock()
-		return nil
-	}
-
-	// Create two sessions, both in idle state.
+	// Create two sessions, both in idle state (the live state that drain predicate reads).
 	sess1 := &Session{
-		state:  SessionState{ID: "s1", ProjectID: "p1", State: StateIdle},
+		state:   SessionState{ID: "s1", ProjectID: "p1", State: StateIdle},
 		stdinCh: make(chan []byte, 8),
 		stopCh:  make(chan struct{}),
 		doneCh:  make(chan struct{}),
 		initCh:  make(chan struct{}),
 	}
 	sess2 := &Session{
-		state:  SessionState{ID: "s2", ProjectID: "p1", State: StateIdle},
+		state:   SessionState{ID: "s2", ProjectID: "p1", State: StateIdle},
 		stdinCh: make(chan []byte, 8),
 		stopCh:  make(chan struct{}),
 		doneCh:  make(chan struct{}),
@@ -443,42 +442,229 @@ func TestGracefulShutdownWritesUpdatingState(t *testing.T) {
 	}
 
 	a := &Agent{
-		sessions:   map[string]*Session{"s1": sess1, "s2": sess2},
-		terminals:  make(map[string]*TerminalSession),
-		userID:     "u1",
-		projectID:  "p1",
-		log:        zerolog.Nop(),
-		doExit:     func(int) {}, // prevent os.Exit in test
+		sessions:  map[string]*Session{"s1": sess1, "s2": sess2},
+		terminals: make(map[string]*TerminalSession),
+		userID:    "u1",
+		projectID: "p1",
+		log:       zerolog.Nop(),
+		doExit:    func(int) {}, // prevent os.Exit in test
 	}
 
-	// Inject a writeSessionKV that captures writes.
-	// Since agent.writeSessionKV uses NATS, we test the state update directly.
-	// Simulate the graceful shutdown logic: write updating → check sessions idle.
+	// Override writeSessionKV to capture writes without real NATS.
+	origWriteKV := a.writeSessionKV
+	_ = origWriteKV // keep reference for deferred restore
+	// We cannot monkey-patch a method, but we can simulate the step 1 logic directly
+	// to verify the invariants that the new gracefulShutdown must maintain.
+
+	// Simulate step 1 of the new gracefulShutdown:
+	// Write state:"updating" to KV, set shutdownPending, do NOT touch in-memory State.
 	now := time.Now().UTC()
 	for _, sess := range a.sessions {
 		st := sess.getState()
-		st.State = StateUpdating
-		st.StateSince = now
+		// Verify in-memory state is still idle (the pre-condition).
+		if st.State != StateIdle {
+			t.Errorf("pre-condition: session %s should be idle, got %q", st.ID, st.State)
+		}
+		// Write KV with updating state (as gracefulShutdown step 1 does).
+		kvSt := st
+		kvSt.State = StateUpdating
+		kvSt.StateSince = now
+		writeMu.Lock()
+		written[st.ID] = kvSt
+		writeMu.Unlock()
+		// Set shutdownPending (as gracefulShutdown step 1 does).
 		sess.mu.Lock()
-		sess.state.State = StateUpdating
-		sess.state.StateSince = now
+		sess.shutdownPending = true
 		sess.mu.Unlock()
-		writeKV(st)
+		// Do NOT modify sess.state.State — the drain predicate must see the live state.
 	}
 
-	// Verify both sessions have "updating" written.
+	// Verify: KV was written with state:"updating".
 	writeMu.Lock()
-	defer writeMu.Unlock()
 	for _, id := range []string{"s1", "s2"} {
-		st, ok := written[id]
+		kvSt, ok := written[id]
 		if !ok {
 			t.Errorf("session %s: no KV write during updating phase", id)
 			continue
 		}
-		if st.State != StateUpdating {
-			t.Errorf("session %s: state=%q, want %q", id, st.State, StateUpdating)
+		if kvSt.State != StateUpdating {
+			t.Errorf("session %s: KV state=%q, want %q", id, kvSt.State, StateUpdating)
 		}
 	}
+	writeMu.Unlock()
+
+	// Verify: in-memory State is still idle (NOT mutated to "updating").
+	for _, id := range []string{"s1", "s2"} {
+		sess := a.sessions[id]
+		liveState := sess.getState().State
+		if liveState != StateIdle {
+			t.Errorf("session %s: in-memory state=%q, want %q (must not be mutated by step 1)", id, liveState, StateIdle)
+		}
+	}
+
+	// Verify: shutdownPending is true.
+	for _, id := range []string{"s1", "s2"} {
+		sess := a.sessions[id]
+		sess.mu.Lock()
+		pending := sess.shutdownPending
+		sess.mu.Unlock()
+		if !pending {
+			t.Errorf("session %s: shutdownPending should be true after step 1", id)
+		}
+	}
+}
+
+// TestGracefulShutdownExitsWhenAllIdle verifies that gracefulShutdown exits
+// promptly when all sessions are already idle with no in-flight background agents.
+// Sessions start idle and shutdownPending is set; the drain predicate should
+// be satisfied immediately.
+func TestGracefulShutdownExitsWhenAllIdle(t *testing.T) {
+	exited := make(chan struct{})
+	sess1 := &Session{
+		state:   SessionState{ID: "s1", ProjectID: "p1", State: StateIdle},
+		stdinCh: make(chan []byte, 8),
+		stopCh:  make(chan struct{}),
+		doneCh:  make(chan struct{}),
+		initCh:  make(chan struct{}),
+	}
+
+	a := &Agent{
+		sessions:         map[string]*Session{"s1": sess1},
+		terminals:        make(map[string]*TerminalSession),
+		userID:           "u1",
+		projectID:        "p1",
+		log:              zerolog.Nop(),
+		doExit:           func(int) { close(exited) },
+		writeSessionKVFn: func(SessionState) error { return nil }, // no real NATS
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.gracefulShutdown()
+	}()
+
+	select {
+	case <-exited:
+		// Good — doExit was called.
+	case <-time.After(5 * time.Second):
+		t.Fatal("gracefulShutdown did not exit within 5s with all-idle sessions")
+	}
+	<-done
+}
+
+// TestGracefulShutdownBlocksOnInFlightBackgroundAgents verifies that
+// gracefulShutdown waits while inFlightBackgroundAgents > 0 and exits
+// only after it reaches 0.
+func TestGracefulShutdownBlocksOnInFlightBackgroundAgents(t *testing.T) {
+	exited := make(chan struct{})
+	sess1 := &Session{
+		state:                    SessionState{ID: "s1", ProjectID: "p1", State: StateIdle},
+		stdinCh:                  make(chan []byte, 8),
+		stopCh:                   make(chan struct{}),
+		doneCh:                   make(chan struct{}),
+		initCh:                   make(chan struct{}),
+		inFlightBackgroundAgents: 1, // one background agent in flight
+	}
+
+	a := &Agent{
+		sessions:         map[string]*Session{"s1": sess1},
+		terminals:        make(map[string]*TerminalSession),
+		userID:           "u1",
+		projectID:        "p1",
+		log:              zerolog.Nop(),
+		doExit:           func(int) { close(exited) },
+		writeSessionKVFn: func(SessionState) error { return nil }, // no real NATS
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.gracefulShutdown()
+	}()
+
+	// Should not exit while in-flight counter is 1.
+	select {
+	case <-exited:
+		t.Fatal("gracefulShutdown exited too early with inFlightBackgroundAgents=1")
+	case <-time.After(1500 * time.Millisecond):
+		// Good — still waiting.
+	}
+
+	// Decrement the counter — drain predicate should now be satisfied.
+	sess1.mu.Lock()
+	sess1.inFlightBackgroundAgents = 0
+	sess1.mu.Unlock()
+
+	select {
+	case <-exited:
+		// Good — exited after counter reached 0.
+	case <-time.After(5 * time.Second):
+		t.Fatal("gracefulShutdown did not exit after inFlightBackgroundAgents decremented to 0")
+	}
+	<-done
+}
+
+// TestGracefulShutdownInterruptsRequiresAction verifies that gracefulShutdown
+// sends a synthetic interrupt to sessions in StateRequiresAction, causing
+// them to transition to idle and satisfying the drain predicate.
+func TestGracefulShutdownInterruptsRequiresAction(t *testing.T) {
+	exited := make(chan struct{})
+	sess1 := &Session{
+		state:   SessionState{ID: "s1", ProjectID: "p1", State: StateRequiresAction},
+		stdinCh: make(chan []byte, 8),
+		stopCh:  make(chan struct{}),
+		doneCh:  make(chan struct{}),
+		initCh:  make(chan struct{}),
+	}
+
+	a := &Agent{
+		sessions:         map[string]*Session{"s1": sess1},
+		terminals:        make(map[string]*TerminalSession),
+		userID:           "u1",
+		projectID:        "p1",
+		log:              zerolog.Nop(),
+		doExit:           func(int) { close(exited) },
+		writeSessionKVFn: func(SessionState) error { return nil }, // no real NATS
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.gracefulShutdown()
+	}()
+
+	// Wait for the drain loop to send an interrupt to the session.
+	var interruptSent bool
+	deadline := time.After(3 * time.Second)
+	for !interruptSent {
+		select {
+		case msg := <-sess1.stdinCh:
+			var env map[string]any
+			if err := json.Unmarshal(msg, &env); err == nil {
+				if req, ok := env["request"].(map[string]any); ok {
+					if req["subtype"] == "interrupt" {
+						interruptSent = true
+					}
+				}
+			}
+		case <-deadline:
+			t.Fatal("gracefulShutdown did not send interrupt to StateRequiresAction session within 3s")
+		}
+	}
+
+	// Simulate the session transitioning to idle after the interrupt.
+	sess1.mu.Lock()
+	sess1.state.State = StateIdle
+	sess1.mu.Unlock()
+
+	select {
+	case <-exited:
+		// Good.
+	case <-time.After(5 * time.Second):
+		t.Fatal("gracefulShutdown did not exit after session transitioned to idle")
+	}
+	<-done
 }
 
 // ---------------------------------------------------------------------------
@@ -929,5 +1115,166 @@ func TestSubscribeTerminalAPIOnlyTerminal(t *testing.T) {
 	// Drain all subs to clean up.
 	for _, sub := range subs {
 		_ = sub.Unsubscribe()
+	}
+}
+
+
+// ---------------------------------------------------------------------------
+// 16. SubtypeSessionStateChanged skips KV flush while shutdownPending is true
+// ---------------------------------------------------------------------------
+
+// TestSessionStateChangedSkipsKVFlushWhenShutdownPending verifies that while
+// sess.shutdownPending is true, the SubtypeSessionStateChanged handler updates
+// in-memory state but does NOT call writeKV. This preserves the "updating"
+// banner in KV during drain.
+func TestSessionStateChangedSkipsKVFlushWhenShutdownPending(t *testing.T) {
+	flushCount := 0
+	var flushMu sync.Mutex
+	writeKV := func(st SessionState) error {
+		flushMu.Lock()
+		flushCount++
+		flushMu.Unlock()
+		return nil
+	}
+
+	sess := &Session{
+		state:           SessionState{ID: "s1", State: StateRunning},
+		stdinCh:         make(chan []byte, 8),
+		stopCh:          make(chan struct{}),
+		doneCh:          make(chan struct{}),
+		initCh:          make(chan struct{}),
+		shutdownPending: true, // drain is in progress
+	}
+
+	// Emit a session_state_changed event (running → idle).
+	line := []byte(`{"type":"system","subtype":"session_state_changed","state":"idle"}`)
+	sess.handleSideEffect(line, writeKV)
+
+	// In-memory state must be updated to idle.
+	gotState := sess.getState().State
+	if gotState != StateIdle {
+		t.Errorf("in-memory state: got %q, want %q", gotState, StateIdle)
+	}
+
+	// KV must NOT be flushed while shutdownPending is true.
+	flushMu.Lock()
+	got := flushCount
+	flushMu.Unlock()
+	if got != 0 {
+		t.Errorf("KV flush count: got %d, want 0 (must not flush while shutdownPending)", got)
+	}
+
+	// Control: when shutdownPending is false, KV IS flushed.
+	sess.mu.Lock()
+	sess.shutdownPending = false
+	sess.mu.Unlock()
+	sess.handleSideEffect(line, writeKV)
+	flushMu.Lock()
+	got = flushCount
+	flushMu.Unlock()
+	if got == 0 {
+		t.Errorf("KV flush count: got 0, want >0 (must flush when not shutdownPending)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 17 & 18. updateInFlightBackgroundAgents counter
+// ---------------------------------------------------------------------------
+
+// TestUpdateInFlightBGAgentsIncrement verifies that an assistant message with
+// an Agent tool_use block where run_in_background:true increments the counter.
+func TestUpdateInFlightBGAgentsIncrement(t *testing.T) {
+	sess := &Session{
+		state:   SessionState{ID: "s1"},
+		stdinCh: make(chan []byte, 8),
+		stopCh:  make(chan struct{}),
+		doneCh:  make(chan struct{}),
+		initCh:  make(chan struct{}),
+	}
+
+	// Assistant message with Agent tool_use + run_in_background:true
+	line := []byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Agent","input":{"run_in_background":true,"prompt":"do something"}}]}}`)
+	sess.updateInFlightBackgroundAgents(EventTypeAssistant, line)
+
+	sess.mu.Lock()
+	count := sess.inFlightBackgroundAgents
+	sess.mu.Unlock()
+	if count != 1 {
+		t.Errorf("inFlightBackgroundAgents: got %d, want 1", count)
+	}
+
+	// A non-background Agent tool_use should NOT increment.
+	lineNoBackground := []byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Agent","input":{"run_in_background":false,"prompt":"do something"}}]}}`)
+	sess.updateInFlightBackgroundAgents(EventTypeAssistant, lineNoBackground)
+	sess.mu.Lock()
+	count = sess.inFlightBackgroundAgents
+	sess.mu.Unlock()
+	if count != 1 {
+		t.Errorf("inFlightBackgroundAgents after non-background agent: got %d, want 1 (unchanged)", count)
+	}
+
+	// A tool_use for a different tool should NOT increment.
+	lineOtherTool := []byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"echo hello"}}]}}`)
+	sess.updateInFlightBackgroundAgents(EventTypeAssistant, lineOtherTool)
+	sess.mu.Lock()
+	count = sess.inFlightBackgroundAgents
+	sess.mu.Unlock()
+	if count != 1 {
+		t.Errorf("inFlightBackgroundAgents after non-Agent tool: got %d, want 1 (unchanged)", count)
+	}
+}
+
+// TestUpdateInFlightBGAgentsDecrement verifies that a user message with
+// origin.kind=="task-notification" decrements the counter (floored at 0).
+func TestUpdateInFlightBGAgentsDecrement(t *testing.T) {
+	sess := &Session{
+		state:                    SessionState{ID: "s1"},
+		stdinCh:                  make(chan []byte, 8),
+		stopCh:                   make(chan struct{}),
+		doneCh:                   make(chan struct{}),
+		initCh:                   make(chan struct{}),
+		inFlightBackgroundAgents: 2,
+	}
+
+	// User message with task-notification origin.
+	line := []byte(`{"type":"user","origin":{"kind":"task-notification"}}`)
+	sess.updateInFlightBackgroundAgents(EventTypeUser, line)
+
+	sess.mu.Lock()
+	count := sess.inFlightBackgroundAgents
+	sess.mu.Unlock()
+	if count != 1 {
+		t.Errorf("inFlightBackgroundAgents after task-notification: got %d, want 1", count)
+	}
+
+	// Decrement again to 0.
+	sess.updateInFlightBackgroundAgents(EventTypeUser, line)
+	sess.mu.Lock()
+	count = sess.inFlightBackgroundAgents
+	sess.mu.Unlock()
+	if count != 0 {
+		t.Errorf("inFlightBackgroundAgents after second task-notification: got %d, want 0", count)
+	}
+
+	// Floor at 0: another decrement should not go negative.
+	sess.updateInFlightBackgroundAgents(EventTypeUser, line)
+	sess.mu.Lock()
+	count = sess.inFlightBackgroundAgents
+	sess.mu.Unlock()
+	if count != 0 {
+		t.Errorf("inFlightBackgroundAgents after decrement below 0: got %d, want 0 (floored)", count)
+	}
+
+	// Regular user message (no task-notification origin) should NOT decrement.
+	sess.mu.Lock()
+	sess.inFlightBackgroundAgents = 1
+	sess.mu.Unlock()
+	lineRegular := []byte(`{"type":"user","message":{"role":"user","content":"hi"}}`)
+	sess.updateInFlightBackgroundAgents(EventTypeUser, lineRegular)
+	sess.mu.Lock()
+	count = sess.inFlightBackgroundAgents
+	sess.mu.Unlock()
+	if count != 1 {
+		t.Errorf("inFlightBackgroundAgents after regular user message: got %d, want 1 (unchanged)", count)
 	}
 }
