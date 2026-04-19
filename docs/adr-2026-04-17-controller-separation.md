@@ -1,5 +1,10 @@
 # Controller Separation & Multi-Cluster Architecture
 
+**Status**: accepted
+**Status history**:
+- 2026-04-17: accepted
+
+
 ## Overview
 
 Extract the MCProject reconciler from the control-plane into its own binary (`mclaude-controller`). Redesign the control-plane to have zero K8s dependency — it becomes a pure HTTP+NATS+Postgres service. The controller is the sole K8s operator. Extend the architecture to support multi-cluster deployment and BYOH (Bring Your Own Hardware) targets.

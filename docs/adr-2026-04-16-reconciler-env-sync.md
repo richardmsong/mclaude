@@ -1,5 +1,10 @@
 # Reconciler Deployment Sync
 
+**Status**: accepted
+**Status history**:
+- 2026-04-16: accepted
+
+
 ## Overview
 
 The MCProject reconciler creates session-agent Deployments but does not keep them in sync when the MCProject spec changes after initial creation. Specifically, when `gitIdentityId` is added or changed on an MCProject CR, the running pod's environment variables are not updated — the session-agent continues using stale (or empty) git credentials until manually restarted.

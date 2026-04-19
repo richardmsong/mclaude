@@ -41,6 +41,8 @@ Both are authoritative. When they conflict, the most recent ADR supersedes older
 
 **Discovery step:** Always `Glob("docs/adr-*.md")` AND `Glob("docs/spec-*.md")` first, then scan each file's Component Changes / Impact section (or grep for the component name) to find all docs that apply.
 
+**Status filter:** Each ADR header declares `**Status**: <draft|accepted|implemented|superseded|withdrawn>`. Only evaluate against ADRs whose status is `accepted` or `implemented`. Skip `draft`, `superseded`, and `withdrawn` ADRs — they are not authoritative. Specs have no status field; always read every `docs/spec-*.md`.
+
 **State schema:** Always read `docs/spec-state-schema.md`. When evaluating code that reads or writes state (KV buckets, Postgres, NATS subjects, K8s resources), verify the code's field names, key formats, and types match the canonical state schema. Report mismatches as gaps.
 
 **Lineage:** Prefer `get_lineage` (via the `docs` MCP) over re-reading every ADR — it returns the ADRs that shaped a given spec section so you can focus on the relevant history.
@@ -60,9 +62,10 @@ Both are authoritative. When they conflict, the most recent ADR supersedes older
 ### Phase 0 — Gather
 
 1. `Glob("docs/adr-*.md")` AND `Glob("docs/spec-*.md")` — discover all ADRs and specs
-2. Read all ADRs and specs that reference this component **in full**
-3. `Glob` all production source files under the component root (exclude `*_test.go`, `testutil/`, `testdata/`, `node_modules/`, `dist/`)
-4. Read every production source file
+2. For each ADR, read the header `**Status**:` line. Drop any ADR whose status is not `accepted` or `implemented`.
+3. Read all remaining ADRs and all specs that reference this component **in full**
+4. `Glob` all production source files under the component root (exclude `*_test.go`, `testutil/`, `testdata/`, `node_modules/`, `dist/`)
+5. Read every production source file
 
 ### Phase 1 — Spec → Code (forward pass)
 

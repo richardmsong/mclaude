@@ -45,6 +45,8 @@ Read these in full before writing any code. The spec is the source of truth — 
 | `docs/adr-*.md` | Feature-specific decision records — each is a spec for its feature. Use `get_lineage` (docs MCP) to discover which ADRs shaped a spec section. |
 | `docs/spec-*.md` | Living cross-cutting references |
 
+**ADR status filter:** Each ADR has a `**Status**:` header (`draft | accepted | implemented | superseded | withdrawn`). When discovering ADRs, read the status line and **only implement against `accepted` or `implemented` ADRs**. Skip `draft` (planning in progress, not final), `superseded` (overridden by a later ADR — follow the pointer), and `withdrawn` (abandoned). Specs (`docs/spec-*.md`) have no status — always read every spec file.
+
 ---
 
 ## Spec Discipline
@@ -74,6 +76,9 @@ When you find code behavior that isn't mentioned in the spec, make a judgment ca
 
 ```
 1. Read ALL relevant spec docs
+   - `Glob("docs/adr-*.md")` + `Glob("docs/spec-*.md")`
+   - For each ADR, read the `**Status**:` line; drop any that aren't `accepted` or `implemented`
+   - Read every remaining ADR and every spec that references this component in full
 
 2. Phase 1 — Spec compliance audit (spec → production code)
    For each feature the spec defines, ask: is it implemented?

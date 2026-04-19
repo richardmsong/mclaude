@@ -1,5 +1,10 @@
 # Telemetry Proposal: OpenTelemetry + LGTM Stack
 
+**Status**: accepted
+**Status history**:
+- 2026-04-08: accepted
+
+
 ## Current State
 
 MClaude has a minimal telemetry endpoint (`POST /telemetry`) on the server. The iOS app queues errors (e.g. WebSocket disconnects) and retries until the server acknowledges. Errors are written to the server log as `[TELEMETRY]` lines.

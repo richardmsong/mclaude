@@ -1,5 +1,10 @@
 # Quota-Aware Session Scheduling
 
+**Status**: accepted
+**Status history**:
+- 2026-04-14: accepted
+
+
 > **Note:** Sections of this ADR that describe slug derivation from the `docs/plan-` filename prefix are superseded by `adr-2026-04-19-docs-plan-spec-refactor.md`. The scheduler still takes a `specPath` but the prefix is now `docs/adr-YYYY-MM-DD-` or `docs/spec-` — the code derives the slug by stripping the leading `docs/` and trailing `.md`, then additionally stripping any `adr-YYYY-MM-DD-` or `spec-` prefix.
 
 ## Overview

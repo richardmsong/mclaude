@@ -1,5 +1,9 @@
 # ADR: Separate ADRs from Specs in `docs/`
 
+**Status**: accepted
+**Status history**:
+- 2026-04-19: accepted
+
 ## Overview
 
 Refactor `docs/` to distinguish two kinds of documents with different lifecycles:

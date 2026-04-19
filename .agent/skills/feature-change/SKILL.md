@@ -52,17 +52,23 @@ Also check `docs/feature-list.md` for feature IDs and platform support matrix.
 
 ```
 1. Read the relevant specs + related ADRs (via docs MCP)
+   — only ADRs in `accepted` or `implemented` status. Drafts, superseded,
+     withdrawn ADRs are skipped. (See adr-2026-04-19-adr-status-lifecycle.md.)
 2. Classify the change (A/B/C/D)
-3. Author a new ADR: docs/adr-YYYY-MM-DD-<slug>.md
+3. Author a new ADR: docs/adr-YYYY-MM-DD-<slug>.md (status: accepted from the start)
 4. Update impacted specs (if any) — same working tree
 5. Commit ADR + spec edits together (single spec commit)
 6. dev-harness → spec-evaluator loop per component (until CLEAN)
-7. Validate (SPA changes only)
+7. Flip ADR status from `accepted` → `implemented` (append history line).
+   Commit the status-only update.
+8. Validate (SPA changes only)
 ```
 
 **Every request produces at minimum an ADR.** This is load-bearing — without a per-request ADR, the docs MCP cannot build the lineage edges that let future agents discover *why* a spec section looks the way it does.
 
 If Step 5's co-commit is skipped (ADR committed separately from specs), the lineage edge does not form. Always co-commit.
+
+**Why `accepted` not `draft`:** `/feature-change` ADRs are authored *because a decision has already been made* — the user is asking for the change to happen. There's no pause point before implementation. If you need a drafting pause, the user should use `/plan-feature` instead (which starts in `draft`).
 
 ---
 
@@ -113,6 +119,10 @@ Minimum content:
 
 ```markdown
 # ADR: <Title>
+
+**Status**: accepted
+**Status history**:
+- YYYY-MM-DD: accepted
 
 ## Overview
 What this change is and what it enables. One paragraph.
@@ -205,7 +215,27 @@ When dev-harness or spec-evaluator reports a gap that is actually a spec or ADR 
 
 ---
 
-## Step 7 — Validate (SPA changes only)
+## Step 7 — Promote ADR to `implemented`
+
+Once every affected component's spec-evaluator returns CLEAN for the scope of this ADR:
+
+1. Edit the ADR's header:
+   - Change `**Status**: accepted` → `**Status**: implemented`.
+   - Append a new line to `**Status history**` with today's date: `- YYYY-MM-DD: implemented — all scope CLEAN`.
+2. Commit **only** the ADR (status header change). No spec edits, no code changes. This is the signal that the decision has landed in code.
+
+```bash
+git add docs/adr-YYYY-MM-DD-<slug>.md
+git commit -m "spec(<slug>): promote ADR to implemented"
+```
+
+The status flip is intentionally a separate commit so lineage lookup distinguishes "shape the spec" (the `draft → accepted` co-commit) from "lands in code" (the `accepted → implemented` ADR-only commit).
+
+Skip this step for ADRs that describe meta-process changes where there is no runtime code to evaluate — those stay in `accepted` (e.g. a `/feature-change` skill rewrite).
+
+---
+
+## Step 8 — Validate (SPA changes only)
 
 After CI deploys the preview, use the **Playwright MCP** to validate the golden path directly in the browser. Do not stop at "build passes" — drive the browser through the actual user flow.
 
