@@ -1,8 +1,8 @@
 # State Schema
 
-Canonical reference for every piece of persistent and semi-persistent state in mclaude. All design docs, evaluators, and implementation must be consistent with this document. When a feature adds, removes, or changes state, this document is updated first.
+Canonical reference for every piece of persistent and semi-persistent state in mclaude. All ADRs, other specs, evaluators, and implementation must be consistent with this document. When a feature adds, removes, or changes state, this document is updated first (in the same commit as the ADR that motivates the change).
 
-The design-evaluator checks all `docs/plan-*.md` files against this schema for consistency. Discrepancies are surfaced as gaps.
+The design-evaluator checks all `docs/adr-*.md` and `docs/spec-*.md` files against this schema for consistency. Discrepancies are surfaced as gaps.
 
 ---
 
@@ -235,7 +235,7 @@ Subscribers: session-agent (pull consumer for at-least-once delivery)
 
 ### `MCLAUDE_LIFECYCLE`
 
-Specified in: `docs/plan-k8s-integration.md`
+Specified in: `docs/adr-2026-04-10-k8s-integration.md`
 Created by: not yet created in production code (test-only in `testutil/deps.go`)
 
 ```

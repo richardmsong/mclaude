@@ -1,14 +1,14 @@
 ---
 name: plan-feature
-description: Design a new feature through structured Q&A. Produces a design doc (which IS the spec) after resolving all ambiguities. Also owns spec maintenance — handles backpressure when dev-harness discovers spec gaps during implementation.
+description: Design a new feature through structured Q&A. Produces an ADR (and updates impacted specs) after resolving all ambiguities. Also owns spec maintenance — handles backpressure when dev-harness discovers spec/ADR gaps during implementation.
 user_invocable: true
 ---
 
 # Plan Feature
 
-Structured design session for a new feature. Produces a design document — which IS the spec — after resolving all ambiguities with the user.
+Structured design session for a new feature. Produces an **ADR** at `docs/adr-YYYY-MM-DD-<slug>.md` — and updates any impacted specs (`docs/spec-*.md`) in the same commit — after resolving all ambiguities with the user.
 
-Design docs (`docs/plan-*.md`) are the canonical spec. There is no separate spec layer. What the design doc says is what gets built. What gets built must match the design doc.
+ADRs are dated, immutable records of individual decisions. Specs are living, present-tense descriptions of the current design. Git co-commits between an ADR and the specs it touches form the **lineage edge** that the `docs` MCP surfaces via `get_lineage`. This is load-bearing: without the co-commit, future agents cannot discover why a spec section looks the way it does.
 
 ## Usage
 
@@ -26,33 +26,38 @@ Examples:
 ## Algorithm
 
 ```
-1. Research
+1. Research (read relevant specs + related ADRs via docs MCP)
 2. Draft design + question list
 3. Ask questions (AskUserQuestion)
 4. Repeat steps 2-3 until no ambiguities remain
-5. Write design document (includes Implementation Plan with token/effort estimates)
+5. Write the ADR + update impacted specs
 6. Design audit (/design-audit) until CLEAN
-7. Hand off to /feature-change
+7. Commit ADR + spec edits together (single spec commit)
+8. Hand off to /feature-change
 ```
 
 ---
 
 ## Step 1 — Research
 
-Read everything relevant before forming opinions:
+Use the `docs` MCP instead of grepping the whole `docs/` tree:
 
-- **Existing design docs**: `docs/plan-*.md` — these are the spec
-- **UI spec**: `docs/ui-spec.md`
-- **Feature list**: `docs/feature-list.md`
-- **Existing code**: grep for related patterns, interfaces, types
-- **Current state**: what's already built that this feature touches?
+- `list_docs category=spec` — see every living spec.
+- `search_docs` — keyword search across ADRs and specs.
+- `get_lineage` on a spec section — returns the ADRs that previously modified it. Read those first.
+- `get_section` — targeted reads once you've identified a relevant section.
+
+Also read:
+- **Feature list**: `docs/feature-list.md` — feature IDs and platform support.
+- **Existing code**: grep for related patterns, interfaces, types.
 
 Use the Explore agent for broad codebase research. Use Grep/Glob for targeted lookups.
 
 The goal is to understand:
 - What exists today that this feature builds on or replaces
+- Which specs will be touched (state-schema, ui, tailscale-dns, etc.)
+- Which prior ADRs shaped the relevant spec sections — so this ADR extends the lineage rather than contradicting it silently
 - What components are affected
-- What patterns the codebase already uses for similar things
 - What constraints exist (NATS subjects, K8s resources, auth model, UI patterns)
 
 ---
@@ -65,6 +70,7 @@ Write a short design sketch covering:
 2. **Component responsibilities**: Which components change and how?
 3. **Data model**: New tables, KV entries, NATS subjects, K8s resources?
 4. **Integration points**: How does this connect to existing systems?
+5. **Spec impact**: Which `docs/spec-*.md` files will be updated in the same commit as the ADR?
 
 Then identify **every ambiguity** — places where you need a decision from the user. Categorize them:
 
@@ -95,29 +101,22 @@ After the user answers, incorporate their decisions and check: are there new amb
 
 ---
 
-## Step 4 — Write design document
+## Step 4 — Write the ADR + update impacted specs
 
-**Choose the right home for the spec.** Not every feature needs its own `plan-*.md` file. If the change is a small addition to an existing subsystem, add it to the existing design doc that covers that area:
+**All output goes in a single working tree change** that will be committed together. The co-commit is the lineage edge.
 
-| Change type | Where to write |
-|-------------|---------------|
-| New standalone feature (OAuth, multi-cluster, job queue) | New `docs/plan-<feature-slug>.md` |
-| UI behavior, design system rule, screen change | Edit `docs/ui-spec.md` |
-| Client architecture (stores, viewmodels, NATS pub/sub) | Edit `docs/plan-client-architecture.md` |
-| Backend behavior covered by existing doc | Edit the existing `docs/plan-*.md` |
-| Small cross-cutting rule (viewport, caching, headers) | Edit the doc for the affected component |
+### 4a. Write the ADR
 
-**Rule of thumb:** if the feature is 1-2 paragraphs of spec, it belongs in an existing file. If it needs its own Decisions table, User Flow, Component Changes, and Error Handling sections, it gets its own file.
-
-When adding to an existing file, put the new content in the right section — follow the existing structure, don't append to the bottom.
-
-When creating a new file, write the design to `docs/plan-<feature-slug>.md`:
+Write the decision record to `docs/adr-YYYY-MM-DD-<slug>.md`. Use today's date (absolute, not relative) and a kebab-case slug.
 
 ```markdown
-# <Feature Name>
+# ADR: <Feature Name>
 
 ## Overview
 One paragraph: what this is, why it exists, what it enables.
+
+## Motivation
+Why this change is being made now. Incident, user request, scalability pressure, or other trigger.
 
 ## Decisions
 Key decisions made during design, with rationale.
@@ -144,6 +143,10 @@ What can go wrong and how each failure is surfaced.
 
 ## Security
 Auth, token storage, scope, revocation.
+
+## Impact
+Which specs are updated in this commit (`docs/spec-state-schema.md`, `docs/spec-ui.md`, etc.).
+Which components implement the change.
 
 ## Scope
 What's in v1. What's explicitly deferred.
@@ -177,34 +180,74 @@ Budget: the 5h Anthropic API budget ≈ 15M tokens at Sonnet speed. Express
 the estimate as a fraction of this budget.
 ```
 
+### 4b. Update impacted specs
+
+For every cross-cutting surface the feature touches, edit the matching `docs/spec-*.md` **in the same working tree**:
+
+| Change surface | Spec to edit |
+|---------------|--------------|
+| Persistent state (DB, KV, NATS subjects, K8s resources) | `docs/spec-state-schema.md` |
+| UI behavior, screens, design system, interactive element contracts | `docs/spec-ui.md` |
+| DNS | `docs/spec-tailscale-dns.md` |
+| A feature-local detail with no cross-cutting impact | None — ADR alone is enough |
+
+Do not create new per-feature spec files in v1 unless a clear cross-component concern emerges (see ADR-2026-04-19 for the partitioning policy). Small, feature-local details belong in the ADR only.
+
+When editing a spec, follow the **doc editing rules** below.
+
 ---
 
 ## Step 5 — Design audit
 
-Run `/design-audit docs/plan-<feature-slug>.md` to verify the design document is self-sufficient.
+Run `/design-audit docs/adr-YYYY-MM-DD-<slug>.md` to verify the ADR is self-sufficient.
 
-This calls the `design-evaluator` agent in a loop. The evaluator has no conversation context — it reads only the design document and the codebase. Between rounds, `/design-audit` classifies gaps (factual vs design decision), fixes factual ones, asks the user about decisions, and re-runs until CLEAN. All findings, fixes, and decisions are logged to `.agent/audits/`.
+This calls the `design-evaluator` agent in a loop. The evaluator has no conversation context — it reads only the ADR (and referenced specs) plus the codebase. Between rounds, `/design-audit` classifies gaps (factual vs design decision), fixes factual ones, asks the user about decisions, and re-runs until CLEAN. All findings, fixes, and decisions are logged to `.agent/audits/`.
 
-Do not hand off to `/feature-change` until the audit passes.
-
----
-
-## Step 6 — Hand off
-
-After the design document is written, audited, and committed:
-
-```
-The design is complete at docs/plan-<feature-slug>.md.
-Run /feature-change to implement.
-```
-
-Do NOT write code yourself. The design document is the output. `/feature-change` implements it.
+Do not commit or hand off until the audit passes.
 
 ---
 
-## Design doc editing rules
+## Step 6 — Commit (single spec commit)
 
-These rules apply whenever a design doc is edited — during initial creation (step 4), during audit fixes (step 5), or during backpressure from dev-harness.
+Stage the new ADR together with any spec edits and commit once:
+
+```bash
+git add docs/
+git commit -m "spec(<area>): <what changed and why>"
+```
+
+**This is the lineage edge.** The `docs` MCP reads co-commits to compute `get_lineage`. If the ADR is committed separately from the specs it modifies, lineage does not link them and future agents will have to re-read all ADRs to understand why a spec section exists.
+
+Only `docs/` is staged in this commit. Code changes go through `/feature-change`'s dev-harness loop and commit separately.
+
+---
+
+## Step 7 — Hand off
+
+After the ADR + spec edits are committed:
+
+```
+The design is complete at docs/adr-YYYY-MM-DD-<slug>.md
+(and updates spec-<concern>.md). Run /feature-change to implement.
+```
+
+Do NOT write code yourself. The ADR + spec edits are the output. `/feature-change` implements the code.
+
+---
+
+## Doc editing rules
+
+These rules apply whenever a doc is edited — during initial creation (step 4), during audit fixes (step 5), or during backpressure from dev-harness.
+
+### ADRs are immutable
+
+- ADR content is historical. Do not rewrite past decisions. If a later decision supersedes an earlier one, author a **new** ADR dated today that describes the supersession, and add a one-line `> Superseded by adr-YYYY-MM-DD-<slug>.md` note near the affected section (or at the top of the old ADR).
+- Mechanical updates to an old ADR are allowed: fixing a broken cross-reference when a file is renamed, fixing a typo, restoring a broken link. These are not semantic changes.
+- Never edit an ADR to change *what it decided* — author a new one instead.
+
+### Specs are living
+
+When editing a `docs/spec-*.md`:
 
 **Adding something:**
 - Add it to the right section with full payload/schema/wireframe
@@ -214,22 +257,25 @@ These rules apply whenever a design doc is edited — during initial creation (s
 
 **Removing something:**
 - Delete it entirely — no stale text, no "deprecated" markers
-- Remove every reference to it across the design doc
+- Remove every reference to it across the spec
 
 **Changing something:**
 - Update in place — old text out, new text in
-- Update every place it appears in the doc
+- Update every place it appears in the spec
 
 **Never:**
-- Leave design doc and implementation out of sync
-- Write implementation details (function names, file paths) in the design doc
-- Describe future/intended behavior — only what will be built now
+- Leave specs and implementation out of sync
+- Write implementation details (function names, file paths) in a spec
+- Describe future/intended behavior — only what is true now or will be true after this ADR lands
 
-**UI-specific rules** (when editing UI sections):
+**UI-specific rules** (when editing `docs/spec-ui.md`):
 - Wireframes: update ASCII art to match what will be rendered exactly
 - Every interactive element has a behavior bullet: label, validation, default, on-submit behavior
 
-**Commit rule:** Design doc changes are always committed separately from code changes:
+### Commit rule
+
+ADR + impacted specs are always committed together in a single spec-only commit, separate from any code changes:
+
 ```bash
 git add docs/
 git commit -m "spec(<area>): <what changed and why>"
@@ -239,22 +285,27 @@ git commit -m "spec(<area>): <what changed and why>"
 
 ## Backpressure from dev-harness
 
-During implementation, `/feature-change` runs the dev-harness → spec-evaluator loop. Sometimes the dev-harness agent discovers that the design doc is ambiguous, incomplete, or wrong. This is **backpressure** — the implementation pushes back on the spec.
+During implementation, `/feature-change` runs the dev-harness → spec-evaluator loop. Sometimes the dev-harness agent discovers that the ADR or a spec is ambiguous, incomplete, or wrong. This is **backpressure** — the implementation pushes back on the spec.
 
-When `/feature-change` encounters backpressure, the spec update follows these rules:
+When `/feature-change` encounters backpressure, the doc update follows these rules:
 
 ### 1. Classify the gap
 
 | Gap type | Action |
 |----------|--------|
-| **Factual error** (wrong endpoint, incorrect field name, stale reference) | Fix directly in the design doc. No user input needed. |
+| **Factual error** (wrong endpoint, incorrect field name, stale reference) | Fix directly in the relevant doc. No user input needed. |
 | **Missing detail** with obvious answer (from codebase/architecture) | Fill it in directly. |
 | **Missing detail** requiring a design decision | Ask the user via AskUserQuestion. Batch related questions. |
 | **Contradiction** (doc says X in one place, Y in another) | Determine correct answer from context. If genuinely ambiguous, ask the user. |
 
-### 2. Edit the design doc
+### 2. Decide which doc to edit
 
-Follow the editing rules above.
+| What's wrong | Edit |
+|--------------|------|
+| Gap is in the ADR you just wrote | Edit the ADR (it hasn't been "historicized" by a later decision yet — still in the same workstream) |
+| Gap is in a spec the ADR references | Edit the spec |
+| Gap exposes a behavior that has no ADR (undocumented historical behavior) | Author a **new corrective ADR** dated today that describes the behavior and rationalizes it |
+| A previously-decided ADR needs to be overridden | Author a **new superseding ADR** dated today — do not rewrite the old one |
 
 ### 3. Commit separately
 
@@ -273,16 +324,18 @@ Which re-invokes dev-harness with the updated spec. The loop continues until spe
 
 - **Don't assume answers** — if you're not sure, ask
 - **Don't ask one question at a time** — batch them, the user's time is valuable
-- **Don't write code** — this skill produces a design document only (and edits design docs during backpressure)
-- **Don't skip research** — uninformed questions waste the user's time
+- **Don't write code** — this skill produces an ADR and spec edits only (and edits docs during backpressure)
+- **Don't skip research** — uninformed questions waste the user's time; the docs MCP makes research cheap
 - **Don't present false choices** — if there's only one reasonable option, state it as your recommendation and ask if they agree
 - **Don't ask about implementation details** — ask about behavior, scope, and architecture. Implementation is for the dev-harness.
+- **Don't rewrite old ADRs** — supersede them with a new ADR instead
+- **Don't split the ADR commit from the spec commit** — the co-commit is the lineage edge
 
 ---
 
 ## Skill authoring conventions (when the output is a SKILL.md)
 
-These apply whenever `plan-feature` is designing a new skill (i.e. the design doc will become `.agent/skills/<name>/SKILL.md`):
+These apply whenever `plan-feature` is designing a new skill (i.e. the ADR describes changes to `.agent/skills/<name>/SKILL.md`):
 
 **External binaries**
 - List every required binary in a `## Prerequisites` section with a one-line install command.

@@ -750,7 +750,7 @@ A `/implement-features` skill that audits a client codebase against the [Client 
 
 Where `<platform>` is `web`, `cli`, or `ios`. The skill:
 
-1. **Read specs** — `docs/feature-list.md` (features + support matrix) and `docs/plan-client-architecture.md` (architecture, protocol, accumulation logic, cache handling)
+1. **Read specs** — `docs/feature-list.md` (features + support matrix) and `docs/adr-2026-04-11-client-architecture.md` (architecture, protocol, accumulation logic, cache handling)
 2. **Identify platform root** — `mclaude-web/`, `mclaude-cli/`, `mclaude-ios/` (configurable)
 3. **Audit** — scan the platform codebase, classify each applicable feature as `implemented`, `partial`, or `missing`
 4. **Output gap report** — ordered by dependency (A1 before P1, C1 before C2), with specific files to create/modify

@@ -1,5 +1,7 @@
 # Docs MCP Server
 
+> **Note:** The `Category Classification` section of this ADR is superseded by `adr-2026-04-19-docs-plan-spec-refactor.md`. Current classifier: `adr-*` → `'adr'`, `spec-*` → `'spec'`, `feature-list*` → `'spec'`, everything else → `null`. The `'design'` category has been renamed to `'adr'`.
+
 ## Overview
 
 An MCP server that indexes the `docs/` directory into a SQLite + FTS5 database, exposing structured search, section retrieval, and git-derived lineage queries. Agents can ask "what design decisions led to this spec section?" or "find everything about NATS security" without grepping through 20+ markdown files. No LLM, no vectors — just structured indexing and full-text search over the doc corpus with relationship tracking derived from git history.
@@ -25,7 +27,7 @@ An MCP server that indexes the `docs/` directory into a SQLite + FTS5 database, 
 ```sql
 CREATE TABLE documents (
   id INTEGER PRIMARY KEY,
-  path TEXT UNIQUE NOT NULL,    -- relative to repo root: docs/plan-foo.md
+  path TEXT UNIQUE NOT NULL,    -- relative to repo root: docs/adr-YYYY-MM-DD-foo.md
   category TEXT,                -- 'design' | 'spec' | null
   title TEXT,                   -- H1 heading (first # line)
   mtime REAL NOT NULL           -- file mtime at last index
@@ -67,7 +69,7 @@ END;
 
 -- Lineage: co-committed section relationships
 CREATE TABLE lineage (
-  section_a_doc TEXT NOT NULL,     -- doc path (docs/plan-foo.md)
+  section_a_doc TEXT NOT NULL,     -- doc path (docs/adr-YYYY-MM-DD-foo.md)
   section_a_heading TEXT NOT NULL, -- heading text
   section_b_doc TEXT NOT NULL,
   section_b_heading TEXT NOT NULL,
@@ -113,7 +115,7 @@ Retrieve the full content of a specific section.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `doc_path` | string | yes | Document path relative to repo root (e.g. `docs/plan-k8s-integration.md`) |
+| `doc_path` | string | yes | Document path relative to repo root (e.g. `docs/adr-2026-04-10-k8s-integration.md`) |
 | `heading` | string | yes | Section heading text (e.g. `Component Changes`) |
 
 Returns: `{ doc_path, doc_title, category, heading, content, line_start, line_end }` or error if not found.
@@ -265,7 +267,7 @@ Claude Code runs stdio MCP servers from the project root directory by default (t
 
 **Deferred:**
 - Recursive subdirectory watching (e.g. `docs/design/`, `docs/spec/`) — add when doc reorganization happens
-- Cross-reference parsing (explicit `docs/plan-*.md` links in text) — git lineage covers most cases
+- Cross-reference parsing (explicit `docs/adr-*.md` links in text) — git lineage covers most cases
 - Section-level diff display in lineage results — just knowing the relationship exists is enough for now
 - MCP resources (browsable doc list) — tools are sufficient, agents query when needed
 - Webhook/API for external indexing triggers — file watcher covers the local use case

@@ -1,6 +1,6 @@
 ---
 name: dev-harness
-description: Implementation loop for any mclaude component. Reads design docs (the spec), audits gaps, implements production code + tests, and commits. Invoked by the master session via /feature-change. Run repeatedly — converges to fully-implemented, fully-tested.
+description: Implementation loop for any mclaude component. Reads ADRs + specs, audits gaps, implements production code + tests, and commits. Invoked by the master session via /feature-change. Run repeatedly — converges to fully-implemented, fully-tested.
 model: claude-sonnet-4-6
 maxTurns: 500
 background: true
@@ -10,7 +10,7 @@ tools:
 
 # Dev Harness
 
-Implements and tests a component against its spec. Design docs (`docs/plan-*.md`) are the canonical spec — there is no separate spec layer. Run repeatedly — each session audits what's implemented vs what the spec requires, implements the next gap, runs tests, and commits.
+Implements and tests a component against its spec. The spec is split across **ADRs** (`docs/adr-*.md` — dated decision records) and **specs** (`docs/spec-*.md` — living cross-cutting references). Run repeatedly — each session audits what's implemented vs what the spec requires, implements the next gap, runs tests, and commits.
 
 ## Usage
 
@@ -36,11 +36,14 @@ Read these in full before writing any code. The spec is the source of truth — 
 
 | Doc | Owns |
 |-----|------|
-| `docs/plan-k8s-integration.md` | NATS subjects, KV schema, session lifecycle, provisioning, failure modes |
-| `docs/plan-client-architecture.md` | Stores, viewmodels, protocol contract, accumulation algorithm |
-| `docs/ui-spec.md` | Screens, wireframes, components, interactions |
+| `docs/spec-state-schema.md` | Persistent state (Postgres, KV, NATS subjects, K8s resources) — the canonical state schema |
+| `docs/spec-ui.md` | Screens, wireframes, components, interactions |
+| `docs/spec-tailscale-dns.md` | DNS conventions |
+| `docs/adr-2026-04-10-k8s-integration.md` | Cluster integration, provisioning, failure modes |
+| `docs/adr-2026-04-11-client-architecture.md` | Stores, viewmodels, protocol contract, accumulation algorithm |
 | `docs/feature-list.md` | Feature IDs and platform support matrix |
-| `docs/plan-*.md` | Feature-specific design docs — each is a spec for its feature |
+| `docs/adr-*.md` | Feature-specific decision records — each is a spec for its feature. Use `get_lineage` (docs MCP) to discover which ADRs shaped a spec section. |
+| `docs/spec-*.md` | Living cross-cutting references |
 
 ---
 
@@ -48,15 +51,15 @@ Read these in full before writing any code. The spec is the source of truth — 
 
 - Implement exactly what the spec says. If behavior isn't in the spec, don't build it.
 - If the spec is ambiguous, implement the minimal interpretation and note the ambiguity in the commit message.
-- **If you discover the spec is missing something required** — stop, notify the master session. The master session will update the design doc (the spec) and re-invoke this agent.
+- **If you discover the spec is missing something required** — stop, notify the master session. The master session will update the relevant ADR or spec and re-invoke this agent.
 
 ### Undocumented behavior in existing code
 
 When you find code behavior that isn't mentioned in the spec, make a judgment call before proceeding:
 
 **Clearly intentional** (deliberate design, fits the architecture, non-trivial to have been accidental):
-→ Stop. Tell the master session: "Found undocumented behavior in `<file>`: `<description>`. Looks intentional — update the design doc to document it before I continue."
-→ Do not remove or change it. Do not proceed past this point until the design doc is updated.
+→ Stop. Tell the master session: "Found undocumented behavior in `<file>`: `<description>`. Looks intentional — update the relevant ADR/spec to document it before I continue."
+→ Do not remove or change it. Do not proceed past this point until the ADR/spec is updated.
 
 **Clearly unintended** (looks like a bug, contradicts other spec'd behavior, obviously wrong):
 → Treat it as a spec violation. Implement the spec-correct behavior and note the fix in the commit message.
@@ -86,8 +89,8 @@ When you find code behavior that isn't mentioned in the spec, make a judgment ca
    - Every session lifecycle state: does the code transition through them?
    
    spa:
-   - Every screen in ui-spec.md: does a component exist for it?
-   - Every store/viewmodel interface in plan-client-architecture.md: is it implemented?
+   - Every screen in spec-ui.md: does a component exist for it?
+   - Every store/viewmodel interface in adr-2026-04-11-client-architecture.md: is it implemented?
    - Every NATS subject the client publishes/subscribes: is it wired?
    
    This phase catches "spec says X, no code does X" — the most dangerous gap.
@@ -168,7 +171,7 @@ When you find code behavior that isn't mentioned in the spec, make a judgment ca
 | `unit` | EventStore accumulation, AuthStore JWT expiry+refresh, SessionStore KV watch, deduplication | Feed mock events → assert ConversationModel state for each transcript scenario |
 | `component` | ConversationVM: sendMessage, approvePermission, interrupt. PermissionPromptVM: multiple simultaneous pendingControls | Assert correct NATS subjects + payloads published |
 | `nats-impl` | Real NATSClient via `nats.ws`: connect, disconnect, subscribe, publish, kvGet, kvWatch, kvPut | Unit tests use in-memory mock; real impl used in e2e |
-| `views` | Components per `docs/ui-spec.md` exactly: design tokens, AuthScreen, DashboardScreen, SessionDetailScreen, event renderers, Settings, TokenUsage | Visual: rendered output matches wireframe. All wired to stores/viewmodels. |
+| `views` | Components per `docs/spec-ui.md` exactly: design tokens, AuthScreen, DashboardScreen, SessionDetailScreen, event renderers, Settings, TokenUsage | Visual: rendered output matches wireframe. All wired to stores/viewmodels. |
 | `reconnect` | EventStore re-subscribes from `max(lastSeq+1, replayFromSeq)` on NATS disconnect | No duplicate events, no gaps after reconnect simulation |
 | `monitoring` | Structured pino logs for all store ops, error boundaries on all components | — |
 | `e2e` | Playwright: auth → session list → open session → send message → approve permission → see result | — |

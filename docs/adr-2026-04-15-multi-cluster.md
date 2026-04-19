@@ -482,7 +482,7 @@ resolver_preload: {
 | Subject | Publisher | Subscriber | Payload | Transport |
 |---------|-----------|------------|---------|-----------|
 | `mclaude.clusters.{clusterId}.projects.provision` | control-plane | worker controller | `{ userId, projectId, gitUrl }` | Core NATS request/reply via leaf |
-Controller liveness is detected via NATS `$SYS` presence events (connect/disconnect), not heartbeats. Control-plane subscribes to `$SYS.ACCOUNT.*.CONNECT` and `$SYS.ACCOUNT.*.DISCONNECT`, identifies the controller from JWT claims, and updates cluster status in Postgres and KV. When a controller disconnects (crash, network loss), control-plane marks the cluster `offline` and stops routing. When it reconnects, control-plane marks it `active` again. See `plan-nats-security.md` for details.
+Controller liveness is detected via NATS `$SYS` presence events (connect/disconnect), not heartbeats. Control-plane subscribes to `$SYS.ACCOUNT.*.CONNECT` and `$SYS.ACCOUNT.*.DISCONNECT`, identifies the controller from JWT claims, and updates cluster status in Postgres and KV. When a controller disconnects (crash, network loss), control-plane marks the cluster `offline` and stops routing. When it reconnects, control-plane marks it `active` again. See `adr-2026-04-17-nats-security.md` for details.
 
 Existing subjects (`mclaude.{userId}.{projectId}.events.*`, `mclaude.{userId}.{projectId}.api.sessions.*`, etc.) are unchanged. They flow between hub and worker automatically via leaf node subject routing. NATS leaf nodes import/export all core NATS subjects by default — no explicit `allow`/`deny` rules are needed in the `remotes` block. JetStream domain routing (`$JS.{domain}.API.>`) is also handled automatically by the NATS leaf node protocol.
 

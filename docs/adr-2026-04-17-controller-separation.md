@@ -200,7 +200,7 @@ $SYS.ACCOUNT.{accountId}.DISCONNECT
 | Control-plane | `mclaude.>`, `$SYS.ACCOUNT.>` | `mclaude.>`, `mclaude.clusters.>`, `$KV.mclaude-sessions.>` |
 | Controller | `mclaude.clusters.{clusterId}.>` | `$KV.mclaude-projects.{clusterId}.>` |
 
-See `docs/plan-nats-security.md` for full threat model.
+See `docs/adr-2026-04-17-nats-security.md` for full threat model.
 
 ---
 
