@@ -12,6 +12,17 @@ ADRs are dated, immutable records of individual decisions. Specs are living, pre
 
 Every ADR carries a **status** (`draft | accepted | implemented | superseded | withdrawn`) — see `docs/adr-2026-04-19-adr-status-lifecycle.md`. This skill starts new ADRs in `draft` and promotes them to `accepted` at the spec-co-commit step. Drafts can be paused and resumed freely; they don't co-commit with specs.
 
+## Write-first principle (LOAD-BEARING)
+
+**Write the draft ADR file to disk on the first turn, before any Q&A.** Context compaction or session switch-out can happen at any time; anything held only in your head evaporates. The file on disk is the durable form.
+
+The initial write is allowed — and expected — to be incomplete:
+- Unknown sections get a stub: `TODO: decide <question>` or `(decision pending: <question>)`.
+- The `## Open questions` section at the bottom enumerates everything that still needs a user decision.
+- Each round of Q&A amends the file in place: answered question → decision incorporated + removed from open list; new ambiguity surfaced → appended to open list.
+
+**Never accumulate 3+ answered questions in memory before writing.** After each round of `AskUserQuestion`, the first action is to edit the ADR file with what the user just decided. Only then move on to the next batch of questions. If you get compacted mid-flow, the file already holds everything the user has told you.
+
 ## Usage
 
 ```
@@ -39,16 +50,22 @@ Examples:
    exists, offer to resume.
 
 1. Research (read relevant specs + related ADRs via docs MCP)
-2. Draft design + question list
-3. Ask questions (AskUserQuestion)
-4. Repeat steps 2-3 until no ambiguities remain.
-   (A draft ADR file may be committed between rounds — convenience only,
-   does not co-commit with specs.)
-5. Write the ADR in `draft` status + stage impacted spec edits
-6. Design audit (/design-audit) until CLEAN
-7. Flip the ADR status from `draft` → `accepted` (append a history line with
+2. WRITE the draft ADR file to disk NOW — with whatever you know so far, plus
+   an "Open questions" section for everything unresolved. Stubs and TODOs are
+   fine. This is the durability step — everything from here forward amends
+   this file.
+3. Ask questions (AskUserQuestion). Immediately after each batch of answers,
+   edit the ADR file: remove answered questions, add their decisions to the
+   relevant sections, append any new ambiguities surfaced by the answers.
+   Repeat until "Open questions" is empty.
+   (The draft ADR file may be committed between rounds — convenience, so the
+   work survives branch switches. No spec edits, no status promotion.)
+4. Finalize the ADR (remove any remaining stubs) and stage impacted spec
+   edits (still under `Status: draft`).
+5. Design audit (/design-audit) until CLEAN
+6. Flip the ADR status from `draft` → `accepted` (append a history line with
    today's date). Commit ADR + spec edits together (single spec commit).
-8. Hand off to /feature-change
+7. Hand off to /feature-change
 ```
 
 ---
@@ -94,22 +111,21 @@ The goal is to understand:
 
 ---
 
-## Step 2 — Draft design + question list
+## Step 2 — Write the initial draft ADR file (DO THIS BEFORE ASKING QUESTIONS)
 
-Write a short design sketch covering:
+Pick a slug and write `docs/adr-YYYY-MM-DD-<slug>.md` to disk now, using today's absolute date. The template at the end of this section is the full shape. On this first write:
 
-1. **User-facing flow**: What does the user see and do, step by step?
-2. **Component responsibilities**: Which components change and how?
-3. **Data model**: New tables, KV entries, NATS subjects, K8s resources?
-4. **Integration points**: How does this connect to existing systems?
-5. **Spec impact**: Which `docs/spec-*.md` files will be updated in the same commit as the ADR?
+- Fill in what you can from research: title, motivation, a rough sketch of the user-facing flow, which components are implicated, which specs are likely impacted.
+- **Stub every uncertain section** with `TODO: <question>` or `(decision pending: <question>)`. It is better to write a bad first draft that captures what you're thinking than to hold it in your head.
+- Enumerate open questions at the bottom under `## Open questions`. Each entry is one line and becomes a question to ask the user.
 
-Then identify **every ambiguity** — places where you need a decision from the user. Categorize them:
-
+Identify ambiguities in these categories while you draft:
 - **Architecture**: fundamental choices that shape the whole design
 - **Behavior**: what happens in specific scenarios
 - **Scope**: what's in v1 vs deferred
 - **UX**: how the user interacts with it
+
+The file must exist on disk before you invoke `AskUserQuestion` for the first time. Do not skip this step.
 
 ---
 
@@ -125,7 +141,7 @@ Use `AskUserQuestion` to resolve ambiguities. Rules:
 - **Don't ask questions you can answer from the code** — only ask about decisions
 - **Always include design ramifications in the question text** — explain the tradeoffs and consequences of each choice directly in the question, not just in the option descriptions. The user should be able to understand what each choice means for the system without having to ask "what are the ramifications?"
 
-After the user answers, incorporate their decisions and check: are there new ambiguities revealed by their choices? If yes, draft follow-up questions and ask again (back to step 2).
+**After each AskUserQuestion returns, the first thing you do is edit the ADR file** — do not queue up the next batch first. Write the user's decisions into the relevant sections, delete the now-resolved entry from `## Open questions`, and append any new ambiguities surfaced by the answers. Only then draft follow-up questions and ask again.
 
 **Keep going until there are zero unresolved ambiguities.** A design with open questions is not done.
 
@@ -133,13 +149,17 @@ After the user answers, incorporate their decisions and check: are there new amb
 
 ---
 
-## Step 4 — Write the ADR + update impacted specs
+## Step 4 — Finalize the ADR + update impacted specs
+
+The ADR file was written in Step 2 and amended through every Q&A round. By now `## Open questions` should be empty and every section should be filled in. This step is the last polish pass before audit — no TODOs, no stubs.
 
 **All output goes in a single working tree change** that will be committed together. The co-commit is the lineage edge.
 
-### 4a. Write the ADR
+### 4a. Finalize the ADR
 
-Write the decision record to `docs/adr-YYYY-MM-DD-<slug>.md`. Use today's date (absolute, not relative) and a kebab-case slug.
+Re-read the ADR end-to-end. Remove the `## Open questions` section (or leave it empty with a comment). Confirm every section of the template below is present and concrete. If anything is still hand-wavy, go back to Step 3.
+
+The template the file should conform to:
 
 ```markdown
 # ADR: <Feature Name>
@@ -186,6 +206,13 @@ Which components implement the change.
 
 ## Scope
 What's in v1. What's explicitly deferred.
+
+## Open questions
+
+(Present during Steps 2-3; deleted before Step 4 finalizes the ADR.)
+
+- <one-line ambiguity — what needs a user decision>
+- ...
 
 ## Implementation Plan
 
