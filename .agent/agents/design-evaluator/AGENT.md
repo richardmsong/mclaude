@@ -34,14 +34,14 @@ For each section of the design document:
 
 ## Cross-spec consistency
 
-You MUST read `docs/plan-state-schema.md` (the canonical state schema) and check the design document against it:
+You MUST read `docs/spec-state-schema.md` (the canonical state schema) and check the design document against it:
 - Does the design doc reference any state (KV buckets, Postgres tables, NATS subjects, K8s resources) that exists in the schema? If so, do the field names, key formats, and types match exactly?
 - Does the design doc introduce new state? If so, it must be consistent with the patterns in the schema (key format conventions, naming conventions, writer/reader assignments).
 - Does the design doc contradict the schema (different field names, different key format, different writers)?
 
 Report any inconsistency as a gap. The state schema is authoritative for schemas; the design doc is authoritative for behavior.
 
-Also check against other `docs/plan-*.md` files when the design doc references shared concepts (NATS subjects, KV buckets, lifecycle events, auth model). Cross-reference to find contradictions.
+Also check against other `docs/adr-*.md` files when the design doc references shared concepts (NATS subjects, KV buckets, lifecycle events, auth model). Cross-reference to find contradictions.
 
 ## What to verify against the codebase
 
@@ -83,7 +83,7 @@ If gaps exist:
 
 **Always** save your output to `.agent/audits/` before returning.
 
-Derive the filename from the design doc path: `docs/plan-github-oauth.md` → `.agent/audits/design-github-oauth-<YYYY-MM-DD>.md`
+Derive the filename from the design doc path: `docs/adr-2026-04-14-github-oauth.md` → `.agent/audits/design-github-oauth-<YYYY-MM-DD>.md`
 
 Append if the file exists (multiple evaluations per day). Format:
 

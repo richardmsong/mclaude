@@ -1,5 +1,7 @@
 # Quota-Aware Session Scheduling
 
+> **Note:** Sections of this ADR that describe slug derivation from the `docs/plan-` filename prefix are superseded by `adr-2026-04-19-docs-plan-spec-refactor.md`. The scheduler still takes a `specPath` but the prefix is now `docs/adr-YYYY-MM-DD-` or `docs/spec-` — the code derives the slug by stripping the leading `docs/` and trailing `.md`, then additionally stripping any `adr-YYYY-MM-DD-` or `spec-` prefix.
+
 ## Overview
 
 Enables unattended dev-harness implementation sessions that run as remote mclaude sessions, managed by a priority-aware job queue, with real-time quota monitoring that gracefully stops low-priority work before the 5-hour Anthropic API usage window is exhausted. Users queue jobs by spec path via `/schedule-feature`; the daemon starts sessions immediately as capacity allows, monitors API utilization by polling the Anthropic OAuth usage endpoint, and pauses lower-priority sessions when quota is tight. On successful completion the session creates a GitHub PR for human review.
@@ -24,11 +26,11 @@ Enables unattended dev-harness implementation sessions that run as remote mclaud
 
 ## User Flow
 
-1. User finishes a spec at `docs/plan-spa.md` and wants it implemented unattended.
+1. User finishes a spec at `docs/adr-YYYY-MM-DD-spa.md` and wants it implemented unattended.
 
 2. User runs:
    ```
-   /schedule-feature docs/plan-spa.md [--priority 7] [--threshold 75] [--auto-continue]
+   /schedule-feature docs/adr-YYYY-MM-DD-spa.md [--priority 7] [--threshold 75] [--auto-continue]
    ```
 
 3. The `/schedule-feature` skill:
@@ -160,12 +162,12 @@ The dispatcher strips the `docs/plan-` prefix and `.md` suffix from `specPath`, 
 
 | `specPath` | Component |
 |-----------|-----------|
-| `docs/plan-spa.md` | `spa` |
-| `docs/plan-session-agent.md` | `session-agent` |
-| `docs/plan-k8s-integration.md` | `control-plane` |
-| `docs/plan-client-architecture.md` | `spa` |
-| `docs/plan-github-oauth.md` | `control-plane` |
-| `docs/plan-quota-aware-scheduling.md` | `all` |
+| `docs/adr-YYYY-MM-DD-spa.md` | `spa` |
+| `docs/adr-YYYY-MM-DD-session-agent.md` | `session-agent` |
+| `docs/adr-2026-04-10-k8s-integration.md` | `control-plane` |
+| `docs/adr-2026-04-11-client-architecture.md` | `spa` |
+| `docs/adr-2026-04-14-github-oauth.md` | `control-plane` |
+| `docs/adr-2026-04-14-quota-aware-scheduling.md` | `all` |
 | Any unrecognized `plan-*.md` | `all` |
 
 The component is passed as the argument to `/dev-harness <component>` in the session prompt.
@@ -481,7 +483,7 @@ All handlers scope KV operations to `{d.cfg.UserID}/{jobId}` keys in `d.jobQueue
 ```
 
 **Arguments**:
-- `spec-path` — relative path to spec doc (e.g., `docs/plan-quota-aware-scheduling.md`). Must exist.
+- `spec-path` — relative path to spec doc (e.g., `docs/adr-2026-04-14-quota-aware-scheduling.md`). Must exist.
 - `--priority N` — integer 1–10; default 5. Higher = survives quota pressure longer.
 - `--threshold N` — integer 1–99; default 75. 5h utilization % at which to trigger graceful stop.
 - `--auto-continue` — flag; if set, job re-queues at the 5h reset time after being stopped.
@@ -504,8 +506,8 @@ Default (no subcommand): same as `list`.
 **`list`**: Calls `GET http://localhost:8378/jobs` (via Bash `curl`). Displays a table:
 ```
 ID         SPEC                     PRI  STATUS           SESSION
-abc12345   docs/plan-spa.md         7    running          sess-xyz
-def67890   docs/plan-k8s-int...md   5    queued           -
+abc12345   docs/adr-YYYY-MM-DD-spa.md         7    running          sess-xyz
+def67890   docs/adr-...-k8s-integration.md   5    queued           -
 ```
 
 **`cancel <jobId>`**: Calls `DELETE http://localhost:8378/jobs/{jobId}` (via Bash `curl`). Confirms cancellation.
@@ -524,7 +526,7 @@ type JobEntry struct {
     ID           string     `json:"id"`           // UUID v4
     UserID       string     `json:"userId"`
     ProjectID    string     `json:"projectId"`    // project the session runs under
-    SpecPath     string     `json:"specPath"`     // e.g. "docs/plan-spa.md"
+    SpecPath     string     `json:"specPath"`     // e.g. "docs/adr-YYYY-MM-DD-spa.md"
     Priority     int        `json:"priority"`     // 1–10; 5 = default
     Threshold    int        `json:"threshold"`    // % 5h utilization; 75 = default
     AutoContinue bool       `json:"autoContinue"`

@@ -940,7 +940,7 @@ docker-compose exec postgres psql -U mclaude -c 'SELECT count(*) FROM events'
 
 ### Integration (requires K8s cluster)
 
-Deploy using the deployment plan (`docs/plan-k8s-integration.md`) and run its verification section (17 steps covering project lifecycle, session lifecycle, memory sharing, config sync, resilience, and provisioning).
+Deploy using the deployment plan (`docs/adr-2026-04-10-k8s-integration.md`) and run its verification section (17 steps covering project lifecycle, session lifecycle, memory sharing, config sync, resilience, and provisioning).
 
 ## Repo Structure
 
@@ -981,6 +981,6 @@ mclaude/
     Dockerfile
   docker-compose.yml
   docs/
-    plan-k8s-integration.md   (deployment plan — cluster-specific)
-    plan-core-containers.md   (this file — core software)
+    adr-2026-04-10-k8s-integration.md   (deployment plan — cluster-specific)
+    adr-2026-04-10-core-containers.md   (this file — core software)
 ```

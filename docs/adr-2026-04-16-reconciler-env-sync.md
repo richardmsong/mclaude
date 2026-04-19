@@ -74,7 +74,7 @@ Conditional:
 ## Scope
 
 **In scope:**
-- Add `gitIdentityId` to CRD schema (YAML) and canonical state schema (`docs/plan-state-schema.md`)
+- Add `gitIdentityId` to CRD schema (YAML) and canonical state schema (`docs/spec-state-schema.md`)
 - Reconciler update path syncs full container spec (env vars, volumes, imagePullSecrets, image, strategy)
 
 **Deferred:**
