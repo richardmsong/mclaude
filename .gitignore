@@ -29,6 +29,9 @@ MClaude/.claude/qa/results/
 # Node modules
 node_modules/
 
+# Lockfiles (registry URLs are environment-specific)
+bun.lock
+
 # Build output
 dist/
 
