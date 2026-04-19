@@ -683,6 +683,8 @@ func TestGracefulShutdownDrainsSubscriptions(t *testing.T) {
 	// and the method doesn't panic on an empty subs list.
 	// Prevent os.Exit(0) from killing the test process.
 	a.doExit = func(int) {}
+	// Prevent writeSessionKV from panicking on nil sessKV (no NATS in this test).
+	a.writeSessionKVFn = func(SessionState) error { return nil }
 	a.gracefulShutdown() // must not panic with empty sessions and empty subs
 }
 

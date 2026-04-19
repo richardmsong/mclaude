@@ -58,6 +58,9 @@ type Agent struct {
 	// doExit is called at the end of gracefulShutdown. Defaults to os.Exit(0).
 	// Overridable in tests to prevent process exit.
 	doExit func(code int)
+	// writeSessionKVFn, if non-nil, overrides writeSessionKV. Used in tests that
+	// exercise gracefulShutdown without a real NATS connection.
+	writeSessionKVFn func(state SessionState) error
 	// pendingUpdatingIDs tracks session IDs that were in "updating" state during
 	// recovery. clearUpdatingState() uses this to write idle to KV after consumers
 	// are attached, since the in-memory state is already idle.
@@ -413,16 +416,22 @@ func (a *Agent) clearUpdatingState() error {
 
 // gracefulShutdown implements the spec shutdown sequence for SIGTERM:
 //
-//  1. Write state:"updating" to session KV for all sessions.
+//  1. Write state:"updating" to session KV for all sessions (SPA banner).
+//     Set sess.shutdownPending = true. Do NOT mutate sess.state.State in memory —
+//     it must keep tracking Claude's live state for the drain predicate.
 //  2. Cancel command consumer context (stops cmd fetch loop; messages queue in JetStream).
 //  3. Drain core NATS subscriptions (terminal API).
-//  4. Keep control consumer running.
-//  5. Poll 1s: wait for all sessions to be idle or updating.
+//  4. Keep control consumer running (interrupts, permission responses still work).
+//  5. Poll 1s: drain predicate — all sessions must satisfy:
+//     sess.state.State == StateIdle AND sess.inFlightBackgroundAgents == 0.
+//     Sessions stuck in StateRequiresAction are interrupted so permission prompts
+//     don't block the upgrade indefinitely.
 //  6. Cancel control consumer context.
 //  7. Publish lifecycle "session_upgrading" for each session.
 //  8. Exit(0).
 func (a *Agent) gracefulShutdown() {
-	// Step 1: write state:"updating" for all sessions.
+	// Step 1: write state:"updating" to KV for all sessions (SPA banner).
+	// Set shutdownPending = true. Do NOT mutate in-memory state.State.
 	a.mu.RLock()
 	ids := make([]string, 0, len(a.sessions))
 	for id := range a.sessions {
@@ -437,12 +446,14 @@ func (a *Agent) gracefulShutdown() {
 		if !ok {
 			continue
 		}
+		// Build the KV payload with state:"updating" from the current live state.
 		st := sess.getState()
 		st.State = StateUpdating
 		st.StateSince = time.Now().UTC()
+		// Set shutdownPending so the SubtypeSessionStateChanged handler stops
+		// flushing to KV (preserving the "updating" banner).
 		sess.mu.Lock()
-		sess.state.State = StateUpdating
-		sess.state.StateSince = st.StateSince
+		sess.shutdownPending = true
 		sess.mu.Unlock()
 		if err := a.writeSessionKV(st); err != nil {
 			a.log.Warn().Err(err).Str("sessionId", id).Msg("gracefulShutdown: failed to write updating state")
@@ -466,20 +477,39 @@ func (a *Agent) gracefulShutdown() {
 		}
 	}
 
-	// Step 4 & 5: keep control consumer running; poll until all sessions idle/updating.
+	// Steps 4 & 5: keep control consumer running; poll until all sessions satisfy
+	// the drain predicate: state == StateIdle AND inFlightBackgroundAgents == 0.
+	// On each tick, interrupt any session in StateRequiresAction so pending
+	// permission prompts do not block the upgrade indefinitely.
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
 		a.mu.RLock()
-		allDone := true
-		for _, sess := range a.sessions {
-			st := sess.getState()
-			if st.State != StateIdle && st.State != StateUpdating {
-				allDone = false
-				break
-			}
+		sessions := make([]*Session, 0, len(a.sessions))
+		for _, s := range a.sessions {
+			sessions = append(sessions, s)
 		}
 		a.mu.RUnlock()
+
+		allDone := true
+		for _, sess := range sessions {
+			sess.mu.Lock()
+			state := sess.state.State
+			inFlight := sess.inFlightBackgroundAgents
+			sess.mu.Unlock()
+
+			// Auto-interrupt sessions stuck in requires_action so the user's
+			// absence doesn't block the upgrade. The turn aborts → idle.
+			if state == StateRequiresAction {
+				sess.sendInterrupt()
+				allDone = false
+				continue
+			}
+
+			if state != StateIdle || inFlight > 0 {
+				allDone = false
+			}
+		}
 		if allDone {
 			break
 		}
@@ -1046,7 +1076,12 @@ func (a *Agent) runHeartbeat(ctx context.Context) {
 }
 
 // writeSessionKV serialises and persists a SessionState to NATS KV.
+// If a.writeSessionKVFn is set (e.g., in tests), it is called instead of
+// the real NATS KV write.
 func (a *Agent) writeSessionKV(state SessionState) error {
+	if a.writeSessionKVFn != nil {
+		return a.writeSessionKVFn(state)
+	}
 	data, err := json.Marshal(state)
 	if err != nil {
 		return err
@@ -1059,7 +1094,11 @@ func (a *Agent) writeSessionKV(state SessionState) error {
 }
 
 // publishLifecycle publishes a lifecycle event on the project's lifecycle subject.
+// No-op when a.nc is nil (unit tests that don't need a real NATS connection).
 func (a *Agent) publishLifecycle(sessionID, eventType string) {
+	if a.nc == nil {
+		return
+	}
 	subject := fmt.Sprintf("mclaude.%s.%s.lifecycle.%s", a.userID, a.projectID, sessionID)
 	payload, _ := json.Marshal(map[string]string{
 		"type":      eventType,

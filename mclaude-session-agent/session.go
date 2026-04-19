@@ -62,6 +62,16 @@ type Session struct {
 	// (in the stdout router goroutine) before the line is published to NATS.
 	// Used by QuotaMonitor to scan assistant events for the SESSION_JOB_COMPLETE marker.
 	onRawOutput func(evType string, raw []byte)
+	// shutdownPending is set to true during graceful shutdown after the KV entry
+	// has been written with state:"updating". While true, SubtypeSessionStateChanged
+	// events update in-memory state but do NOT flush to KV (to preserve the
+	// "updating" banner in the SPA during drain).
+	shutdownPending bool
+	// inFlightBackgroundAgents tracks the number of Agent(run_in_background=true)
+	// tool calls that have been dispatched but whose task-notification has not yet
+	// been received. Guarded by mu. The drain predicate in gracefulShutdown waits
+	// for this to reach 0 before exiting.
+	inFlightBackgroundAgents int
 }
 
 // newSession creates a Session but does not start the Claude process yet.
@@ -130,6 +140,17 @@ func (s *Session) stopAndWait(timeout time.Duration) error {
 		}
 		<-done
 		return fmt.Errorf("process did not exit within %s; killed", timeout)
+	}
+}
+
+// sendInterrupt sends a synthetic interrupt to Claude's stdin. This is the same
+// code path used by handleControl when it receives an interrupt control_request.
+// Used by gracefulShutdown to unblock sessions stuck in StateRequiresAction.
+func (s *Session) sendInterrupt() {
+	interrupt := []byte(`{"type":"control_request","request":{"subtype":"interrupt"}}`)
+	select {
+	case s.stdinCh <- interrupt:
+	default:
 	}
 }
 
@@ -226,6 +247,11 @@ func (s *Session) start(claudePath string, resume bool, publish func(subject str
 
 			evType, _ := parseEventType(lineCopy)
 
+			// Update in-flight background agent counter based on stdout events.
+			// +1 when an assistant message contains an Agent tool_use with run_in_background:true.
+			// -1 when a user message with origin.kind=="task-notification" is observed.
+			s.updateInFlightBackgroundAgents(evType, lineCopy)
+
 			// Truncate events that exceed the NATS max payload limit (8 MB).
 			// The full content remains in Claude's JSONL for recovery.
 			lineCopy = truncateEventIfNeeded(lineCopy)
@@ -288,6 +314,64 @@ func (s *Session) start(claudePath string, resume bool, publish func(subject str
 	return nil
 }
 
+// updateInFlightBackgroundAgents updates the inFlightBackgroundAgents counter
+// based on observed stdout events from Claude:
+//   - +1 when an assistant message contains an Agent tool_use block with
+//     run_in_background: true in its input.
+//   - -1 (floored at 0) when a user message with origin.kind == "task-notification"
+//     is observed (indicating the background agent has completed).
+func (s *Session) updateInFlightBackgroundAgents(evType string, line []byte) {
+	switch evType {
+	case EventTypeAssistant:
+		// Parse the assistant message to check for Agent tool_use with run_in_background.
+		var msg struct {
+			Message struct {
+				Content []struct {
+					Type  string          `json:"type"`
+					Name  string          `json:"name"`
+					Input json.RawMessage `json:"input"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(line, &msg); err != nil {
+			return
+		}
+		for _, block := range msg.Message.Content {
+			if block.Type != "tool_use" || block.Name != "Agent" {
+				continue
+			}
+			var input struct {
+				RunInBackground bool `json:"run_in_background"`
+			}
+			if err := json.Unmarshal(block.Input, &input); err != nil {
+				continue
+			}
+			if input.RunInBackground {
+				s.mu.Lock()
+				s.inFlightBackgroundAgents++
+				s.mu.Unlock()
+			}
+		}
+	case EventTypeUser:
+		// Check for task-notification origin.
+		var msg struct {
+			Origin struct {
+				Kind string `json:"kind"`
+			} `json:"origin"`
+		}
+		if err := json.Unmarshal(line, &msg); err != nil {
+			return
+		}
+		if msg.Origin.Kind == "task-notification" {
+			s.mu.Lock()
+			if s.inFlightBackgroundAgents > 0 {
+				s.inFlightBackgroundAgents--
+			}
+			s.mu.Unlock()
+		}
+	}
+}
+
 // handleSideEffect inspects specific event types and updates local state/KV.
 // It also handles permission-policy auto-approve for control_request events.
 func (s *Session) handleSideEffect(line []byte, writeKV func(state SessionState) error) {
@@ -322,8 +406,16 @@ func (s *Session) handleSideEffect(line []byte, writeKV func(state SessionState)
 				s.mu.Lock()
 				s.state.State = ev.State
 				s.state.StateSince = time.Now()
+				pending := s.shutdownPending
 				s.mu.Unlock()
-				s.flushKV(writeKV)
+				// While shutdownPending is true, do NOT flush state to KV.
+				// The KV entry was already written with state:"updating" in
+				// gracefulShutdown step 1. Flushing here would overwrite the
+				// "updating" banner with Claude's live state (e.g. "idle"),
+				// causing the SPA banner to disappear mid-upgrade.
+				if !pending {
+					s.flushKV(writeKV)
+				}
 			}
 		}
 	case EventTypeControlRequest:
