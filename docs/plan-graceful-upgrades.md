@@ -28,11 +28,11 @@ End-to-end sequence when Helm deploys a new session-agent image:
 3. reconcileDeployment sees image mismatch → updates Deployment spec (including Recreate strategy)
 4. K8s sends SIGTERM to old pod (Recreate strategy: old dies first)
 5. Session-agent receives SIGTERM:
-   a. Writes state:"updating" to session KV for ALL sessions
+   a. Writes state:"updating" to session KV for ALL sessions (for SPA banner). Does NOT clobber the in-memory `sess.state.State` field — that keeps reflecting Claude's live state so the drain predicate in step e can detect real idle-vs-running transitions.
    b. Stops command consumer (create/delete/input/restart queue in JetStream)
    c. Drains core NATS subscriptions (terminal API)
    d. Keeps control consumer running (interrupts, permission responses)
-   e. Waits for all busy sessions → idle (no timeout)
+   e. Waits for every session to satisfy the drain predicate — Claude main turn is `idle` AND no in-flight background agents. Sessions stuck in `requires_action` (awaiting a permission response) are interrupted so the user isn't a blocker for the upgrade; they re-send after resume if they still want the tool to run. No wall-clock timeout.
    f. Stops control consumer
    g. Publishes lifecycle event "session_upgrading" for each session
    h. Exits cleanly
@@ -155,19 +155,38 @@ Replace the current `gracefulShutdown()` (which interrupts Claude and exits in 1
 
 ```
 On SIGTERM / context cancellation:
-1. Write state:"updating" + stateSince:now to session KV for every session
-2. Cancel command consumer context (stops cmd fetch loop; messages queue in JetStream)
-3. Drain core NATS subscriptions (terminal.create, terminal.delete, terminal.resize)
-4. Keep control consumer running (its context is NOT cancelled)
+1. For each session:
+    - Write state:"updating" + stateSince:now to session KV (for SPA banner).
+    - Set sess.shutdownPending = true (in-memory flag).
+    - Do NOT modify the in-memory sess.state.State field — it must keep tracking Claude's live state so the drain predicate works.
+2. Cancel command consumer context (stops cmd fetch loop; messages queue in JetStream).
+3. Drain core NATS subscriptions (terminal.create, terminal.delete, terminal.resize).
+4. Keep control consumer running (its context is NOT cancelled).
 5. Poll loop (1s tick):
-   - For each session: read sess.getState().State
-   - If state is "idle" or "updating": session is done
-   - If state is "running" or "requires_action": still active, keep waiting
-   - If ALL sessions are idle/updating → break
-6. Cancel control consumer context (stops ctl fetch loop)
-7. Publish lifecycle event "session_upgrading" for each session
-8. Exit(0)
+    - For each session: evaluate the drain predicate (see below).
+    - If ALL sessions satisfy the predicate → break.
+6. Cancel control consumer context (stops ctl fetch loop).
+7. Publish lifecycle event "session_upgrading" for each session.
+8. Exit(0).
 ```
+
+**Drain predicate** — a session is ready to exit when BOTH of:
+- `sess.getState().State == StateIdle` — Claude's main turn is not active.
+- `sess.inFlightBackgroundAgents == 0` — no async `Agent(run_in_background=true)` tool calls are awaiting their `task-notification`.
+
+Pending permission prompts are NOT a blocking condition. If a session has outstanding controls (`state == StateRequiresAction`) the drain loop interrupts the turn rather than waiting for the user to respond — see Pending-control interrupt below.
+
+The in-memory state field is the source of truth for the poll, NOT the KV state. KV state is set to `"updating"` in step 1 for the SPA banner and must not be read back to decide drain completion (that would be tautological).
+
+**Pending-control interrupt** — a session may be stuck in `StateRequiresAction` because the user is offline or asleep. Waiting indefinitely would block the upgrade for that session forever. Therefore, on every poll tick, for each session whose state is `StateRequiresAction`, the drain loop sends a synthetic interrupt through the same code path as `handleControl` — the turn aborts, the pending tool_use is cancelled, the session transitions to `StateIdle`, and the drain predicate becomes satisfiable. After the new pod resumes the conversation with `--resume`, the user's last request is still in the transcript; they can re-send to retry, and Claude re-issues the tool_use (triggering a fresh permission prompt) if it still wants to proceed.
+
+**In-flight background agent counter** — each session tracks `inFlightBackgroundAgents int` guarded by `sess.mu`. The stdout router updates it:
+- `+1` when it observes an `assistant` message whose `message.content[*]` contains a `tool_use` block where `name == "Agent"` AND the input includes `run_in_background: true`.
+- `-1` (floored at zero) when it observes a top-level `user` message with `origin.kind == "task-notification"`.
+
+The counter is best-effort — if the session-agent was killed mid-flight and relaunched, the counter starts at 0 on the new pod. The main-session JSONL still contains the unresolved Agent tool_use, but Claude's internal task-notification machinery was lost with the old pod. This is by design: the NEW pod's drain logic only needs to protect agents launched after its own startup.
+
+**KV write suppression during drain** — while `sess.shutdownPending == true`, the `SubtypeSessionStateChanged` handler updates in-memory `sess.state.State` as usual but MUST NOT flush state to KV. If it did, a post-step-1 Claude transition from `running` → `idle` would overwrite the `"updating"` banner state, and the SPA banner would disappear mid-upgrade.
 
 The poll loop uses `sess.getState().State` (already thread-safe via mutex) — not `stopAndWait`, which sends an interrupt. The point is to wait passively, not to interrupt.
 
@@ -578,10 +597,12 @@ func clearPendingControlsForResume(st *SessionState) {
 
 | Scenario | Behavior |
 |----------|----------|
-| SIGTERM while all sessions idle | Write "updating", stop all consumers, exit immediately. |
-| SIGTERM while a session is busy | Write "updating", stop cmd consumer, keep ctl consumer. Wait for turn to finish. |
+| SIGTERM while all sessions idle AND no in-flight background agents | Write "updating" to KV, stop cmd consumer, drain terminal subs, evaluate predicate → already satisfied → stop ctl consumer, exit. |
+| SIGTERM while a session is mid-turn (`state == running`) | Write "updating" to KV (but do NOT clobber in-memory state). Stop cmd consumer, keep ctl consumer. Poll until Claude emits `state == idle`, then check for background agents. |
+| SIGTERM while a session has in-flight background agents | Write "updating" to KV. Keep ctl consumer running. Poll until each async Agent's `task-notification` has been observed (counter hits 0) before exit. |
 | User sends interrupt during drain | Control consumer processes it. Session goes idle. Pod exits. |
-| User sends permission response during drain | Control consumer processes it. Turn continues/completes. Pod exits when idle. |
+| User sends permission response during drain | Control consumer processes it. Turn continues/completes. Pod exits when the drain predicate is satisfied (possibly still waiting on background agents). |
+| User does NOT respond to permission prompt during drain | Drain loop sends a synthetic interrupt on the next poll tick. Turn aborts, session transitions to idle, pod exits. User's last request remains in transcript and they can re-send after the new pod resumes. |
 | New user message during drain | Queues in JetStream. Processed by new pod after restart. |
 | Create request during restart | Queues in JetStream. New pod processes it. SPA waits for KV (30s timeout). |
 | Pod crashes (no SIGTERM) | K8s recreates pod. Durable consumer has unacked messages → redelivered. Sessions resume from KV. |
@@ -595,7 +616,9 @@ func clearPendingControlsForResume(st *SessionState) {
 - `MCLAUDE_API` JetStream stream for all session API subjects
 - Two durable pull consumers per session-agent (cmd + ctl)
 - JetStream fetch loop with `jetstream.Msg` → `*nats.Msg` adapter
-- SIGTERM graceful drain: write "updating" → stop cmd → poll for idle → stop ctl → exit
+- SIGTERM graceful drain: write `"updating"` to KV only (not in-memory state) → stop cmd → poll drain predicate (state == idle AND in-flight bg agents == 0) → auto-interrupt any session in `requires_action` so pending permission prompts don't block upgrade → stop ctl → exit
+- Per-session `inFlightBackgroundAgents` counter maintained by the stdout router (`+1` on `Agent` tool_use with `run_in_background: true`, `-1` on user message with `origin.kind == "task-notification"`)
+- KV write suppression in `SubtypeSessionStateChanged` handler while `shutdownPending` is set (in-memory state still updates)
 - Reconciler watches ConfigMap (filtered by name + namespace), re-enqueues MCProject CRs on image change
 - `Recreate` deployment strategy for session-agent pods (both create and update paths)
 - `terminationGracePeriodSeconds: 86400` (values.yaml change only — template already renders it)
