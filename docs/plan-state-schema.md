@@ -90,7 +90,7 @@ Value: `SessionState`
   "worktree": "string",
   "cwd": "string",
   "name": "string",
-  "state": "idle | busy | error",
+  "state": "idle | running | requires_action | updating | restarting | failed | plan_mode | waiting_for_input | unknown",
   "stateSince": "RFC3339",
   "createdAt": "RFC3339",
   "model": "string",
