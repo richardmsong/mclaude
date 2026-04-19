@@ -1,5 +1,10 @@
 # Scratch-to-Git Conversion
 
+**Status**: accepted
+**Status history**:
+- 2026-04-14: accepted
+
+
 ## Overview
 
 > **Current model note:** Today ALL projects (including scratch) get a bare repo at `/data/repo/` and use worktrees — see `entrypoint.sh` and `adr-2026-04-10-k8s-integration.md`. "Scratch" currently means "bare repo, no remote." This doc proposes changing to a regular-repo layout at `/data/` and introducing a true no-git scratch mode. This is a layout migration, not just adding git to projects that lack it.

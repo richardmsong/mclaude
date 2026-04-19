@@ -1,5 +1,10 @@
 # Backgrounded Shell Survival Across Pod Restarts
 
+**Status**: accepted
+**Status history**:
+- 2026-04-19: accepted
+
+
 ## Overview
 
 When a session-agent pod is upgraded (Helm rollout, Recreate strategy), any `Bash(run_in_background=true)` shells that the session's Claude launched are killed with the pod. The resumed Claude on the new pod has no way to know a shell died — the `tool_use` is dangling in the transcript, and any future `BashOutput` call on the shell-id would reference a process that no longer exists.

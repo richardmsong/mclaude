@@ -1,5 +1,10 @@
 # Per-Turn Token Insights
 
+**Status**: accepted
+**Status history**:
+- 2026-04-17: accepted
+
+
 Feature **M5** — per-turn token breakdown visible on every assistant message.
 
 ## Problem

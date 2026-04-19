@@ -1,5 +1,10 @@
 # mclaude Client Architecture
 
+**Status**: accepted
+**Status history**:
+- 2026-04-11: accepted
+
+
 ## Principle
 
 Every client — web SPA, mclaude-cli, future native apps — follows the same layered architecture. The business logic is identical; only the rendering and native API bindings change.

@@ -1,5 +1,10 @@
 # Replay User Messages
 
+**Status**: accepted
+**Status history**:
+- 2026-04-15: accepted
+
+
 ## Overview
 
 Enable Claude Code's `--replay-user-messages` flag so that all user messages — including mid-turn redirects queued between tool calls — are echoed on stdout and flow through the events stream. On send, `addPendingMessage` immediately inserts an optimistic user turn into `_conversation.turns` (dimmed, `pendingUuid` set). When Claude's echo arrives and the uuid matches, the pending flag is cleared in-place — no position jump. This replaces the manual `handleInput` publish while keeping the optimistic turn for instant rendering.

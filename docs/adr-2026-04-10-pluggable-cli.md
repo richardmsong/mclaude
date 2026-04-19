@@ -1,5 +1,10 @@
 # Pluggable CLI Backend Architecture
 
+**Status**: accepted
+**Status history**:
+- 2026-04-10: accepted
+
+
 ## Overview
 
 Make the mclaude session agent support multiple CLI backends (Claude Code, Factory Droid, Devin CLI, Gemini CLI) through a driver/adapter pattern. Each CLI becomes a "driver" that owns its native protocol and translates it into a canonical internal event schema that flows through NATS to clients.

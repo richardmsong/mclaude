@@ -1,5 +1,10 @@
 # Graceful Session-Agent Pod Upgrades
 
+**Status**: accepted
+**Status history**:
+- 2026-04-14: accepted
+
+
 ## Overview
 
 When Helm deploys a new session-agent image, the running pod finishes its current Claude turn, queues incoming messages in JetStream, writes an "Updating..." state to KV, and exits cleanly. The new pod starts, resumes sessions, drains queued messages, and clears the banner. No user messages are lost. The UI shows an "Updating..." banner during the transition.

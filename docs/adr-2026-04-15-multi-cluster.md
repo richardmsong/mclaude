@@ -1,5 +1,10 @@
 # Multi-Cluster Architecture
 
+**Status**: accepted
+**Status history**:
+- 2026-04-15: accepted
+
+
 ## Overview
 
 Separates mclaude into a central control plane and N independent worker clusters. The control plane handles authentication, authorization, cluster registry, project-to-cluster mapping, and discovery. Each worker cluster runs its own NATS and session-agents. Workers connect to the control plane's hub NATS as leaf nodes, giving the SPA a single connection point for real-time monitoring across all clusters. Clients prefer direct NATS connections to workers for active sessions, falling back through the hub when direct access is unavailable.

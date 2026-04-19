@@ -1,5 +1,10 @@
 # Multi-Laptop Support
 
+**Status**: accepted
+**Status history**:
+- 2026-04-10: accepted
+
+
 ## Overview
 
 Allow multiple laptops to connect to a single relay simultaneously. Each laptop runs its own connector + mclaude-server. The web/iOS UI shows sessions from all laptops, filterable by host.

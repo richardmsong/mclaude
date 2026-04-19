@@ -10,31 +10,63 @@ Structured design session for a new feature. Produces an **ADR** at `docs/adr-YY
 
 ADRs are dated, immutable records of individual decisions. Specs are living, present-tense descriptions of the current design. Git co-commits between an ADR and the specs it touches form the **lineage edge** that the `docs` MCP surfaces via `get_lineage`. This is load-bearing: without the co-commit, future agents cannot discover why a spec section looks the way it does.
 
+Every ADR carries a **status** (`draft | accepted | implemented | superseded | withdrawn`) — see `docs/adr-2026-04-19-adr-status-lifecycle.md`. This skill starts new ADRs in `draft` and promotes them to `accepted` at the spec-co-commit step. Drafts can be paused and resumed freely; they don't co-commit with specs.
+
 ## Usage
 
 ```
 /plan-feature <description of the feature>
+/plan-feature --resume [<slug>]
 ```
 
 Examples:
 - `/plan-feature GitHub OAuth for repo access`
 - `/plan-feature multi-user support with per-user namespaces`
 - `/plan-feature session sharing — let users share a session URL with a teammate`
+- `/plan-feature --resume` — list all draft ADRs and pick one to resume
+- `/plan-feature --resume session-sharing` — resume the matching draft directly
 
 ---
 
 ## Algorithm
 
 ```
+0. If --resume: locate the draft ADR, re-read its current content, and jump into
+   the Q&A loop with the remaining open questions.
+
+   Otherwise: check for an existing draft ADR whose slug overlaps with the
+   description (grep docs/adr-*.md for Status: draft, compare slugs). If one
+   exists, offer to resume.
+
 1. Research (read relevant specs + related ADRs via docs MCP)
 2. Draft design + question list
 3. Ask questions (AskUserQuestion)
-4. Repeat steps 2-3 until no ambiguities remain
-5. Write the ADR + update impacted specs
+4. Repeat steps 2-3 until no ambiguities remain.
+   (A draft ADR file may be committed between rounds — convenience only,
+   does not co-commit with specs.)
+5. Write the ADR in `draft` status + stage impacted spec edits
 6. Design audit (/design-audit) until CLEAN
-7. Commit ADR + spec edits together (single spec commit)
+7. Flip the ADR status from `draft` → `accepted` (append a history line with
+   today's date). Commit ADR + spec edits together (single spec commit).
 8. Hand off to /feature-change
 ```
+
+---
+
+## Step 0 — Resume a draft (if applicable)
+
+If the user invoked `/plan-feature --resume [<slug>]`:
+
+1. Find draft ADRs: `Glob("docs/adr-*.md")` → for each file, read the top ~10 lines and keep those with `**Status**: draft`.
+2. If `<slug>` was provided, pick the matching file (substring match). Otherwise, list the drafts to the user and ask which one to resume.
+3. Read the full draft in context. Identify open questions (typically marked with TODO, "(decision pending)", or explicit question lists from prior Q&A rounds).
+4. Skip Step 1 (research already done) and jump into Step 3 (ask questions) with the remaining opens.
+
+If the user invoked `/plan-feature <description>` **without** `--resume`:
+
+1. Grep `docs/adr-*.md` for `**Status**: draft` and extract each draft's slug from its filename.
+2. If any draft's slug overlaps with the description's keywords, tell the user: "Found a draft at `docs/adr-YYYY-MM-DD-<slug>.md` that might match. Resume it, or start fresh?"
+3. Otherwise proceed to Step 1.
 
 ---
 
@@ -111,6 +143,10 @@ Write the decision record to `docs/adr-YYYY-MM-DD-<slug>.md`. Use today's date (
 
 ```markdown
 # ADR: <Feature Name>
+
+**Status**: draft
+**Status history**:
+- YYYY-MM-DD: draft
 
 ## Overview
 One paragraph: what this is, why it exists, what it enables.
@@ -207,9 +243,18 @@ Do not commit or hand off until the audit passes.
 
 ---
 
-## Step 6 — Commit (single spec commit)
+## Step 6 — Promote to `accepted` and commit (single spec commit)
 
-Stage the new ADR together with any spec edits and commit once:
+Before committing, edit the ADR's header to flip the status:
+
+```markdown
+**Status**: accepted
+**Status history**:
+- YYYY-MM-DD: draft
+- YYYY-MM-DD: accepted — paired with <list of spec-*.md files updated, if any>
+```
+
+Then stage the ADR together with any spec edits and commit once:
 
 ```bash
 git add docs/
@@ -219,6 +264,17 @@ git commit -m "spec(<area>): <what changed and why>"
 **This is the lineage edge.** The `docs` MCP reads co-commits to compute `get_lineage`. If the ADR is committed separately from the specs it modifies, lineage does not link them and future agents will have to re-read all ADRs to understand why a spec section exists.
 
 Only `docs/` is staged in this commit. Code changes go through `/feature-change`'s dev-harness loop and commit separately.
+
+### Drafts may be committed too
+
+If the user wants to pause mid-planning, the draft ADR can be committed on its own (no spec edits, no status promotion):
+
+```bash
+git add docs/adr-YYYY-MM-DD-<slug>.md
+git commit -m "draft(<area>): <what's being planned>"
+```
+
+A draft-only commit does **not** form a lineage edge. It only preserves the work-in-progress so it survives branch switches. The next invocation of `/plan-feature --resume` picks up from there.
 
 ---
 

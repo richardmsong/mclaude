@@ -1,5 +1,10 @@
 # NATS Security Threat Model
 
+**Status**: accepted
+**Status history**:
+- 2026-04-17: accepted
+
+
 ## Overview
 
 Security model for NATS in mclaude's event-driven architecture. Covers identity permissions, subject isolation, trust boundaries, KV access control, rate limiting, and threat scenarios for both managed clusters and BYOH (Bring Your Own Hardware) targets.

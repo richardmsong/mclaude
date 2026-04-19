@@ -1,5 +1,10 @@
 # mclaude Platform Architecture
 
+**Status**: accepted
+**Status history**:
+- 2026-04-10: accepted
+
+
 ## Overview
 
 Two services + infrastructure. The relay, connector, server, and controller collapse into simpler, well-scoped components. The session agent communicates with Claude Code via the structured stream-json protocol (the same protocol used by VS Code and JetBrains IDE extensions), eliminating tmux, JSONL tailing, and screen scraping entirely.

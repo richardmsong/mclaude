@@ -1,5 +1,10 @@
 # Git Provider OAuth — Repo Access
 
+**Status**: accepted
+**Status history**:
+- 2026-04-14: accepted
+
+
 ## Overview
 
 Users connect their GitHub or GitLab account via OAuth so mclaude can clone private repos without manual SSH key setup. The control-plane handles the OAuth flow, stores tokens in K8s Secrets, and proxies provider API calls (repo listing) so the SPA never touches tokens. The architecture is provider-agnostic — GitHub and GitLab ship in v1, with Bitbucket and Azure DevOps planned.
