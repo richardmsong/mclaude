@@ -27,6 +27,14 @@ The loop: `/feature-change` checks the spec → updates spec if needed → commi
 
 For bug fixes where the spec is already correct, `/feature-change` skips the spec update and goes straight to `/dev-harness`.
 
+## New feature detected → invoke /plan-feature immediately
+
+**When the user describes anything that looks like a potential new feature, jump straight into `/plan-feature` — don't wait for the full picture, don't rely on keeping it in memory.**
+
+Planning context is lost when you get compacted or switched out. The ADR on disk is the durable form. Start `/plan-feature` on the first mention, even mid-conversation, even if there are still open questions — drafts are first-class (see `docs/adr-2026-04-19-adr-status-lifecycle.md`) and can be paused, committed, and resumed.
+
+Heuristic: if the user says something like "maybe we should…", "what if…", "could we add…", "I want to…", or describes a capability the app doesn't have yet → that's `/plan-feature`. Don't ask permission; just start the skill and let the Q&A surface the rest.
+
 ## Polling — keep checking until done
 
 After triggering any async operation (CI run, pod rollout), **keep polling** until it resolves. Do not summarize and hand back to the user mid-flight. Check `gh run view` + `kubectl get pods` on every cycle.
