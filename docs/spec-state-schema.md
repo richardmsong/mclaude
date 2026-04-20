@@ -36,13 +36,37 @@ Slug charset: `[a-z0-9][a-z0-9-]{0,62}`, excluding leading `_` and the reserved-
 | `name` | TEXT | NOT NULL | Display name (free-form UTF-8, max 128 chars, mutable, e.g. "mclaude") |
 | `git_url` | TEXT | NOT NULL DEFAULT '' | Optional git remote |
 | `status` | TEXT | NOT NULL DEFAULT 'active' | active, pending, archived |
-| `cluster_id` | TEXT | NOT NULL FK→clusters ON DELETE RESTRICT | Cluster the project is provisioned on |
+| `host_id` | TEXT | NOT NULL FK→hosts ON DELETE RESTRICT | Host the project is provisioned on (machine or cluster host) |
 | `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
 
-Index: `UNIQUE (user_id, slug)` — projects are unique-by-slug per user, not globally.
+Index: `UNIQUE (user_id, host_id, slug)` — projects are unique-by-slug per user per host.
 
 Writers: control-plane (CreateProject)
-Readers: control-plane (GetProjectsByUser, reconciler, GetProjectBySlug)
+Readers: control-plane (GetProjectsByUser, GetProjectsByHost, reconciler, GetProjectBySlug)
+
+### `hosts`
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | TEXT | PRIMARY KEY | UUID v4 |
+| `user_id` | TEXT | NOT NULL FK→users ON DELETE CASCADE | Owning user |
+| `slug` | TEXT | NOT NULL | Typed-slug identifier. Per-user unique (`UNIQUE (user_id, slug)`). For machine hosts, derived from display name via `slugify()`. For cluster hosts, canonical from cluster name. Immutable. |
+| `name` | TEXT | NOT NULL | Display name (free-form UTF-8, max 128 chars, mutable) |
+| `type` | TEXT | NOT NULL | `machine` or `cluster` |
+| `role` | TEXT | NOT NULL DEFAULT 'owner' | `owner` or `user`. Machine hosts always `owner`. Cluster hosts: registering admin = `owner`, granted users = `user`. Multiple owners supported. |
+| `cluster_id` | TEXT | FK→clusters ON DELETE CASCADE | NULL for machine hosts. FK to `clusters` for cluster hosts. |
+| `public_key` | TEXT | NOT NULL | NKey public key (generated on host, submitted during registration) |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+| `last_seen_at` | TIMESTAMPTZ | | Updated by presence tracking |
+
+Index: `UNIQUE (user_id, slug)` — hosts are unique-by-slug per user.
+
+Writers: control-plane (RegisterHost, GrantClusterAccess, RemoveHost, UpdateHostName)
+Readers: control-plane (GetHostsByUser, GetHostBySlug, reconciler, auth middleware, presence tracking)
+
+Slug charset: same as all slugs per ADR-0024. `hosts` is a reserved word.
+
+See `docs/adr-0004-multi-laptop.md` for the full BYOH design.
 
 ### `clusters`
 
@@ -62,21 +86,7 @@ Readers: control-plane (GetProjectsByUser, reconciler, GetProjectBySlug)
 Writers: control-plane (RegisterCluster, UpdateCluster)
 Readers: control-plane (discovery, login response, RBAC checks)
 
-### `user_clusters`
-
-| Column | Type | Constraints | Description |
-|--------|------|-------------|-------------|
-| `user_id` | TEXT | NOT NULL FK→users ON DELETE CASCADE | |
-| `cluster_id` | TEXT | NOT NULL FK→clusters ON DELETE CASCADE | |
-| `role` | TEXT | NOT NULL DEFAULT 'member' | member, admin |
-| `is_default` | BOOLEAN | NOT NULL DEFAULT FALSE | First grant = default |
-| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
-
-Primary key: `(user_id, cluster_id)`
-Constraint: `CREATE UNIQUE INDEX idx_user_clusters_default ON user_clusters (user_id) WHERE is_default = TRUE` — partial unique index ensuring at most one default per user
-
-Writers: control-plane (GrantClusterAccess, RevokeClusterAccess, SetDefaultCluster)
-Readers: control-plane (RBAC validation, project creation, login response)
+*`user_clusters` table removed — absorbed into `hosts` table with `type='cluster'`. See ADR-0004.*
 
 ---
 
@@ -88,7 +98,7 @@ All KV bucket keys use typed slugs as their identifier tokens per ADR-0024. Sepa
 
 Created by: control-plane (`ensureSessionsKV` — `nats.KeyValueConfig{Bucket: "mclaude-sessions"}`)
 
-Key format: `{uslug}.{pslug}.{sslug}` (dot-separated for wildcard matching)
+Key format: `{uslug}.{hslug}.{pslug}.{sslug}` (dot-separated for wildcard matching; `{hslug}` per ADR-0004)
 
 Value: `SessionState`
 ```json
@@ -96,6 +106,7 @@ Value: `SessionState`
   "id": "string (UUID v4)",
   "slug": "string (session slug)",
   "userSlug": "string",
+  "hostSlug": "string",
   "projectSlug": "string",
   "projectId": "string (UUID v4)",
   "branch": "string",
@@ -132,7 +143,7 @@ History: all versions (for resume tracking)
 
 Created by: control-plane (`ensureProjectsKV` — `nats.KeyValueConfig{Bucket: "mclaude-projects", History: 1}`)
 
-Key format: `{uslug}.{pslug}`
+Key format: `{uslug}.{hslug}.{pslug}` (host-scoped per ADR-0004)
 
 Value: `ProjectState`
 ```json
@@ -140,6 +151,7 @@ Value: `ProjectState`
   "id": "string (UUID v4)",
   "slug": "string",
   "userSlug": "string",
+  "hostSlug": "string",
   "name": "string",
   "gitUrl": "string",
   "status": "string",
@@ -167,22 +179,26 @@ Writers: control-plane (on cluster membership change)
 Readers: SPA (user watches own key)
 History: 1
 
-### `mclaude-laptops`
+### `mclaude-hosts`
 
 Created by: control-plane (pre-created; opened by daemon in `NewDaemon`)
 
-Key format: `{uslug}.{hostname}` (hostname is the raw machine hostname — not a slug; ADR-0004 later replaces this with `{uslug}.{hslug}` when the `hosts` table lands)
+Key format: `{uslug}.{hslug}` (per ADR-0004)
 
 Value:
 ```json
 {
-  "machineId": "string",
-  "ts": "RFC3339"
+  "slug": "string",
+  "type": "machine | cluster",
+  "name": "string",
+  "status": "online | offline",
+  "machineId": "string (machine hosts only)",
+  "lastSeen": "RFC3339"
 }
 ```
 
-Writers: daemon (`writeLaptopKV` — on startup + every 12h)
-Readers: daemon (`checkHostnameCollision` — on startup)
+Writers: daemon (`writeHostKV` — on startup + every 12h for machine hosts), control-plane (for cluster host status)
+Readers: SPA (KV watch for host list + status), daemon (on startup)
 History: 1
 
 ### `mclaude-job-queue`
@@ -197,6 +213,7 @@ Value: `JobEntry`
   "id": "string (UUID v4)",
   "userId": "string (UUID v4)",
   "userSlug": "string",
+  "hostSlug": "string",
   "projectId": "string (UUID v4)",
   "projectSlug": "string",
   "sessionId": "string (UUID v4)",
@@ -222,7 +239,7 @@ Writers: daemon HTTP server (`POST /jobs`), daemon dispatcher (status transition
 Readers: daemon dispatcher (KV watch), daemon HTTP server (`GET /jobs`)
 History: 1
 
-Dispatcher uses slug fields (`userSlug`, `projectSlug`, `sessionSlug`) to construct KV keys into `mclaude-sessions`. UUID fields (`userId`, `projectId`, `sessionId`) remain for Postgres foreign-key joins.
+Dispatcher uses slug fields (`userSlug`, `hostSlug`, `projectSlug`, `sessionSlug`) to construct KV keys into `mclaude-sessions`. UUID fields (`userId`, `projectId`, `sessionId`) remain for Postgres foreign-key joins.
 
 ---
 
@@ -234,14 +251,14 @@ Created by: session-agent (`CreateOrUpdateStream` — idempotent, authoritative)
 
 ```
 Name:      MCLAUDE_EVENTS
-Subjects:  mclaude.users.*.projects.*.events.*
+Subjects:  mclaude.users.*.hosts.*.projects.*.events.*
 Retention: LimitsPolicy
 MaxAge:    30 days
 Storage:   FileStorage
 Discard:   DiscardOld
 ```
 
-Subject pattern: `mclaude.users.{uslug}.projects.{pslug}.events.{sslug|_api}`
+Subject pattern: `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.events.{sslug|_api}`
 
 Publishers: session-agent (raw stream-json from Claude Code process; `_api` suffix for API responses — the `_` prefix is reserved for internal sentinels and does not collide with slugs, which cannot start with `_`)
 Subscribers: SPA (JetStream consumer for live conversation replay)
@@ -252,14 +269,14 @@ Created by: session-agent (`CreateOrUpdateStream` — idempotent)
 
 ```
 Name:      MCLAUDE_API
-Subjects:  mclaude.users.*.projects.*.api.sessions.>
+Subjects:  mclaude.users.*.hosts.*.projects.*.api.sessions.>
 Retention: LimitsPolicy
 MaxAge:    1 hour
 Storage:   FileStorage
 Discard:   DiscardOld
 ```
 
-Subject pattern: `mclaude.users.{uslug}.projects.{pslug}.api.sessions.{create|input|resume|delete|control}`
+Subject pattern: `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.{create|input|resume|delete|control}`
 
 Publishers: SPA (session commands), daemon (job dispatch)
 Subscribers: session-agent (pull consumer for at-least-once delivery)
@@ -271,14 +288,14 @@ Created by: not yet created in production code (test-only in `testutil/deps.go`)
 
 ```
 Name:      MCLAUDE_LIFECYCLE
-Subjects:  mclaude.users.*.projects.*.lifecycle.*
+Subjects:  mclaude.users.*.hosts.*.projects.*.lifecycle.*
 Retention: LimitsPolicy
 MaxAge:    TBD
 Storage:   FileStorage
 Discard:   DiscardOld
 ```
 
-Subject pattern: `mclaude.users.{uslug}.projects.{pslug}.lifecycle.{sslug}`
+Subject pattern: `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{sslug}`
 
 Publishers: session-agent (`publishLifecycle`, `publishLifecycleExtra`, `publishPermDenied`), daemon (session_job_paused)
 Subscribers: SPA (session list updates), daemon (`runLifecycleSubscriber` — writes terminal job state to KV)
@@ -287,22 +304,34 @@ Subscribers: SPA (session list updates), daemon (`runLifecycleSubscriber` — wr
 
 ## NATS Subjects (Core Pub/Sub)
 
-These are fire-and-forget messages on core NATS (not JetStream). No persistence. All subjects use typed literals between slugs per ADR-0024: every slug is preceded by a reserved word (`users`, `projects`, `sessions`, `clusters`, `api`, `events`, `lifecycle`, `quota`, `terminal`) that names what the following token is.
+These are fire-and-forget messages on core NATS (not JetStream). No persistence. All subjects use typed literals between slugs per ADR-0024 (extended by ADR-0004): every slug is preceded by a reserved word (`users`, `hosts`, `projects`, `sessions`, `clusters`, `api`, `events`, `lifecycle`, `quota`, `terminal`) that names what the following token is.
+
+**User-level subjects** (no host scope):
 
 | Subject Pattern | Publisher | Subscriber | Payload |
 |----------------|-----------|------------|---------|
-| `mclaude.users.{uslug}.api.projects.create` | SPA | control-plane (request/reply) | `{projectSlug, name, gitUrl}` |
-| `mclaude.users.{uslug}.api.projects.updated` | control-plane | SPA | `{projectSlug, status}` |
+| `mclaude.users.{uslug}.api.projects.create` | SPA | control-plane (request/reply) | `{projectSlug, hostSlug, name, gitUrl}` |
+| `mclaude.users.{uslug}.api.projects.updated` | control-plane | SPA | `{projectSlug, hostSlug, status}` |
 | `mclaude.users.{uslug}.quota` | daemon (`runQuotaPublisher`) | `QuotaMonitor` (per-session) | `QuotaStatus` JSON — leaf under user scope (not under `.api.`, since quota is a broadcast signal, not a request/reply endpoint) |
-| `mclaude.users.{uslug}.projects.{pslug}.api.sessions.input` | SPA, daemon | session-agent | `{type, message, sessionSlug}` |
-| `mclaude.users.{uslug}.projects.{pslug}.api.sessions.control` | SPA | session-agent | `{type, sessionSlug, request}` |
-| `mclaude.users.{uslug}.projects.{pslug}.api.sessions.create` | SPA, daemon | session-agent (request/reply) | `{branch, permPolicy, quotaMonitor}` |
-| `mclaude.users.{uslug}.projects.{pslug}.api.sessions.delete` | SPA, daemon | session-agent | `{sessionSlug}` |
-| `mclaude.users.{uslug}.projects.{pslug}.api.terminal.*` | SPA | session-agent | terminal I/O |
-| `mclaude.users.{uslug}.projects.{pslug}.events.{sslug}` | session-agent | SPA (via MCLAUDE_EVENTS stream) | raw stream-json |
-| `mclaude.users.{uslug}.projects.{pslug}.lifecycle.{sslug}` | session-agent, daemon | SPA, daemon (via MCLAUDE_LIFECYCLE stream) | lifecycle event JSON |
 
-| `mclaude.clusters.{cslug}.api.projects.provision` | control-plane | worker controller (request/reply) | `{userSlug, projectSlug, gitUrl}` |
+**Host-scoped subjects** (per ADR-0004 — `.hosts.{hslug}.` inserted between user and project):
+
+| Subject Pattern | Publisher | Subscriber | Payload |
+|----------------|-----------|------------|---------|
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.input` | SPA, daemon | session-agent | `{type, message, sessionSlug}` |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.control` | SPA | session-agent | `{type, sessionSlug, request}` |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.create` | SPA, daemon | session-agent (request/reply) | `{branch, permPolicy, quotaMonitor}` |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.delete` | SPA, daemon | session-agent | `{sessionSlug}` |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.*` | SPA | session-agent | terminal I/O |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.events.{sslug}` | session-agent | SPA (via MCLAUDE_EVENTS stream) | raw stream-json |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{sslug}` | session-agent, daemon | SPA, daemon (via MCLAUDE_LIFECYCLE stream) | lifecycle event JSON |
+| `mclaude.users.{uslug}.hosts.{hslug}.status` | daemon (machine hosts) | control-plane, SPA | host presence heartbeat |
+
+**Cluster infrastructure subjects** (unchanged from ADR-0011):
+
+| Subject Pattern | Publisher | Subscriber | Payload |
+|----------------|-----------|------------|---------|
+| `mclaude.clusters.{cslug}.api.projects.provision` | control-plane | worker controller (request/reply) | `{userSlug, hostSlug, projectSlug, gitUrl}` |
 | `mclaude.clusters.{cslug}.api.status` | worker controller | control-plane | `{clusterSlug, status, sessionCount, capacity}` |
 
 Note: `sessions.input`, `sessions.create`, etc. are captured by the `MCLAUDE_API` stream for at-least-once delivery. The session-agent consumes them via a JetStream pull consumer, not a core NATS subscription.
@@ -408,10 +437,10 @@ Readers: reconciler (reads on startup to template Deployments)
 
 - Replicas: 1
 - Volumes: project PVC, nix PVC, user-config ConfigMap, user-secrets Secret
-- Container: session-agent image with env vars `USER_ID`, `PROJECT_ID` (UUIDs for FK joins), `USER_SLUG`, `PROJECT_SLUG` (slugs for NATS subject and KV key construction per ADR-0024)
+- Container: session-agent image with env vars `USER_ID`, `PROJECT_ID` (UUIDs for FK joins), `USER_SLUG`, `PROJECT_SLUG`, `HOST_SLUG` (slugs for NATS subject and KV key construction per ADR-0024 + ADR-0004)
 - Restart policy: Always (pod restarts trigger `--resume` recovery)
 
-The reconciler resolves `USER_SLUG` and `PROJECT_SLUG` from Postgres (`users.slug`, `projects.slug`) when building the pod template. Session slugs are per-session and flow through NATS messages / KV state — they are not pod env vars.
+The reconciler resolves `USER_SLUG`, `HOST_SLUG`, and `PROJECT_SLUG` from Postgres (`users.slug`, `hosts.slug`, `projects.slug`) when building the pod template. Session slugs are per-session and flow through NATS messages / KV state — they are not pod env vars.
 
 Writers: reconciler (`reconcileDeployment`)
 
@@ -442,7 +471,7 @@ No auth resolver configured in NATS config — JWT verification uses the account
 
 ---
 
-## Local File State (Laptop/Daemon)
+## Local File State (Host Daemon)
 
 ### `~/.claude/.credentials.json`
 
@@ -457,7 +486,19 @@ No auth resolver configured in NATS config — JWT verification uses the account
 Writers: Claude Code (on OAuth login)
 Readers: daemon `readOAuthToken` (for quota API polling)
 
-### NATS credentials file (daemon mode)
+### Host credentials directory (per ADR-0004)
+
+Path: `~/.mclaude/hosts/{hslug}/`
+
+Contents:
+- `nkey.seed` — NKey private seed (generated locally on host, never leaves machine)
+- `nats.creds` — NATS credentials file (JWT + NKey seed, host-scoped permissions)
+- `config.json` — host metadata (`{slug, serverUrl, userSlug}`)
+
+Writers: `mclaude host register` (on registration), daemon JWT refresh loop
+Readers: daemon (NATS connection)
+
+### NATS credentials file (legacy — pre-BYOH)
 
 Path: specified by `--nats-creds` flag or `DaemonConfig.NATSCredsFile`
 
@@ -475,11 +516,13 @@ Format:
 Writers: control-plane (generated per-user), daemon JWT refresh loop
 Readers: daemon (NATS connection), session-agent (NATS connection)
 
+Note: Legacy user-scoped credentials are rejected after BYOH migration. Daemons must re-register via `mclaude host register`.
+
 ---
 
 ## Lifecycle Event Payloads
 
-Published to `mclaude.users.{uslug}.projects.{pslug}.lifecycle.{sslug}`. These are the event types and their payloads:
+Published to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{sslug}`. These are the event types and their payloads:
 
 ### `session_created`
 ```json
