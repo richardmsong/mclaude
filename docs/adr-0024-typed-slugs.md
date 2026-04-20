@@ -4,6 +4,7 @@
 **Status history**:
 - 2026-04-20: draft
 - 2026-04-20: accepted — paired with spec-state-schema.md updates (subject inventory, KV key formats, JetStream filters, Postgres slug columns)
+- 2026-04-20: extended by ADR-0004 (BYOH) — `.hosts.{hslug}.` inserted between user and project in all project-scoped subjects, KV keys, and HTTP URLs. See ADR-0004 Data Model section for full mapping.
 
 ## Overview
 

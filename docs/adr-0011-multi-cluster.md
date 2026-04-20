@@ -4,6 +4,7 @@
 **Status history**:
 - 2026-04-15: accepted
 - 2026-04-19: reverted to draft — retroactive accepted tag incorrect; implementation not confirmed, needs per-ADR review
+- 2026-04-20: partially superseded by ADR-0004 (BYOH) — registry/identity/RBAC model replaced by unified `hosts` table. Infrastructure topology (leaf nodes, hub NATS, JetStream domains, worker controller) preserved unchanged.
 
 
 ## Overview
