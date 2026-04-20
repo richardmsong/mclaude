@@ -33,11 +33,16 @@ Both are authoritative. When they conflict, the most recent ADR supersedes older
 
 | Component          | Read these                                                                                                                                                                          |
 |--------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `control-plane`    | `docs/spec-state-schema.md`, `docs/adr-0003-k8s-integration.md`, any `docs/adr-*.md` that references control-plane                                                                  |
-| `session-agent`    | `docs/spec-state-schema.md`, `docs/adr-0003-k8s-integration.md`, any `docs/adr-*.md` that references session-agent                                                                  |
+| `control-plane`    | `docs/mclaude-control-plane/spec-control-plane.md`, `docs/spec-state-schema.md`, any `docs/adr-*.md` that references control-plane                                                   |
+| `session-agent`    | `docs/mclaude-session-agent/spec-session-agent.md`, `docs/spec-state-schema.md`, any `docs/adr-*.md` that references session-agent                                                   |
 | `spa`              | `docs/ui/spec-*.md` (shared contracts), `docs/ui/mclaude-web/spec-*.md` (web-local screens/widgets), `docs/adr-0006-client-architecture.md`, any `docs/adr-*.md` that references spa/SPA/client |
-| `cli`              | `docs/adr-0003-k8s-integration.md`, any `docs/adr-*.md` that references cli/CLI                                                                                                     |
-| `helm`             | `docs/spec-state-schema.md`, `docs/adr-0003-k8s-integration.md`, `charts/mclaude/`, any `docs/adr-*.md` that references helm                                                        |
+| `cli`              | `docs/mclaude-cli/spec-cli.md`, any `docs/adr-*.md` that references cli/CLI                                                                                                         |
+| `helm`             | `docs/charts-mclaude/spec-helm.md`, `docs/spec-state-schema.md`, any `docs/adr-*.md` that references helm                                                                           |
+| `server`           | `docs/mclaude-server/spec-server.md`, any `docs/adr-*.md` that references server                                                                                                    |
+| `connector`        | `docs/mclaude-connector/spec-connector.md`, any `docs/adr-*.md` that references connector                                                                                           |
+| `relay`            | `docs/mclaude-relay/spec-relay.md`, any `docs/adr-*.md` that references relay                                                                                                       |
+| `mcp`              | `docs/mclaude-mcp/spec-mcp.md`, any `docs/adr-*.md` that references mcp server                                                                                                      |
+| `common`           | `docs/mclaude-common/spec-common.md`, any `docs/adr-*.md` that references common/slug                                                                                               |
 | `mclaude-docs-mcp` | `docs/mclaude-docs-mcp/spec-*.md` (lazy — folder is created when the first ADR adds content), any `docs/adr-*.md` that references docs-mcp                                          |
 
 **Discovery step:** Always `Glob("docs/adr-*.md")` (root only) AND `Glob("docs/**/spec-*.md")` (recursive) first, then scan each file's Component Changes / Impact section (or grep for the component name) to find all docs that apply.
@@ -57,6 +62,11 @@ Both are authoritative. When they conflict, the most recent ADR supersedes older
 | `spa` | `mclaude-web/` |
 | `cli` | `mclaude-cli/` |
 | `helm` | `charts/mclaude/` |
+| `server` | `mclaude-server/` |
+| `connector` | `mclaude-connector/` |
+| `relay` | `mclaude-relay/` |
+| `mcp` | `mclaude-mcp/` |
+| `common` | `mclaude-common/` |
 
 ## Algorithm
 

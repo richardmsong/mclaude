@@ -1,0 +1,75 @@
+# Spec: Common Library
+
+## Role
+
+`mclaude-common` is a zero-dependency Go library (module `mclaude.io/common`) that provides typed slug identifiers and NATS subject/KV key construction helpers shared by all mclaude components. It enforces compile-time type safety: every subject and key helper accepts only typed slug wrappers, making it impossible to pass a raw string where a validated slug is expected.
+
+## Interfaces
+
+### Package `slug`
+
+Typed slug wrappers and the slugification algorithm defined by ADR-0024.
+
+**Typed wrappers** (each is a distinct `type T string`, not an alias):
+
+| Type            | Kind constant   | Fallback prefix |
+|-----------------|-----------------|-----------------|
+| `UserSlug`      | `KindUser`      | `u-`            |
+| `ProjectSlug`   | `KindProject`   | `p-`            |
+| `SessionSlug`   | `KindSession`   | `s-`            |
+| `HostSlug`      | `KindHost`      | `h-`            |
+| `ClusterSlug`   | `KindCluster`   | `c-`            |
+
+**Slug algorithm (`Slugify`):**
+
+1. Lowercase the input.
+2. NFD Unicode decomposition (via `golang.org/x/text/unicode/norm`).
+3. Strip combining marks (Unicode category Mn) -- accented characters become their base form.
+4. Replace runs of non-`[a-z0-9]` characters with a single hyphen.
+5. Trim leading and trailing hyphens.
+6. Truncate to 63 characters (re-trimming any trailing hyphen from the cut).
+
+Returns empty string if no valid characters remain. Callers use `ValidateOrFallback` to handle empty/reserved results.
+
+**Validation (`Validate`):**
+
+Charset: `[a-z0-9][a-z0-9-]{0,62}`. Max length 63. Must not start with `_` or `-`. Rejects the reserved-word blocklist: `users`, `hosts`, `projects`, `sessions`, `clusters`, `api`, `events`, `lifecycle`, `quota`, `terminal`. Returns typed errors: `ErrEmpty`, `ErrCharset`, `ErrTooLong`, `ErrLeadingUnderscore`, `ErrReserved`.
+
+**Fallback (`ValidateOrFallback`):**
+
+When a candidate fails validation, generates a deterministic slug `{prefix}-{6 base32 chars}` using the first 4 bytes of a UUID seed. The base32 alphabet (`a-z2-7`, no padding) is always within the slug charset.
+
+**User slug derivation (`DeriveUserSlug`):**
+
+Produces `{slugify(displayName)}-{first domain segment}` from a display name and email. Falls back to the email local-part when the display name slugifies to empty.
+
+**MustParse helpers:** `MustParseUserSlug`, `MustParseProjectSlug`, `MustParseSessionSlug`, `MustParseHostSlug`, `MustParseClusterSlug` -- validate and return the typed wrapper or panic.
+
+### Package `subj`
+
+Typed NATS subject and KV key builders. Every function accepts only typed slug wrappers from `pkg/slug`. See `spec-state-schema.md` for canonical subject and key formats.
+
+**JetStream stream filters:**
+
+| Constant                 | Pattern                                              |
+|--------------------------|------------------------------------------------------|
+| `FilterMclaudeAPI`       | `mclaude.users.*.projects.*.api.sessions.>`          |
+| `FilterMclaudeEvents`    | `mclaude.users.*.projects.*.events.*`                |
+| `FilterMclaudeLifecycle` | `mclaude.users.*.projects.*.lifecycle.*`              |
+
+**Subject helpers:** `UserAPIProjectsCreate`, `UserAPIProjectsUpdated`, `UserQuota`, `UserProjectAPISessionsInput`, `UserProjectAPISessionsControl`, `UserProjectAPISessionsCreate`, `UserProjectAPISessionsDelete`, `UserProjectAPITerminal`, `UserProjectEvents`, `UserProjectLifecycle`, `ClusterAPIProjectsProvision`, `ClusterAPIStatus`.
+
+**KV key helpers:**
+
+| Helper           | Pattern                    | Bucket             |
+|------------------|----------------------------|--------------------|
+| `SessionsKVKey`  | `{uslug}.{pslug}.{sslug}` | mclaude-sessions   |
+| `ProjectsKVKey`  | `{uslug}.{pslug}`         | mclaude-projects   |
+| `ClustersKVKey`  | `{uslug}`                 | mclaude-clusters   |
+| `LaptopsKVKey`   | `{uslug}.{hostname}`      | mclaude-laptops    |
+| `JobQueueKVKey`  | `{uslug}.{jobId}`         | mclaude-job-queue  |
+
+## Dependencies
+
+- `golang.org/x/text` -- Unicode normalization (NFD decomposition, combining-mark detection) used by the slug algorithm.
+- Go standard library only (`encoding/base32`, `fmt`, `strings`, `unicode`).
