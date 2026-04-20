@@ -145,3 +145,11 @@
 |---|-----|-----------|------|
 | 1 | Backfill vs CHECK constraint | Deferred CHECK to Step 7 with `NOT VALID` — backfill hosts get NULL public_key until re-register | factual |
 | 2 | SessionsKVKey type | Fixed to `s SessionSlug` matching all other helpers | factual |
+
+### Round 6
+
+CLEAN — no blocking gaps found.
+
+### Result
+
+**CLEAN** after 6 rounds, 33 total gaps resolved (33 factual fixes, 0 design decisions).
