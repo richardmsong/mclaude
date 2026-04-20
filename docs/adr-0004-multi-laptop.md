@@ -157,7 +157,7 @@ Device-code storage: **in-memory map** with 10-min TTL and automatic eviction. M
 - Old `UserProject*` helpers are removed (not deprecated — hard cutover, no dual-path). `mclaude-common` lands first; components update call sites in parallel after.
 - `FormatNATSCredentials(jwt, seed string) []byte` moves from `mclaude-control-plane/nkeys.go` to `mclaude-common/pkg/nats/creds.go` so the CLI can assemble `.creds` files locally (JWT from server + seed from local NKey generation).
 - KV key helpers updated:
-  - `SessionsKVKey(u UserSlug, h HostSlug, p ProjectSlug, s string) string` → `{u}.{h}.{p}.{s}`
+  - `SessionsKVKey(u UserSlug, h HostSlug, p ProjectSlug, s SessionSlug) string` → `{u}.{h}.{p}.{s}`
   - `ProjectsKVKey(u UserSlug, h HostSlug, p ProjectSlug) string` → `{u}.{h}.{p}`
   - `HostsKVKey(u UserSlug, h HostSlug) string` → `{u}.{h}` (replaces `LaptopsKVKey`)
   - `JobQueueKVKey(u UserSlug, jobId string) string` → unchanged (jobs are user-scoped)
@@ -252,8 +252,8 @@ CREATE TABLE hosts (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_seen_at TIMESTAMPTZ,
   UNIQUE (user_id, slug),
-  CHECK (type = 'machine' OR cluster_id IS NOT NULL),
-  CHECK (type = 'cluster' OR public_key IS NOT NULL)
+  CHECK (type = 'machine' OR cluster_id IS NOT NULL)
+  -- NOTE: CHECK (type = 'cluster' OR public_key IS NOT NULL) added in Step 7 after backfill
 );
 
 -- Step 2: Add host_id to projects (nullable during backfill)
@@ -276,6 +276,16 @@ ALTER TABLE projects ALTER COLUMN host_id SET NOT NULL;
 -- Step 6: Update project uniqueness
 DROP INDEX IF EXISTS idx_projects_user_slug;
 CREATE UNIQUE INDEX idx_projects_user_host_slug ON projects (user_id, host_id, slug);
+
+-- Step 7: Add public_key CHECK constraint (deferred until after backfill —
+-- backfill creates default 'local' machine hosts with NULL public_key,
+-- which is updated on first `mclaude host register`)
+ALTER TABLE hosts ADD CONSTRAINT hosts_machine_public_key_check
+  CHECK (type = 'cluster' OR public_key IS NOT NULL) NOT VALID;
+-- NOT VALID: existing rows with NULL public_key are allowed until re-register.
+-- New inserts via registration endpoints always provide public_key, so the
+-- constraint prevents future violations. VALIDATE CONSTRAINT can run later
+-- after all daemons have re-registered.
 ```
 
 The backfill program uses `slug.Slugify()` from `mclaude-common/pkg/slug` for host slug derivation, same as the ADR-0024 backfill pattern.
