@@ -235,7 +235,7 @@ Subscribers: session-agent (pull consumer for at-least-once delivery)
 
 ### `MCLAUDE_LIFECYCLE`
 
-Specified in: `docs/adr-2026-04-10-k8s-integration.md`
+Specified in: `docs/adr-0003-k8s-integration.md`
 Created by: not yet created in production code (test-only in `testutil/deps.go`)
 
 ```

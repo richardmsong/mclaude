@@ -30,17 +30,25 @@ Examples:
 
 Two kinds of docs live in `docs/`:
 
-- **ADRs** (`docs/adr-YYYY-MM-DD-<slug>.md`): dated, immutable records of individual decisions. One per feature request / change. This is where the *why* is recorded.
-- **Specs** (`docs/spec-<concern>.md`): living, present-tense references that describe the current design (data schema, UI contract, DNS, etc.). Updated in place as ADRs introduce changes.
+- **ADRs** (`docs/adr-NNNN-<slug>.md`): immutable records of individual decisions, numbered via a monotonic global counter. Root only — ADRs never nest. One per feature request / change. This is where the *why* is recorded.
+- **Specs** (`docs/**/spec-*.md`): living, present-tense references that describe the current design. Layout:
+  - **Cross-cutting** at root: `docs/spec-state-schema.md`, `docs/spec-tailscale-dns.md`, `docs/spec-doc-layout.md`, plus any future `docs/spec-<concern>.md` that touches 2+ components.
+  - **UI shared** under `docs/ui/`: flows and contracts any UI component implements (design-system, navigation, auth, conversation-events, token-usage, ptt, etc.).
+  - **UI component-local** under `docs/ui/<ui-component>/`: widget-level layout for a single UI (e.g. `docs/ui/mclaude-web/spec-dashboard.md`).
+  - **Component-local** under `docs/<component>/`: behavior specific to one non-UI component (e.g. `docs/mclaude-docs-mcp/spec-docs-mcp.md`). Folders are created lazily.
 
 Every change goes through this skill, which **always authors a new ADR** and — when the change has cross-cutting impact — updates the relevant spec(s) **in the same commit**. The co-commit is what the `docs` MCP reads as the lineage edge between an ADR and the spec sections it shaped.
 
-| What's changing | Read these specs + ADRs |
-|----------------|-------------------------|
-| Persistent state (DB, KV, NATS subjects, K8s resources) | `docs/spec-state-schema.md` + related ADRs |
-| UI / SPA behavior | `docs/spec-ui.md` + `docs/adr-2026-04-11-client-architecture.md` |
-| DNS | `docs/spec-tailscale-dns.md` |
-| Feature-specific subsystem | the relevant `docs/adr-*-<feature>.md` |
+| What's changing                                         | Read these specs + ADRs                                                 |
+|---------------------------------------------------------|-------------------------------------------------------------------------|
+| Persistent state (DB, KV, NATS subjects, K8s resources) | `docs/spec-state-schema.md` + related ADRs                              |
+| DNS                                                     | `docs/spec-tailscale-dns.md`                                            |
+| Doc layout / partitioning rules                         | `docs/spec-doc-layout.md`                                               |
+| Cross-cutting concern (touches 2+ components)           | `docs/spec-<concern>.md` (root) + related ADRs                          |
+| UI shared contract (flow, interaction, design token)    | `docs/ui/spec-<topic>.md` + `docs/adr-0006-client-architecture.md`      |
+| UI component-local (screen, widget, platform API)       | `docs/ui/<ui-component>/spec-<topic>.md`                                |
+| Component-local behavior (single non-UI component)      | `docs/<component>/spec-<topic>.md`                                      |
+| Feature-specific subsystem                              | the relevant `docs/adr-NNNN-<feature>.md`                               |
 
 Use `search_docs` / `get_lineage` from the `docs` MCP to discover which ADRs previously shaped a spec section before touching it. Avoid re-reading every ADR — let lineage surface the relevant history.
 
@@ -53,9 +61,9 @@ Also check `docs/feature-list.md` for feature IDs and platform support matrix.
 ```
 1. Read the relevant specs + related ADRs (via docs MCP)
    — only ADRs in `accepted` or `implemented` status. Drafts, superseded,
-     withdrawn ADRs are skipped. (See adr-2026-04-19-adr-status-lifecycle.md.)
+     withdrawn ADRs are skipped. (See adr-0018-adr-status-lifecycle.md.)
 2. Classify the change (A/B/C/D)
-3. Author a new ADR: docs/adr-YYYY-MM-DD-<slug>.md (status: accepted from the start)
+3. Author a new ADR: docs/adr-NNNN-<slug>.md (status: accepted from the start)
 4. Update impacted specs (if any) — same working tree
 5. Commit ADR + spec edits together (single spec commit)
 6. dev-harness → spec-evaluator loop per component (until CLEAN)
@@ -113,7 +121,7 @@ No ADR or spec covers this. Run /plan-feature <description> to produce an ADR, t
 
 ## Step 3 — Author the ADR
 
-Create `docs/adr-YYYY-MM-DD-<slug>.md`. Use today's date (absolute, not relative) and a kebab-case slug.
+Create `docs/adr-NNNN-<slug>.md`. Compute `N = (ls docs/adr-*.md | wc -l) + 1`, zero-padded to 4 digits. If the number's already taken at commit time, bump by 1 and retry. Use a kebab-case slug.
 
 Minimum content:
 
@@ -147,7 +155,18 @@ For bug fixes (class A), the ADR is short — an Overview + Motivation + a one-l
 
 ## Step 4 — Update impacted specs
 
-If the change is cross-cutting (state schema, UI contract, DNS, NATS subjects, etc.), edit the relevant `docs/spec-*.md` **in the same working tree**, to be committed together with the ADR.
+If the change is cross-cutting (state schema, UI contract, DNS, NATS subjects, etc.), edit the relevant spec file **in the same working tree**, to be committed together with the ADR. Use the same spec-location table as `/plan-feature` Step 4b:
+
+| Change surface                                       | Spec to edit                                  |
+|------------------------------------------------------|-----------------------------------------------|
+| Persistent state (DB, KV, NATS subjects, K8s)        | `docs/spec-state-schema.md`                   |
+| DNS                                                  | `docs/spec-tailscale-dns.md`                  |
+| Doc layout / partitioning rules                      | `docs/spec-doc-layout.md`                     |
+| Cross-cutting spec (touches 2+ components)           | `docs/spec-<concern>.md` (root)               |
+| UI shared contract (flow, interaction, design token) | `docs/ui/spec-<topic>.md`                     |
+| UI component-local (screen, widget, platform API)    | `docs/ui/<ui-component>/spec-<topic>.md`      |
+| Component-local behavior (single non-UI component)   | `docs/<component>/spec-<topic>.md`            |
+| Feature-local detail with no cross-cutting impact    | None — ADR alone is enough                    |
 
 Follow the spec editing rules in `/plan-feature` (add with full payload/schema, remove entirely, change in place — no stale text).
 
@@ -225,7 +244,7 @@ Once every affected component's spec-evaluator returns CLEAN for the scope of th
 2. Commit **only** the ADR (status header change). No spec edits, no code changes. This is the signal that the decision has landed in code.
 
 ```bash
-git add docs/adr-YYYY-MM-DD-<slug>.md
+git add docs/adr-NNNN-<slug>.md
 git commit -m "spec(<slug>): promote ADR to implemented"
 ```
 
@@ -267,8 +286,8 @@ Do not report the task complete until Playwright confirms the acceptance criteri
 ## Master session write restrictions
 
 The master session (where `/feature-change` runs) may only write to:
-- **ADRs** (`docs/adr-*.md`) — authored in Step 3
-- **Specs** (`docs/spec-*.md`, `docs/feature-list.md`) — edited in Step 4
+- **ADRs** (`docs/adr-*.md`, root only) — authored in Step 3
+- **Specs** (`docs/**/spec-*.md`, `docs/feature-list.md`) — edited in Step 4
 - **Skill files** (`.agent/skills/`) — process improvements
 - **Agent files** (`.agent/agents/`) — agent instructions
 - **Memory files** — feedback, project context
@@ -288,9 +307,12 @@ All implementation changes go through dev-harness subagents. The master session 
 ## Reference
 
 - `docs/spec-state-schema.md` — canonical persistent state (DB, KV, NATS subjects, K8s resources)
-- `docs/spec-ui.md` — UI wireframes and behavior
 - `docs/spec-tailscale-dns.md` — DNS conventions
-- `docs/adr-*.md` — one per past decision; use `docs` MCP to search
+- `docs/spec-doc-layout.md` — canonical doc partitioning + naming rules
+- `docs/ui/spec-*.md` — UI shared contracts (design system, navigation, auth, conversation-events, token-usage, ptt, interaction-patterns, etc.)
+- `docs/ui/<ui-component>/spec-*.md` — UI component-local specs (e.g. `docs/ui/mclaude-web/spec-dashboard.md`)
+- `docs/<component>/spec-*.md` — component-local specs (lazy, e.g. `docs/mclaude-docs-mcp/spec-docs-mcp.md`)
+- `docs/adr-*.md` — one per past decision; use `docs` MCP to search. ADRs live at root only.
 - `docs/feature-list.md` — feature IDs
-- `docs/adr-2026-04-19-docs-plan-spec-refactor.md` — ADR #1, establishes the layout this skill operates under
+- `docs/adr-0020-docs-per-component-folders.md` — establishes the per-component subfolder layout and `adr-NNNN-<slug>.md` naming this skill operates under
 - Component roots: `mclaude-control-plane/`, `mclaude-web/`, `mclaude-session-agent/`, `mclaude-cli/`, `mclaude-docs-mcp/`, `charts/mclaude/`

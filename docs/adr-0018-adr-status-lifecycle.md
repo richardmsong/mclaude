@@ -14,7 +14,7 @@ The ADR body remains immutable once a decision is made. Only the `Status` field 
 
 ## Motivation
 
-The refactor in `adr-2026-04-19-docs-plan-spec-refactor.md` established that every feature request produces an ADR, co-committed with any impacted specs. The co-commit is the lineage edge.
+The refactor in `adr-0021-docs-plan-spec-refactor.md` established that every feature request produces an ADR, co-committed with any impacted specs. The co-commit is the lineage edge.
 
 But in practice, planning is not atomic:
 - A user starts `/plan-feature`, gets partway through Q&A, and wants to pause.
@@ -147,5 +147,5 @@ The `Status history` list is append-only. Each line records a transition with it
 
 ## References
 
-- `adr-2026-04-19-docs-plan-spec-refactor.md` — establishes the ADR/spec split this lifecycle sits on top of
+- `adr-0021-docs-plan-spec-refactor.md` — establishes the ADR/spec split this lifecycle sits on top of
 - Michael Nygard's original ADR template (2011) — source of the status pattern

@@ -11,7 +11,7 @@ When a session-agent pod is upgraded (Helm rollout, Recreate strategy), any `Bas
 
 This plan specifies how session-agent synthesizes a `task-notification` message for each killed shell on SIGTERM, so the resumed Claude sees the death in its event log and can adapt (re-run the shell with adjusted intent, inform the user, or move on).
 
-**Related work:** `docs/adr-2026-04-14-graceful-upgrades.md` covers the SIGTERM drain flow for the main turn and in-flight background **agents** (subagents). That plan deliberately does not handle backgrounded shells — they're covered here. Agents are expensive (context + tokens) so drain waits for them to finish naturally; shells are cheap to restart but have side effects, so this plan handles their death explicitly.
+**Related work:** `docs/adr-0008-graceful-upgrades.md` covers the SIGTERM drain flow for the main turn and in-flight background **agents** (subagents). That plan deliberately does not handle backgrounded shells — they're covered here. Agents are expensive (context + tokens) so drain waits for them to finish naturally; shells are cheap to restart but have side effects, so this plan handles their death explicitly.
 
 ## Claude Code's native pattern (reference)
 
@@ -49,11 +49,11 @@ $CLAUDE_CODE_TMPDIR/claude-{uid}/{sanitized-cwd}/{sessionId}/tasks/{taskId}.outp
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Handle shell deaths? | Yes, synthetic notification on drain | Shells are cheap to restart but have side effects; Claude needs to know to adjust intent on resume. |
-| Handle agent deaths the same way? | No — drain waits for agents | Agents have context + token cost; can't meaningfully "retry". Covered in `adr-2026-04-14-graceful-upgrades.md`. |
+| Handle agent deaths the same way? | No — drain waits for agents | Agents have context + token cost; can't meaningfully "retry". Covered in `adr-0008-graceful-upgrades.md`. |
 | Notification transport | Publish onto session input subject in JetStream | Reuses existing durable path. No new storage, no authz to bypass (session-agent is the trusted consumer of its own subjects). |
 | Output file persistence | Set `CLAUDE_CODE_TMPDIR` → PVC subPath | Scopes persistence to Claude-owned files, reuses existing session PVC, no new volume. |
 | Tracking structure | `map[shellId]ShellMeta` per session, keyed by Claude-emitted shell-id | Need to iterate in-flight shells at drain time; count alone isn't enough. |
-| What triggers tracking | stream-json parse: `Bash` tool_use with `run_in_background: true` | Same pattern as the in-flight agent counter in `adr-2026-04-14-graceful-upgrades.md`. |
+| What triggers tracking | stream-json parse: `Bash` tool_use with `run_in_background: true` | Same pattern as the in-flight agent counter in `adr-0008-graceful-upgrades.md`. |
 | What removes tracking | User message with `origin.kind == "task-notification"` referencing the shell's tool-use-id | Real task-notification arrived (shell completed naturally during normal operation). |
 
 ## Flow
@@ -74,7 +74,7 @@ $CLAUDE_CODE_TMPDIR/claude-{uid}/{sanitized-cwd}/{sessionId}/tasks/{taskId}.outp
 ### SIGTERM during pod upgrade
 
 ```
-1. Session-agent receives SIGTERM (see adr-2026-04-14-graceful-upgrades.md for main flow).
+1. Session-agent receives SIGTERM (see adr-0008-graceful-upgrades.md for main flow).
 2. After the main-turn drain predicate is satisfied (state == idle, no in-flight agents),
    and BEFORE stopping the control consumer and exiting:
 3. For each session, for each entry in sess.inFlightShells:
@@ -89,7 +89,7 @@ $CLAUDE_CODE_TMPDIR/claude-{uid}/{sanitized-cwd}/{sessionId}/tasks/{taskId}.outp
         mclaude.{userId}.{projectId}.api.sessions.input
         with payload {sessionId, content: <xml above>}.
      c. JetStream persists it in MCLAUDE_API.
-4. Continue with adr-2026-04-14-graceful-upgrades.md steps (stop ctl consumer, lifecycle event, exit).
+4. Continue with adr-0008-graceful-upgrades.md steps (stop ctl consumer, lifecycle event, exit).
 5. New pod starts, attaches to the durable cmd consumer.
 6. Consumer delivers the queued synthetic input messages.
 7. handleInput forwards each one to the resumed Claude's stdin as a normal user message.
@@ -255,4 +255,4 @@ func shellOutputPath(tmpDir, sanitizedCwd, sessionId, taskId string) string {
 - Output path: `src/utils/task/diskOutput.ts:50-74`, `src/utils/permissions/filesystem.ts:307-378`
 - Env var: `CLAUDE_CODE_TMPDIR` in `getClaudeTempDir()` at `src/utils/permissions/filesystem.ts:331-346`
 - Source checkout: `/Users/rsong/work/collection-claude-code-source-code/`
-- Related spec: `docs/adr-2026-04-14-graceful-upgrades.md` (main drain flow, in-flight agent handling)
+- Related spec: `docs/adr-0008-graceful-upgrades.md` (main drain flow, in-flight agent handling)

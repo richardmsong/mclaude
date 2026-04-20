@@ -22,7 +22,7 @@ fatal: could not read Username for 'https://github.com': No such device or addre
 
 The entrypoint exits with code 1, causing k8s to restart the pod in a crash loop.
 
-The real fix is the github-oauth feature (`docs/adr-2026-04-14-github-oauth.md`) which provisions `gh auth` credential helpers via K8s Secrets. That feature's control-plane endpoints are not yet implemented (0/17 spec items).
+The real fix is the github-oauth feature (`docs/adr-0007-github-oauth.md`) which provisions `gh auth` credential helpers via K8s Secrets. That feature's control-plane endpoints are not yet implemented (0/17 spec items).
 
 ## Evidence
 
@@ -44,5 +44,5 @@ MCProject CR shows `gitUrl: https://github.com/mclaude-project/mclaude` and `pha
 ## Files
 
 - `mclaude-session-agent/entrypoint.sh` — clone logic that exits on failure
-- `docs/adr-2026-04-14-github-oauth.md` — complete spec for OAuth credential flow (design audit: CLEAN)
+- `docs/adr-0007-github-oauth.md` — complete spec for OAuth credential flow (design audit: CLEAN)
 - `mclaude-control-plane/projects.go:44-124` — project creation handler (does not provision git credentials)

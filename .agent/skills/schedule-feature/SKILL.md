@@ -9,15 +9,15 @@ Schedule an unattended dev-harness implementation session as a job in the daemon
 ```
 
 Arguments:
-- `spec-path` — relative path to spec doc (e.g., `docs/adr-2026-04-14-quota-aware-scheduling.md`). Must exist.
+- `spec-path` — relative path to spec doc (e.g., `docs/adr-0009-quota-aware-scheduling.md`). Must exist.
 - `--priority N` — integer 1–10; default 5. Higher = survives quota pressure longer.
 - `--threshold N` — integer 1–99; default 75. 5h utilization % at which to trigger graceful stop.
 - `--auto-continue` — flag; if set, job re-queues at the 5h reset time after being stopped.
 
 Examples:
-- `/schedule-feature docs/adr-YYYY-MM-DD-spa.md`
-- `/schedule-feature docs/adr-2026-04-10-k8s-integration.md --priority 7 --threshold 80`
-- `/schedule-feature docs/adr-2026-04-14-quota-aware-scheduling.md --auto-continue`
+- `/schedule-feature docs/adr-NNNN-spa.md`
+- `/schedule-feature docs/adr-0003-k8s-integration.md --priority 7 --threshold 80`
+- `/schedule-feature docs/adr-0009-quota-aware-scheduling.md --auto-continue`
 
 ---
 

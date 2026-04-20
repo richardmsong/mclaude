@@ -41,7 +41,7 @@ You MUST read `docs/spec-state-schema.md` (the canonical state schema) and check
 
 Report any inconsistency as a gap. The state schema is authoritative for schemas; the design doc is authoritative for behavior.
 
-Also check against other `docs/adr-*.md` files when the design doc references shared concepts (NATS subjects, KV buckets, lifecycle events, auth model). Cross-reference to find contradictions.
+Also check against other `docs/adr-*.md` files (root only — ADRs never nest) and `docs/**/spec-*.md` (recursive — cross-cutting at root, UI cluster under `docs/ui/`, component-local under `docs/<component>/`) when the design doc references shared concepts (NATS subjects, KV buckets, lifecycle events, auth model, UI contracts). Cross-reference to find contradictions.
 
 ## What to verify against the codebase
 
@@ -83,7 +83,7 @@ If gaps exist:
 
 **Always** save your output to `.agent/audits/` before returning.
 
-Derive the filename from the design doc path: `docs/adr-2026-04-14-github-oauth.md` → `.agent/audits/design-github-oauth-<YYYY-MM-DD>.md`
+Derive the filename from the design doc path: `docs/adr-0007-github-oauth.md` → `.agent/audits/design-github-oauth-<YYYY-MM-DD>.md`
 
 Append if the file exists (multiple evaluations per day). Format:
 

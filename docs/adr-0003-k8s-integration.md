@@ -138,7 +138,7 @@ When Claude spawns a subagent (Explore, Plan, etc.), the subagent's events appea
 {"type": "user", "message": {"content": [{"type": "tool_result", ...}]}, "parent_tool_use_id": "tu_1"}
 ```
 
-The SPA uses `parent_tool_use_id` to render subagent events nested under the parent Agent tool block. Events with `parent_tool_use_id: null` are top-level. The session agent publishes all events verbatim regardless of nesting depth — `parent_tool_use_id` is valid at any depth (Agent → Agent → Agent). Rendering strategy for deep nesting is deferred to `adr-2026-04-11-client-architecture.md`.
+The SPA uses `parent_tool_use_id` to render subagent events nested under the parent Agent tool block. Events with `parent_tool_use_id: null` are top-level. The session agent publishes all events verbatim regardless of nesting depth — `parent_tool_use_id` is valid at any depth (Agent → Agent → Agent). Rendering strategy for deep nesting is deferred to `adr-0006-client-architecture.md`.
 
 ---
 
@@ -203,7 +203,7 @@ Watching a KV key gives real-time state updates to any subscriber. Clients watch
 - `mclaude-projects`: deleted by control-plane on project delete.
 - `mclaude-laptops`: TTL 24h. Launcher refreshes on startup and every 12h.
 
-**Agent/controller liveness**: detected via NATS `$SYS` presence events (connect/disconnect), not heartbeats. Control-plane subscribes to `$SYS.ACCOUNT.*.CONNECT` and `$SYS.ACCOUNT.*.DISCONNECT`, identifies the client type from JWT claims, and updates status in KV. See `adr-2026-04-17-nats-security.md` for details.
+**Agent/controller liveness**: detected via NATS `$SYS` presence events (connect/disconnect), not heartbeats. Control-plane subscribes to `$SYS.ACCOUNT.*.CONNECT` and `$SYS.ACCOUNT.*.DISCONNECT`, identifies the client type from JWT claims, and updates status in KV. See `adr-0016-nats-security.md` for details.
 
 ---
 
@@ -1916,7 +1916,7 @@ Complete when all verification steps pass AND these future plans are written:
 
 | Plan | Scope |
 |------|-------|
-| `adr-2026-04-11-client-architecture.md` | ✅ Done — layered architecture, stores, view models, protocol contract, accumulation algorithm, feature list |
+| `adr-0006-client-architecture.md` | ✅ Done — layered architecture, stores, view models, protocol contract, accumulation algorithm, feature list |
 | `docs/feature-list.md` | ✅ Done — canonical feature list with platform support matrix |
 | `plan-entra-sso.md` | Entra OIDC integration (blocked on corporate Entra admin approval) |
 | `plan-openbao-integration.md` | OpenBao deployment, K8s auth, seed script framework |

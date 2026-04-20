@@ -43,4 +43,4 @@ Needs investigation. Possible causes:
 - `mclaude-session-agent/agent.go` — `runHeartbeat()` function
 - `mclaude-session-agent/daemon.go:177-189` — laptop heartbeat (daemon mode)
 - `mclaude-web/src/stores/heartbeat-monitor.ts` — SPA heartbeat watcher
-- `docs/adr-2026-04-10-k8s-integration.md:199` — spec: 90s TTL on heartbeat entries
+- `docs/adr-0003-k8s-integration.md:199` — spec: 90s TTL on heartbeat entries

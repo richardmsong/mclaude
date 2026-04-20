@@ -7,7 +7,7 @@
 
 > Supersedes the "per-concern only, v1" partitioning rule in
 > `adr-0021-docs-plan-spec-refactor.md` (formerly
-> `adr-2026-04-19-docs-plan-spec-refactor.md`). Supersedes the
+> `adr-0021-docs-plan-spec-refactor.md`). Supersedes the
 > `adr-YYYY-MM-DD-<slug>.md` naming convention from the same ADR.
 
 ## Overview
@@ -186,27 +186,27 @@ Reference globs updated from flat to recursive. Enumerated updates:
 
    | NNNN | Current filename                               |
    |------|------------------------------------------------|
-   | 0001 | adr-2026-04-08-telemetry.md                    |
-   | 0002 | adr-2026-04-10-core-containers.md              |
-   | 0003 | adr-2026-04-10-k8s-integration.md              |
-   | 0004 | adr-2026-04-10-multi-laptop.md                 |
-   | 0005 | adr-2026-04-10-pluggable-cli.md                |
-   | 0006 | adr-2026-04-11-client-architecture.md          |
-   | 0007 | adr-2026-04-14-github-oauth.md                 |
-   | 0008 | adr-2026-04-14-graceful-upgrades.md            |
-   | 0009 | adr-2026-04-14-quota-aware-scheduling.md       |
-   | 0010 | adr-2026-04-14-scratch-to-git.md               |
-   | 0011 | adr-2026-04-15-multi-cluster.md                |
-   | 0012 | adr-2026-04-15-replay-user-messages.md         |
-   | 0013 | adr-2026-04-16-reconciler-env-sync.md          |
-   | 0014 | adr-2026-04-17-controller-separation.md        |
-   | 0015 | adr-2026-04-17-docs-mcp.md                     |
-   | 0016 | adr-2026-04-17-nats-security.md                |
-   | 0017 | adr-2026-04-17-token-insights.md               |
-   | 0018 | adr-2026-04-19-adr-status-lifecycle.md         |
-   | 0019 | adr-2026-04-19-backgrounded-shells.md          |
-   | 0020 | adr-2026-04-19-docs-per-component-folders.md   |
-   | 0021 | adr-2026-04-19-docs-plan-spec-refactor.md      |
+   | 0001 | adr-0001-telemetry.md                    |
+   | 0002 | adr-0002-core-containers.md              |
+   | 0003 | adr-0003-k8s-integration.md              |
+   | 0004 | adr-0004-multi-laptop.md                 |
+   | 0005 | adr-0005-pluggable-cli.md                |
+   | 0006 | adr-0006-client-architecture.md          |
+   | 0007 | adr-0007-github-oauth.md                 |
+   | 0008 | adr-0008-graceful-upgrades.md            |
+   | 0009 | adr-0009-quota-aware-scheduling.md       |
+   | 0010 | adr-0010-scratch-to-git.md               |
+   | 0011 | adr-0011-multi-cluster.md                |
+   | 0012 | adr-0012-replay-user-messages.md         |
+   | 0013 | adr-0013-reconciler-env-sync.md          |
+   | 0014 | adr-0014-controller-separation.md        |
+   | 0015 | adr-0015-docs-mcp.md                     |
+   | 0016 | adr-0016-nats-security.md                |
+   | 0017 | adr-0017-token-insights.md               |
+   | 0018 | adr-0018-adr-status-lifecycle.md         |
+   | 0019 | adr-0019-backgrounded-shells.md          |
+   | 0020 | adr-0020-docs-per-component-folders.md   |
+   | 0021 | adr-0021-docs-plan-spec-refactor.md      |
 
    This ADR becomes ADR-0020. That it numerically precedes the ADR it
    supersedes (ADR-0021 docs-plan-spec-refactor) is fine — numbering is
