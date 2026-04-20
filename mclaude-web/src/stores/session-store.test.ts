@@ -182,4 +182,46 @@ describe('SessionStore', () => {
       expect(added).toHaveLength(0)
     })
   })
+
+  describe('getSessionBySlug (ADR-0024)', () => {
+    it('returns session when slug matches', () => {
+      const session = makeSessionKVState({ id: 'session-1', projectId: 'project-1', slug: 'my-session' })
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.my-session', session)
+      const result = store.getSessionBySlug('my-session')
+      expect(result).toBeDefined()
+      expect(result?.id).toBe('session-1')
+    })
+
+    it('returns undefined when slug does not match', () => {
+      const session = makeSessionKVState({ id: 'session-1', slug: 'my-session' })
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.my-session', session)
+      expect(store.getSessionBySlug('other-slug')).toBeUndefined()
+    })
+
+    it('returns undefined when sessions have no slug field', () => {
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({ id: 'session-1' }))
+      expect(store.getSessionBySlug('session-1')).toBeUndefined()
+    })
+  })
+
+  describe('resolveSession (ADR-0024)', () => {
+    it('resolves by UUID when session id matches', () => {
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({ id: 'session-1' }))
+      const result = store.resolveSession('session-1')
+      expect(result?.id).toBe('session-1')
+    })
+
+    it('resolves by slug when UUID lookup fails but slug matches', () => {
+      const session = makeSessionKVState({ id: 'uuid-abc', slug: 'my-session' })
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.my-session', session)
+      const result = store.resolveSession('my-session')
+      expect(result?.id).toBe('uuid-abc')
+    })
+
+    it('returns undefined when neither UUID nor slug matches', () => {
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({ id: 'session-1', slug: 'test-slug' }))
+      expect(store.resolveSession('nonexistent')).toBeUndefined()
+    })
+  })
+
 })

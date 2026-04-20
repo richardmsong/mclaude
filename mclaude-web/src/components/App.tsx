@@ -17,13 +17,19 @@ import { Settings } from './Settings'
 import { TokenUsage } from './TokenUsage'
 import { UserManagement } from './UserManagement'
 
-// ── Hash routing ──────────────────────────────────────────────────────────
+// ── Hash routing (ADR-0024: typed slugs) ─────────────────────────────────
+// Session hash format: #s/{uslug}/{pslug}/{sslug} (new, slug-based)
+// Legacy format: #s/{sessionId} (UUID, kept for backward compat)
 function getRoute(): { screen: string; sessionId?: string } {
   const hash = window.location.hash.slice(1) // remove leading #
   if (!hash || hash === '/') return { screen: 'dashboard' }
   if (hash === 'settings') return { screen: 'settings' }
   if (hash === 'usage') return { screen: 'usage' }
   if (hash === 'users') return { screen: 'users' }
+  // New slug-based format: s/{uslug}/{pslug}/{sslug}
+  const slugSessionMatch = /^s\/([a-z0-9][a-z0-9-]*)\/(.[a-z0-9-]*)\/(.[a-z0-9-]*)$/.exec(hash)
+  if (slugSessionMatch) return { screen: 'session', sessionId: slugSessionMatch[3] }
+  // Legacy UUID format: s/{uuid-or-id}
   const sessionMatch = /^s\/(.+)$/.exec(hash)
   if (sessionMatch) return { screen: 'session', sessionId: sessionMatch[1] }
   return { screen: 'dashboard' }
@@ -32,6 +38,7 @@ function getRoute(): { screen: string; sessionId?: string } {
 function navigate(hash: string) {
   window.location.hash = hash
 }
+
 
 // ── Update banner ─────────────────────────────────────────────────────────
 function UpdateBanner() {
@@ -381,11 +388,29 @@ export function App() {
   // but uses functional update to only set it once per session (never overwrite once resolved).
   useEffect(() => {
     if (route.screen !== 'session' || !route.sessionId || !sessionStore) return
-    const session = sessionStore.sessions.get(route.sessionId)
+    const session = sessionStore.resolveSession(route.sessionId)
     if (session) {
       setResolvedProjectId(prev => prev ?? session.projectId)
     }
   }, [route.screen, route.sessionId, sessionStore, sessionVersion])
+
+  // ADR-0024: Rewrite the hash URL to slug format once all slugs are available.
+  // This runs after session KV data arrives and all three slugs (user/project/session) are known.
+  // Only rewrites if the current URL is NOT already in slug format (no double-rewrite).
+  useEffect(() => {
+    if (route.screen !== 'session' || !route.sessionId || !sessionStore) return
+    const session = sessionStore.resolveSession(route.sessionId)
+    if (!session?.slug || !session.projectSlug) return
+    const uslug = authState.userSlug ?? authState.userId
+    if (!uslug) return
+    // Check if current hash is already in slug format: s/{uslug}/{pslug}/{sslug}
+    const currentHash = window.location.hash.slice(1)
+    const expectedHash = `s/${uslug}/${session.projectSlug}/${session.slug}`
+    if (currentHash !== expectedHash) {
+      // Use replaceState so the slug URL doesn't create an extra history entry
+      history.replaceState(null, '', `#${expectedHash}`)
+    }
+  }, [route.screen, route.sessionId, sessionStore, sessionVersion, authState.userSlug, authState.userId])
 
   // Per-session EventStore + ConversationVM + TerminalVM + LifecycleStore — created ONCE per sessionId+projectId.
   // Does NOT depend on sessionVersion so KV updates (idle→running→idle) don't destroy
@@ -397,7 +422,7 @@ export function App() {
       setTerminalVm(null)
       return
     }
-    const session = sessionStore?.sessions.get(route.sessionId!)
+    const session = sessionStore?.resolveSession(route.sessionId!)
     const project = session ? sessionStore?.projects.get(session.projectId) : undefined
     const resolvedUserSlug = authState.userSlug ?? authState.userId
     const resolvedProjectSlug = project?.slug ?? resolvedProjectId
@@ -584,7 +609,7 @@ export function App() {
   }
 
   if (route.screen === 'session' && route.sessionId && conversationVM && eventStore && sessionStore) {
-    const session = sessionStore.sessions.get(route.sessionId)
+    const session = sessionStore.resolveSession(route.sessionId)
     const project = session ? sessionStore.projects.get(session.projectId) : undefined
     return (
       <Fragment>

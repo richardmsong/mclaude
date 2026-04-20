@@ -126,8 +126,9 @@ export class AuthClient implements IAuthClient {
     return res.json() as Promise<{ connectionId: string; providerType: string; displayName: string; username: string }>
   }
 
-  async updateProjectIdentity(projectId: string, connectionId: string | null): Promise<void> {
-    const res = await fetch(`${this.baseUrl}/api/projects/${projectId}`, {
+  async updateProjectIdentity(userSlug: string, projectSlug: string, connectionId: string | null): Promise<void> {
+    // ADR-0024: URL uses slug-based path /api/users/{uslug}/projects/{pslug}
+    const res = await fetch(`${this.baseUrl}/api/users/${userSlug}/projects/${projectSlug}`, {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
