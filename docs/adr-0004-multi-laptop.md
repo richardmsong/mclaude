@@ -175,21 +175,25 @@ Device-code storage: **in-memory map** with 10-min TTL and automatic eviction. M
 - Admin endpoints: `POST /admin/clusters/{cslug}/members`, `DELETE /admin/clusters/{cslug}/members/{uslug}`.
 - All project-scoped HTTP routes gain `hosts/{hslug}/`: `/api/users/{uslug}/hosts/{hslug}/projects/{pslug}/sessions/{sslug}`.
 - Subject-publishing for project-scoped messages uses host-inclusive `pkg/subj` helpers.
+- `projects.go` NATS subscriber: subject `mclaude.*.api.projects.create` replaced by `mclaude.users.*.api.projects.create` (same ADR-0024 form — user-level, no host). Token extraction indices shift. KV key write uses `subj.ProjectsKVKey(uslug, hslug, pslug)` instead of `userID + "." + proj.ID`. `hostSlug` is read from the create-project payload.
 - `user_clusters` table removed; replaced by `hosts` rows with `type='cluster'`.
 - Reconciler: resolves `HOST_SLUG` from Postgres alongside `USER_SLUG` and `PROJECT_SLUG` when building pod templates.
-- NATS JWT signing: host-scoped permissions (`mclaude.users.{uslug}.hosts.{hslug}.>`).
-- Device-code storage: `host_registration_codes` table or in-memory map with 10-min expiry.
+- NATS JWT signing: new `IssueHostJWT(accountNKey, hostPublicKey, userSlug, hostSlug)` function. Unlike existing `IssueUserJWT`/`IssueSessionAgentJWT` which generate NKeys internally, this signs against a caller-supplied public key (the host's). Returns only the JWT — no seed. Permissions: `mclaude.users.{uslug}.hosts.{hslug}.>`.
+- Device-code storage: in-memory map with 10-min expiry (not Postgres — codes are ephemeral).
 - Host presence: subscribe to `$SYS.ACCOUNT.*.CONNECT`/`DISCONNECT`, maintain in-memory map, expose via `GET /api/users/{uslug}/hosts` response.
 
 ### `mclaude-session-agent`
 
-- Reads `HOST_SLUG` env var (set by reconciler for cluster hosts, or by daemon wrapper for machine hosts).
+- `DaemonConfig` gains `HostSlug slug.HostSlug` field, populated from `--host <hslug>` flag or `HOST_SLUG` env var (flag takes precedence). If neither is set and only one host is registered in `~/.mclaude/hosts/`, auto-select it. If neither is set and zero or multiple hosts exist, exit with error: `"Multiple hosts registered. Specify --host <slug> or set HOST_SLUG. Available: mbp16, mbp14"`.
+- `mclaude-laptops` KV bucket reference renamed to `mclaude-hosts` (hardcoded string in `daemon.go` updated).
+- Reads `HOST_SLUG` env var (set by reconciler for cluster hosts, or by daemon `--host` flag for machine hosts).
 - All NATS subscriptions use host-inclusive subject shape via `pkg/subj` helpers.
 - KV key construction includes `{hslug}`: sessions key = `{uslug}.{hslug}.{pslug}.{sslug}`.
 - `SessionState` KV value gains `hostSlug` field.
-- `JobEntry` gains `hostSlug` field. Dispatcher uses it for KV key construction. The daemon populates `hostSlug` from its own `DaemonConfig.HostSlug` when creating jobs via `POST /jobs`. The `handleJobsRoute` POST handler reads `hostSlug` from the request body (required field).
-- `handleJobsProjects` handler: KV key prefix lookup switches from UUID (`userID + "."`) to slug-based (`userSlug + "." + hostSlug + "."`). All KV key lookups in the daemon use slug-based prefixes, not UUIDs.
+- `JobEntry` gains `hostSlug` field. Dispatcher uses it for subject and KV key construction (third arg to `pkg/subj` helpers). The daemon populates `hostSlug` from its own `DaemonConfig.HostSlug` when creating jobs via `POST /jobs`. The `handleJobsRoute` POST handler reads `hostSlug` from the request body (required field). Callers (web UI, CLI) always know the host because projects are host-scoped — the project's host is used.
+- `handleJobsProjects` handler: KV key prefix lookup switches from UUID (`userID + "."`) to slug-based (`userSlug + "." + hostSlug + "."`). This returns only the daemon's own host's projects (the daemon manages exactly one host). All KV key lookups in the daemon use slug-based prefixes, not UUIDs.
 - Lifecycle subscriber wildcard subject updated to host-inclusive form: `mclaude.users.{uslug}.hosts.{hslug}.projects.*.lifecycle.>`.
+- `main.go` hardcoded lifecycle init subject (`"mclaude.users.%s.projects.%s.lifecycle._init"`) replaced with `subj.UserHostProjectLifecycle(u, h, p, "_init")`. `HOST_SLUG` must be read from env before this call site.
 
 ### `mclaude-cli`
 
@@ -229,7 +233,9 @@ Key columns: `id` (UUID PK), `user_id` (FK→users), `slug` (per-user unique), `
 
 ### Migration DDL
 
-The current codebase has no `hosts`, `user_clusters`, or `host_id` on `projects` (ADR-0011 was never implemented). Migration is additive:
+The current codebase has no `hosts`, `user_clusters`, or `host_id` on `projects` (ADR-0011 was never implemented). Migration is additive.
+
+**Migration mechanism**: The existing `db.Migrate()` applies a single `schema` constant via `IF NOT EXISTS`. For this ADR, the multi-step DDL (create table, add nullable column, backfill, alter NOT NULL, drop/create index) is embedded as a separate ordered migration function `db.MigrateHosts(ctx)` that runs after `db.Migrate(ctx)`. Each step is idempotent (guarded by `IF NOT EXISTS`, `IF EXISTS`, or `DO $$ ... END $$` PL/pgSQL blocks). The backfill step (Step 3) is a Go function that queries all projects without `host_id`, creates or looks up a default host row per user, and sets `host_id`. This runs in a single transaction.
 
 ```sql
 -- Step 1: Create hosts table
@@ -346,6 +352,32 @@ New host endpoints:
 - `PUT /api/users/{uslug}/hosts/{hslug}` — rename display name
 - `POST /api/users/{uslug}/hosts/code` — generate device code
 - `POST /api/hosts/register` — complete device-code registration (no auth — code is the credential)
+
+**Request/response schemas for host endpoints:**
+
+`POST /api/users/{uslug}/hosts` (authed — requires Bearer token matching `{uslug}`):
+- Request: `{name: string (required), publicKey: string (required, NKey public), type: "machine" (required)}`
+- Success 201: `{slug: string, jwt: string, serverUrl: string}`
+- 400: missing/invalid fields. 403: token uslug mismatch. 409: slug collision (auto-suffixed, so rare).
+
+`POST /api/hosts/register` (no auth — device code is the credential):
+- Request: `{code: string (required, 6-char), name: string (required), publicKey: string (required), type: "machine" (required)}`
+- Success 201: `{slug: string, jwt: string, serverUrl: string}`
+- 401: invalid code. 410: code expired. 400: missing fields.
+
+`POST /api/users/{uslug}/hosts/code` (authed):
+- Request: `{}` (empty body)
+- Success 201: `{code: string, expiresAt: string (RFC3339)}`
+
+`GET /api/users/{uslug}/hosts` (authed):
+- Success 200: `[{slug, name, type, role, status: "online"|"offline", lastSeen: RFC3339|null}]`
+
+`DELETE /api/users/{uslug}/hosts/{hslug}` (authed):
+- Success 204. 404: host not found. 403: not owner.
+
+`PUT /api/users/{uslug}/hosts/{hslug}` (authed):
+- Request: `{name: string (required)}`
+- Success 200: `{slug, name, type, role}`. 404: host not found. 403: not owner.
 
 Admin cluster-member endpoints:
 - `POST /admin/clusters/{cslug}/members` — grant user access (creates host row)
