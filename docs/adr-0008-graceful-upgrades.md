@@ -1,8 +1,9 @@
 # Graceful Session-Agent Pod Upgrades
 
-**Status**: accepted
+**Status**: draft
 **Status history**:
 - 2026-04-14: accepted
+- 2026-04-19: reverted to draft — retroactive accepted tag incorrect; implementation not confirmed, needs per-ADR review
 
 
 ## Overview

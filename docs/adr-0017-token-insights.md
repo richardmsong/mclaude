@@ -1,8 +1,9 @@
 # Per-Turn Token Insights
 
-**Status**: accepted
+**Status**: draft
 **Status history**:
 - 2026-04-17: accepted
+- 2026-04-19: reverted to draft — retroactive accepted tag incorrect; implementation not confirmed, needs per-ADR review
 
 
 Feature **M5** — per-turn token breakdown visible on every assistant message.
