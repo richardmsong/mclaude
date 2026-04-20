@@ -84,7 +84,7 @@ func TestE2ESessionLifecycle(t *testing.T) {
 		sessionID = "e2e-session-1"
 	)
 
-	eventsSubject := fmt.Sprintf("mclaude.%s.%s.events.%s", userID, projectID, sessionID)
+	eventsSubject := fmt.Sprintf("mclaude.users.%s.projects.%s.events.%s", userID, projectID, sessionID)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -105,7 +105,7 @@ func TestE2ESessionLifecycle(t *testing.T) {
 		"joinWorktree": false,
 	}
 	data, _ := json.Marshal(createReq)
-	createSubject := fmt.Sprintf("mclaude.%s.%s.api.sessions.create", userID, projectID)
+	createSubject := fmt.Sprintf("mclaude.users.%s.projects.%s.api.sessions.create", userID, projectID)
 	if _, err := nc.Request(createSubject, data, 15*time.Second); err != nil {
 		t.Fatalf("session create request: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestE2ESessionLifecycle(t *testing.T) {
 	}
 
 	// Send a user message.
-	inputSubject := fmt.Sprintf("mclaude.%s.%s.api.sessions.input", userID, projectID)
+	inputSubject := fmt.Sprintf("mclaude.users.%s.projects.%s.api.sessions.input", userID, projectID)
 	inputMsg := map[string]any{
 		"sessionId": sessionID,
 		"message": map[string]any{
@@ -159,7 +159,7 @@ func TestE2ESessionLifecycle(t *testing.T) {
 	}
 
 	// Clean up: delete the session.
-	deleteSubject := fmt.Sprintf("mclaude.%s.%s.api.sessions.delete", userID, projectID)
+	deleteSubject := fmt.Sprintf("mclaude.users.%s.projects.%s.api.sessions.delete", userID, projectID)
 	deleteReq, _ := json.Marshal(map[string]string{"sessionId": sessionID})
 	if _, err := nc.Request(deleteSubject, deleteReq, 15*time.Second); err != nil {
 		t.Logf("session delete request: %v (non-fatal)", err)

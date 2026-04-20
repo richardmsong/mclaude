@@ -90,10 +90,13 @@ func startTestSession(t *testing.T, transcriptName, sessionID string) (*Session,
 	transcript := testutil.TranscriptPath(transcriptName)
 
 	st := SessionState{
-		ID:        sessionID,
-		ProjectID: "test-proj",
-		State:     StateIdle,
-		CreatedAt: time.Now(),
+		ID:          sessionID,
+		Slug:        sessionID,  // use sessionID as slug for tests (already slug-valid)
+		UserSlug:    "test-user",
+		ProjectSlug: "test-proj",
+		ProjectID:   "test-proj",
+		State:       StateIdle,
+		CreatedAt:   time.Now(),
 	}
 
 	sess := newSession(st, "test-user")
@@ -185,7 +188,7 @@ func TestSimpleMessageLifecycle(t *testing.T) {
 
 	// All events should be on the correct NATS subject.
 	for _, m := range msgs {
-		want := "mclaude.test-user.test-proj.events.sess-simple"
+		want := "mclaude.users.test-user.projects.test-proj.events.sess-simple"
 		if m.subject != want {
 			t.Errorf("event on wrong subject: got %q, want %q", m.subject, want)
 			break
@@ -396,7 +399,7 @@ func TestEventSubjectFormat(t *testing.T) {
 		t.Fatal("no messages published")
 	}
 	for _, m := range msgs {
-		if !strings.HasPrefix(m.subject, "mclaude.test-user.test-proj.events.") {
+		if !strings.HasPrefix(m.subject, "mclaude.users.test-user.projects.test-proj.events.") {
 			t.Errorf("unexpected subject prefix: %q", m.subject)
 		}
 	}

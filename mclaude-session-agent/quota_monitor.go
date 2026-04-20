@@ -42,7 +42,7 @@ func newQuotaMonitor(
 	publishLifec func(sessionID, evType string, extra map[string]string),
 ) (*QuotaMonitor, error) {
 	quotaCh := make(chan *nats.Msg, 16)
-	subject := fmt.Sprintf("mclaude.%s.quota", userID)
+	subject := "mclaude.users." + userID + ".quota"
 	quotaSub, err := nc.ChanSubscribe(subject, quotaCh)
 	if err != nil {
 		return nil, fmt.Errorf("quota subscribe: %w", err)

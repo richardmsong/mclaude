@@ -73,8 +73,8 @@ func TestMonitoringSpans(t *testing.T) {
 
 	// Emit nats.publish spans.
 	for _, subject := range []string{
-		"mclaude.user1.proj1.events.sess-mon-test",
-		"mclaude.user1.proj1.lifecycle.sess-mon-test",
+		"mclaude.users.user1.projects.proj1.events.sess-mon-test",
+		"mclaude.users.user1.projects.proj1.lifecycle.sess-mon-test",
 	} {
 		_, pubSpan := NATSPublishSpan(ctx, subject)
 		pubSpan.End()

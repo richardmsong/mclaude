@@ -66,8 +66,8 @@ func startTerminal(id, shell string, tr termPubSub, userID, projectID string) (*
 		doneCh: make(chan struct{}),
 	}
 
-	outputSubject := fmt.Sprintf("mclaude.%s.%s.terminal.%s.output", userID, projectID, id)
-	inputSubject := fmt.Sprintf("mclaude.%s.%s.terminal.%s.input", userID, projectID, id)
+	outputSubject := fmt.Sprintf("mclaude.users.%s.projects.%s.api.terminal.%s.output", userID, projectID, id)
+	inputSubject := fmt.Sprintf("mclaude.users.%s.projects.%s.api.terminal.%s.input", userID, projectID, id)
 
 	// PTY output → NATS
 	go func() {

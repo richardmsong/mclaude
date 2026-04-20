@@ -746,7 +746,7 @@ func TestNewQuotaMonitorSubscriptionAndLifecycle(t *testing.T) {
 	sess := newSession(st, "test-user")
 
 	userID := "u-quota-lifecycle"
-	quotaSubject := fmt.Sprintf("mclaude.%s.quota", userID)
+	quotaSubject := fmt.Sprintf("mclaude.users.%s.quota", userID)
 
 	var lifecycleEvents []string
 	var lifecycleMu sync.Mutex

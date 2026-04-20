@@ -359,7 +359,7 @@ func TestDaemonSpawnsChildOnProjectCreate(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Publish projects.create.
-	subject := fmt.Sprintf("mclaude.%s.api.projects.create", "daemon-user")
+	subject := "mclaude.users.daemon-user.api.projects.create"
 	payload, _ := json.Marshal(map[string]string{"projectId": "proj-daemon-integ"})
 	if err := nc.Publish(subject, payload); err != nil {
 		t.Fatalf("publish: %v", err)
