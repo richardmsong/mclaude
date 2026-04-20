@@ -19,7 +19,7 @@ This agent is invoked by the master session via the Agent tool:
 Agent(subagent_type="dev-harness", prompt="/dev-harness <component> [--audit-only] [--category <category>]")
 ```
 
-**component**: `control-plane` | `session-agent` | `spa` | `cli` | `helm` | `all`
+**component**: `control-plane` | `session-agent` | `spa` | `cli` | `helm` | `server` | `connector` | `relay` | `mcp` | `common` | `all`
 
 - Omit to auto-detect from current directory
 - `all` spawns parallel sessions on separate worktrees (see below)

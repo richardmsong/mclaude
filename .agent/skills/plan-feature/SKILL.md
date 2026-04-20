@@ -263,6 +263,20 @@ For every surface the feature touches, edit the matching spec file **in the same
 
 See `docs/spec-doc-layout.md` for the canonical partitioning rules. Component subfolders are created lazily — the first spec for a component introduces the folder.
 
+### Spec-gap detection
+
+For each component listed in the ADR's "Component Changes" section, check whether a component-local spec exists:
+
+```
+Glob("docs/<component>/spec-*.md")
+```
+
+If no spec file exists for a component, **create one** using the template from `docs/adr-0025-component-specs.md` § Spec Template. Read the component's production code to populate the spec with current behavior in present tense. Include the new spec in the co-commit with the ADR and other spec edits.
+
+This check detects only the **absence of a spec file** — it does not verify that the new feature's behavior is described in the spec. Adding new behavior to an existing spec is handled by the table above. The two concerns are separate:
+- Spec-gap detection: "does this component have any spec at all?" → create if missing.
+- Spec update: "does the spec describe this ADR's changes?" → edit the existing spec.
+
 When editing a spec, follow the **doc editing rules** below.
 
 ---
