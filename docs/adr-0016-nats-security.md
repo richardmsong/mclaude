@@ -4,6 +4,7 @@
 **Status history**:
 - 2026-04-17: accepted
 
+> **Partial supersession notice.** The subject strings and KV scopes in this ADR use the legacy positional-subject shape (`mclaude.{userId}.>`, `mclaude.{clusterId}.>`, `mclaude.{userId}.sessions.{clusterId}.{sessionId}.>`). ADR-0024 (typed-slugs, 2026-04-20) supersedes every subject and KV-scope string here with the typed-literal shape (`mclaude.users.{uslug}.>`, `mclaude.clusters.{cslug}.>`, session-agent signing-key ceiling `mclaude.users.*.projects.*.>`). The identity model, issuance flow, signing-key hierarchy, threat scenarios, and KV access-control principles are unchanged. When the two ADRs disagree on a subject string, ADR-0024 wins.
 
 ## Overview
 
