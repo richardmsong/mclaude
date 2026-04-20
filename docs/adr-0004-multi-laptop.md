@@ -100,17 +100,22 @@ Without BYOH, users either run one laptop-daemon and lose their other machines, 
 1. User opens Settings > Hosts in the web UI, clicks "Add Host."
 2. Web calls `POST /api/users/{uslug}/hosts/code` — control-plane generates a 6-char alphanumeric code with 10-min TTL.
 3. Web shows: "Run on your new machine: `mclaude host register ABC123 --server https://mclaude.internal`"
-4. User runs the command on the target machine.
-5. CLI calls `POST /api/hosts/register` with `{code: "ABC123"}`.
-6. Control-plane verifies code, creates `hosts` row, signs JWT, returns creds.
+4. User runs the command on the target machine. CLI generates an NKey pair locally before calling the API.
+5. CLI calls `POST /api/hosts/register` with `{code: "ABC123", name: "Work MBP", publicKey: "<nkey>", type: "machine"}`.
+6. Control-plane atomically consumes the code (marks used in the in-memory map — preventing double-registration), looks up the associated `user_id`, creates `hosts` row, signs JWT with host-scoped permissions, returns `{slug, jwt, serverUrl}`.
 7. CLI saves NKey seed + NATS creds under `~/.mclaude/hosts/{hslug}/`. Prints success.
+
+Device-code storage: **in-memory map** with 10-min TTL and automatic eviction. Map entry: `{code → {userId, expiresAt, attempts, used}}`. Atomically set `used=true` on consumption. After 5 failed attempts, entry is evicted. No Postgres table — codes are ephemeral and a server restart simply invalidates all pending codes (acceptable for the 10-min window).
 
 ### Register a cluster host
 
-1. Admin registers the cluster via `POST /admin/clusters` (unchanged from ADR-0011). Creates `clusters` row with leaf-node NKey, NATS URL, etc.
+1. Admin registers the cluster via `POST /admin/clusters` (unchanged from ADR-0011). Creates `clusters` row with leaf-node NKey, NATS URL, signing key, etc.
 2. Admin grants user access: `POST /admin/clusters/{cslug}/members` with `{userSlug, role: "owner"|"user"}`.
-3. Control-plane creates a `hosts` row: `type='cluster', cluster_id=cslug, slug=<cluster-name-slug>`.
+3. Control-plane creates a `hosts` row: `type='cluster', cluster_id=cslug, slug=<cluster-name-slug>, public_key=NULL, role=<role>`.
 4. User sees the cluster host in Settings > Hosts and in the dashboard host picker.
+5. Control-plane writes `mclaude-hosts` KV entry: `{uslug}.{hslug}` with `status=offline` initially.
+
+**Cluster host credential model**: Cluster hosts do **not** get individual NKey pairs like machine hosts. Session-agents on the cluster connect to the **worker NATS** (which leaf-nodes into hub NATS), using JWTs signed by the cluster's **signing key** (registered at cluster creation per ADR-0011/ADR-0016). The signing key ceiling is `mclaude.users.*.hosts.{hslug}.projects.*.>` where `{hslug}` is the cluster's canonical host slug. The `hosts.public_key` column is `NULL` for cluster hosts — the cluster's signing key in `clusters.leaf_creds` handles credential issuance. The `hosts` row for a cluster is a **logical mapping** (this user can use this cluster), not a credential holder.
 
 ### Creating a project
 
@@ -133,6 +138,35 @@ Without BYOH, users either run one laptop-daemon and lose their other machines, 
 
 ## Component Changes
 
+### `mclaude-common`
+
+`pkg/slug`:
+- Add `hosts` to the `reservedWord` blocklist (compile-time checked constant).
+
+`pkg/subj`:
+- Add `type HostSlug string` (already exists in `slug.go` — re-export or move to `subj.go` for consistency).
+- All project-scoped subject helpers gain an `h HostSlug` parameter between user and project. New signatures:
+  - `UserHostProjectAPISessionsInput(u UserSlug, h HostSlug, p ProjectSlug) string`
+  - `UserHostProjectAPISessionsControl(u UserSlug, h HostSlug, p ProjectSlug) string`
+  - `UserHostProjectAPISessionsCreate(u UserSlug, h HostSlug, p ProjectSlug) string`
+  - `UserHostProjectAPISessionsDelete(u UserSlug, h HostSlug, p ProjectSlug) string`
+  - `UserHostProjectAPITerminal(u UserSlug, h HostSlug, p ProjectSlug, tail string) string`
+  - `UserHostProjectEvents(u UserSlug, h HostSlug, p ProjectSlug, sslug string) string`
+  - `UserHostProjectLifecycle(u UserSlug, h HostSlug, p ProjectSlug, sslug string) string`
+  - `UserHostStatus(u UserSlug, h HostSlug) string` — host presence heartbeat
+- Old `UserProject*` helpers are removed (not deprecated — hard cutover, no dual-path).
+- KV key helpers updated:
+  - `SessionsKVKey(u UserSlug, h HostSlug, p ProjectSlug, s string) string` → `{u}.{h}.{p}.{s}`
+  - `ProjectsKVKey(u UserSlug, h HostSlug, p ProjectSlug) string` → `{u}.{h}.{p}`
+  - `HostsKVKey(u UserSlug, h HostSlug) string` → `{u}.{h}` (replaces `LaptopsKVKey`)
+  - `JobQueueKVKey(u UserSlug, jobId string) string` → unchanged (jobs are user-scoped)
+- JetStream filter constants updated in this step (before components that reference them):
+  - `FilterMclaudeAPI = "mclaude.users.*.hosts.*.projects.*.api.sessions.>"`
+  - `FilterMclaudeEvents = "mclaude.users.*.hosts.*.projects.*.events.*"`
+  - `FilterMclaudeLifecycle = "mclaude.users.*.hosts.*.projects.*.lifecycle.*"`
+
+`src/lib/subj.ts` (mclaude-web mirror): same signature changes. `src/lib/slug.ts`: add `hosts` to reserved words.
+
 ### `mclaude-control-plane`
 
 - New `hosts` table in Postgres (see spec-state-schema.md).
@@ -153,7 +187,9 @@ Without BYOH, users either run one laptop-daemon and lose their other machines, 
 - All NATS subscriptions use host-inclusive subject shape via `pkg/subj` helpers.
 - KV key construction includes `{hslug}`: sessions key = `{uslug}.{hslug}.{pslug}.{sslug}`.
 - `SessionState` KV value gains `hostSlug` field.
-- `JobEntry` gains `hostSlug` field. Dispatcher uses it for KV key construction.
+- `JobEntry` gains `hostSlug` field. Dispatcher uses it for KV key construction. The daemon populates `hostSlug` from its own `DaemonConfig.HostSlug` when creating jobs via `POST /jobs`. The `handleJobsRoute` POST handler reads `hostSlug` from the request body (required field).
+- `handleJobsProjects` handler: KV key prefix lookup switches from UUID (`userID + "."`) to slug-based (`userSlug + "." + hostSlug + "."`). All KV key lookups in the daemon use slug-based prefixes, not UUIDs.
+- Lifecycle subscriber wildcard subject updated to host-inclusive form: `mclaude.users.{uslug}.hosts.{hslug}.projects.*.lifecycle.>`.
 
 ### `mclaude-cli`
 
@@ -176,7 +212,7 @@ Without BYOH, users either run one laptop-daemon and lose their other machines, 
 ### `charts/mclaude`
 
 - NATS permission templates updated for host-scoped grants.
-- Signing key ceiling: `mclaude.users.*.hosts.*.projects.*.>` (replaces ADR-0024's `mclaude.users.*.projects.*.>`).
+- Signing key ceiling: `mclaude.users.*.hosts.{hslug}.projects.*.>` per cluster (replaces ADR-0024's `mclaude.users.*.projects.*.>`).
 - Host registration code TTL configurable via values.
 
 ## Data Model
@@ -190,6 +226,49 @@ Key columns: `id` (UUID PK), `user_id` (FK→users), `slug` (per-user unique), `
 **Modified table: `projects`** — `cluster_id` replaced by `host_id FK→hosts`.
 
 **Removed table: `user_clusters`** — absorbed into `hosts` with `type='cluster'`.
+
+### Migration DDL
+
+The current codebase has no `hosts`, `user_clusters`, or `host_id` on `projects` (ADR-0011 was never implemented). Migration is additive:
+
+```sql
+-- Step 1: Create hosts table
+CREATE TABLE hosts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  slug TEXT NOT NULL,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL CHECK (type IN ('machine', 'cluster')),
+  role TEXT NOT NULL DEFAULT 'owner' CHECK (role IN ('owner', 'user')),
+  cluster_id TEXT REFERENCES clusters(id) ON DELETE CASCADE,
+  public_key TEXT,  -- NOT NULL for machine hosts; NULL for cluster hosts
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at TIMESTAMPTZ,
+  UNIQUE (user_id, slug),
+  CHECK (type = 'machine' OR cluster_id IS NOT NULL),
+  CHECK (type = 'cluster' OR public_key IS NOT NULL)
+);
+
+-- Step 2: Add host_id to projects (nullable during backfill)
+ALTER TABLE projects ADD COLUMN host_id TEXT REFERENCES hosts(id) ON DELETE RESTRICT;
+
+-- Step 3: Backfill (Go program — runs after hosts table is populated)
+-- For each existing project row:
+--   Look up the project's cluster → find or create a host row for (user_id, cluster)
+--   Set projects.host_id = host.id
+
+-- Step 4: Make host_id NOT NULL after backfill
+ALTER TABLE projects ALTER COLUMN host_id SET NOT NULL;
+
+-- Step 5: Drop old cluster_id FK (if it exists from a prior migration)
+-- ALTER TABLE projects DROP COLUMN cluster_id;  -- only if present
+
+-- Step 6: Update project uniqueness
+DROP INDEX IF EXISTS idx_projects_user_slug;
+CREATE UNIQUE INDEX idx_projects_user_host_slug ON projects (user_id, host_id, slug);
+```
+
+The backfill program uses `slug.Slugify()` from `mclaude-common/pkg/slug` for host slug derivation, same as the ADR-0024 backfill pattern.
 
 ### NATS subject changes (extends ADR-0024)
 
@@ -209,6 +288,8 @@ User-level subjects unchanged:
 
 New host-level subject:
 - `mclaude.users.{uslug}.hosts.{hslug}.status` — host presence heartbeat (machine hosts only; cluster hosts use `$SYS` events)
+
+**Cluster host presence**: Control-plane subscribes to `$SYS.ACCOUNT.*.CONNECT`/`DISCONNECT` events. When a cluster's leaf-node connection fires a `CONNECT` event, the CP updates all `mclaude-hosts` KV entries for that cluster (across all granted users) to `status=online`. On `DISCONNECT`, updates to `status=offline`. The mapping is: one leaf-node connection = one cluster = all host rows referencing that `cluster_id`. Initial KV entry is written at grant time with `status=offline`; it transitions to `online` only when the cluster's leaf-node connection is active.
 
 Cluster infra subjects unchanged:
 - `mclaude.clusters.{cslug}.api.projects.provision` — payload gains `hostSlug`
