@@ -78,7 +78,7 @@ export class MockAuthClient implements IAuthClient {
     return { connectionId: 'conn-mock', providerType: 'github', displayName: 'Mock', username: 'mock-user' }
   }
 
-  async updateProjectIdentity(_projectId: string, _connectionId: string | null): Promise<void> {
+  async updateProjectIdentity(_userSlug: string, _projectSlug: string, _connectionId: string | null): Promise<void> {
     // no-op in tests
   }
 }

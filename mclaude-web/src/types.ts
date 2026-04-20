@@ -60,7 +60,7 @@ export interface IAuthClient {
   getConnectionRepos(connectionId: string, query: string, page?: number): Promise<RepoListResponse>
   disconnectConnection(connectionId: string): Promise<void>
   addPAT(baseUrl: string, displayName: string, token: string): Promise<{ connectionId: string; providerType: string; displayName: string; username: string }>
-  updateProjectIdentity(projectId: string, connectionId: string | null): Promise<void>
+  updateProjectIdentity(userSlug: string, projectSlug: string, connectionId: string | null): Promise<void>
 }
 
 // ─── Session / Project state ─────────────────────────────────────────────────

@@ -94,6 +94,30 @@ export class SessionStore {
     return Array.from(this._sessions.values()).filter(s => s.projectId === projectId)
   }
 
+  /**
+   * Look up a session by its slug (ADR-0024).
+   * Falls back gracefully: if no session has a `slug` field matching, returns undefined.
+   * Use when the route contains a session slug instead of a UUID.
+   */
+  getSessionBySlug(sslug: string): SessionKVState | undefined {
+    for (const session of this._sessions.values()) {
+      if (session.slug === sslug) return session
+    }
+    return undefined
+  }
+
+  /**
+   * Look up a session by UUID or slug — handles both old and new route formats.
+   * ADR-0024: routes use slug format; UUID format is kept for backward compat.
+   */
+  resolveSession(idOrSlug: string): SessionKVState | undefined {
+    // Try UUID lookup first (fast path, existing routes)
+    const byId = this._sessions.get(idOrSlug)
+    if (byId) return byId
+    // Fall back to slug scan
+    return this.getSessionBySlug(idOrSlug)
+  }
+
   onSessionChanged(listener: SessionStoreListener): () => void {
     this._sessionListeners.push(listener)
     return () => {
