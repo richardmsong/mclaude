@@ -111,3 +111,23 @@
 | 6 | handleJobsProjects hostSlug source | Made `d.cfg.HostSlug` explicit in handleJobsProjects description | factual |
 | 7 | FormatNATSCredentials location | Moved to mclaude-common/pkg/nats/creds.go for CLI access | factual |
 | 8 | serverUrl derivation | Added `window.location.origin` note to device-code flow step 3 | factual |
+
+### Round 4
+
+**Gaps found: 5**
+
+1. **Backfill Step 3 references non-existent `projects.cluster_id`** — ADR-0011 never implemented; no cluster associations exist.
+2. **`serverUrl` in registration responses: source unspecified** — Control-plane has `EXTERNAL_URL` env var already.
+3. **Admin cluster-member endpoints lack response schemas** — No status codes, bodies, or error cases.
+4. **`sslug string` instead of `slug.SessionSlug`** — Type downgrade breaks ADR-0024 type safety.
+5. **Machine host presence CP behavior unspecified** — Two mechanisms (KV + status subject) with no stated ownership/interaction.
+
+#### Fixes applied
+
+| # | Gap | Resolution | Type |
+|---|-----|-----------|------|
+| 1 | Backfill references cluster_id | Rewrote Step 3: create default 'local' host per user, assign all projects to it | factual |
+| 2 | serverUrl source | Specified: uses existing `EXTERNAL_URL` env var | factual |
+| 3 | Admin endpoint schemas | Added formal request/response schemas with status codes and error cases | factual |
+| 4 | sslug type downgrade | Fixed to `slug.SessionSlug` matching existing helpers | factual |
+| 5 | Machine host presence | Specified: daemon publishes status heartbeat every 30s, CP subscribes + maintains in-memory map, marks offline after 90s timeout, KV is persistent complement | factual |

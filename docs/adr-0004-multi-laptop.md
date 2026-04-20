@@ -151,8 +151,8 @@ Device-code storage: **in-memory map** with 10-min TTL and automatic eviction. M
   - `UserHostProjectAPISessionsCreate(u UserSlug, h HostSlug, p ProjectSlug) string`
   - `UserHostProjectAPISessionsDelete(u UserSlug, h HostSlug, p ProjectSlug) string`
   - `UserHostProjectAPITerminal(u UserSlug, h HostSlug, p ProjectSlug, tail string) string`
-  - `UserHostProjectEvents(u UserSlug, h HostSlug, p ProjectSlug, sslug string) string`
-  - `UserHostProjectLifecycle(u UserSlug, h HostSlug, p ProjectSlug, sslug string) string`
+  - `UserHostProjectEvents(u UserSlug, h HostSlug, p ProjectSlug, s SessionSlug) string`
+  - `UserHostProjectLifecycle(u UserSlug, h HostSlug, p ProjectSlug, s SessionSlug) string`
   - `UserHostStatus(u UserSlug, h HostSlug) string` — host presence heartbeat
 - Old `UserProject*` helpers are removed (not deprecated — hard cutover, no dual-path). `mclaude-common` lands first; components update call sites in parallel after.
 - `FormatNATSCredentials(jwt, seed string) []byte` moves from `mclaude-control-plane/nkeys.go` to `mclaude-common/pkg/nats/creds.go` so the CLI can assemble `.creds` files locally (JWT from server + seed from local NKey generation).
@@ -259,10 +259,13 @@ CREATE TABLE hosts (
 -- Step 2: Add host_id to projects (nullable during backfill)
 ALTER TABLE projects ADD COLUMN host_id TEXT REFERENCES hosts(id) ON DELETE RESTRICT;
 
--- Step 3: Backfill (Go program — runs after hosts table is populated)
--- For each existing project row:
---   Look up the project's cluster → find or create a host row for (user_id, cluster)
---   Set projects.host_id = host.id
+-- Step 3: Backfill (Go function — runs after hosts table is created)
+-- Since ADR-0011 was never implemented, no projects have cluster associations.
+-- For each distinct user_id in projects:
+--   Create a default machine host row: slug='local', name='Local', type='machine',
+--   role='owner', public_key=NULL (will be populated on first daemon register).
+-- Then for each project row without host_id:
+--   Set projects.host_id = the user's 'local' host row id.
 
 -- Step 4: Make host_id NOT NULL after backfill
 ALTER TABLE projects ALTER COLUMN host_id SET NOT NULL;
@@ -294,7 +297,7 @@ User-level subjects unchanged:
 - `mclaude.users.{uslug}.quota`
 
 New host-level subject:
-- `mclaude.users.{uslug}.hosts.{hslug}.status` — host presence heartbeat (machine hosts only; cluster hosts use `$SYS` events)
+- `mclaude.users.{uslug}.hosts.{hslug}.status` — host presence heartbeat (machine hosts only; cluster hosts use `$SYS` events). The daemon publishes a heartbeat every 30s. The control-plane subscribes to `mclaude.users.*.hosts.*.status` and maintains an in-memory presence map (same map used for `$SYS` cluster events). On heartbeat: mark host online, update `hosts.last_seen_at` in Postgres (debounced to every 5 min). On timeout (no heartbeat for 90s): mark host offline. The daemon also writes `mclaude-hosts` KV directly on startup and every 12h for persistent state — the status subject is the real-time complement.
 
 **Cluster host presence**: Control-plane subscribes to `$SYS.ACCOUNT.*.CONNECT`/`DISCONNECT` events. When a cluster's leaf-node connection fires a `CONNECT` event, the CP updates all `mclaude-hosts` KV entries for that cluster (across all granted users) to `status=online`. On `DISCONNECT`, updates to `status=offline`. The mapping is: one leaf-node connection = one cluster = all host rows referencing that `cluster_id`. Initial KV entry is written at grant time with `status=offline`; it transitions to `online` only when the cluster's leaf-node connection is active.
 
@@ -360,12 +363,12 @@ New host endpoints:
 
 `POST /api/users/{uslug}/hosts` (authed — requires Bearer token matching `{uslug}`):
 - Request: `{name: string (required), publicKey: string (required, NKey public), type: "machine" (required)}`
-- Success 201: `{slug: string, jwt: string, serverUrl: string}`
+- Success 201: `{slug: string, jwt: string, serverUrl: string}` — `serverUrl` is the existing `EXTERNAL_URL` env var (already required by control-plane, set via Helm values).
 - 400: missing/invalid fields. 403: token uslug mismatch. 409: slug collision (auto-suffixed, so rare).
 
 `POST /api/hosts/register` (no auth — device code is the credential):
 - Request: `{code: string (required, 6-char), name: string (required), publicKey: string (required), type: "machine" (required)}`
-- Success 201: `{slug: string, jwt: string, serverUrl: string}`
+- Success 201: `{slug: string, jwt: string, serverUrl: string}` — same `EXTERNAL_URL` source.
 - 401: invalid code. 410: code expired. 400: missing fields.
 
 `POST /api/users/{uslug}/hosts/code` (authed):
@@ -383,8 +386,14 @@ New host endpoints:
 - Success 200: `{slug, name, type, role}`. 404: host not found. 403: not owner.
 
 Admin cluster-member endpoints:
-- `POST /admin/clusters/{cslug}/members` — grant user access (creates host row)
-- `DELETE /admin/clusters/{cslug}/members/{uslug}` — revoke access (deletes host row + NATS revocation)
+
+`POST /admin/clusters/{cslug}/members` (admin auth required):
+- Request: `{userSlug: string (required), role: "owner"|"user" (required)}`
+- Success 201: `{hostSlug: string, userId: string, role: string}`
+- 404: cluster not found. 404: user not found. 409: user already has access to this cluster.
+
+`DELETE /admin/clusters/{cslug}/members/{uslug}` (admin auth required):
+- Success 204. 404: cluster not found. 404: user has no access to this cluster.
 
 ### NATS permission grant changes
 
