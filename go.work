@@ -1,0 +1,10 @@
+go 1.26
+
+use (
+	./mclaude-cli
+	./mclaude-common
+	./mclaude-connector
+	./mclaude-control-plane
+	./mclaude-relay
+	./mclaude-session-agent
+)

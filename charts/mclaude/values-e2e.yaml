@@ -85,6 +85,11 @@ sessionAgent:
     repository: python
     tag: "3.12-alpine"
 
+## ── slug backfill: disable in e2e — control-plane is a Python stub ───────
+## The slug-backfill binary lives in the real control-plane image, not the stub.
+slugBackfill:
+  enabled: false
+
 ## ── namespace: let the e2e script create it, chart doesn't manage it ─────
 ## Helm v4 SSA rejects managedFields conflicts when a pre-created namespace
 ## is also declared in chart templates. Disable chart-side creation so the

@@ -51,6 +51,11 @@ sessionAgent:
     repository: mclaude-session-agent
     tag: "dev"
 
+## ── slug backfill: disable in ephemeral dev clusters ───────────────────────
+## Dev clusters start fresh (no existing UUID-keyed data to migrate).
+slugBackfill:
+  enabled: false
+
 ## ── namespace managed by dev.sh, not by helm ──────────────────────────────
 namespace:
   create: false
