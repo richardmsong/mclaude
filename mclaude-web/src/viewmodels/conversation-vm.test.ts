@@ -46,7 +46,7 @@ describe('ConversationVM', () => {
       vm.sendMessage('hello')
       expect(mockNats.published).toHaveLength(1)
       const msg = mockNats.published[0]
-      expect(msg.subject).toBe('mclaude.user-1.project-1.api.sessions.input')
+      expect(msg.subject).toBe('mclaude.users.user-1.projects.project-1.api.sessions.input')
       const payload = parsePublished(msg.data) as { type: string; message: { role: string; content: string }; session_id: string; uuid: string }
       expect(payload.type).toBe('user')
       expect(payload.message.role).toBe('user')
@@ -102,7 +102,7 @@ describe('ConversationVM', () => {
 
       expect(mockNats.published).toHaveLength(1)
       const msg = mockNats.published[0]
-      expect(msg.subject).toBe('mclaude.user-1.project-1.api.sessions.control')
+      expect(msg.subject).toBe('mclaude.users.user-1.projects.project-1.api.sessions.control')
       const payload = parsePublished(msg.data) as {
         type: string
         response: { subtype: string; request_id: string; response: { behavior: string } }
@@ -136,7 +136,7 @@ describe('ConversationVM', () => {
       vm.denyPermission('req-1')
 
       const msg = mockNats.published[0]
-      expect(msg.subject).toBe('mclaude.user-1.project-1.api.sessions.control')
+      expect(msg.subject).toBe('mclaude.users.user-1.projects.project-1.api.sessions.control')
       const payload = parsePublished(msg.data) as {
         type: string
         response: { subtype: string; request_id: string; response: { behavior: string } }
@@ -163,7 +163,7 @@ describe('ConversationVM', () => {
       vm.interrupt()
       expect(mockNats.published).toHaveLength(1)
       const msg = mockNats.published[0]
-      expect(msg.subject).toBe('mclaude.user-1.project-1.api.sessions.control')
+      expect(msg.subject).toBe('mclaude.users.user-1.projects.project-1.api.sessions.control')
       const payload = parsePublished(msg.data) as { type: string; request: { subtype: string } }
       expect(payload.type).toBe('control_request')
       expect(payload.request.subtype).toBe('interrupt')
@@ -176,7 +176,7 @@ describe('ConversationVM', () => {
       vm.switchModel('claude-opus-4-6')
       expect(mockNats.published).toHaveLength(1)
       const msg = mockNats.published[0]
-      expect(msg.subject).toBe('mclaude.user-1.project-1.api.sessions.control')
+      expect(msg.subject).toBe('mclaude.users.user-1.projects.project-1.api.sessions.control')
       const payload = parsePublished(msg.data) as { type: string; request: { subtype: string; model: string } }
       expect(payload.type).toBe('control_request')
       expect(payload.request.subtype).toBe('set_model')
@@ -209,7 +209,7 @@ describe('ConversationVM', () => {
       vm.reloadPlugins()
       expect(mockNats.published).toHaveLength(1)
       const msg = mockNats.published[0]
-      expect(msg.subject).toBe('mclaude.user-1.project-1.api.sessions.control')
+      expect(msg.subject).toBe('mclaude.users.user-1.projects.project-1.api.sessions.control')
       const payload = parsePublished(msg.data) as { type: string; request: { subtype: string } }
       expect(payload.type).toBe('control_request')
       expect(payload.request.subtype).toBe('reload_plugins')
@@ -222,7 +222,7 @@ describe('ConversationVM', () => {
       vm.setMaxThinkingTokens(8000)
       expect(mockNats.published).toHaveLength(1)
       const msg = mockNats.published[0]
-      expect(msg.subject).toBe('mclaude.user-1.project-1.api.sessions.control')
+      expect(msg.subject).toBe('mclaude.users.user-1.projects.project-1.api.sessions.control')
       const payload = parsePublished(msg.data) as {
         type: string
         request: { subtype: string; budget: number }

@@ -1,4 +1,6 @@
 import type { INATSClient } from '@/types'
+import { subjTerminal } from '@/lib/subj'
+import type { UserSlug, ProjectSlug } from '@/lib/slug'
 
 export interface TerminalInstance {
   id: string
@@ -15,8 +17,12 @@ export class TerminalVM {
 
   constructor(
     private readonly natsClient: INATSClient,
-    private readonly userId: string,
-    private readonly projectId: string,
+    userId: string,
+    projectId: string,
+    /** User slug for subject construction (ADR-0024). Falls back to userId when absent. */
+    private readonly userSlug: string = userId,
+    /** Project slug for subject construction (ADR-0024). Falls back to projectId when absent. */
+    private readonly projectSlug: string = projectId,
   ) {}
 
   get terminals(): TerminalInstance[] {
@@ -24,7 +30,7 @@ export class TerminalVM {
   }
 
   async createTerminal(cwd?: string): Promise<string> {
-    const subject = `mclaude.${this.userId}.${this.projectId}.api.terminal.create`
+    const subject = subjTerminal(this.userSlug as UserSlug, this.projectSlug as ProjectSlug, 'create')
     const reply = await this.natsClient.request(
       subject,
       new TextEncoder().encode(JSON.stringify({ cwd })),
@@ -33,7 +39,7 @@ export class TerminalVM {
     this._terminals.push({ id: terminalId, cwd: cwd ?? '', active: true })
 
     // Subscribe to output
-    const outputSubject = `mclaude.${this.userId}.${this.projectId}.terminal.${terminalId}.output`
+    const outputSubject = subjTerminal(this.userSlug as UserSlug, this.projectSlug as ProjectSlug, `${terminalId}.output`)
     const unsub = this.natsClient.subscribe(outputSubject, (msg) => {
       const listeners = this._outputListeners.get(terminalId) ?? []
       for (const l of listeners) l(msg.data)
@@ -43,7 +49,7 @@ export class TerminalVM {
   }
 
   async deleteTerminal(terminalId: string): Promise<void> {
-    const subject = `mclaude.${this.userId}.${this.projectId}.api.terminal.delete`
+    const subject = subjTerminal(this.userSlug as UserSlug, this.projectSlug as ProjectSlug, 'delete')
     await this.natsClient.request(subject, new TextEncoder().encode(JSON.stringify({ terminalId })))
     const unsub = this._unsubscribers.get(terminalId)
     if (unsub) { unsub(); this._unsubscribers.delete(terminalId) }
@@ -52,12 +58,12 @@ export class TerminalVM {
   }
 
   sendInput(terminalId: string, data: Uint8Array): void {
-    const subject = `mclaude.${this.userId}.${this.projectId}.terminal.${terminalId}.input`
+    const subject = subjTerminal(this.userSlug as UserSlug, this.projectSlug as ProjectSlug, `${terminalId}.input`)
     this.natsClient.publish(subject, data)
   }
 
   resize(terminalId: string, rows: number, cols: number): void {
-    const subject = `mclaude.${this.userId}.${this.projectId}.api.terminal.resize`
+    const subject = subjTerminal(this.userSlug as UserSlug, this.projectSlug as ProjectSlug, 'resize')
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify({ terminalId, rows, cols })))
   }
 

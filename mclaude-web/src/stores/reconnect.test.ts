@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { EventStore } from './event-store'
 import { MockNATSClient } from '../testutil/mock-nats'
 
-const SUBJECT = 'mclaude.user-1.project-1.events.session-1'
+const SUBJECT = 'mclaude.users.user-1.projects.project-1.events.session-1'
 
 function makeStore(mockNats: MockNATSClient): EventStore {
   return new EventStore({

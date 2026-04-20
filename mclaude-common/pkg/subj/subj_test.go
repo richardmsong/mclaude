@@ -3,8 +3,8 @@ package subj_test
 import (
 	"testing"
 
-	"mclaude-common/pkg/slug"
-	"mclaude-common/pkg/subj"
+	"mclaude.io/common/pkg/slug"
+	"mclaude.io/common/pkg/subj"
 )
 
 // helper: typed slug constructors. Tests must use typed wrappers — passing

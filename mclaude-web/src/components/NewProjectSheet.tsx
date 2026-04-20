@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { slugify } from '@/lib/slug'
 import type { SessionListVM } from '@/viewmodels/session-list-vm'
 import type { ConnectedProvider, AdminProvider, Repo } from '@/types'
 import type { AuthClient } from '@/transport/auth-client'
@@ -302,6 +303,16 @@ export function NewProjectSheet({ sessionListVM, onClose, onCreated, authClient 
               onChange={e => setName(e.target.value)}
               style={inputStyle}
             />
+            {name.trim() && (
+              <div style={{
+                marginTop: 6,
+                fontSize: 12,
+                color: 'var(--text3)',
+                fontFamily: 'monospace',
+              }}>
+                saved as: <span style={{ color: 'var(--text2)' }}>{slugify(name.trim()) || '—'}</span>
+              </div>
+            )}
           </div>
 
           {/* Git Repository section */}
