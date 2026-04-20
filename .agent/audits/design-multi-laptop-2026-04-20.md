@@ -57,3 +57,31 @@
 | 7 | Daemon subject/KV breakage after BYOH | Added hostSlug-per-job flow (POST /jobs includes hostSlug, dispatcher uses it), lifecycle subscriber wildcard update, KV prefix fix | factual |
 | 8 | Signing key ceiling contradiction (wildcard vs specific hslug) | Fixed charts section to match Decisions: `mclaude.users.*.hosts.{hslug}.projects.*.>` per cluster | factual |
 | 9 | `handleJobsProjects` UUID prefix | Included in gap 7 resolution — daemon uses `{uslug}.{hslug}.` prefix for KV lookups | factual |
+
+### Round 2
+
+**Gaps found: 9**
+
+1. **`spec-state-schema.md` contradicts ADR on `hosts.public_key` nullability** — spec said NOT NULL unconditionally; ADR says nullable with CHECK constraint for cluster hosts.
+2. **NKey signing pattern for host JWT unspecified** — existing helpers generate NKeys internally; host registration signs against caller-supplied public key.
+3. **Migration mechanism not specified** — multi-step DDL has no execution strategy given the single-schema `db.Migrate()`.
+4. **`dispatchQueuedJob` host slug resolution** — unclear who supplies hostSlug to the dispatcher.
+5. **`handleJobsProjects` prefix filter semantics** — does it return all user projects or only the daemon's host's projects?
+6. **Hardcoded lifecycle init subject in `main.go`** — bypasses `pkg/subj`, will break after BYOH.
+7. **`DaemonConfig` missing `HostSlug` field** — no flag/env var name, no behavior for missing/ambiguous host.
+8. **`projects.go` NATS subscriber rewrite not called out** — subject token indices shift, KV key format changes.
+9. **Host registration request/response schemas not formally specified** — no types, required fields, or HTTP status codes.
+
+#### Fixes applied
+
+| # | Gap | Resolution | Type |
+|---|-----|-----------|------|
+| 1 | spec-state-schema public_key nullability | Updated spec to nullable with CHECK constraint matching ADR migration DDL | factual |
+| 2 | NKey signing pattern | Added `IssueHostJWT` function signature to CP component changes — signs against caller-supplied public key | factual |
+| 3 | Migration mechanism | Added migration mechanism paragraph: separate `db.MigrateHosts()` function, idempotent steps, Go backfill in single transaction | factual |
+| 4 | dispatchQueuedJob hostSlug resolution | Clarified callers (web UI, CLI) always know host because projects are host-scoped | factual |
+| 5 | handleJobsProjects prefix filter | Clarified daemon manages exactly one host, prefix returns only that host's projects | factual |
+| 6 | Hardcoded lifecycle init subject | Added main.go call site to session-agent component changes with `subj.UserHostProjectLifecycle()` replacement | factual |
+| 7 | DaemonConfig missing HostSlug | Added field spec, `--host` flag / `HOST_SLUG` env, auto-select single host, error on ambiguous, `mclaude-laptops` → `mclaude-hosts` rename | factual |
+| 8 | projects.go subscriber rewrite | Added to CP component changes: subject unchanged (user-level), token index shift, KV key via `subj.ProjectsKVKey()`, hostSlug from payload | factual |
+| 9 | Host registration schemas | Added formal request/response schemas for all 6 host endpoints with types, required fields, HTTP status codes | factual |

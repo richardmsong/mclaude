@@ -55,7 +55,7 @@ Readers: control-plane (GetProjectsByUser, GetProjectsByHost, reconciler, GetPro
 | `type` | TEXT | NOT NULL | `machine` or `cluster` |
 | `role` | TEXT | NOT NULL DEFAULT 'owner' | `owner` or `user`. Machine hosts always `owner`. Cluster hosts: registering admin = `owner`, granted users = `user`. Multiple owners supported. |
 | `cluster_id` | TEXT | FK→clusters ON DELETE CASCADE | NULL for machine hosts. FK to `clusters` for cluster hosts. |
-| `public_key` | TEXT | NOT NULL | NKey public key (generated on host, submitted during registration) |
+| `public_key` | TEXT | | NKey public key. NOT NULL for machine hosts (generated on host, submitted during registration). NULL for cluster hosts (cluster signing key handles credential issuance). Enforced by CHECK: `type = 'cluster' OR public_key IS NOT NULL`. |
 | `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
 | `last_seen_at` | TIMESTAMPTZ | | Updated by presence tracking |
 
