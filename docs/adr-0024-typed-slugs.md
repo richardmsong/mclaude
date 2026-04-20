@@ -100,6 +100,7 @@ Each Go component today is its own `go.mod` with no cross-imports. The shared sl
 - KV key format changes from `{userId}.{projectId}.{sessionId}` to `{uslug}.{pslug}.{sslug}`.
 - `handleControl` and other subject-matching code reads slugs out of the new token positions.
 - Session state stored in `mclaude-sessions` gains `userSlug`, `projectSlug`, `slug` (session slug) string fields alongside the existing UUID `id` / `projectId` — session-agent's resume/recovery path constructs KV keys from these fields, not from UUIDs.
+- **Startup slug ingestion.** The session-agent pod receives `USER_SLUG` and `PROJECT_SLUG` env vars from the reconciler's pod template (alongside the existing `USER_ID` / `PROJECT_ID`). The reconciler resolves these from Postgres (`users.slug`, `projects.slug`) when it builds the pod spec. Session slugs are per-session and flow in via NATS messages (`session.create` payload carries `sessionSlug`) and KV state — not via env vars. Rationale: symmetric with existing UUID env vars, no new JWT claim schema, single source of resolution (control-plane). See `spec-state-schema.md` Deployment section.
 
 ### `mclaude-session-agent` (daemon job dispatcher)
 
