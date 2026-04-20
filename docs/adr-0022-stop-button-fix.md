@@ -1,8 +1,9 @@
 # ADR: Stop Button Mid-Turn Interrupt Fix
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-04-20: accepted
+- 2026-04-20: implemented — visibility predicate widened in SessionDetailScreen, spec enumerated the four in-flight states, spec-evaluator CLEAN
 
 ## Overview
 
