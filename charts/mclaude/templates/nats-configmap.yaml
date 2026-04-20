@@ -10,7 +10,24 @@ metadata:
 data:
   nats.conf: |
     # mclaude NATS Server Configuration
-    # Ref: docs/plan-k8s-integration.md — NATS Subject Structure
+    # Ref: docs/adr-0024-typed-slugs.md — typed-slug subject scheme
+    #
+    # Subject structure (typed-slug scheme, ADR-0024):
+    #   mclaude.users.{uslug}.>                               — all user-scoped messages
+    #   mclaude.users.{uslug}.api.projects.create             — project create (request/reply)
+    #   mclaude.users.{uslug}.quota                           — quota broadcast
+    #   mclaude.users.{uslug}.projects.{pslug}.api.sessions.> — session commands
+    #   mclaude.users.{uslug}.projects.{pslug}.events.{sslug} — raw Claude stream-json
+    #   mclaude.users.{uslug}.projects.{pslug}.lifecycle.*    — session lifecycle events
+    #   mclaude.clusters.{cslug}.api.>                         — cluster commands/status
+    #
+    # JetStream stream filters (stream names unchanged, filters updated):
+    #   MCLAUDE_API      → mclaude.users.*.projects.*.api.sessions.>
+    #   MCLAUDE_EVENTS   → mclaude.users.*.projects.*.events.*
+    #   MCLAUDE_LIFECYCLE → mclaude.users.*.projects.*.lifecycle.*
+    #
+    # Permission grant templates are in the nats-permissions ConfigMap.
+    # Auth is JWT-based: account public key embedded here; JWTs minted by control-plane.
 
     port: {{ .Values.nats.service.clientPort }}
     http_port: {{ .Values.nats.service.monitorPort }}

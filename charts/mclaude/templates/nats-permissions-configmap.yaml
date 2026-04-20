@@ -1,0 +1,126 @@
+## ConfigMap containing NATS permission grant template strings for each identity type.
+## The control-plane reads this on startup to construct NATS user JWTs with the
+## correct subject grants per ADR-0024 (typed-slug scheme).
+##
+## Placeholder tokens:
+##   {uslug}   — the user's typed slug (e.g. "alice-gmail")
+##   {pslug}   — the project's typed slug (e.g. "my-new-project")
+##   {cslug}   — the cluster's typed slug (e.g. "us-west")
+##
+## Ref: docs/adr-0024-typed-slugs.md § "NATS permission grant inventory"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mclaude.fullname" . }}-nats-permissions
+  namespace: {{ include "mclaude.namespace" . }}
+  labels:
+    {{- include "mclaude.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats-permissions
+data:
+  ## ── SPA (browser user) ─────────────────────────────────────────────────────
+  ## JWT minted on login; sub = {uslug}. Scoped to the user's own subject tree.
+  ## Template: replace {uslug} with the actual user slug at JWT issuance time.
+  ##
+  ## Publish allow:
+  ##   mclaude.users.{uslug}.>   — all user-scoped NATS messages (projects, sessions, etc.)
+  ##   _INBOX.>                   — request/reply inbox
+  ##
+  ## Subscribe allow:
+  ##   mclaude.users.{uslug}.>   — receive responses + broadcast events
+  ##   $KV.mclaude-sessions.>    — KV watch for session state (all users' sessions visible via direct-get)
+  ##   $KV.mclaude-projects.>    — KV watch for project list
+  ##   $JS.API.DIRECT.GET.>      — JetStream direct-get (KV point reads without full watch overhead)
+  ##   _INBOX.>                   — request/reply inbox
+  ##
+  ## Publish deny (prevents privilege escalation):
+  ##   $KV.>                      — browser cannot write directly to any KV bucket
+  ##   $JS.>                      — browser cannot manage streams or consumers
+  ##   mclaude.system.>           — internal system subjects blocked from browser
+  spa.pub.allow: |
+    mclaude.users.{uslug}.>
+    _INBOX.>
+  spa.sub.allow: |
+    mclaude.users.{uslug}.>
+    $KV.mclaude-sessions.>
+    $KV.mclaude-projects.>
+    $JS.API.DIRECT.GET.>
+    _INBOX.>
+  spa.pub.deny: |
+    $KV.>
+    $JS.>
+    mclaude.system.>
+
+  ## ── Control-plane ──────────────────────────────────────────────────────────
+  ## Static JWT signed with account seed at operator provisioning time.
+  ## Unchanged from pre-ADR-0024: holds the full subject tree since it is the
+  ## authoritative routing hub. Slug rename is mechanical in routing code, not grants.
+  ##
+  ## Publish allow:  mclaude.>  $KV.>  $JS.>  _INBOX.>  $SYS.ACCOUNT.>
+  ## Subscribe allow: mclaude.>  $KV.>  $JS.>  _INBOX.>  $SYS.ACCOUNT.>
+  control-plane.pub.allow: |
+    mclaude.>
+    $KV.>
+    $JS.>
+    _INBOX.>
+    $SYS.ACCOUNT.>
+  control-plane.sub.allow: |
+    mclaude.>
+    $KV.>
+    $JS.>
+    _INBOX.>
+    $SYS.ACCOUNT.>
+
+  ## ── K8s / BYOH Controller ──────────────────────────────────────────────────
+  ## Scoped to one cluster. Minted by control-plane at cluster registration.
+  ## Template: replace {cslug} with the cluster's slug.
+  ##
+  ## Publish allow:
+  ##   $KV.mclaude-projects.>        — write project state (see KV scope note in ADR-0024)
+  ##   mclaude.clusters.{cslug}.>    — reply inbox / publish replies to control-plane
+  ##   _INBOX.>                       — request/reply inbox
+  ##
+  ## Subscribe allow:
+  ##   mclaude.clusters.{cslug}.api.>  — commands from control-plane (provision, status)
+  ##
+  ## Publish deny (prevents cross-cluster and cross-user interference):
+  ##   mclaude.users.*.>              — cannot publish user-level commands
+  ##   $KV.mclaude-sessions.>         — cannot write session state (session-agent owns it)
+  ##   $JS.>                           — cannot manage streams
+  controller.pub.allow: |
+    $KV.mclaude-projects.>
+    mclaude.clusters.{cslug}.>
+    _INBOX.>
+  controller.sub.allow: |
+    mclaude.clusters.{cslug}.api.>
+  controller.pub.deny: |
+    mclaude.users.*.>
+    $KV.mclaude-sessions.>
+    $JS.>
+
+  ## ── Session-agent signing key ceiling ──────────────────────────────────────
+  ## Registered on the NATS account at cluster registration time.
+  ## Any JWT minted by the controller's cluster signing key is clamped to this
+  ## ceiling — the session-agent JWT claims below further narrow within it.
+  ## Replaces old ceiling: mclaude.*.sessions.{clusterId}.*.> (ADR-0016 superseded).
+  session-agent.signing-key.ceiling: |
+    mclaude.users.*.projects.*.>
+
+  ## ── Session-agent JWT claims ────────────────────────────────────────────────
+  ## Minted by the controller per session-agent pod.
+  ## Template: replace {uslug} and {pslug} with the owning user/project slugs.
+  ##
+  ## Publish allow:
+  ##   mclaude.users.{uslug}.projects.{pslug}.events.>    — publish raw stream-json events
+  ##   mclaude.users.{uslug}.projects.{pslug}.lifecycle.> — publish lifecycle events
+  ##   _INBOX.>                                             — request/reply inbox
+  ##
+  ## Subscribe allow:
+  ##   mclaude.users.{uslug}.projects.{pslug}.api.sessions.>  — session commands (create, input, control, delete)
+  ##   mclaude.users.{uslug}.projects.{pslug}.api.terminal.>  — terminal I/O
+  session-agent.pub.allow: |
+    mclaude.users.{uslug}.projects.{pslug}.events.>
+    mclaude.users.{uslug}.projects.{pslug}.lifecycle.>
+    _INBOX.>
+  session-agent.sub.allow: |
+    mclaude.users.{uslug}.projects.{pslug}.api.sessions.>
+    mclaude.users.{uslug}.projects.{pslug}.api.terminal.>

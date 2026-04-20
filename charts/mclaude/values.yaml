@@ -241,6 +241,33 @@ sessionAgent:
     configMapKey: "ca-certificates.crt"  # Key in the ConfigMap containing PEM certs
 
 ## ---------------------------------------------------------------------------
+## Slug backfill migration Job (ADR-0024 typed-slug scheme)
+## ---------------------------------------------------------------------------
+## Runs cmd/slug-backfill (from the control-plane image) as a pre-install/
+## pre-upgrade Helm hook. Adds slug columns to Postgres and rekeys KV buckets
+## to the typed-slug key format before the control-plane rolls out.
+##
+## enabled: set to false to skip the migration (useful when the database is
+##   already migrated, e.g. on fresh installs where Postgres has the slug
+##   columns from the start, or in ephemeral test environments).
+##
+## Ref: docs/adr-0024-typed-slugs.md § "Backfill algorithm"
+slugBackfill:
+  enabled: true
+  ## Maximum retries on failure. Kept at 0 — slug derivation is deterministic;
+  ## a failure means a schema problem requiring human intervention.
+  backoffLimit: 0
+  ## Job fails and stops attempting after this many seconds.
+  activeDeadlineSeconds: 300
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+## ---------------------------------------------------------------------------
 ## Helm test configuration
 ## ---------------------------------------------------------------------------
 tests:

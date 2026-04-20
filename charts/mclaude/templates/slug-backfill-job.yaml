@@ -1,0 +1,85 @@
+{{- if .Values.slugBackfill.enabled }}
+## Helm pre-install/pre-upgrade hook Job that runs the slug-backfill migration
+## from mclaude-control-plane's cmd/slug-backfill binary before the control-plane
+## rolls out.
+##
+## The binary:
+##   1. Adds slug columns to users, projects, clusters (nullable; no-op if present).
+##   2. Derives typed slugs from existing name/email columns using the same
+##      slugify() algorithm as the control-plane runtime (ADR-0024).
+##   3. Sets NOT NULL + unique indexes after backfill.
+##   4. Rekeyss KV buckets: mclaude-projects, mclaude-clusters, mclaude-laptops,
+##      mclaude-job-queue (mclaude-sessions is purged — sessions are ephemeral).
+##
+## Idempotent: the binary checks for a sentinel row
+## (SELECT 1 FROM users WHERE slug IS NOT NULL LIMIT 1) before running.
+## Re-runs are no-ops when slugs are already populated.
+##
+## Ordering: runs BEFORE control-plane rollout via pre-install + pre-upgrade hooks.
+## Helm hook weight -10 ensures this runs before any weight-0 hooks.
+##
+## Ref: docs/adr-0024-typed-slugs.md § "Backfill algorithm"
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "mclaude.fullname" . }}-slug-backfill-{{ .Release.Revision }}
+  namespace: {{ include "mclaude.namespace" . }}
+  labels:
+    {{- include "mclaude.labels" . | nindent 4 }}
+    app.kubernetes.io/component: slug-backfill
+  annotations:
+    ## Pre-install runs on first helm install; pre-upgrade runs on every upgrade.
+    ## Both are needed so the migration runs whenever a new chart version deploys.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    ## Delete the Job after it completes (keeps the namespace tidy).
+    ## Failed Jobs are retained (hook-delete-policy default) so operators can inspect logs.
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  ## Do not retry on failure — slug derivation is deterministic; a failure indicates
+  ## a Postgres schema problem that requires human intervention.
+  backoffLimit: {{ .Values.slugBackfill.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.slugBackfill.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "mclaude.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: slug-backfill
+    spec:
+      restartPolicy: Never
+      {{- include "mclaude.podSecurityContext" . | nindent 6 }}
+      {{- include "mclaude.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: slug-backfill
+          ## Runs the slug-backfill binary from the control-plane image.
+          ## The binary lives at /usr/local/bin/slug-backfill inside the image
+          ## (built by mclaude-control-plane's Dockerfile alongside the main binary).
+          image: {{ include "mclaude.image" (dict "imageValues" .Values.controlPlane.image "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.controlPlane.image.pullPolicy }}
+          {{- include "mclaude.securityContext" . | nindent 10 }}
+          command: ["/usr/local/bin/slug-backfill"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.controlPlane.existingSecret }}
+                  key: database-url
+            {{- if .Values.nats.enabled }}
+            - name: NATS_URL
+              value: "nats://{{ include "mclaude.fullname" . }}-nats:{{ .Values.nats.service.clientPort }}"
+            - name: NATS_OPERATOR_JWT
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.controlPlane.existingSecret }}
+                  key: nats-operator-jwt
+            - name: NATS_OPERATOR_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.controlPlane.existingSecret }}
+                  key: nats-operator-seed
+            {{- end }}
+            - name: LOG_LEVEL
+              value: {{ .Values.controlPlane.config.logLevel | quote }}
+          resources:
+            {{- toYaml .Values.slugBackfill.resources | nindent 12 }}
+{{- end }}
