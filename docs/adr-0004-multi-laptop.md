@@ -19,7 +19,7 @@ Let a single user attach one or more of their own **hosts** to the mclaude contr
 
 Both types are first-class peers in a unified `hosts` table. The `clusters` table stays as infrastructure metadata (leaf-node config, NKey, NATS URL, capacity); the user-facing concept is always "host." The `user_clusters` join table from ADR-0011 is absorbed into `hosts` — each user's access to a cluster is a host row with `type='cluster'`.
 
-This ADR **extends ADR-0024's subject scheme** by inserting `.hosts.{hslug}.` between the user and project levels in all project-scoped subjects, KV keys, and HTTP URLs.
+This ADR **extends ADR-0024's subject scheme** by inserting `.hosts.{hslug}.` between the user and project levels in all project-scoped subjects, KV keys, and HTTP URLs. **Prerequisite**: ADR-0024 must be fully implemented first — specifically, `users.slug` column exists and is populated, `projects.slug` exists, and all subject/KV helpers use typed slugs.
 
 This ADR **partially supersedes ADR-0011** (Multi-Cluster Architecture): the registry/identity/RBAC model is replaced by the hosts model. ADR-0011's infrastructure topology (leaf nodes, hub NATS, JetStream domains, worker controller) is preserved unchanged.
 
@@ -99,7 +99,7 @@ Without BYOH, users either run one laptop-daemon and lose their other machines, 
 
 1. User opens Settings > Hosts in the web UI, clicks "Add Host."
 2. Web calls `POST /api/users/{uslug}/hosts/code` — control-plane generates a 6-char alphanumeric code with 10-min TTL.
-3. Web shows: "Run on your new machine: `mclaude host register ABC123 --server https://mclaude.internal`"
+3. Web shows: "Run on your new machine: `mclaude host register ABC123 --server https://mclaude.internal`" (the `--server` URL is derived from `window.location.origin` in the web UI)
 4. User runs the command on the target machine. CLI generates an NKey pair locally before calling the API.
 5. CLI calls `POST /api/hosts/register` with `{code: "ABC123", name: "Work MBP", publicKey: "<nkey>", type: "machine"}`.
 6. Control-plane atomically consumes the code (marks used in the in-memory map — preventing double-registration), looks up the associated `user_id`, creates `hosts` row, signs JWT with host-scoped permissions, returns `{slug, jwt, serverUrl}`.
@@ -154,7 +154,8 @@ Device-code storage: **in-memory map** with 10-min TTL and automatic eviction. M
   - `UserHostProjectEvents(u UserSlug, h HostSlug, p ProjectSlug, sslug string) string`
   - `UserHostProjectLifecycle(u UserSlug, h HostSlug, p ProjectSlug, sslug string) string`
   - `UserHostStatus(u UserSlug, h HostSlug) string` — host presence heartbeat
-- Old `UserProject*` helpers are removed (not deprecated — hard cutover, no dual-path).
+- Old `UserProject*` helpers are removed (not deprecated — hard cutover, no dual-path). `mclaude-common` lands first; components update call sites in parallel after.
+- `FormatNATSCredentials(jwt, seed string) []byte` moves from `mclaude-control-plane/nkeys.go` to `mclaude-common/pkg/nats/creds.go` so the CLI can assemble `.creds` files locally (JWT from server + seed from local NKey generation).
 - KV key helpers updated:
   - `SessionsKVKey(u UserSlug, h HostSlug, p ProjectSlug, s string) string` → `{u}.{h}.{p}.{s}`
   - `ProjectsKVKey(u UserSlug, h HostSlug, p ProjectSlug) string` → `{u}.{h}.{p}`
@@ -191,7 +192,7 @@ Device-code storage: **in-memory map** with 10-min TTL and automatic eviction. M
 - KV key construction includes `{hslug}`: sessions key = `{uslug}.{hslug}.{pslug}.{sslug}`.
 - `SessionState` KV value gains `hostSlug` field.
 - `JobEntry` gains `hostSlug` field. Dispatcher uses it for subject and KV key construction (third arg to `pkg/subj` helpers). The daemon populates `hostSlug` from its own `DaemonConfig.HostSlug` when creating jobs via `POST /jobs`. The `handleJobsRoute` POST handler reads `hostSlug` from the request body (required field). Callers (web UI, CLI) always know the host because projects are host-scoped — the project's host is used.
-- `handleJobsProjects` handler: KV key prefix lookup switches from UUID (`userID + "."`) to slug-based (`userSlug + "." + hostSlug + "."`). This returns only the daemon's own host's projects (the daemon manages exactly one host). All KV key lookups in the daemon use slug-based prefixes, not UUIDs.
+- `handleJobsProjects` handler: KV key prefix lookup switches from UUID (`userID + "."`) to slug-based (`d.cfg.UserSlug + "." + d.cfg.HostSlug + "."`), using the daemon's own `DaemonConfig` fields. This returns only the daemon's own host's projects (the daemon manages exactly one host). All KV key lookups in the daemon use slug-based prefixes from `d.cfg`, not UUIDs.
 - Lifecycle subscriber wildcard subject updated to host-inclusive form: `mclaude.users.{uslug}.hosts.{hslug}.projects.*.lifecycle.>`.
 - `main.go` hardcoded lifecycle init subject (`"mclaude.users.%s.projects.%s.lifecycle._init"`) replaced with `subj.UserHostProjectLifecycle(u, h, p, "_init")`. `HOST_SLUG` must be read from env before this call site.
 
@@ -310,6 +311,8 @@ Cluster infra subjects unchanged:
 | `mclaude-hosts` (was `mclaude-laptops`) | `{uslug}.{hostname}` | `{uslug}.{hslug}` |
 | `mclaude-job-queue` | `{uslug}.{jobId}` | `{uslug}.{jobId}` (unchanged — jobs are user-scoped) |
 | `mclaude-clusters` | `{uslug}` | `{uslug}` (unchanged) |
+
+`mclaude-heartbeats` bucket **removed** — project heartbeats (periodic `{ts}` writes) are folded into `mclaude-projects` KV by updating the existing project entry's `lastSeen` field. The separate `hbKV` field and `kvBucketHeartbeats` constant in agent.go are deleted. `heartbeatKVKey()` in state.go is deleted. The heartbeat goroutine in `startHeartbeat()` writes to `projKV` instead.
 
 `mclaude-laptops` renamed to `mclaude-hosts`. Value schema expanded:
 ```json

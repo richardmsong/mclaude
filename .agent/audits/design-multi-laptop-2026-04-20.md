@@ -85,3 +85,29 @@
 | 7 | DaemonConfig missing HostSlug | Added field spec, `--host` flag / `HOST_SLUG` env, auto-select single host, error on ambiguous, `mclaude-laptops` → `mclaude-hosts` rename | factual |
 | 8 | projects.go subscriber rewrite | Added to CP component changes: subject unchanged (user-level), token index shift, KV key via `subj.ProjectsKVKey()`, hostSlug from payload | factual |
 | 9 | Host registration schemas | Added formal request/response schemas for all 6 host endpoints with types, required fields, HTTP status codes | factual |
+
+### Round 3
+
+**Gaps found: 8**
+
+1. **`pkg/subj` still uses old signatures** — Implementation gap, not spec gap. ADR specifies cutover; code updated by dev-harness after audit. Added sequencing note.
+2. **`users` table has no `slug` column** — ADR-0024 scope. Added explicit prerequisite statement.
+3. **`users.slug` migration DDL absent** — Same as #2. ADR-0024 adds users.slug. This ADR assumes it exists.
+4. **`main.go` lifecycle init / `DaemonConfig.HostSlug` not in code** — Implementation gap. ADR already specifies the changes; code updated by dev-harness.
+5. **`mclaude-heartbeats` bucket fate unspecified** — Real gap. Specified removal: heartbeats folded into mclaude-projects KV.
+6. **`handleJobsProjects` hostSlug source** — Made `d.cfg.HostSlug` explicit in the ADR text.
+7. **`FormatNATSCredentials` location** — Real gap. Moved to `mclaude-common/pkg/nats/creds.go` so CLI can use it.
+8. **`serverUrl` in device-code web display** — Clarified: derived from `window.location.origin`.
+
+#### Fixes applied
+
+| # | Gap | Resolution | Type |
+|---|-----|-----------|------|
+| 1 | pkg/subj old signatures | Added sequencing note: mclaude-common lands first, components update in parallel | factual |
+| 2 | users.slug missing | Added explicit prerequisite: ADR-0024 must be fully implemented first | factual |
+| 3 | users.slug migration DDL | Covered by gap 2 prerequisite statement | factual |
+| 4 | main.go / DaemonConfig not in code | Implementation gap — ADR already specifies changes | not-a-gap |
+| 5 | mclaude-heartbeats fate | Specified removal: fold into mclaude-projects KV (update lastSeen on existing entry) | factual |
+| 6 | handleJobsProjects hostSlug source | Made `d.cfg.HostSlug` explicit in handleJobsProjects description | factual |
+| 7 | FormatNATSCredentials location | Moved to mclaude-common/pkg/nats/creds.go for CLI access | factual |
+| 8 | serverUrl derivation | Added `window.location.origin` note to device-code flow step 3 | factual |
