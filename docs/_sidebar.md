@@ -1,0 +1,53 @@
+- **Overview**
+  - [Feature List](feature-list.md)
+
+- **Specs**
+  - [State Schema](spec-state-schema.md)
+  - [Tailscale DNS](spec-tailscale-dns.md)
+  - [Doc Layout](spec-doc-layout.md)
+
+- **UI Specs (shared)**
+  - [Auth](ui/spec-auth.md)
+  - [Connection Indicator](ui/spec-connection-indicator.md)
+  - [Conversation Events](ui/spec-conversation-events.md)
+  - [Design System](ui/spec-design-system.md)
+  - [Diff View](ui/spec-diff-view.md)
+  - [First Run Flow](ui/spec-first-run-flow.md)
+  - [Interaction Patterns](ui/spec-interaction-patterns.md)
+  - [Navigation](ui/spec-navigation.md)
+  - [Platform Notes](ui/spec-platform-notes.md)
+  - [Prompt Bar](ui/spec-prompt-bar.md)
+  - [PTT](ui/spec-ptt.md)
+  - [Token Usage](ui/spec-token-usage.md)
+
+- **UI Specs (mclaude-web)**
+  - [Dashboard](ui/mclaude-web/spec-dashboard.md)
+  - [Overlays](ui/mclaude-web/spec-overlays.md)
+  - [Session Detail](ui/mclaude-web/spec-session-detail.md)
+  - [Settings](ui/mclaude-web/spec-settings-web.md)
+  - [User Management](ui/mclaude-web/spec-user-management.md)
+
+- **ADRs**
+  - [0001 Telemetry](adr-0001-telemetry.md)
+  - [0002 Core Containers](adr-0002-core-containers.md)
+  - [0003 K8s Integration](adr-0003-k8s-integration.md)
+  - [0004 Multi-Laptop](adr-0004-multi-laptop.md)
+  - [0005 Pluggable CLI](adr-0005-pluggable-cli.md)
+  - [0006 Client Architecture](adr-0006-client-architecture.md)
+  - [0007 GitHub OAuth](adr-0007-github-oauth.md)
+  - [0008 Graceful Upgrades](adr-0008-graceful-upgrades.md)
+  - [0009 Quota-Aware Scheduling](adr-0009-quota-aware-scheduling.md)
+  - [0010 Scratch to Git](adr-0010-scratch-to-git.md)
+  - [0011 Multi-Cluster](adr-0011-multi-cluster.md)
+  - [0012 Replay User Messages](adr-0012-replay-user-messages.md)
+  - [0013 Reconciler Env Sync](adr-0013-reconciler-env-sync.md)
+  - [0014 Controller Separation](adr-0014-controller-separation.md)
+  - [0015 Docs MCP](adr-0015-docs-mcp.md)
+  - [0016 NATS Security](adr-0016-nats-security.md)
+  - [0017 Token Insights](adr-0017-token-insights.md)
+  - [0018 ADR Status Lifecycle](adr-0018-adr-status-lifecycle.md)
+  - [0019 Backgrounded Shells](adr-0019-backgrounded-shells.md)
+  - [0020 Docs Per-Component Folders](adr-0020-docs-per-component-folders.md)
+  - [0021 Docs Plan/Spec Refactor](adr-0021-docs-plan-spec-refactor.md)
+  - [0022 Stop Button Fix](adr-0022-stop-button-fix.md)
+  - [0023 Harness Backpressure](adr-0023-harness-backpressure-on-ambiguity.md)
