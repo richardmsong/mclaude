@@ -76,6 +76,14 @@ Existing users, projects, sessions, and clusters are renamed in place at cutover
 - Subscriptions switch to the new subject shape via `pkg/subj` (shared with control-plane).
 - KV key format changes from `{userId}.{projectId}.{sessionId}` to `{uslug}.{pslug}.{sslug}`.
 - `handleControl` and other subject-matching code reads slugs out of the new token positions.
+- Session state stored in `mclaude-sessions` gains `userSlug`, `projectSlug`, `slug` (session slug) string fields alongside the existing UUID `id` / `projectId` — session-agent's resume/recovery path constructs KV keys from these fields, not from UUIDs.
+
+### `mclaude-session-agent` (daemon job dispatcher)
+
+The daemon in `mclaude-session-agent` hosts the `runJobDispatcher` loop (ADR-0009). It polls `mclaude-sessions` KV to watch active sessions and manipulates jobs in `mclaude-job-queue`.
+
+- `JobEntry` struct gains three new fields: `UserSlug string`, `ProjectSlug string`, `SessionSlug string`. Populated at job creation by the control-plane handler (which already has all three slugs in the request path).
+- The dispatcher uses the slug fields (not the UUIDs) to construct KV keys: `{UserSlug}.{ProjectSlug}.{SessionSlug}` for `mclaude-sessions`, `{UserSlug}.{ID}` for `mclaude-job-queue`. UUID fields (`UserID`, `ProjectID`, `SessionID`) stay on the struct for Postgres foreign-key joins and logging compatibility.
 
 ### `mclaude-web`
 
@@ -99,31 +107,61 @@ Existing users, projects, sessions, and clusters are renamed in place at cutover
 
 ### Slug columns (Postgres)
 
+Migration strategy: the backfill is performed by a **Go migration program**, not pure SQL. Reason: the `slugify()` algorithm requires Unicode NFD normalization + combining-mark stripping + the reserved-word blocklist + fallback generation — all cleaner in Go than plpgsql, and we already call the same helper at runtime from control-plane, so running it at migration time guarantees parity.
+
+Schema migration (pure DDL):
+
 ```sql
 -- users
-ALTER TABLE users ADD COLUMN slug TEXT;
-UPDATE users SET slug =
-  regexp_replace(
-    lower(coalesce(name, split_part(email, '@', 1))),
-    '[^a-z0-9]+', '-', 'g'
-  ) || '-' || split_part(email, '@', 2);
--- ^ simplified — real migration uses the slugify() helper in a
---   plpgsql function + numeric suffix on collisions
+ALTER TABLE users ADD COLUMN slug TEXT;         -- nullable during backfill
+-- (backfill runs next, in Go)
 ALTER TABLE users ALTER COLUMN slug SET NOT NULL;
 CREATE UNIQUE INDEX idx_users_slug ON users (slug);
 
 -- projects
 ALTER TABLE projects ADD COLUMN slug TEXT;
-UPDATE projects SET slug = <slugify(name) + collision suffix>;
 ALTER TABLE projects ALTER COLUMN slug SET NOT NULL;
 CREATE UNIQUE INDEX idx_projects_user_slug ON projects (user_id, slug);
 
 -- clusters
 ALTER TABLE clusters ADD COLUMN slug TEXT;
-UPDATE clusters SET slug = <slugify(name) + collision suffix>;
 ALTER TABLE clusters ALTER COLUMN slug SET NOT NULL;
 CREATE UNIQUE INDEX idx_clusters_slug ON clusters (slug);
 ```
+
+Backfill algorithm (Go program `cmd/slug-backfill`, run between the `ADD COLUMN` and the `SET NOT NULL` steps, inside the same deploy transaction):
+
+```
+For each users row (ordered by created_at):
+  base = slugify(row.name or email_local_part(row.email))
+  candidate = base + "-" + domain_first_segment(row.email)
+  suffix = 0
+  while candidate already used in users.slug:
+    suffix += 1
+    candidate = base + "-" + domain_first_segment + "-" + str(suffix)
+  row.slug = candidate
+  mark candidate as used
+
+For each projects row (ordered by created_at, grouped by user_id):
+  base = slugify(row.name)
+  candidate = base
+  suffix = 0
+  while candidate already used in projects.slug for this user_id:
+    suffix += 1
+    candidate = base + "-" + str(suffix)
+  row.slug = candidate
+
+For each clusters row (ordered by created_at):
+  base = slugify(row.name)
+  candidate = base
+  suffix = 0
+  while candidate already used in clusters.slug:
+    suffix += 1
+    candidate = base + "-" + str(suffix)
+  row.slug = candidate
+```
+
+`slugify()` fallback: if `base` is empty after normalization, or is a reserved word, or starts with `_`, substitute `u-{6 base32 chars}` (users) / `p-{6}` / `c-{6}` — where the 6 chars derive from the first 30 bits of the row's UUID for determinism.
 
 `users.id`, `projects.id`, `clusters.id` stay as UUID PKs. All existing foreign keys continue to reference `id`.
 
@@ -144,29 +182,139 @@ CREATE UNIQUE INDEX idx_clusters_slug ON clusters (slug);
 | `mclaude.clusters.{clusterId}.projects.provision` | `mclaude.clusters.{cslug}.api.projects.provision` |
 | `mclaude.clusters.{clusterId}.status` | `mclaude.clusters.{cslug}.api.status` |
 
-JetStream streams (`MCLAUDE_API`, `MCLAUDE_EVENTS`, `MCLAUDE_LIFECYCLE`) stay by name; their subject filters update to the new patterns.
+### JetStream stream filter inventory
+
+Stream names stay unchanged. Subject filters update to a 5-token wildcard prefix for user-scoped streams.
+
+| Stream | Old filter | New filter |
+|--------|-----------|-----------|
+| `MCLAUDE_API` | `mclaude.*.*.api.sessions.>` | `mclaude.users.*.projects.*.api.sessions.>` |
+| `MCLAUDE_EVENTS` | `mclaude.*.*.events.*` | `mclaude.users.*.projects.*.events.*` |
+| `MCLAUDE_LIFECYCLE` | `mclaude.*.*.lifecycle.*` | `mclaude.users.*.projects.*.lifecycle.*` |
+
+Streams are recreated (not renamed) during the hard cutover because NATS JetStream does not support in-place filter change without a stream reset.
+
+### NATS permission grant inventory
+
+Grant strings per identity type, derived from the new subject tree:
+
+**SPA (browser user)** — JWT minted on login, `sub = {uslug}`:
+```
+Publish allow:
+  mclaude.users.{uslug}.>
+  _INBOX.>
+Subscribe allow:
+  mclaude.users.{uslug}.>
+  $KV.mclaude-sessions.>       # KV watch for session state
+  $KV.mclaude-projects.>       # KV watch for project list
+  $JS.API.DIRECT.GET.>         # KV direct get
+  _INBOX.>
+Publish deny:
+  $KV.>
+  $JS.>
+  mclaude.system.>
+```
+
+**Control-plane** — static JWT signed with account seed. Unchanged grants (`mclaude.>`, `$KV.>`, `$JS.>`, `_INBOX.>`, `$SYS.ACCOUNT.>`). Control-plane already holds the full subject tree; the slug rename is a mechanical substitution in routing code, not in grants.
+
+**K8s / BYOH Controller** — scoped to one cluster (cluster slug):
+```
+Publish allow:
+  $KV.mclaude-projects.>       # see "mclaude-projects KV key (scope note)" below
+  mclaude.clusters.{cslug}.>   # reply inbox / publish replies
+  _INBOX.>
+Subscribe allow:
+  mclaude.clusters.{cslug}.api.>  # commands from control-plane
+Publish deny:
+  mclaude.users.*.>            # cannot publish user-level commands
+  $KV.mclaude-sessions.>
+  $JS.>
+```
+
+**Session-agent** — minted by controller's cluster signing key. Session-agents currently run per-project (not per-session) — see Note below. Ceiling inherited from signing key, JWT claims narrow further.
+
+- **Signing key ceiling** (registered on the account at cluster registration time): `mclaude.users.*.projects.*.>` — clamps any JWT the controller mints. Replaces the old `mclaude.*.sessions.{clusterId}.*.>` ceiling from ADR-0016, which is superseded by this ADR's subject tree.
+- **Session-agent JWT claims** (what each minted JWT asserts):
+  ```
+  Publish allow:
+    mclaude.users.{uslug}.projects.{pslug}.events.>
+    mclaude.users.{uslug}.projects.{pslug}.lifecycle.>
+    _INBOX.>
+  Subscribe allow:
+    mclaude.users.{uslug}.projects.{pslug}.api.sessions.>
+    mclaude.users.{uslug}.projects.{pslug}.api.terminal.>
+  ```
+
+> **Note on session-agent scope**: ADR-0016 specified a per-session JWT ceiling (`mclaude.*.sessions.{clusterId}.{sessionId}.>`). The live system (see `spec-state-schema.md`) runs session-agents at project granularity — a single agent handles every session in one project. ADR-0024 aligns JWT scope with live behavior: project-scoped grants. Moving to per-session JWTs is a separate concern (would be a new ADR on session isolation).
+
+### `mclaude-projects` KV key (scope note)
+
+`spec-state-schema.md` currently specifies key format `{userId}.{projectId}` (user-prefixed). ADR-0011 and ADR-0016 specify `{clusterId}.{projectId}` (cluster-prefixed) for controller write-scope isolation. These two are already inconsistent in the repo — a pre-existing drift unrelated to slugs.
+
+ADR-0024 preserves the **current live shape** (user-prefixed). The mapping is `{userId}.{projectId}` → `{uslug}.{pslug}`. Reconciling with ADR-0011/ADR-0016's cluster-prefixed intent is out of scope for this ADR; it will be addressed by a future multi-cluster KV-partitioning ADR when cluster-scoped writes are actually rolled out. Until that ADR lands, the controller write grant is `$KV.mclaude-projects.>` (the same broad scope it has today per spec-state-schema) — not narrowed by cluster.
 
 ### KV key format
 
 | Bucket | Old key | New key |
 |--------|---------|---------|
 | `mclaude-sessions` | `{userId}.{projectId}.{sessionId}` | `{uslug}.{pslug}.{sslug}` |
-| `mclaude-projects` | `{userId}.{projectId}` | `{uslug}.{pslug}` |
-| `mclaude-laptops` | `{userId}.{hostname}` | `{uslug}.{hslug}` (after ADR-0004 lands; pre-ADR-0004 `{hostname}` is still raw machine hostname — stays until ADR-0004 replaces it) |
+| `mclaude-projects` | `{userId}.{projectId}` | `{uslug}.{pslug}` (see "`mclaude-projects` KV key (scope note)" above) |
+| `mclaude-clusters` | `{userId}` | `{uslug}` |
+| `mclaude-laptops` | `{userId}.{hostname}` | `{uslug}.{hostname}` (pre-ADR-0004 — `{hostname}` is still the raw machine hostname; ADR-0004 later replaces the `hostname` column with `hslug`) |
 | `mclaude-job-queue` | `{userId}/{jobId}` | `{uslug}.{jobId}` |
 
-`{jobId}` and `{hostname}` remain UUID/opaque tokens (not slugs) — no change.
+`{jobId}` and `{hostname}` remain UUID/opaque tokens (not slugs) — no change in token shape, only separator.
+
+### Hard-cutover KV rekeying
+
+Because the hard cutover rewrites every key, the migration job for each bucket:
+
+1. Snapshots all existing keys at deploy time.
+2. For each key, joins against Postgres (`users.id → users.slug`, `projects.id → projects.slug`, etc.) to compute the new slug-based key.
+3. Writes the value under the new key.
+4. Purges the old key.
+
+For `mclaude-sessions`, sessions are ephemeral — sessions that exist at cutover time are stopped as part of the deploy (session-agents are restarted anyway when pods redeploy). The migration job can purge `mclaude-sessions` entirely rather than rekey it. For `mclaude-projects`, `mclaude-clusters`, `mclaude-laptops`, and `mclaude-job-queue`, rekeying is required because these hold durable state.
 
 ### HTTP URL inventory
 
+Auth + infra routes (no per-user variant, stay flat):
+
+| Route | Status |
+|-------|--------|
+| `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout` | unchanged |
+| `GET /version`, `GET /health`, `GET /healthz`, `GET /metrics`, `GET /readyz` | unchanged |
+
+User-scoped API routes (moved under `/api/users/{uslug}/...`):
+
 | Old | New |
 |-----|-----|
-| `/auth/login`, `/auth/refresh`, `/auth/logout` | unchanged (flat) |
-| `/version`, `/health`, `/healthz`, `/metrics`, `/readyz` | unchanged (flat) |
-| `/admin/*` | `/admin/users/{uslug}/...` for user-scoped endpoints; instance-wide admin endpoints stay flat |
-| `/api/projects/*` | `/api/users/{uslug}/projects/*` |
-| `/api/projects/{pid}/sessions/*` | `/api/users/{uslug}/projects/{pslug}/sessions/*` |
-| `/api/jobs/*` | `/api/users/{uslug}/jobs/*` |
+| `GET /api/projects` | `GET /api/users/{uslug}/projects` |
+| `POST /api/projects` | `POST /api/users/{uslug}/projects` |
+| `GET /api/projects/{pid}` | `GET /api/users/{uslug}/projects/{pslug}` |
+| `DELETE /api/projects/{pid}` | `DELETE /api/users/{uslug}/projects/{pslug}` |
+| `GET /api/projects/{pid}/sessions` | `GET /api/users/{uslug}/projects/{pslug}/sessions` |
+| `POST /api/projects/{pid}/sessions` | `POST /api/users/{uslug}/projects/{pslug}/sessions` |
+| `GET /api/projects/{pid}/sessions/{sid}` | `GET /api/users/{uslug}/projects/{pslug}/sessions/{sslug}` |
+| `DELETE /api/projects/{pid}/sessions/{sid}` | `DELETE /api/users/{uslug}/projects/{pslug}/sessions/{sslug}` |
+| `GET /api/jobs` | `GET /api/users/{uslug}/jobs` |
+| `POST /api/jobs` | `POST /api/users/{uslug}/jobs` |
+| `GET /api/jobs/{jobId}` | `GET /api/users/{uslug}/jobs/{jobId}` |
+| `DELETE /api/jobs/{jobId}` | `DELETE /api/users/{uslug}/jobs/{jobId}` |
+
+Admin routes — cluster admin endpoints keep cluster-scoped addressing (cluster membership is cluster-centric, not user-centric), migrated to cluster slugs:
+
+| Old | New |
+|-----|-----|
+| `POST /admin/clusters` | `POST /admin/clusters` (create — no cluster id yet) |
+| `GET /admin/clusters` | `GET /admin/clusters` |
+| `GET /admin/clusters/{id}` | `GET /admin/clusters/{cslug}` |
+| `POST /admin/clusters/{id}/members` | `POST /admin/clusters/{cslug}/members` |
+| `DELETE /admin/clusters/{id}/members/{userId}` | `DELETE /admin/clusters/{cslug}/members/{uslug}` |
+| `GET /admin/users` | `GET /admin/users` (list) |
+| `GET /admin/users/{userId}` | `GET /admin/users/{uslug}` |
+
+`{jobId}` stays UUID-shaped for now — jobs are transient and creating slugs for them adds no readability value. (Out of scope: revisiting job identifiers if logs become hard to parse in practice.)
 
 ## Error Handling
 
