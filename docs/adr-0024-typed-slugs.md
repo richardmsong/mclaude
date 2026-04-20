@@ -1,8 +1,9 @@
 # ADR: Typed Slug Scheme for Subjects, URLs, and Keys
 
-**Status**: draft
+**Status**: accepted
 **Status history**:
 - 2026-04-20: draft
+- 2026-04-20: accepted — paired with spec-state-schema.md updates (subject inventory, KV key formats, JetStream filters, Postgres slug columns)
 
 ## Overview
 
@@ -359,6 +360,8 @@ Deferred:
 - Multi-tenant / per-org reserved-word policies.
 - `hosts` table + `{hslug}` subjects — lands with ADR-0004.
 - A rename API (if ever needed, would be a new ADR that carefully thinks through permission grant invalidation + cache invalidation).
+- **Kubernetes resource naming.** `mclaude-{userId}` namespaces, `project-{projectId}` PVCs, `mclaude-session-agent-{projectId}` deployments, and `MCProject` CRDs continue to use UUIDs. K8s names have stricter constraints (DNS-1123 length/charset) and renaming them requires pod recreation + namespace moves — a larger scope than the slug-in-subjects migration. A separate future ADR can address K8s-resource naming if readability pressure warrants it.
+- `mclaude-projects` KV key partitioning (user-prefix vs cluster-prefix) — pre-existing drift between spec-state-schema.md (`{userId}.{projectId}`) and ADR-0011/ADR-0016 (`{clusterId}.{projectId}`). ADR-0024 preserves the live user-prefixed shape; reconciliation is future work.
 
 ## Open questions
 
