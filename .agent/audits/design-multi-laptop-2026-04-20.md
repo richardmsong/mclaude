@@ -131,3 +131,17 @@
 | 3 | Admin endpoint schemas | Added formal request/response schemas with status codes and error cases | factual |
 | 4 | sslug type downgrade | Fixed to `slug.SessionSlug` matching existing helpers | factual |
 | 5 | Machine host presence | Specified: daemon publishes status heartbeat every 30s, CP subscribes + maintains in-memory map, marks offline after 90s timeout, KV is persistent complement | factual |
+
+### Round 5
+
+**Gaps found: 2**
+
+1. **Backfill creates machine host with NULL public_key, violating CHECK constraint** — Step 1 CHECK and Step 3 backfill contradict.
+2. **`SessionsKVKey` uses `s string` instead of `s SessionSlug`** — Breaks type safety pattern.
+
+#### Fixes applied
+
+| # | Gap | Resolution | Type |
+|---|-----|-----------|------|
+| 1 | Backfill vs CHECK constraint | Deferred CHECK to Step 7 with `NOT VALID` — backfill hosts get NULL public_key until re-register | factual |
+| 2 | SessionsKVKey type | Fixed to `s SessionSlug` matching all other helpers | factual |
