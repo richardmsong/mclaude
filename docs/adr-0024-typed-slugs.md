@@ -58,10 +58,31 @@ Existing users, projects, sessions, and clusters are renamed in place at cutover
 
 ## Component Changes
 
+### New shared Go module `mclaude-common`
+
+Each Go component today is its own `go.mod` with no cross-imports. The shared slug/subject helpers live in a new repo-root module `mclaude-common/` (module path `mclaude-common`), wired via `go.work` at the repo root. Layout:
+
+```
+./
+├── go.work                              (new — lists all 5+ Go modules)
+├── mclaude-common/                      (new module)
+│   ├── go.mod                           (module mclaude-common)
+│   └── pkg/
+│       ├── slug/                        (Slugify, Validate, ValidateOrFallback)
+│       └── subj/                        (typed subject-construction helpers)
+├── mclaude-control-plane/               (imports mclaude-common/pkg/slug, subj)
+├── mclaude-session-agent/               (imports mclaude-common/pkg/slug, subj)
+├── mclaude-cli/                         (imports mclaude-common/pkg/slug, subj)
+└── ...
+```
+
+- `pkg/slug`: `Slugify(displayName string) string`, `Validate(slug string) error`, `ValidateOrFallback(candidate string, kind Kind) string` where `kind ∈ {User, Project, Host, Cluster, Session}`. Reserved-word list is a typed constant (not a `[]string` literal) so additions are compile-time checked.
+- `pkg/subj`: typed subject-construction helpers keyed on named types (`type UserSlug string`, `type ProjectSlug string`, etc.). Helpers accept only the typed wrappers — passing a raw string is a compile-time error. Example: `subj.UserProjectAPI(u UserSlug, p ProjectSlug, tail ...Literal) string` returns `mclaude.users.{u}.projects.{p}.api.{tail...}`.
+- CI does not require special workflow changes — Go 1.21+ respects `go.work` automatically when building from the workspace root. Existing per-component `go build` / `go test` invocations continue to work because each module's `go.mod` resolves the new dependency via the workspace.
+
 ### `mclaude-control-plane`
 
-- New package `pkg/slug` (Go): `Slugify(displayName) string`, `Validate(slug) error`, `ValidateOrFallback(slug, kind) string`. Reserved-word list is a typed constant, not a string array.
-- New package `pkg/subj` (Go): typed subject-construction helpers. Each helper takes a validated slug type (`UserSlug`, `ProjectSlug`, `SessionSlug`) — not raw strings — so an unvalidated slug fails at compile time. Example: `subj.UserAPI(u UserSlug, rest ...Literal) string` produces `mclaude.users.{u}.api.{rest...}`.
+- Imports `mclaude-common/pkg/slug` and `mclaude-common/pkg/subj`.
 - Postgres migration:
   - `users`: add `slug TEXT NOT NULL UNIQUE`, backfilled via `slugify(name or email local-part) || '-' || split_part(email, '@', 2)`.
   - `projects`: add `slug TEXT NOT NULL`, unique per user (`UNIQUE (user_id, slug)`), backfilled from `name`.
@@ -74,7 +95,8 @@ Existing users, projects, sessions, and clusters are renamed in place at cutover
 
 ### `mclaude-session-agent`
 
-- Subscriptions switch to the new subject shape via `pkg/subj` (shared with control-plane).
+- Imports `mclaude-common/pkg/slug` and `mclaude-common/pkg/subj`.
+- Subscriptions switch to the new subject shape via the shared `pkg/subj` helpers.
 - KV key format changes from `{userId}.{projectId}.{sessionId}` to `{uslug}.{pslug}.{sslug}`.
 - `handleControl` and other subject-matching code reads slugs out of the new token positions.
 - Session state stored in `mclaude-sessions` gains `userSlug`, `projectSlug`, `slug` (session slug) string fields alongside the existing UUID `id` / `projectId` — session-agent's resume/recovery path constructs KV keys from these fields, not from UUIDs.
@@ -95,6 +117,7 @@ The daemon in `mclaude-session-agent` hosts the `runJobDispatcher` loop (ADR-000
 
 ### `mclaude-cli`
 
+- Imports `mclaude-common/pkg/slug` and `mclaude-common/pkg/subj`.
 - `~/.mclaude/context.json` gains `userSlug`, `projectSlug`, `hostSlug`.
 - Commands accept short forms: `mclaude session list` uses the context file; `mclaude session list -p other-project` overrides. `@pslug` is accepted as a positional short form.
 - Slug flags are validated locally before any API call.
@@ -371,11 +394,12 @@ _All resolved — see Decisions table._
 
 | Component | New/changed lines (est.) | Dev-harness tokens (est.) | Notes |
 |-----------|--------------------------|---------------------------|-------|
-| mclaude-control-plane | ~1,200 | ~90k | `pkg/slug` (150) + `pkg/subj` (200) + Postgres migration (100) + handler restructuring (400) + subject-publish rewrites (200) + tests (150) |
-| mclaude-session-agent | ~500 | ~60k | Subscription rewrites (200) + KV key rewrites (150) + tests (150) |
-| mclaude-web | ~700 | ~65k | `slug.ts` + `subj.ts` (200) + route restructuring (150) + slug preview component (100) + publish-call migrations (150) + tests (100) |
-| mclaude-cli | ~400 | ~40k | Context file (100) + flag validation (100) + short-form parser (100) + tests (100) |
-| charts/mclaude | ~150 | ~25k | NATS permission templates (100) + migration Job template (50) |
+| **mclaude-common (new)** | ~450 | ~50k | go.mod (10) + pkg/slug (150) + pkg/subj (200) + tests for both (90). Must land first because all 3 Go components import it. |
+| mclaude-control-plane | ~1,100 | ~85k | Import mclaude-common. Postgres migration + backfill program (250) + handler restructuring to user-scoped routes (400) + subject-publish rewrites (200) + tests (250). |
+| mclaude-session-agent | ~550 | ~65k | Import mclaude-common. Subscription rewrites (200) + KV key + state rewrites (150) + daemon dispatcher slug fields (100) + tests (100). |
+| mclaude-web | ~700 | ~65k | `slug.ts` + `subj.ts` (200) + route restructuring (150) + slug preview component (100) + publish-call migrations (150) + tests (100). |
+| mclaude-cli | ~400 | ~40k | Import mclaude-common. Context file (100) + flag validation (100) + short-form parser (100) + tests (100). |
+| charts/mclaude | ~150 | ~25k | NATS permission templates (100) + backfill migration Job template (50). |
 
-**Total estimated tokens:** ~280k
-**Estimated wall-clock:** ~1.5h of 5h budget (≈30%). Under the per-component ceiling; dev-harness can handle control-plane in one pass without context-pressure re-invocation.
+**Total estimated tokens:** ~330k
+**Estimated wall-clock:** ~2h of 5h budget (≈40%). mclaude-common lands first (sequential); the remaining 4 components land in parallel.
