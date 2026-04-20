@@ -408,8 +408,10 @@ Readers: reconciler (reads on startup to template Deployments)
 
 - Replicas: 1
 - Volumes: project PVC, nix PVC, user-config ConfigMap, user-secrets Secret
-- Container: session-agent image with `--project-id`, `--user-id` args
+- Container: session-agent image with env vars `USER_ID`, `PROJECT_ID` (UUIDs for FK joins), `USER_SLUG`, `PROJECT_SLUG` (slugs for NATS subject and KV key construction per ADR-0024)
 - Restart policy: Always (pod restarts trigger `--resume` recovery)
+
+The reconciler resolves `USER_SLUG` and `PROJECT_SLUG` from Postgres (`users.slug`, `projects.slug`) when building the pod template. Session slugs are per-session and flow through NATS messages / KV state — they are not pod env vars.
 
 Writers: reconciler (`reconcileDeployment`)
 
