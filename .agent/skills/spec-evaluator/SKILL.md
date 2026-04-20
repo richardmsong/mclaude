@@ -8,6 +8,19 @@ user_invocable: true
 
 Spawns the `spec-evaluator` agent for one or all components. The agent has no conversation context — it reads only spec docs and code.
 
+## Doc discovery
+
+Agents glob ADRs at `docs/adr-*.md` (root only — ADRs never nest) and specs at `docs/**/spec-*.md` (recursive). Component-local specs live under per-component subfolders; components without a dedicated subfolder use only cross-cutting specs + relevant ADRs.
+
+| Component          | Docs                                                                                                                  |
+|--------------------|-----------------------------------------------------------------------------------------------------------------------|
+| `control-plane`    | `docs/spec-state-schema.md` + any `docs/adr-*.md` referencing control-plane                                           |
+| `session-agent`    | `docs/spec-state-schema.md` + any `docs/adr-*.md` referencing session-agent                                           |
+| `spa`              | `docs/ui/spec-*.md` (shared) + `docs/ui/mclaude-web/spec-*.md` (web-local) + `docs/adr-0006-client-architecture.md`   |
+| `cli`              | Cross-cutting specs + any `docs/adr-*.md` referencing cli                                                             |
+| `helm`             | `docs/spec-state-schema.md` + any `docs/adr-*.md` referencing helm                                                    |
+| `mclaude-docs-mcp` | `docs/mclaude-docs-mcp/spec-*.md` (lazy — folder doesn't exist yet; spec is created when the first ADR adds content)  |
+
 ## Usage
 
 ```

@@ -6,11 +6,11 @@ user_invocable: true
 
 # Plan Feature
 
-Structured design session for a new feature. Produces an **ADR** at `docs/adr-YYYY-MM-DD-<slug>.md` — and updates any impacted specs (`docs/spec-*.md`) in the same commit — after resolving all ambiguities with the user.
+Structured design session for a new feature. Produces an **ADR** at `docs/adr-NNNN-<slug>.md` — and updates any impacted specs (`docs/**/spec-*.md`) in the same commit — after resolving all ambiguities with the user.
 
 ADRs are dated, immutable records of individual decisions. Specs are living, present-tense descriptions of the current design. Git co-commits between an ADR and the specs it touches form the **lineage edge** that the `docs` MCP surfaces via `get_lineage`. This is load-bearing: without the co-commit, future agents cannot discover why a spec section looks the way it does.
 
-Every ADR carries a **status** (`draft | accepted | implemented | superseded | withdrawn`) — see `docs/adr-2026-04-19-adr-status-lifecycle.md`. This skill starts new ADRs in `draft` and promotes them to `accepted` at the spec-co-commit step. Drafts can be paused and resumed freely; they don't co-commit with specs.
+Every ADR carries a **status** (`draft | accepted | implemented | superseded | withdrawn`) — see `docs/adr-0018-adr-status-lifecycle.md`. This skill starts new ADRs in `draft` and promotes them to `accepted` at the spec-co-commit step. Drafts can be paused and resumed freely; they don't co-commit with specs.
 
 ## Write-first principle (LOAD-BEARING)
 
@@ -46,8 +46,8 @@ Examples:
    the Q&A loop with the remaining open questions.
 
    Otherwise: check for an existing draft ADR whose slug overlaps with the
-   description (grep docs/adr-*.md for Status: draft, compare slugs). If one
-   exists, offer to resume.
+   description (grep `docs/adr-*.md` — root only, ADRs never nest — for
+   Status: draft, compare slugs). If one exists, offer to resume.
 
 1. Research (read relevant specs + related ADRs via docs MCP)
 2. WRITE the draft ADR file to disk NOW — with whatever you know so far, plus
@@ -74,7 +74,7 @@ Examples:
 
 If the user invoked `/plan-feature --resume [<slug>]`:
 
-1. Find draft ADRs: `Glob("docs/adr-*.md")` → for each file, read the top ~10 lines and keep those with `**Status**: draft`.
+1. Find draft ADRs: `Glob("docs/adr-*.md")` (root only — ADRs never nest) → for each file, read the top ~10 lines and keep those with `**Status**: draft`.
 2. If `<slug>` was provided, pick the matching file (substring match). Otherwise, list the drafts to the user and ask which one to resume.
 3. Read the full draft in context. Identify open questions (typically marked with TODO, "(decision pending)", or explicit question lists from prior Q&A rounds).
 4. Skip Step 1 (research already done) and jump into Step 3 (ask questions) with the remaining opens.
@@ -82,7 +82,7 @@ If the user invoked `/plan-feature --resume [<slug>]`:
 If the user invoked `/plan-feature <description>` **without** `--resume`:
 
 1. Grep `docs/adr-*.md` for `**Status**: draft` and extract each draft's slug from its filename.
-2. If any draft's slug overlaps with the description's keywords, tell the user: "Found a draft at `docs/adr-YYYY-MM-DD-<slug>.md` that might match. Resume it, or start fresh?"
+2. If any draft's slug overlaps with the description's keywords, tell the user: "Found a draft at `docs/adr-NNNN-<slug>.md` that might match. Resume it, or start fresh?"
 3. Otherwise proceed to Step 1.
 
 ---
@@ -96,15 +96,18 @@ Use the `docs` MCP instead of grepping the whole `docs/` tree:
 - `get_lineage` on a spec section — returns the ADRs that previously modified it. Read those first.
 - `get_section` — targeted reads once you've identified a relevant section.
 
+When globbing directly, ADRs live at `docs/adr-*.md` (root only — never nested) and specs live at `docs/**/spec-*.md` (recursive — cross-cutting at root, UI cluster under `docs/ui/`, component-local under `docs/<component>/`).
+
 Also read:
 - **Feature list**: `docs/feature-list.md` — feature IDs and platform support.
+- **Doc layout rules**: `docs/spec-doc-layout.md` — canonical partitioning + naming policy.
 - **Existing code**: grep for related patterns, interfaces, types.
 
 Use the Explore agent for broad codebase research. Use Grep/Glob for targeted lookups.
 
 The goal is to understand:
 - What exists today that this feature builds on or replaces
-- Which specs will be touched (state-schema, ui, tailscale-dns, etc.)
+- Which specs will be touched (state-schema, UI cluster, tailscale-dns, component-local specs, etc.)
 - Which prior ADRs shaped the relevant spec sections — so this ADR extends the lineage rather than contradicting it silently
 - What components are affected
 - What constraints exist (NATS subjects, K8s resources, auth model, UI patterns)
@@ -113,7 +116,7 @@ The goal is to understand:
 
 ## Step 2 — Write the initial draft ADR file (DO THIS BEFORE ASKING QUESTIONS)
 
-Pick a slug and write `docs/adr-YYYY-MM-DD-<slug>.md` to disk now, using today's absolute date. The template at the end of this section is the full shape. On this first write:
+Pick a slug and write `docs/adr-NNNN-<slug>.md` to disk now. ADRs are numbered with a zero-padded 4-digit monotonic global counter — compute `N = (ls docs/adr-*.md | wc -l) + 1` at write time. If a later commit reveals the number's already taken, bump by 1 and retry (the rename is mechanical — only the filename changes). The template at the end of this section is the full shape. On this first write:
 
 - Fill in what you can from research: title, motivation, a rough sketch of the user-facing flow, which components are implicated, which specs are likely impacted.
 - **Stub every uncertain section** with `TODO: <question>` or `(decision pending: <question>)`. It is better to write a bad first draft that captures what you're thinking than to hold it in your head.
@@ -201,7 +204,7 @@ What can go wrong and how each failure is surfaced.
 Auth, token storage, scope, revocation.
 
 ## Impact
-Which specs are updated in this commit (`docs/spec-state-schema.md`, `docs/spec-ui.md`, etc.).
+Which specs are updated in this commit (`docs/spec-state-schema.md`, `docs/ui/spec-<topic>.md`, `docs/<component>/spec-<topic>.md`, etc.).
 Which components implement the change.
 
 ## Scope
@@ -245,16 +248,20 @@ the estimate as a fraction of this budget.
 
 ### 4b. Update impacted specs
 
-For every cross-cutting surface the feature touches, edit the matching `docs/spec-*.md` **in the same working tree**:
+For every surface the feature touches, edit the matching spec file **in the same working tree**:
 
-| Change surface | Spec to edit |
-|---------------|--------------|
-| Persistent state (DB, KV, NATS subjects, K8s resources) | `docs/spec-state-schema.md` |
-| UI behavior, screens, design system, interactive element contracts | `docs/spec-ui.md` |
-| DNS | `docs/spec-tailscale-dns.md` |
-| A feature-local detail with no cross-cutting impact | None — ADR alone is enough |
+| Change surface                                       | Spec to edit                                  |
+|------------------------------------------------------|-----------------------------------------------|
+| Persistent state (DB, KV, NATS subjects, K8s)        | `docs/spec-state-schema.md`                   |
+| DNS                                                  | `docs/spec-tailscale-dns.md`                  |
+| Doc layout / partitioning rules                      | `docs/spec-doc-layout.md`                     |
+| Cross-cutting spec (touches 2+ components)           | `docs/spec-<concern>.md` (root)               |
+| UI shared contract (flow, interaction, design token) | `docs/ui/spec-<topic>.md`                     |
+| UI component-local (screen, widget, platform API)    | `docs/ui/<ui-component>/spec-<topic>.md`      |
+| Component-local behavior (single non-UI component)   | `docs/<component>/spec-<topic>.md`            |
+| Feature-local detail with no cross-cutting impact    | None — ADR alone is enough                    |
 
-Do not create new per-feature spec files in v1 unless a clear cross-component concern emerges (see ADR-2026-04-19 for the partitioning policy). Small, feature-local details belong in the ADR only.
+See `docs/spec-doc-layout.md` for the canonical partitioning rules. Component subfolders are created lazily — the first spec for a component introduces the folder.
 
 When editing a spec, follow the **doc editing rules** below.
 
@@ -262,7 +269,7 @@ When editing a spec, follow the **doc editing rules** below.
 
 ## Step 5 — Design audit
 
-Run `/design-audit docs/adr-YYYY-MM-DD-<slug>.md` to verify the ADR is self-sufficient.
+Run `/design-audit docs/adr-NNNN-<slug>.md` to verify the ADR is self-sufficient.
 
 This calls the `design-evaluator` agent in a loop. The evaluator has no conversation context — it reads only the ADR (and referenced specs) plus the codebase. Between rounds, `/design-audit` classifies gaps (factual vs design decision), fixes factual ones, asks the user about decisions, and re-runs until CLEAN. All findings, fixes, and decisions are logged to `.agent/audits/`.
 
@@ -297,7 +304,7 @@ Only `docs/` is staged in this commit. Code changes go through `/feature-change`
 If the user wants to pause mid-planning, the draft ADR can be committed on its own (no spec edits, no status promotion):
 
 ```bash
-git add docs/adr-YYYY-MM-DD-<slug>.md
+git add docs/adr-NNNN-<slug>.md
 git commit -m "draft(<area>): <what's being planned>"
 ```
 
@@ -310,7 +317,7 @@ A draft-only commit does **not** form a lineage edge. It only preserves the work
 After the ADR + spec edits are committed:
 
 ```
-The design is complete at docs/adr-YYYY-MM-DD-<slug>.md
+The design is complete at docs/adr-NNNN-<slug>.md
 (and updates spec-<concern>.md). Run /feature-change to implement.
 ```
 
@@ -324,7 +331,7 @@ These rules apply whenever a doc is edited — during initial creation (step 4),
 
 ### ADRs are immutable
 
-- ADR content is historical. Do not rewrite past decisions. If a later decision supersedes an earlier one, author a **new** ADR dated today that describes the supersession, and add a one-line `> Superseded by adr-YYYY-MM-DD-<slug>.md` note near the affected section (or at the top of the old ADR).
+- ADR content is historical. Do not rewrite past decisions. If a later decision supersedes an earlier one, author a **new** ADR dated today that describes the supersession, and add a one-line `> Superseded by adr-NNNN-<slug>.md` note near the affected section (or at the top of the old ADR).
 - Mechanical updates to an old ADR are allowed: fixing a broken cross-reference when a file is renamed, fixing a typo, restoring a broken link. These are not semantic changes.
 - Never edit an ADR to change *what it decided* — author a new one instead.
 
@@ -351,7 +358,7 @@ When editing a `docs/spec-*.md`:
 - Write implementation details (function names, file paths) in a spec
 - Describe future/intended behavior — only what is true now or will be true after this ADR lands
 
-**UI-specific rules** (when editing `docs/spec-ui.md`):
+**UI-specific rules** (when editing any `docs/ui/**/spec-*.md` — shared contracts under `docs/ui/` or component-local under `docs/ui/<ui-component>/`):
 - Wireframes: update ASCII art to match what will be rendered exactly
 - Every interactive element has a behavior bullet: label, validation, default, on-submit behavior
 

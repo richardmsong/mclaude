@@ -5,7 +5,7 @@
 - 2026-04-17: accepted
 
 
-> **Note:** The `Category Classification` section of this ADR is superseded by `adr-2026-04-19-docs-plan-spec-refactor.md`. Current classifier: `adr-*` → `'adr'`, `spec-*` → `'spec'`, `feature-list*` → `'spec'`, everything else → `null`. The `'design'` category has been renamed to `'adr'`.
+> **Note:** The `Category Classification` section of this ADR is superseded by `adr-0021-docs-plan-spec-refactor.md`. Current classifier: `adr-*` → `'adr'`, `spec-*` → `'spec'`, `feature-list*` → `'spec'`, everything else → `null`. The `'design'` category has been renamed to `'adr'`.
 
 ## Overview
 
@@ -120,7 +120,7 @@ Retrieve the full content of a specific section.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `doc_path` | string | yes | Document path relative to repo root (e.g. `docs/adr-2026-04-10-k8s-integration.md`) |
+| `doc_path` | string | yes | Document path relative to repo root (e.g. `docs/adr-0003-k8s-integration.md`) |
 | `heading` | string | yes | Section heading text (e.g. `Component Changes`) |
 
 Returns: `{ doc_path, doc_title, category, heading, content, line_start, line_end }` or error if not found.

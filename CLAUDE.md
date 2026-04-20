@@ -31,7 +31,7 @@ For bug fixes where the spec is already correct, `/feature-change` skips the spe
 
 **When the user describes anything that looks like a potential new feature, jump straight into `/plan-feature` — don't wait for the full picture, don't rely on keeping it in memory.**
 
-Planning context is lost when you get compacted or switched out. The ADR on disk is the durable form. Start `/plan-feature` on the first mention, even mid-conversation, even if there are still open questions — drafts are first-class (see `docs/adr-2026-04-19-adr-status-lifecycle.md`) and can be paused, committed, and resumed.
+Planning context is lost when you get compacted or switched out. The ADR on disk is the durable form. Start `/plan-feature` on the first mention, even mid-conversation, even if there are still open questions — drafts are first-class (see `docs/adr-0018-adr-status-lifecycle.md`) and can be paused, committed, and resumed.
 
 Heuristic: if the user says something like "maybe we should…", "what if…", "could we add…", "I want to…", or describes a capability the app doesn't have yet → that's `/plan-feature`. Don't ask permission; just start the skill and let the Q&A surface the rest.
 

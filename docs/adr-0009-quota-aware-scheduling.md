@@ -5,7 +5,7 @@
 - 2026-04-14: accepted
 
 
-> **Note:** Sections of this ADR that describe slug derivation from the `docs/plan-` filename prefix are superseded by `adr-2026-04-19-docs-plan-spec-refactor.md`. The scheduler still takes a `specPath` but the prefix is now `docs/adr-YYYY-MM-DD-` or `docs/spec-` — the code derives the slug by stripping the leading `docs/` and trailing `.md`, then additionally stripping any `adr-YYYY-MM-DD-` or `spec-` prefix.
+> **Note:** Sections of this ADR that describe slug derivation from the `docs/plan-` filename prefix are superseded by `adr-0021-docs-plan-spec-refactor.md`. The scheduler still takes a `specPath` but the prefix is now `docs/adr-YYYY-MM-DD-` or `docs/spec-` — the code derives the slug by stripping the leading `docs/` and trailing `.md`, then additionally stripping any `adr-YYYY-MM-DD-` or `spec-` prefix.
 
 ## Overview
 
@@ -169,10 +169,10 @@ The dispatcher strips the `docs/plan-` prefix and `.md` suffix from `specPath`, 
 |-----------|-----------|
 | `docs/adr-YYYY-MM-DD-spa.md` | `spa` |
 | `docs/adr-YYYY-MM-DD-session-agent.md` | `session-agent` |
-| `docs/adr-2026-04-10-k8s-integration.md` | `control-plane` |
-| `docs/adr-2026-04-11-client-architecture.md` | `spa` |
-| `docs/adr-2026-04-14-github-oauth.md` | `control-plane` |
-| `docs/adr-2026-04-14-quota-aware-scheduling.md` | `all` |
+| `docs/adr-0003-k8s-integration.md` | `control-plane` |
+| `docs/adr-0006-client-architecture.md` | `spa` |
+| `docs/adr-0007-github-oauth.md` | `control-plane` |
+| `docs/adr-0009-quota-aware-scheduling.md` | `all` |
 | Any unrecognized `plan-*.md` | `all` |
 
 The component is passed as the argument to `/dev-harness <component>` in the session prompt.
@@ -488,7 +488,7 @@ All handlers scope KV operations to `{d.cfg.UserID}/{jobId}` keys in `d.jobQueue
 ```
 
 **Arguments**:
-- `spec-path` — relative path to spec doc (e.g., `docs/adr-2026-04-14-quota-aware-scheduling.md`). Must exist.
+- `spec-path` — relative path to spec doc (e.g., `docs/adr-0009-quota-aware-scheduling.md`). Must exist.
 - `--priority N` — integer 1–10; default 5. Higher = survives quota pressure longer.
 - `--threshold N` — integer 1–99; default 75. 5h utilization % at which to trigger graceful stop.
 - `--auto-continue` — flag; if set, job re-queues at the 5h reset time after being stopped.

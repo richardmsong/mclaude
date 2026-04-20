@@ -7,7 +7,7 @@
 
 ## Overview
 
-> **Current model note:** Today ALL projects (including scratch) get a bare repo at `/data/repo/` and use worktrees — see `entrypoint.sh` and `adr-2026-04-10-k8s-integration.md`. "Scratch" currently means "bare repo, no remote." This doc proposes changing to a regular-repo layout at `/data/` and introducing a true no-git scratch mode. This is a layout migration, not just adding git to projects that lack it.
+> **Current model note:** Today ALL projects (including scratch) get a bare repo at `/data/repo/` and use worktrees — see `entrypoint.sh` and `adr-0003-k8s-integration.md`. "Scratch" currently means "bare repo, no remote." This doc proposes changing to a regular-repo layout at `/data/` and introducing a true no-git scratch mode. This is a layout migration, not just adding git to projects that lack it.
 
 Users can upgrade a scratch project (no git, files in `/data/`) to a git project (version-controlled, worktree isolation per session). Conversion happens in a dedicated session via a skill, where Claude walks the user through gitignore setup, initial commit, and optional remote connection. Once converted, a project cannot revert to scratch.
 
@@ -231,7 +231,7 @@ Cannot transition `has_git` from true to false.
 ## Security
 
 - The `/git-init` skill runs with the same permissions as any Claude session — no elevated access needed.
-- OAuth tokens for GitHub/GitLab are managed by the existing OAuth connection flow (see `adr-2026-04-14-github-oauth.md`). The skill uses the connection's `gh`/`glab` CLI credentials to create repos and push.
+- OAuth tokens for GitHub/GitLab are managed by the existing OAuth connection flow (see `adr-0007-github-oauth.md`). The skill uses the connection's `gh`/`glab` CLI credentials to create repos and push.
 - `has_git` and `git_url` updates go through the control-plane API, which validates the requesting user owns the project.
 - ConfigMap is in the project's namespace, scoped by RBAC. Only the control-plane ServiceAccount can update it.
 

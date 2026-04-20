@@ -17,7 +17,7 @@ The current layout conflates the two: `docs/plan-*.md` files contain a mix of fe
 
 Every new feature request effectively is an ADR — a dated decision with a scope. But several "feature" decisions also have cross-cutting impact (data schema, NATS subjects, UI patterns) that every future feature must stay consistent with. Today, to understand current behavior, an agent re-reads every `docs/plan-*.md` and reconciles overlapping claims. This is token-hungry and error-prone.
 
-The `mclaude-docs-mcp` server (ADR `adr-2026-04-17-docs-mcp.md`) was the first step: git co-modification becomes lineage, so "which ADRs shaped this spec section" is a `get_lineage` query, not a re-read. Lineage only pays off once the filesystem actually distinguishes ADRs from specs. This ADR does that.
+The `mclaude-docs-mcp` server (ADR `adr-0015-docs-mcp.md`) was the first step: git co-modification becomes lineage, so "which ADRs shaped this spec section" is a `get_lineage` query, not a re-read. Lineage only pays off once the filesystem actually distinguishes ADRs from specs. This ADR does that.
 
 ## Decisions
 
@@ -47,31 +47,31 @@ The `mclaude-docs-mcp` server (ADR `adr-2026-04-17-docs-mcp.md`) was the first s
 
 | Old path | New path |
 |----------|----------|
-| `docs/telemetry-proposal.md` | `docs/adr-2026-04-08-telemetry.md` |
-| `docs/plan-k8s-integration.md` | `docs/adr-2026-04-10-k8s-integration.md` |
-| `docs/multi-laptop-plan.md` | `docs/adr-2026-04-10-multi-laptop.md` |
-| `docs/pluggable-cli-plan.md` | `docs/adr-2026-04-10-pluggable-cli.md` |
-| `docs/plan-core-containers.md` | `docs/adr-2026-04-10-core-containers.md` |
-| `docs/plan-client-architecture.md` | `docs/adr-2026-04-11-client-architecture.md` |
-| `docs/plan-github-oauth.md` | `docs/adr-2026-04-14-github-oauth.md` |
-| `docs/plan-graceful-upgrades.md` | `docs/adr-2026-04-14-graceful-upgrades.md` |
-| `docs/plan-quota-aware-scheduling.md` | `docs/adr-2026-04-14-quota-aware-scheduling.md` |
-| `docs/plan-scratch-to-git.md` | `docs/adr-2026-04-14-scratch-to-git.md` |
-| `docs/plan-multi-cluster.md` | `docs/adr-2026-04-15-multi-cluster.md` |
-| `docs/plan-replay-user-messages.md` | `docs/adr-2026-04-15-replay-user-messages.md` |
-| `docs/plan-reconciler-env-sync.md` | `docs/adr-2026-04-16-reconciler-env-sync.md` |
-| `docs/plan-controller-separation.md` | `docs/adr-2026-04-17-controller-separation.md` |
-| `docs/plan-docs-mcp.md` | `docs/adr-2026-04-17-docs-mcp.md` |
-| `docs/plan-nats-security.md` | `docs/adr-2026-04-17-nats-security.md` |
-| `docs/plan-token-insights.md` | `docs/adr-2026-04-17-token-insights.md` |
-| `docs/plan-backgrounded-shells.md` | `docs/adr-2026-04-19-backgrounded-shells.md` |
+| `docs/telemetry-proposal.md` | `docs/adr-0001-telemetry.md` |
+| `docs/plan-k8s-integration.md` | `docs/adr-0003-k8s-integration.md` |
+| `docs/multi-laptop-plan.md` | `docs/adr-0004-multi-laptop.md` |
+| `docs/pluggable-cli-plan.md` | `docs/adr-0005-pluggable-cli.md` |
+| `docs/plan-core-containers.md` | `docs/adr-0002-core-containers.md` |
+| `docs/plan-client-architecture.md` | `docs/adr-0006-client-architecture.md` |
+| `docs/plan-github-oauth.md` | `docs/adr-0007-github-oauth.md` |
+| `docs/plan-graceful-upgrades.md` | `docs/adr-0008-graceful-upgrades.md` |
+| `docs/plan-quota-aware-scheduling.md` | `docs/adr-0009-quota-aware-scheduling.md` |
+| `docs/plan-scratch-to-git.md` | `docs/adr-0010-scratch-to-git.md` |
+| `docs/plan-multi-cluster.md` | `docs/adr-0011-multi-cluster.md` |
+| `docs/plan-replay-user-messages.md` | `docs/adr-0012-replay-user-messages.md` |
+| `docs/plan-reconciler-env-sync.md` | `docs/adr-0013-reconciler-env-sync.md` |
+| `docs/plan-controller-separation.md` | `docs/adr-0014-controller-separation.md` |
+| `docs/plan-docs-mcp.md` | `docs/adr-0015-docs-mcp.md` |
+| `docs/plan-nats-security.md` | `docs/adr-0016-nats-security.md` |
+| `docs/plan-token-insights.md` | `docs/adr-0017-token-insights.md` |
+| `docs/plan-backgrounded-shells.md` | `docs/adr-0019-backgrounded-shells.md` |
 
 ### Unchanged
 
 | Path | Reason |
 |------|--------|
 | `docs/feature-list.md` | Inventory, not an ADR or spec. |
-| `docs/adr-2026-04-19-docs-plan-spec-refactor.md` | This file. |
+| `docs/adr-0021-docs-plan-spec-refactor.md` | This file. |
 
 ## `mclaude-docs-mcp` Changes
 
@@ -173,11 +173,11 @@ Every spec file (`spec-state-schema.md`, `spec-ui.md`, `spec-tailscale-dns.md`) 
 
 **Deferred:**
 - Per-component specs (`spec-session-agent.md`, etc.) — introduce only when a cross-component concern clearly exists.
-- Extracting spec-shaped content from within old ADRs (e.g. the docs MCP category classifier currently lives inside `adr-2026-04-17-docs-mcp.md` as well as this one) — leave as dual-recorded for now; extract if/when `adr-2026-04-17-docs-mcp.md` needs further supersession.
+- Extracting spec-shaped content from within old ADRs (e.g. the docs MCP category classifier currently lives inside `adr-0015-docs-mcp.md` as well as this one) — leave as dual-recorded for now; extract if/when `adr-0015-docs-mcp.md` needs further supersession.
 - Recursive subdirectory organisation (`docs/adr/`, `docs/spec/`) — flat layout is fine for current volume.
 
 ## References
 
-- `adr-2026-04-17-docs-mcp.md` — the docs MCP that makes lineage queryable (prior art)
+- `adr-0015-docs-mcp.md` — the docs MCP that makes lineage queryable (prior art)
 - `spec-state-schema.md` — first spec under the new naming
 - `.agent/skills/feature-change/SKILL.md` — the workflow that enforces ADR-per-request

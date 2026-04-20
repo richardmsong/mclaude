@@ -25,10 +25,11 @@ Determine which design doc covers the buggy behavior:
 
 | Area | Design doc |
 |------|-----------|
-| Control-plane, auth, provisioning | `docs/adr-2026-04-10-k8s-integration.md` |
-| Session-agent, session lifecycle | `docs/adr-2026-04-10-k8s-integration.md` |
-| SPA, stores, viewmodels | `docs/spec-ui.md`, `docs/adr-2026-04-11-client-architecture.md` |
-| Feature-specific | `docs/adr-YYYY-MM-DD-<feature>.md` |
+| Control-plane, auth, provisioning | `docs/adr-0003-k8s-integration.md` |
+| Session-agent, session lifecycle | `docs/adr-0003-k8s-integration.md` |
+| SPA, stores, viewmodels | `docs/ui/spec-*.md` (shared), `docs/ui/mclaude-web/spec-*.md` (web-local), `docs/adr-0006-client-architecture.md` |
+| Component-local (e.g. docs MCP) | `docs/<component>/spec-*.md` |
+| Feature-specific | `docs/adr-NNNN-<feature>.md` |
 
 Read the relevant section to confirm the spec describes the correct behavior.
 

@@ -26,22 +26,23 @@ Two-pass exhaustive audit:
 ## ADRs and specs per component
 
 The canonical spec is split across two kinds of docs:
-- **ADRs** (`docs/adr-*.md`) — dated, immutable decision records, one per feature/change
-- **Specs** (`docs/spec-*.md`) — living, cross-cutting references (state schema, UI, DNS)
+- **ADRs** (`docs/adr-*.md`, root only — ADRs never nest) — immutable decision records, one per feature/change, numbered via `adr-NNNN-<slug>.md`
+- **Specs** (`docs/**/spec-*.md`, recursive) — living references. Cross-cutting at root (`spec-state-schema.md`, `spec-tailscale-dns.md`, `spec-doc-layout.md`); UI shared under `docs/ui/`; UI component-local under `docs/ui/<ui-component>/`; component-local under `docs/<component>/` (lazy folders).
 
 Both are authoritative. When they conflict, the most recent ADR supersedes older text in a spec, but typically the two co-commit (the co-commit is the lineage edge).
 
-| Component | Read these |
-|-----------|-----------|
-| `control-plane` | `docs/spec-state-schema.md`, `docs/adr-2026-04-10-k8s-integration.md`, any `docs/adr-*.md` that references control-plane |
-| `session-agent` | `docs/spec-state-schema.md`, `docs/adr-2026-04-10-k8s-integration.md`, any `docs/adr-*.md` that references session-agent |
-| `spa` | `docs/spec-ui.md`, `docs/adr-2026-04-11-client-architecture.md`, any `docs/adr-*.md` that references spa/SPA/client |
-| `cli` | `docs/adr-2026-04-10-k8s-integration.md`, any `docs/adr-*.md` that references cli/CLI |
-| `helm` | `docs/spec-state-schema.md`, `docs/adr-2026-04-10-k8s-integration.md`, `charts/mclaude/`, any `docs/adr-*.md` that references helm |
+| Component          | Read these                                                                                                                                                                          |
+|--------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `control-plane`    | `docs/spec-state-schema.md`, `docs/adr-0003-k8s-integration.md`, any `docs/adr-*.md` that references control-plane                                                                  |
+| `session-agent`    | `docs/spec-state-schema.md`, `docs/adr-0003-k8s-integration.md`, any `docs/adr-*.md` that references session-agent                                                                  |
+| `spa`              | `docs/ui/spec-*.md` (shared contracts), `docs/ui/mclaude-web/spec-*.md` (web-local screens/widgets), `docs/adr-0006-client-architecture.md`, any `docs/adr-*.md` that references spa/SPA/client |
+| `cli`              | `docs/adr-0003-k8s-integration.md`, any `docs/adr-*.md` that references cli/CLI                                                                                                     |
+| `helm`             | `docs/spec-state-schema.md`, `docs/adr-0003-k8s-integration.md`, `charts/mclaude/`, any `docs/adr-*.md` that references helm                                                        |
+| `mclaude-docs-mcp` | `docs/mclaude-docs-mcp/spec-*.md` (lazy — folder is created when the first ADR adds content), any `docs/adr-*.md` that references docs-mcp                                          |
 
-**Discovery step:** Always `Glob("docs/adr-*.md")` AND `Glob("docs/spec-*.md")` first, then scan each file's Component Changes / Impact section (or grep for the component name) to find all docs that apply.
+**Discovery step:** Always `Glob("docs/adr-*.md")` (root only) AND `Glob("docs/**/spec-*.md")` (recursive) first, then scan each file's Component Changes / Impact section (or grep for the component name) to find all docs that apply.
 
-**Status filter:** Each ADR header declares `**Status**: <draft|accepted|implemented|superseded|withdrawn>`. Only evaluate against ADRs whose status is `accepted` or `implemented`. Skip `draft`, `superseded`, and `withdrawn` ADRs — they are not authoritative. Specs have no status field; always read every `docs/spec-*.md`.
+**Status filter:** Each ADR header declares `**Status**: <draft|accepted|implemented|superseded|withdrawn>`. Only evaluate against ADRs whose status is `accepted` or `implemented`. Skip `draft`, `superseded`, and `withdrawn` ADRs — they are not authoritative. Specs have no status field; always read every `docs/**/spec-*.md`.
 
 **State schema:** Always read `docs/spec-state-schema.md`. When evaluating code that reads or writes state (KV buckets, Postgres, NATS subjects, K8s resources), verify the code's field names, key formats, and types match the canonical state schema. Report mismatches as gaps.
 
@@ -61,7 +62,7 @@ Both are authoritative. When they conflict, the most recent ADR supersedes older
 
 ### Phase 0 — Gather
 
-1. `Glob("docs/adr-*.md")` AND `Glob("docs/spec-*.md")` — discover all ADRs and specs
+1. `Glob("docs/adr-*.md")` (root only) AND `Glob("docs/**/spec-*.md")` (recursive) — discover all ADRs and specs
 2. For each ADR, read the header `**Status**:` line. Drop any ADR whose status is not `accepted` or `implemented`.
 3. Read all remaining ADRs and all specs that reference this component **in full**
 4. `Glob` all production source files under the component root (exclude `*_test.go`, `testutil/`, `testdata/`, `node_modules/`, `dist/`)

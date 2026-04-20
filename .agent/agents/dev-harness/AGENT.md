@@ -10,7 +10,7 @@ tools:
 
 # Dev Harness
 
-Implements and tests a component against its spec. The spec is split across **ADRs** (`docs/adr-*.md` — dated decision records) and **specs** (`docs/spec-*.md` — living cross-cutting references). Run repeatedly — each session audits what's implemented vs what the spec requires, implements the next gap, runs tests, and commits.
+Implements and tests a component against its spec. The spec is split across **ADRs** (`docs/adr-*.md` — immutable decision records, root only) and **specs** (`docs/**/spec-*.md` — living references; cross-cutting at root, UI cluster under `docs/ui/`, component-local under `docs/<component>/`). Run repeatedly — each session audits what's implemented vs what the spec requires, implements the next gap, runs tests, and commits.
 
 ## Usage
 
@@ -37,13 +37,16 @@ Read these in full before writing any code. The spec is the source of truth — 
 | Doc | Owns |
 |-----|------|
 | `docs/spec-state-schema.md` | Persistent state (Postgres, KV, NATS subjects, K8s resources) — the canonical state schema |
-| `docs/spec-ui.md` | Screens, wireframes, components, interactions |
+| `docs/ui/spec-*.md` | UI shared contracts — design system, navigation, auth, conversation events, token usage, interaction patterns, PTT, platform notes, connection indicator, prompt bar, diff view, etc. |
+| `docs/ui/mclaude-web/spec-*.md` | Web-local screens, widgets, and overlays (dashboard, session-detail, overlays, user-management, settings-web) |
+| `docs/<component>/spec-*.md` | Component-local specs (e.g. `docs/mclaude-docs-mcp/spec-docs-mcp.md`). Folders are created lazily. |
 | `docs/spec-tailscale-dns.md` | DNS conventions |
-| `docs/adr-2026-04-10-k8s-integration.md` | Cluster integration, provisioning, failure modes |
-| `docs/adr-2026-04-11-client-architecture.md` | Stores, viewmodels, protocol contract, accumulation algorithm |
+| `docs/spec-doc-layout.md` | Canonical doc partitioning + naming rules |
+| `docs/adr-0003-k8s-integration.md` | Cluster integration, provisioning, failure modes |
+| `docs/adr-0006-client-architecture.md` | Stores, viewmodels, protocol contract, accumulation algorithm |
 | `docs/feature-list.md` | Feature IDs and platform support matrix |
-| `docs/adr-*.md` | Feature-specific decision records — each is a spec for its feature. Use `get_lineage` (docs MCP) to discover which ADRs shaped a spec section. |
-| `docs/spec-*.md` | Living cross-cutting references |
+| `docs/adr-*.md` | Feature-specific decision records (root only) — each is a spec for its feature. Use `get_lineage` (docs MCP) to discover which ADRs shaped a spec section. |
+| `docs/**/spec-*.md` | Living references; cross-cutting at root, UI cluster under `docs/ui/`, component-local under `docs/<component>/` |
 
 **ADR status filter:** Each ADR has a `**Status**:` header (`draft | accepted | implemented | superseded | withdrawn`). When discovering ADRs, read the status line and **only implement against `accepted` or `implemented` ADRs**. Skip `draft` (planning in progress, not final), `superseded` (overridden by a later ADR — follow the pointer), and `withdrawn` (abandoned). Specs (`docs/spec-*.md`) have no status — always read every spec file.
 
@@ -76,7 +79,7 @@ When you find code behavior that isn't mentioned in the spec, make a judgment ca
 
 ```
 1. Read ALL relevant spec docs
-   - `Glob("docs/adr-*.md")` + `Glob("docs/spec-*.md")`
+   - `Glob("docs/adr-*.md")` (root only — ADRs never nest) + `Glob("docs/**/spec-*.md")` (recursive)
    - For each ADR, read the `**Status**:` line; drop any that aren't `accepted` or `implemented`
    - Read every remaining ADR and every spec that references this component in full
 
@@ -94,8 +97,8 @@ When you find code behavior that isn't mentioned in the spec, make a judgment ca
    - Every session lifecycle state: does the code transition through them?
    
    spa:
-   - Every screen in spec-ui.md: does a component exist for it?
-   - Every store/viewmodel interface in adr-2026-04-11-client-architecture.md: is it implemented?
+   - Every screen in `docs/ui/mclaude-web/spec-*.md` and shared contract in `docs/ui/spec-*.md`: does a component exist for it?
+   - Every store/viewmodel interface in adr-0006-client-architecture.md: is it implemented?
    - Every NATS subject the client publishes/subscribes: is it wired?
    
    This phase catches "spec says X, no code does X" — the most dangerous gap.
@@ -176,7 +179,7 @@ When you find code behavior that isn't mentioned in the spec, make a judgment ca
 | `unit` | EventStore accumulation, AuthStore JWT expiry+refresh, SessionStore KV watch, deduplication | Feed mock events → assert ConversationModel state for each transcript scenario |
 | `component` | ConversationVM: sendMessage, approvePermission, interrupt. PermissionPromptVM: multiple simultaneous pendingControls | Assert correct NATS subjects + payloads published |
 | `nats-impl` | Real NATSClient via `nats.ws`: connect, disconnect, subscribe, publish, kvGet, kvWatch, kvPut | Unit tests use in-memory mock; real impl used in e2e |
-| `views` | Components per `docs/spec-ui.md` exactly: design tokens, AuthScreen, DashboardScreen, SessionDetailScreen, event renderers, Settings, TokenUsage | Visual: rendered output matches wireframe. All wired to stores/viewmodels. |
+| `views` | Components per `docs/ui/spec-*.md` (shared) and `docs/ui/mclaude-web/spec-*.md` (web-local) exactly: design tokens, AuthScreen, DashboardScreen, SessionDetailScreen, event renderers, Settings, TokenUsage | Visual: rendered output matches wireframe. All wired to stores/viewmodels. |
 | `reconnect` | EventStore re-subscribes from `max(lastSeq+1, replayFromSeq)` on NATS disconnect | No duplicate events, no gaps after reconnect simulation |
 | `monitoring` | Structured pino logs for all store ops, error boundaries on all components | — |
 | `e2e` | Playwright: auth → session list → open session → send message → approve permission → see result | — |

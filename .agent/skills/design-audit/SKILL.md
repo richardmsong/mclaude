@@ -15,8 +15,8 @@ Runs `/design-evaluator` in a loop, fixing gaps between rounds until CLEAN. The 
 ```
 
 Examples:
-- `/design-audit docs/adr-2026-04-14-github-oauth.md`
-- `/design-audit docs/adr-YYYY-MM-DD-session-sharing.md`
+- `/design-audit docs/adr-0007-github-oauth.md`
+- `/design-audit docs/adr-NNNN-session-sharing.md`
 
 ---
 
@@ -35,13 +35,13 @@ Examples:
 
 ## Step 1 — Validate
 
-Check that the file path exists and is a markdown file. If no path is given, look for the most recently modified `docs/adr-*.md` file.
+Check that the file path exists and is a markdown file. If no path is given, look for the most recently modified `docs/adr-*.md` file (root only — ADRs never nest).
 
 ---
 
 ## Step 2 — Initialize audit log
 
-Derive the log filename from the design doc: `docs/adr-2026-04-14-github-oauth.md` → `.agent/audits/design-github-oauth-<YYYY-MM-DD>.md`.
+Derive the log filename from the design doc: `docs/adr-0007-github-oauth.md` → `.agent/audits/design-github-oauth-<YYYY-MM-DD>.md`.
 
 Create `.agent/audits/` if it doesn't exist. If the log file already exists (multiple audits per day), append.
 
@@ -145,7 +145,7 @@ When the evaluator returns CLEAN, append the summary:
 ```markdown
 ## Audit: 2026-04-14T12:00:00Z
 
-**Document:** docs/adr-2026-04-14-github-oauth.md
+**Document:** docs/adr-0007-github-oauth.md
 
 ### Round 1
 

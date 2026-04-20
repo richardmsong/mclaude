@@ -30,8 +30,8 @@ Parse the JSON array of JobEntry objects. Display as a table:
 
 ```
 ID         SPEC                     PRI  STATUS           SESSION
-abc12345   docs/adr-YYYY-MM-DD-spa.md         7    running          sess-xyz
-def67890   docs/adr-...-k8s-integration.md   5    queued           -
+abc12345   docs/adr-NNNN-spa.md              7    running          sess-xyz
+def67890   docs/adr-0003-k8s-integration.md  5    queued           -
 ```
 
 Columns:
