@@ -197,17 +197,19 @@ For each affected component, invoke the dev-harness agent **and keep re-invoking
 
 ```
 Loop:
-  1. Agent(subagent_type="dev-harness", prompt="<component> — <description>. Fix ALL spec gaps.")
+  1. Agent(subagent_type="dev-harness", prompt="<component> — audit the entire component against every accepted/implemented ADR and every docs/**/spec-*.md that references it. Close every drift. Prioritize: <description>. Any spec ambiguity = STOP and backpressure, never a guess.")
   2. When the agent returns, run /spec-evaluator <component>
   3. If gaps remain:
-     a. CODE gap (spec says X, code doesn't do X):
-        → Agent(subagent_type="dev-harness", prompt="<component> — fix these gaps: <list>")
+     a. CODE gap, direction CODE→FIX (spec is correct, code doesn't implement it):
+        → Agent(subagent_type="dev-harness", prompt="<component> — continue full-component audit. Close these remaining gaps: <list>. Any spec ambiguity = STOP and backpressure.")
         → go to step 2
-     b. SPEC gap (ADR/spec is ambiguous/incomplete/wrong):
-        → Handle backpressure (see below)
+     b. SPEC gap, direction SPEC→FIX or UNCLEAR (ADR/spec is ambiguous, incomplete, imprecise, or wrong):
+        → Handle backpressure (see below) — master session updates the spec/ADR
         → go to step 1
   4. If CLEAN: proceed to Step 7
 ```
+
+The invocation prompt gives the harness *priority*, not *scope*. The harness always audits the full component; `<description>` only tells it which gap to close first. See ADR-0023.
 
 The dev-harness agent has `maxTurns=500` and is instructed to keep going until all gaps are closed. If it hits context limits and returns with gaps remaining, **re-invoke it immediately** with the remaining gap list. Each re-invocation picks up from the last commit and continues.
 

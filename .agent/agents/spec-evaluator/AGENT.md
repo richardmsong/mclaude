@@ -76,15 +76,17 @@ Work through the ADRs and specs **line by line**, section by section. For each l
 2. **Find** the code that implements it — grep for keywords, read candidate files, trace the logic
 3. **Record** the implementing location: `file:line-range` (e.g., `agent.go:508-527`)
 4. **Verdict**: one of:
-   - `IMPLEMENTED` — code matches spec
+   - `IMPLEMENTED` — code matches spec AND the spec statement is concrete enough that only one reading is reasonable
    - `GAP` — spec and code diverge (explain the divergence)
    - `PARTIAL` — some of the spec line is implemented, rest is missing (explain what's missing)
+
+   **Ambiguity bar (ADR-0023):** A spec statement containing an undefined qualifier ("when working", "when complete", "if idle"), a vague boundary ("briefly", "large", "soon"), or an un-enumerated referent whose code implementation had to pick among multiple plausible readings does NOT qualify for `IMPLEMENTED` — even if the code's choice is the one you would have made. Classify it `PARTIAL` with direction `SPEC→FIX`. The spec must be tightened (enumerate the states, define the term, concretize the boundary) before the verdict can flip to `IMPLEMENTED`. Rationale: rubber-stamping an ambiguous match lets silent drift accumulate — the doc layer loses the decision the code now encodes.
 5. **Direction** (for GAP and PARTIAL only): determine which side should change:
    - `CODE→FIX` — the spec is clearly correct and the code should be updated to match
-   - `SPEC→FIX` — the code's approach is reasonable and the spec is overly prescriptive, ambiguous, or missing practical constraints. The spec should be updated to match reality.
+   - `SPEC→FIX` — either (a) the code's approach is reasonable and the spec is overly prescriptive, ambiguous, or missing practical constraints, or (b) the spec is imprecise per the ambiguity bar above. The spec should be updated to match reality or to enumerate the missing definition.
    - `UNCLEAR` — you can't determine which side is wrong from the code and spec alone. Flag for the caller to decide.
 
-   To determine direction, consider: Does the code's approach have a practical justification (performance, environment constraints, edge cases the spec didn't consider)? Is the spec language aspirational rather than concrete? Would changing the code to match the spec introduce problems?
+   To determine direction, consider: Does the code's approach have a practical justification (performance, environment constraints, edge cases the spec didn't consider)? Is the spec language aspirational rather than concrete? Does the spec leave a qualifier undefined? Would changing the code to match the spec introduce problems?
 
 Track every code line range you visit in the "reviewed set."
 
