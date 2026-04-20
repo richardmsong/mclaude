@@ -2,7 +2,7 @@
 
 ## Role
 
-The session agent is the process supervisor for Claude Code sessions within a single project. It spawns and manages Claude Code child processes, bridges their stream-json I/O to NATS, maintains session state in NATS KV, manages git worktrees, handles permission policies, provides PTY-based terminal sessions, and exposes debug unix sockets for CLI attach. It operates in two modes: as a standalone per-project agent (K8s pod or single-project laptop) or as a laptop daemon that spawns one child agent per project and runs the job queue dispatcher.
+The session agent is a per-project process supervisor that manages **multiple concurrent Claude Code sessions** within a single project. One Agent instance owns all sessions for a `(userId, projectId)` pair, holding them in an in-memory session map. It spawns and manages Claude Code child processes (one per session), bridges their stream-json I/O to NATS, maintains per-session state in NATS KV, manages git worktrees, handles permission policies, provides PTY-based terminal sessions, and exposes debug unix sockets for CLI attach. It operates in two modes: as a standalone per-project agent (K8s pod or single-project laptop) or as a laptop daemon that spawns one child agent per project and runs the job queue dispatcher.
 
 ## Deployment
 
@@ -79,6 +79,8 @@ The agent creates two durable pull consumers on MCLAUDE_API:
 - **Quota status** to `mclaude.users.{uslug}.quota` (daemon only) -- Published every 60 seconds from Anthropic API polling. See `spec-state-schema.md` section "Quota Status".
 
 ### NATS Subjects (Subscribe)
+
+All API subscriptions are at project scope — the Agent subscribes once per project and demultiplexes to the correct session internally. Messages include a `sessionId` field (or `sessionSlug`) that the Agent uses to route to the right `Session` in its map. Control requests without a specific session target are broadcast to all active sessions.
 
 - **Session API commands** via JetStream pull consumers on MCLAUDE_API (create, delete, input, restart, control).
 - **Terminal API** via core NATS subscriptions on `mclaude.users.{uslug}.projects.{pslug}.api.terminal.{create,delete,resize}` -- Latency-sensitive; stays on core NATS.
