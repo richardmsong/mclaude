@@ -5,6 +5,8 @@ export type AuthStatus = 'unauthenticated' | 'authenticated' | 'refreshing' | 'e
 
 export interface AuthState {
   userId: string | null
+  /** User slug from the `slug` JWT claim (ADR-0024). Falls back to userId when not present. */
+  userSlug: string | null
   jwt: string | null
   status: AuthStatus
 }
@@ -12,7 +14,7 @@ export interface AuthState {
 export type AuthListener = (state: AuthState) => void
 
 export class AuthStore {
-  private _state: AuthState = { userId: null, jwt: null, status: 'unauthenticated' }
+  private _state: AuthState = { userId: null, userSlug: null, jwt: null, status: 'unauthenticated' }
   private _listeners: AuthListener[] = []
   private _refreshTimer: ReturnType<typeof setInterval> | null = null
   private _tokens: AuthTokens | null = null
@@ -29,12 +31,14 @@ export class AuthStore {
   async login(email: string, password: string): Promise<void> {
     const tokens = await this.authClient.login(email, password)
     this._tokens = tokens
-    this._setState({ userId: tokens.userId, jwt: tokens.jwt, status: 'authenticated' })
+    const userSlug = tokens.userSlug ?? this._parseSlugFromJwt(tokens.jwt) ?? tokens.userId
+    this._setState({ userId: tokens.userId, userSlug, jwt: tokens.jwt, status: 'authenticated' })
   }
 
   restoreTokens(tokens: AuthTokens): void {
     this._tokens = tokens
-    this._setState({ userId: tokens.userId, jwt: tokens.jwt, status: 'authenticated' })
+    const userSlug = tokens.userSlug ?? this._parseSlugFromJwt(tokens.jwt) ?? tokens.userId
+    this._setState({ userId: tokens.userId, userSlug, jwt: tokens.jwt, status: 'authenticated' })
   }
 
   async loginSSO(provider: string): Promise<string> {
@@ -45,7 +49,7 @@ export class AuthStore {
     this._stopRefreshLoop()
     await this.authClient.logout()
     this._tokens = null
-    this._setState({ userId: null, jwt: null, status: 'unauthenticated' })
+    this._setState({ userId: null, userSlug: null, jwt: null, status: 'unauthenticated' })
     await this.natsClient.close()
   }
 
@@ -79,7 +83,8 @@ export class AuthStore {
     try {
       const { jwt } = await this.authClient.refresh()
       this._tokens = { ...this._tokens, jwt }
-      this._setState({ ...this._state, jwt, status: 'authenticated' })
+      const userSlug = this._parseSlugFromJwt(jwt) ?? this._state.userSlug
+      this._setState({ ...this._state, userSlug, jwt, status: 'authenticated' })
       await this.natsClient.reconnect(jwt)
       logger.info({ component: 'auth-store', userId: this._state.userId }, 'JWT refreshed')
     } catch (err) {
@@ -94,6 +99,18 @@ export class AuthStore {
       if (parts.length !== 3) return null
       const payload = JSON.parse(atob(parts[1])) as { exp?: number }
       return payload.exp ?? null
+    } catch {
+      return null
+    }
+  }
+
+  /** Extract the user slug from the JWT `slug` claim (ADR-0024). Returns null if absent. */
+  private _parseSlugFromJwt(jwt: string): string | null {
+    try {
+      const parts = jwt.split('.')
+      if (parts.length !== 3) return null
+      const payload = JSON.parse(atob(parts[1])) as { slug?: string }
+      return payload.slug ?? null
     } catch {
       return null
     }

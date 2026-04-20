@@ -2,7 +2,10 @@ module mclaude-cli
 
 go 1.25.0
 
-require github.com/rs/zerolog v1.35.0
+require (
+	github.com/rs/zerolog v1.35.0
+	mclaude.io/common v0.0.0
+)
 
 require (
 	github.com/mattn/go-colorable v0.1.14 // indirect

@@ -7,7 +7,7 @@
 package subj
 
 import (
-	"mclaude-common/pkg/slug"
+	"mclaude.io/common/pkg/slug"
 )
 
 // --------------------------------------------------------------------------

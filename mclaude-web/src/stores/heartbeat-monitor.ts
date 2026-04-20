@@ -1,4 +1,6 @@
 import type { INATSClient } from '@/types'
+import { kvKeyHeartbeatsForUser } from '@/lib/subj'
+import type { UserSlug } from '@/lib/slug'
 
 export interface HeartbeatHealth {
   ts: string
@@ -16,8 +18,10 @@ export class HeartbeatMonitor {
 
   constructor(
     private readonly natsClient: INATSClient,
-    private readonly userId: string,
+    userId: string,
     thresholdMs = 60_000,
+    /** User slug for KV key construction (ADR-0024). Falls back to userId when absent. */
+    private readonly userSlug: string = userId,
   ) {
     this._thresholdMs = thresholdMs
   }
@@ -25,7 +29,7 @@ export class HeartbeatMonitor {
   start(checkIntervalMs = 5_000): void {
     this.stop()
 
-    this._unwatcher = this.natsClient.kvWatch('mclaude-heartbeats', `${this.userId}.*`, (entry) => {
+    this._unwatcher = this.natsClient.kvWatch('mclaude-heartbeats', kvKeyHeartbeatsForUser(this.userSlug as UserSlug), (entry) => {
       const projectId = entry.key.split('.')[1]
       if (!projectId) return
       try {

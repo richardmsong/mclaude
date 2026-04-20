@@ -1,4 +1,4 @@
-module mclaude-common
+module mclaude.io/common
 
 go 1.25.0
 

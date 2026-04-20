@@ -1,6 +1,14 @@
 import type { INATSClient } from '@/types'
 import type { SessionStore } from '@/stores/session-store'
 import type { HeartbeatMonitor } from '@/stores/heartbeat-monitor'
+import {
+  subjProjectsCreate,
+  subjSessionsCreate,
+  subjSessionsDelete,
+  subjSessionsRestart,
+  subjEventsApi,
+} from '@/lib/subj'
+import type { UserSlug, ProjectSlug } from '@/lib/slug'
 
 const FILTER_PROJECT_KEY = 'mclaude.filterProjectId'
 
@@ -53,8 +61,10 @@ export class SessionListVM {
     private readonly sessionStore: SessionStore,
     private readonly heartbeatMonitor: HeartbeatMonitor,
     private readonly natsClient: INATSClient,
-    private readonly userId: string,
+    userId: string,
     storage?: IStorage,
+    /** User slug for subject construction (ADR-0024). Falls back to userId when absent. */
+    private readonly userSlug: string = userId,
   ) {
     this._storage = storage ?? (globalThis.localStorage as IStorage)
     this._unsubscribers.push(
@@ -142,7 +152,7 @@ export class SessionListVM {
   }
 
   async createProject(name: string, gitUrl?: string, gitIdentityId?: string): Promise<string> {
-    const subject = `mclaude.${this.userId}.api.projects.create`
+    const subject = subjProjectsCreate(this.userSlug as UserSlug)
     const payload: Record<string, string> = { name }
     if (gitUrl) payload['gitUrl'] = gitUrl
     if (gitIdentityId) payload['gitIdentityId'] = gitIdentityId
@@ -154,7 +164,10 @@ export class SessionListVM {
 
   async createSession(projectId: string, branch: string, name: string, opts?: { extraFlags?: string }): Promise<string> {
     const requestId = crypto.randomUUID()
-    const subject = `mclaude.${this.userId}.${projectId}.api.sessions.create`
+    // ADR-0024: use slug-based subject. Fall back to projectId if no slug available yet.
+    const project = this.sessionStore.projects.get(projectId)
+    const pslug = (project?.slug ?? projectId) as ProjectSlug
+    const subject = subjSessionsCreate(this.userSlug as UserSlug, pslug)
     const payload = {
       projectId,
       branch,
@@ -188,7 +201,7 @@ export class SessionListVM {
 
       // Error: temporary core NATS sub on project-level _api subject
       unsubErr = this.natsClient.subscribe(
-        `mclaude.${this.userId}.${projectId}.events._api`,
+        subjEventsApi(this.userSlug as UserSlug, pslug),
         (msg) => {
           try {
             const event = JSON.parse(new TextDecoder().decode(msg.data)) as { type?: string; request_id?: string; error?: string }
@@ -208,14 +221,18 @@ export class SessionListVM {
     // Find which project this session belongs to
     const session = this.sessionStore.sessions.get(sessionId)
     if (!session) return
-    const subject = `mclaude.${this.userId}.${session.projectId}.api.sessions.delete`
+    const delProject = this.sessionStore.projects.get(session.projectId)
+    const delPslug = (delProject?.slug ?? session.projectId) as ProjectSlug
+    const subject = subjSessionsDelete(this.userSlug as UserSlug, delPslug)
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify({ sessionId })))
   }
 
   async restartSession(sessionId: string, opts?: { extraFlags?: string }): Promise<void> {
     const session = this.sessionStore.sessions.get(sessionId)
     if (!session) return
-    const subject = `mclaude.${this.userId}.${session.projectId}.api.sessions.restart`
+    const rstProject = this.sessionStore.projects.get(session.projectId)
+    const rstPslug = (rstProject?.slug ?? session.projectId) as ProjectSlug
+    const subject = subjSessionsRestart(this.userSlug as UserSlug, rstPslug)
     const payload = {
       sessionId,
       ...(opts?.extraFlags !== undefined ? { extraFlags: opts.extraFlags } : {}),

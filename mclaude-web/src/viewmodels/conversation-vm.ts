@@ -2,6 +2,11 @@ import type { INATSClient, ConversationModel, SessionState, PendingMessage } fro
 import type { EventStore } from '@/stores/event-store'
 import type { SessionStore } from '@/stores/session-store'
 import { logger } from '@/logger'
+import {
+  subjSessionsInput,
+  subjSessionsControl,
+} from '@/lib/subj'
+import type { UserSlug, ProjectSlug } from '@/lib/slug'
 
 export interface ConversationVMState {
   turns: ConversationModel['turns']
@@ -23,8 +28,12 @@ export class ConversationVM {
     private readonly sessionStore: SessionStore,
     private readonly natsClient: INATSClient,
     private readonly userId: string,
-    private readonly projectId: string,
+    projectId: string,
     private readonly sessionId: string,
+    /** User slug for subject construction (ADR-0024). Falls back to userId when absent. */
+    private readonly userSlug: string = userId,
+    /** Project slug for subject construction (ADR-0024). Falls back to projectId when absent. */
+    private readonly projectSlug: string = projectId,
   ) {
     const unsub = this.eventStore.onConversationChanged(() => this._notify())
     this._unsubscribers.push(unsub)
@@ -49,7 +58,7 @@ export class ConversationVM {
   sendMessage(text: string): void {
     const uuid = crypto.randomUUID()
     this.eventStore.addPendingMessage(uuid, text)
-    const subject = `mclaude.${this.userId}.${this.projectId}.api.sessions.input`
+    const subject = subjSessionsInput(this.userSlug as UserSlug, this.projectSlug as ProjectSlug)
     const payload = {
       type: 'user',
       message: { role: 'user', content: text },
@@ -68,7 +77,7 @@ export class ConversationVM {
       { type: 'image', source: { type: 'base64', media_type: mimeType, data: imageBase64 } },
     ]
     this.eventStore.addPendingMessage(uuid, content)
-    const subject = `mclaude.${this.userId}.${this.projectId}.api.sessions.input`
+    const subject = subjSessionsInput(this.userSlug as UserSlug, this.projectSlug as ProjectSlug)
     const payload = {
       type: 'user',
       message: {
@@ -83,7 +92,7 @@ export class ConversationVM {
   }
 
   approvePermission(requestId: string): void {
-    const subject = `mclaude.${this.userId}.${this.projectId}.api.sessions.control`
+    const subject = subjSessionsControl(this.userSlug as UserSlug, this.projectSlug as ProjectSlug)
     const payload = {
       type: 'control_response',
       response: {
@@ -107,7 +116,7 @@ export class ConversationVM {
   }
 
   denyPermission(requestId: string): void {
-    const subject = `mclaude.${this.userId}.${this.projectId}.api.sessions.control`
+    const subject = subjSessionsControl(this.userSlug as UserSlug, this.projectSlug as ProjectSlug)
     const payload = {
       type: 'control_response',
       response: {
@@ -129,13 +138,13 @@ export class ConversationVM {
   }
 
   interrupt(): void {
-    const subject = `mclaude.${this.userId}.${this.projectId}.api.sessions.control`
+    const subject = subjSessionsControl(this.userSlug as UserSlug, this.projectSlug as ProjectSlug)
     const payload = { type: 'control_request', request: { subtype: 'interrupt' } }
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
   }
 
   switchModel(model: string): void {
-    const subject = `mclaude.${this.userId}.${this.projectId}.api.sessions.control`
+    const subject = subjSessionsControl(this.userSlug as UserSlug, this.projectSlug as ProjectSlug)
     const payload = { type: 'control_request', request: { subtype: 'set_model', model } }
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
   }
@@ -146,13 +155,13 @@ export class ConversationVM {
   }
 
   setMaxThinkingTokens(budget: number): void {
-    const subject = `mclaude.${this.userId}.${this.projectId}.api.sessions.control`
+    const subject = subjSessionsControl(this.userSlug as UserSlug, this.projectSlug as ProjectSlug)
     const payload = { type: 'control_request', request: { subtype: 'set_max_thinking_tokens', budget } }
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
   }
 
   reloadPlugins(): void {
-    const subject = `mclaude.${this.userId}.${this.projectId}.api.sessions.control`
+    const subject = subjSessionsControl(this.userSlug as UserSlug, this.projectSlug as ProjectSlug)
     const payload = { type: 'control_request', request: { subtype: 'reload_plugins' } }
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
   }

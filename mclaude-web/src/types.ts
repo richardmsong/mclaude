@@ -41,6 +41,8 @@ export interface AuthTokens {
   jwt: string
   nkeySeed: string
   userId: string
+  /** User slug derived from the `slug` JWT claim (ADR-0024). Defaults to userId if absent. */
+  userSlug?: string
   natsUrl?: string
 }
 
@@ -101,6 +103,12 @@ export type SessionState =
 
 export interface SessionKVState {
   id: string
+  /** Session slug (ADR-0024). Present once session-agent is updated. */
+  slug?: string
+  /** User slug (ADR-0024). Present once session-agent is updated. */
+  userSlug?: string
+  /** Project slug (ADR-0024). Present once session-agent is updated. */
+  projectSlug?: string
   projectId: string
   branch: string
   worktree: string
@@ -118,6 +126,10 @@ export interface SessionKVState {
 
 export interface ProjectKVState {
   id: string
+  /** Project slug (ADR-0024). Present once control-plane is updated. */
+  slug?: string
+  /** User slug of the project owner (ADR-0024). Present once control-plane is updated. */
+  userSlug?: string
   name: string
   gitUrl: string
   gitIdentityId?: string | null

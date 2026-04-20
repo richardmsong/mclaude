@@ -302,8 +302,9 @@ export function App() {
   // Bootstrap session store after login
   useEffect(() => {
     if (authState.status === 'authenticated' && authState.userId) {
-      const store = new SessionStore(natsClient, authState.userId)
-      const hb = new HeartbeatMonitor(natsClient, authState.userId)
+      const uslug = authState.userSlug ?? authState.userId
+      const store = new SessionStore(natsClient, authState.userId, uslug)
+      const hb = new HeartbeatMonitor(natsClient, authState.userId, 60_000, uslug)
       store.startWatching()
       hb.start()
       const unsub = store.onSessionChanged(() => setSessionVersion(v => v + 1))
@@ -321,7 +322,7 @@ export function App() {
   // SessionListVM (memo: recreate when store changes)
   const sessionListVM = useMemo(() => {
     if (!sessionStore || !heartbeatMonitor || !authState.userId) return null
-    return new SessionListVM(sessionStore, heartbeatMonitor, natsClient, authState.userId)
+    return new SessionListVM(sessionStore, heartbeatMonitor, natsClient, authState.userId, undefined, authState.userSlug ?? authState.userId)
   }, [sessionStore, heartbeatMonitor, authState.userId])
 
   // First-run: auto-create session if no sessions exist (handles seeded projects with no sessions)
@@ -396,20 +397,27 @@ export function App() {
       setTerminalVm(null)
       return
     }
+    const session = sessionStore?.sessions.get(route.sessionId!)
+    const project = session ? sessionStore?.projects.get(session.projectId) : undefined
+    const resolvedUserSlug = authState.userSlug ?? authState.userId
+    const resolvedProjectSlug = project?.slug ?? resolvedProjectId
+    const resolvedSessionSlug = session?.slug ?? route.sessionId!
     const store = new EventStore({
       natsClient,
       userId: authState.userId,
       projectId: resolvedProjectId,
       sessionId: route.sessionId,
+      userSlug: resolvedUserSlug,
+      projectSlug: resolvedProjectSlug ?? undefined,
+      sessionSlug: resolvedSessionSlug,
     })
     // Start from replayFromSeq in KV — skips events before last clear/compaction (spec: plan-client-architecture.md)
-    const session = sessionStore.sessions.get(route.sessionId)
     const replayFromSeq = session?.replayFromSeq ?? undefined
     store.start(replayFromSeq)
-    const vm = new ConversationVM(store, sessionStore, natsClient, authState.userId, resolvedProjectId, route.sessionId)
-    const lifecycle = new LifecycleStore(natsClient, authState.userId, resolvedProjectId)
+    const vm = new ConversationVM(store, sessionStore, natsClient, authState.userId, resolvedProjectId, route.sessionId, resolvedUserSlug, resolvedProjectSlug ?? resolvedProjectId)
+    const lifecycle = new LifecycleStore(natsClient, authState.userId, resolvedProjectId, resolvedUserSlug, resolvedProjectSlug ?? resolvedProjectId)
     lifecycle.start()
-    const tvm = new TerminalVM(natsClient, authState.userId, resolvedProjectId)
+    const tvm = new TerminalVM(natsClient, authState.userId, resolvedProjectId, resolvedUserSlug, resolvedProjectSlug ?? resolvedProjectId)
     setEventStore(store)
     setConversationVM(vm)
     setTerminalVm(tvm)

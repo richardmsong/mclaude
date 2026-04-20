@@ -1,5 +1,7 @@
 import type { INATSClient, SessionKVState, ProjectKVState } from '@/types'
 import { logger } from '@/logger'
+import { kvKeySessionsForUser, kvKeyProjectsForUser } from '@/lib/subj'
+import type { UserSlug } from '@/lib/slug'
 
 export type SessionStoreListener = (sessions: Map<string, SessionKVState>) => void
 export type ProjectStoreListener = (projects: Map<string, ProjectKVState>) => void
@@ -16,6 +18,8 @@ export class SessionStore {
   constructor(
     private readonly natsClient: INATSClient,
     private readonly userId: string,
+    /** User slug for KV key construction (ADR-0024). Falls back to userId when absent. */
+    private readonly userSlug: string = userId,
   ) {}
 
   get sessions(): Map<string, SessionKVState> {
@@ -29,9 +33,9 @@ export class SessionStore {
   startWatching(): void {
     this._stopWatching()
 
-    // Watch sessions — keys are {userId}.{projectId}.{sessionId} (dot separator, NATS token format)
+    // Watch sessions — keys are {uslug}.{pslug}.{sslug} (ADR-0024 typed-slug scheme)
     // Use > wildcard for multi-level match across all projects and sessions for this user
-    const sessionKey = `${this.userId}.>`
+    const sessionKey = kvKeySessionsForUser(this.userSlug as UserSlug)
     const unwatch1 = this.natsClient.kvWatch('mclaude-sessions', sessionKey, (entry) => {
       if (entry.operation === 'DEL' || entry.operation === 'PURGE') {
         const parts = entry.key.split('.')
@@ -58,8 +62,8 @@ export class SessionStore {
     })
     this._unwatchers.push(unwatch1)
 
-    // Watch projects — key format: "{userId}.{projectId}"
-    const projectKey = `${this.userId}.*`
+    // Watch projects — key format: "{uslug}.{pslug}" (ADR-0024 typed-slug scheme)
+    const projectKey = kvKeyProjectsForUser(this.userSlug as UserSlug)
     const unwatch2 = this.natsClient.kvWatch('mclaude-projects', projectKey, (entry) => {
       try {
         const state = JSON.parse(new TextDecoder().decode(entry.value)) as ProjectKVState
