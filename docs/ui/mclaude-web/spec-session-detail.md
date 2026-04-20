@@ -57,7 +57,7 @@ Switching to Terminal tab: hides input bar, shows PTY.
 ### Input Bar (Events tab)
 
 Left to right:
-1. **✕ Stop button** (only when `working`): round, `--red` tint — sends Escape to halt Claude
+1. **✕ Stop button** (visible while a turn is in-flight — session state `running`, `requires_action`, `plan_mode`, or `waiting_for_input`; hidden for `idle`, `updating`, `restarting`, `failed`, `unknown`): round, `--red` tint. Publishes `{type:"control_request",request:{subtype:"interrupt"}}` to `mclaude.{userId}.{projectId}.api.sessions.control`, which the session-agent forwards to Claude's stdin to halt the current turn. Remains clickable during permission prompts so the user can abort instead of approving or denying.
 2. **📷 Attach**: camera icon, opens image file picker; paste from clipboard also works
 3. **Textarea**: auto-grows up to ~120px, placeholder "Message… or / for skills", Enter sends (Shift+Enter newline)
 4. **🎙 PTT button**: hold to record (Web Speech API), releases to submit transcription; grayed if unsupported
