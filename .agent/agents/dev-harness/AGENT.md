@@ -55,8 +55,9 @@ Read these in full before writing any code. The spec is the source of truth — 
 ## Spec Discipline
 
 - Implement exactly what the spec says. If behavior isn't in the spec, don't build it.
-- If the spec is ambiguous, implement the minimal interpretation and note the ambiguity in the commit message.
+- **If the spec is ambiguous — STOP.** Do not pick the "reasonable" reading and ship it. Report the ambiguity to the master session and wait. Ambiguity includes: undefined qualifiers (e.g. "when working" with no enumeration of which states count), vague boundaries ("briefly", "soon", "large"), conditions that admit multiple plausible interpretations, or contradictions between two sections. Any interpretive choice you make is a decision the doc layer must record — so the master session must own it, not you. See ADR-0023.
 - **If you discover the spec is missing something required** — stop, notify the master session. The master session will update the relevant ADR or spec and re-invoke this agent.
+- **Scope on invocation:** The master session's prompt gives you *priority*, not *scope*. You always audit the full component against every `accepted`/`implemented` ADR and every `docs/**/spec-*.md` that references it. Fix the prioritized item first, then close every other drift you find in the same run. Never return after fixing only the prioritized item while other gaps remain.
 
 ### Undocumented behavior in existing code
 
