@@ -106,7 +106,7 @@ func TestPTYStartsShell(t *testing.T) {
 	t.Cleanup(ts.stop)
 
 	// Deliver input via the mock (simulates a NATS publisher).
-	inputSubject := "mclaude.user-1.proj-1.terminal.term-1.input"
+	inputSubject := "mclaude.users.user-1.projects.proj-1.api.terminal.term-1.input"
 	mock.deliver(inputSubject, []byte("echo hello-pty-test\n"))
 
 	if !cap.waitFor("hello-pty-test", 5*time.Second) {
@@ -167,8 +167,8 @@ func TestPTYMultipleSessions(t *testing.T) {
 	t.Cleanup(tsA.stop)
 	t.Cleanup(tsB.stop)
 
-	mockA.deliver("mclaude.user-1.proj-1.terminal.term-a.input", []byte("echo session-A\n"))
-	mockB.deliver("mclaude.user-1.proj-1.terminal.term-b.input", []byte("echo session-B\n"))
+	mockA.deliver("mclaude.users.user-1.projects.proj-1.api.terminal.term-a.input", []byte("echo session-A\n"))
+	mockB.deliver("mclaude.users.user-1.projects.proj-1.api.terminal.term-b.input", []byte("echo session-B\n"))
 
 	if !capA.waitFor("session-A", 5*time.Second) {
 		t.Errorf("term-a output missing; got: %q", capA.string())
@@ -208,10 +208,10 @@ func TestPTYOutputSubjectFormat(t *testing.T) {
 	t.Cleanup(ts.stop)
 
 	// Trigger output.
-	mock.deliver("mclaude.alice.myproject.terminal.my-term.input", []byte("echo x\n"))
+	mock.deliver("mclaude.users.alice.projects.myproject.api.terminal.my-term.input", []byte("echo x\n"))
 	time.Sleep(500 * time.Millisecond)
 
-	want := "mclaude.alice.myproject.terminal.my-term.output"
+	want := "mclaude.users.alice.projects.myproject.api.terminal.my-term.output"
 	subjectMu.Lock()
 	got := capturedSubject
 	subjectMu.Unlock()

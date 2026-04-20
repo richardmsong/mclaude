@@ -235,10 +235,16 @@ func (s *Session) start(claudePath string, resume bool, publish func(subject str
 		scanner := bufio.NewScanner(stdout)
 		scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 
-		eventSubject := fmt.Sprintf("mclaude.%s.%s.events.%s",
-			s.userID,
-			s.state.ProjectID,
-			s.state.ID)
+		// Build event subject using slug fields (ADR-0024). Fall back to IDs.
+		var eventSubject string
+		if s.state.UserSlug != "" && s.state.ProjectSlug != "" && s.state.Slug != "" {
+			eventSubject = "mclaude.users." + s.state.UserSlug + ".projects." + s.state.ProjectSlug + ".events." + s.state.Slug
+		} else {
+			eventSubject = fmt.Sprintf("mclaude.users.%s.projects.%s.events.%s",
+				s.userID,
+				s.state.ProjectID,
+				s.state.ID)
+		}
 
 		for scanner.Scan() {
 			line := scanner.Bytes()

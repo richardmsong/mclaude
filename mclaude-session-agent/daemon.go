@@ -17,6 +17,9 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/rs/zerolog"
+
+	"mclaude.io/common/pkg/slug"
+	"mclaude.io/common/pkg/subj"
 )
 
 const (
@@ -35,6 +38,7 @@ type DaemonConfig struct {
 	NATSCredsFile   string
 	RefreshURL      string // POST /auth/refresh endpoint
 	UserID          string
+	UserSlug        slug.UserSlug    // user slug per ADR-0024
 	Hostname        string
 	MachineID       string
 	AgentBinary     string // path to this binary (os.Args[0])
@@ -119,7 +123,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.cfg.Log.Warn().Err(err).Msg("failed to write laptop KV entry on startup (non-fatal)")
 	}
 
-	createSubject := fmt.Sprintf("mclaude.%s.api.projects.create", d.cfg.UserID)
+	createSubject := subj.UserAPIProjectsCreate(d.cfg.UserSlug)
 	sub, err := d.nc.Subscribe(createSubject, d.handleProjectCreate)
 	if err != nil {
 		return fmt.Errorf("subscribe %s: %w", createSubject, err)
@@ -141,7 +145,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 // checkHostnameCollision returns an error if another machine has registered
 // the same hostname with a different machineID.
 func (d *Daemon) checkHostnameCollision(ctx context.Context) error {
-	key := fmt.Sprintf("%s.%s", d.cfg.UserID, d.cfg.Hostname)
+	key := subj.LaptopsKVKey(d.cfg.UserSlug, d.cfg.Hostname)
 	entry, err := d.laptopsKV.Get(ctx, key)
 	if err != nil {
 		// Key absent or transient error — no collision.
@@ -163,7 +167,7 @@ func (d *Daemon) checkHostnameCollision(ctx context.Context) error {
 
 // writeLaptopKV writes or refreshes the laptop registration KV entry.
 func (d *Daemon) writeLaptopKV(ctx context.Context) error {
-	key := fmt.Sprintf("%s.%s", d.cfg.UserID, d.cfg.Hostname)
+	key := subj.LaptopsKVKey(d.cfg.UserSlug, d.cfg.Hostname)
 	entry := laptopEntry{
 		MachineID: d.cfg.MachineID,
 		TS:        time.Now().UTC().Format(time.RFC3339),

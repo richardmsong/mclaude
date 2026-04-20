@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"mclaude.io/common/pkg/slug"
 )
 
 // TestKVKeyConstruction verifies the key format used for NATS KV lookups.
@@ -18,7 +20,7 @@ func TestKVKeyConstruction(t *testing.T) {
 		{"alice", "myproject", "abc-123-def", "alice.myproject.abc-123-def"},
 	}
 	for _, tc := range cases {
-		got := sessionKVKey(tc.userID, tc.projectID, tc.sessionID)
+		got := sessionKVKey(slug.UserSlug(tc.userID), slug.ProjectSlug(tc.projectID), slug.SessionSlug(tc.sessionID))
 		if got != tc.want {
 			t.Errorf("sessionKVKey(%q,%q,%q) = %q, want %q",
 				tc.userID, tc.projectID, tc.sessionID, got, tc.want)
@@ -27,7 +29,7 @@ func TestKVKeyConstruction(t *testing.T) {
 }
 
 func TestHeartbeatKVKey(t *testing.T) {
-	got := heartbeatKVKey("user-1", "proj-1")
+	got := heartbeatKVKey(slug.UserSlug("user-1"), slug.ProjectSlug("proj-1"))
 	want := "user-1.proj-1"
 	if got != want {
 		t.Errorf("heartbeatKVKey = %q, want %q", got, want)

@@ -56,7 +56,7 @@ func (m *memKVStore) PutString(_ context.Context, _ string, _ string) (uint64, e
 	panic("memKVStore.PutString not implemented")
 }
 
-func (m *memKVStore) Create(_ context.Context, _ string, _ []byte) (uint64, error) {
+func (m *memKVStore) Create(_ context.Context, _ string, _ []byte, _ ...jetstream.KVCreateOpt) (uint64, error) {
 	panic("memKVStore.Create not implemented")
 }
 
@@ -104,6 +104,10 @@ func (m *memKVStore) Keys(_ context.Context, _ ...jetstream.WatchOpt) ([]string,
 
 func (m *memKVStore) ListKeys(_ context.Context, _ ...jetstream.WatchOpt) (jetstream.KeyLister, error) {
 	panic("memKVStore.ListKeys not implemented")
+}
+
+func (m *memKVStore) ListKeysFiltered(_ context.Context, _ ...string) (jetstream.KeyLister, error) {
+	panic("memKVStore.ListKeysFiltered not implemented")
 }
 
 func (m *memKVStore) History(_ context.Context, _ string, _ ...jetstream.WatchOpt) ([]jetstream.KeyValueEntry, error) {

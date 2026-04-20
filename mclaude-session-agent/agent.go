@@ -15,6 +15,9 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/rs/zerolog"
+
+	"mclaude.io/common/pkg/slug"
+	"mclaude.io/common/pkg/subj"
 )
 
 const (
@@ -36,8 +39,10 @@ type Agent struct {
 	sessKV     jetstream.KeyValue
 	projKV     jetstream.KeyValue
 	hbKV       jetstream.KeyValue
-	userID     string
-	projectID  string
+	userID      string
+	userSlug    slug.UserSlug
+	projectID   string
+	projectSlug slug.ProjectSlug
 	claudePath string
 	// dataDir is the root of the project data volume (e.g. /data).
 	// Used to compute worktree paths: {dataDir}/worktrees/{branchSlug}.
@@ -75,7 +80,7 @@ type Agent struct {
 // m may be nil (no-op metrics) — pass NewMetrics(reg) in production.
 // dataDir is the project PVC mount point (e.g. "/data"); pass "" to skip git
 // worktree operations (dev/laptop mode without a bare repo).
-func NewAgent(nc *nats.Conn, userID, projectID, claudePath, dataDir string, log zerolog.Logger, m *Metrics, credMgr *CredentialManager, gitIdentityID string) (*Agent, error) {
+func NewAgent(nc *nats.Conn, userID string, userSlug slug.UserSlug, projectID string, projectSlug slug.ProjectSlug, claudePath, dataDir string, log zerolog.Logger, m *Metrics, credMgr *CredentialManager, gitIdentityID string) (*Agent, error) {
 	js, err := jetstream.New(nc)
 	if err != nil {
 		return nil, fmt.Errorf("jetstream: %w", err)
@@ -105,7 +110,7 @@ func NewAgent(nc *nats.Conn, userID, projectID, claudePath, dataDir string, log 
 	// exist it is created. The session-agent is authoritative for this stream.
 	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:      "MCLAUDE_EVENTS",
-		Subjects:  []string{"mclaude.*.*.events.*"},
+		Subjects:  []string{subj.FilterMclaudeEvents},
 		Retention: jetstream.LimitsPolicy,
 		MaxAge:    30 * 24 * time.Hour,
 		Storage:   jetstream.FileStorage,
@@ -118,7 +123,7 @@ func NewAgent(nc *nats.Conn, userID, projectID, claudePath, dataDir string, log 
 	// subjects for at-least-once delivery. Created idempotently by each agent.
 	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:      "MCLAUDE_API",
-		Subjects:  []string{"mclaude.*.*.api.sessions.>"},
+		Subjects:  []string{subj.FilterMclaudeAPI},
 		Retention: jetstream.LimitsPolicy,
 		MaxAge:    1 * time.Hour,
 		Storage:   jetstream.FileStorage,
@@ -136,7 +141,9 @@ func NewAgent(nc *nats.Conn, userID, projectID, claudePath, dataDir string, log 
 		projKV:        projKV,
 		hbKV:          hbKV,
 		userID:        userID,
+		userSlug:      userSlug,
 		projectID:     projectID,
+		projectSlug:   projectSlug,
 		claudePath:    claudePath,
 		dataDir:       dataDir,
 		log:           log,
@@ -273,9 +280,10 @@ func (a *Agent) createJetStreamConsumers() error {
 		return fmt.Errorf("MCLAUDE_API stream lookup: %w", err)
 	}
 
-	cmdName := fmt.Sprintf("sa-cmd-%s-%s", a.userID, a.projectID)
-	ctlName := fmt.Sprintf("sa-ctl-%s-%s", a.userID, a.projectID)
-	prefix := fmt.Sprintf("mclaude.%s.%s.api.sessions.", a.userID, a.projectID)
+	cmdName := fmt.Sprintf("sa-cmd-%s-%s", string(a.userSlug), string(a.projectSlug))
+	ctlName := fmt.Sprintf("sa-ctl-%s-%s", string(a.userSlug), string(a.projectSlug))
+	prefix := subj.UserProjectAPISessionsCreate(a.userSlug, a.projectSlug)
+	prefix = prefix[:len(prefix)-len("create")] // strip the trailing "create" to get the common prefix
 
 	cmdCons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
 		Durable:        cmdName,
@@ -536,7 +544,7 @@ func (a *Agent) gracefulShutdown() {
 // subscribeTerminalAPI sets up core NATS subscriptions for terminal management.
 // Terminal I/O is latency-sensitive and stays on core NATS (ephemeral).
 func (a *Agent) subscribeTerminalAPI() error {
-	termPrefix := fmt.Sprintf("mclaude.%s.%s.api.terminal.", a.userID, a.projectID)
+	termPrefix := subj.UserProjectAPITerminal(a.userSlug, a.projectSlug, "")
 
 	type entry struct {
 		subject string
@@ -563,7 +571,7 @@ func (a *Agent) subscribeTerminalAPI() error {
 // publishAPIError publishes an api_error event to the project-level _api subject.
 // Used when a create/delete/restart handler encounters an error.
 func (a *Agent) publishAPIError(requestID, operation, errMsg string) {
-	subject := fmt.Sprintf("mclaude.%s.%s.events._api", a.userID, a.projectID)
+	subject := "mclaude.users." + string(a.userSlug) + ".projects." + string(a.projectSlug) + ".events._api"
 	payload, _ := json.Marshal(map[string]string{
 		"type":       "api_error",
 		"request_id": requestID,
@@ -660,8 +668,15 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 	}
 
 	now := time.Now().UTC()
+	sessionSlug := slug.Slugify(req.Name)
+	if sessionSlug == "" {
+		sessionSlug = "s-" + sessionID[:8]
+	}
 	state := SessionState{
 		ID:              sessionID,
+		Slug:            sessionSlug,
+		UserSlug:        string(a.userSlug),
+		ProjectSlug:     string(a.projectSlug),
 		ProjectID:       a.projectID,
 		Branch:          branch,
 		Worktree:        branchSlug,
@@ -852,8 +867,13 @@ func (a *Agent) handleDelete(msg *nats.Msg) {
 		}
 	}
 
-	// Delete from KV.
-	key := sessionKVKey(a.userID, a.projectID, req.SessionID)
+	// Delete from KV. Use slug fields from session state if available.
+	delState := sess.getState()
+	delSessSlug := slug.SessionSlug(req.SessionID)
+	if delState.Slug != "" {
+		delSessSlug = slug.SessionSlug(delState.Slug)
+	}
+	key := sessionKVKey(a.userSlug, a.projectSlug, delSessSlug)
 	_ = a.sessKV.Delete(context.Background(), key)
 
 	a.publishLifecycle(req.SessionID, "session_stopped")
@@ -1067,7 +1087,7 @@ func (a *Agent) runHeartbeat(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-tick.C:
-				key := heartbeatKVKey(a.userID, a.projectID)
+				key := heartbeatKVKey(a.userSlug, a.projectSlug)
 				val := []byte(fmt.Sprintf(`{"ts":%q}`, time.Now().UTC().Format(time.RFC3339)))
 				_, _ = a.hbKV.Put(ctx, key, val)
 			}
@@ -1086,7 +1106,21 @@ func (a *Agent) writeSessionKV(state SessionState) error {
 	if err != nil {
 		return err
 	}
-	key := sessionKVKey(a.userID, state.ProjectID, state.ID)
+	// Prefer slug fields when available; fall back to casting IDs so sessions
+	// created before the slug migration are still reachable.
+	uSlug := a.userSlug
+	pSlug := a.projectSlug
+	sSlug := slug.SessionSlug(state.ID)
+	if state.UserSlug != "" {
+		uSlug = slug.UserSlug(state.UserSlug)
+	}
+	if state.ProjectSlug != "" {
+		pSlug = slug.ProjectSlug(state.ProjectSlug)
+	}
+	if state.Slug != "" {
+		sSlug = slug.SessionSlug(state.Slug)
+	}
+	key := sessionKVKey(uSlug, pSlug, sSlug)
 	_, span := KVWriteSpan(context.Background(), kvBucketSessions, key)
 	_, err = a.sessKV.Put(context.Background(), key, data)
 	span.End()
@@ -1099,7 +1133,7 @@ func (a *Agent) publishLifecycle(sessionID, eventType string) {
 	if a.nc == nil {
 		return
 	}
-	subject := fmt.Sprintf("mclaude.%s.%s.lifecycle.%s", a.userID, a.projectID, sessionID)
+	subject := subj.UserProjectLifecycle(a.userSlug, a.projectSlug, slug.SessionSlug(sessionID))
 	payload, _ := json.Marshal(map[string]string{
 		"type":      eventType,
 		"sessionId": sessionID,
@@ -1112,7 +1146,7 @@ func (a *Agent) publishLifecycle(sessionID, eventType string) {
 // error message.  Called when sess.start() returns an error so clients know
 // the session will never become active.
 func (a *Agent) publishLifecycleFailed(sessionID, errMsg string) {
-	subject := fmt.Sprintf("mclaude.%s.%s.lifecycle.%s", a.userID, a.projectID, sessionID)
+	subject := subj.UserProjectLifecycle(a.userSlug, a.projectSlug, slug.SessionSlug(sessionID))
 	payload, _ := json.Marshal(map[string]string{
 		"type":      "session_failed",
 		"sessionId": sessionID,
@@ -1126,7 +1160,7 @@ func (a *Agent) publishLifecycleFailed(sessionID, errMsg string) {
 // beyond type/sessionId/ts. Used by QuotaMonitor for events like
 // session_job_complete, session_quota_interrupted, session_job_failed.
 func (a *Agent) publishLifecycleExtra(sessionID, eventType string, extra map[string]string) {
-	subject := fmt.Sprintf("mclaude.%s.%s.lifecycle.%s", a.userID, a.projectID, sessionID)
+	subject := subj.UserProjectLifecycle(a.userSlug, a.projectSlug, slug.SessionSlug(sessionID))
 	payload := map[string]string{
 		"type":      eventType,
 		"sessionId": sessionID,
@@ -1142,7 +1176,7 @@ func (a *Agent) publishLifecycleExtra(sessionID, eventType string, extra map[str
 // publishPermDenied publishes a session_permission_denied lifecycle event.
 // Called when a strict-allowlist session auto-denies a tool request.
 func (a *Agent) publishPermDenied(sessionID, toolName, jobID string) {
-	subject := fmt.Sprintf("mclaude.%s.%s.lifecycle.%s", a.userID, a.projectID, sessionID)
+	subject := subj.UserProjectLifecycle(a.userSlug, a.projectSlug, slug.SessionSlug(sessionID))
 	payload, _ := json.Marshal(map[string]string{
 		"type":      "session_permission_denied",
 		"sessionId": sessionID,
@@ -1304,7 +1338,7 @@ func (a *Agent) handleTerminalCreate(msg *nats.Msg) {
 	a.mu.Unlock()
 
 	tr := NATSTermPubSub(a.nc)
-	ts, err := startTerminal(req.TermID, req.Shell, tr, a.userID, a.projectID)
+	ts, err := startTerminal(req.TermID, req.Shell, tr, string(a.userSlug), string(a.projectSlug))
 	if err != nil {
 		a.log.Error().Err(err).Str("termId", req.TermID).Msg("failed to start terminal")
 		a.reply(msg, nil, "start terminal: "+err.Error())

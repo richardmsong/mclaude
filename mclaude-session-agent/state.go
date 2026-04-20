@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"time"
+
+	"mclaude.io/common/pkg/slug"
+	"mclaude.io/common/pkg/subj"
 )
 
 // PermissionPolicy controls how the session agent responds to control_request
@@ -26,6 +28,9 @@ const (
 // mclaude-sessions NATS KV bucket.
 type SessionState struct {
 	ID          string            `json:"id"`
+	Slug        string            `json:"slug,omitempty"`       // session slug (sslug) per ADR-0024
+	UserSlug    string            `json:"userSlug,omitempty"`   // user slug (uslug) per ADR-0024
+	ProjectSlug string            `json:"projectSlug,omitempty"` // project slug (pslug) per ADR-0024
 	ProjectID   string            `json:"projectId"`
 	Branch      string            `json:"branch"`
 	Worktree    string            `json:"worktree"`
@@ -59,17 +64,16 @@ type UsageStats struct {
 	CostUSD          float64 `json:"costUsd"`
 }
 
-// sessionKVKey returns the NATS KV key for a session.
-// Format: {userId}.{projectId}.{sessionId} — dots are the NATS token separator,
-// required for wildcard matching (">" and "*" only work across dot-separated tokens).
-func sessionKVKey(userID, projectID, sessionID string) string {
-	return fmt.Sprintf("%s.%s.%s", userID, projectID, sessionID)
+// sessionKVKey returns the NATS KV key for a session per ADR-0024.
+// Format: {uslug}.{pslug}.{sslug} — dot-separated typed slug tokens.
+func sessionKVKey(userSlug slug.UserSlug, projectSlug slug.ProjectSlug, sessionSlug slug.SessionSlug) string {
+	return subj.SessionsKVKey(userSlug, projectSlug, sessionSlug)
 }
 
-// heartbeatKVKey returns the NATS KV key for a project heartbeat.
-// Format: {userId}.{projectId}
-func heartbeatKVKey(userID, projectID string) string {
-	return fmt.Sprintf("%s.%s", userID, projectID)
+// heartbeatKVKey returns the NATS KV key for a project heartbeat per ADR-0024.
+// Format: {uslug}.{pslug}
+func heartbeatKVKey(userSlug slug.UserSlug, projectSlug slug.ProjectSlug) string {
+	return subj.ProjectsKVKey(userSlug, projectSlug)
 }
 
 // addPendingControl adds a control request to the session's pending map.
@@ -133,17 +137,20 @@ type QuotaMonitorConfig struct {
 }
 
 // JobEntry is the value stored in the mclaude-job-queue KV bucket.
-// Key: {userId}/{jobId}
+// Key: {uslug}.{jobId} per ADR-0024.
 type JobEntry struct {
 	ID           string     `json:"id"`
 	UserID       string     `json:"userId"`
+	UserSlug     string     `json:"userSlug,omitempty"`     // user slug (uslug) per ADR-0024
 	ProjectID    string     `json:"projectId"`
+	ProjectSlug  string     `json:"projectSlug,omitempty"`  // project slug (pslug) per ADR-0024
+	SessionID    string     `json:"sessionId"`
+	SessionSlug  string     `json:"sessionSlug,omitempty"`  // session slug (sslug) per ADR-0024
 	SpecPath     string     `json:"specPath"`
 	Priority     int        `json:"priority"`
 	Threshold    int        `json:"threshold"`
 	AutoContinue bool       `json:"autoContinue"`
 	Status       string     `json:"status"`
-	SessionID    string     `json:"sessionId"`
 	Branch       string     `json:"branch"`
 	PRUrl        string     `json:"prUrl"`
 	FailedTool   string     `json:"failedTool"`

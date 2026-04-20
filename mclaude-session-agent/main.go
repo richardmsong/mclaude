@@ -14,6 +14,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+
+	"mclaude.io/common/pkg/slug"
 )
 
 func main() {
@@ -60,7 +62,9 @@ func main() {
 		flagDaemon     = flag.Bool("daemon", false, "Run as laptop daemon launcher (spawns one child agent per project)")
 		flagHostname   = flag.String("hostname", os.Getenv("HOSTNAME"), "Hostname for laptop collision detection (--daemon only)")
 		flagMachineID  = flag.String("machine-id", os.Getenv("MACHINE_ID"), "Machine ID for laptop collision detection (--daemon only)")
-		flagRefreshURL = flag.String("refresh-url", os.Getenv("REFRESH_URL"), "POST /auth/refresh URL for JWT refresh (--daemon only)")
+		flagRefreshURL  = flag.String("refresh-url", os.Getenv("REFRESH_URL"), "POST /auth/refresh URL for JWT refresh (--daemon only)")
+		flagUserSlug    = flag.String("user-slug", os.Getenv("USER_SLUG"), "User slug (uslug) per ADR-0024 (required in standalone mode)")
+		flagProjectSlug = flag.String("project-slug", os.Getenv("PROJECT_SLUG"), "Project slug (pslug) per ADR-0024 (required in standalone mode)")
 	)
 	flag.Parse()
 
@@ -70,6 +74,25 @@ func main() {
 	}
 	userID := *flagUserID
 	projectID := *flagProjectID
+	// Derive typed slugs. If the provided slug is invalid, fall back to a
+	// Slugify of the raw ID so the binary compiles and runs without requiring
+	// explicit slug flags (laptop dev mode).
+	userSlugStr := *flagUserSlug
+	if slug.Validate(userSlugStr) != nil {
+		userSlugStr = slug.Slugify(userID)
+	}
+	if userSlugStr == "" {
+		userSlugStr = "u-" + userID[:8]
+	}
+	userSlug := slug.UserSlug(userSlugStr)
+	projectSlugStr := *flagProjectSlug
+	if slug.Validate(projectSlugStr) != nil {
+		projectSlugStr = slug.Slugify(projectID)
+	}
+	if projectSlugStr == "" {
+		projectSlugStr = "p-" + projectID[:8]
+	}
+	projectSlug := slug.ProjectSlug(projectSlugStr)
 	claudePath := *flagClaudePath
 	if claudePath == "" {
 		claudePath = "claude"
@@ -114,6 +137,7 @@ func main() {
 			NATSCredsFile: natsCredsFile,
 			RefreshURL:    *flagRefreshURL,
 			UserID:        userID,
+			UserSlug:      userSlug,
 			Hostname:      hostname,
 			MachineID:     machineID,
 			AgentBinary:   os.Args[0],
@@ -124,6 +148,7 @@ func main() {
 				"--nats-creds", natsCredsFile,
 				"--claude-path", claudePath,
 				"--data-dir", dataDir,
+				"--user-slug", string(userSlug),
 			},
 			Log: log.Logger,
 		}
@@ -172,7 +197,7 @@ func main() {
 				// Auth error during clone → publish session_failed with provider_auth_failed.
 				// We don't have a session ID yet (no sessions created), so publish on the
 				// project lifecycle subject with a synthetic session ID.
-				subject := fmt.Sprintf("mclaude.%s.%s.lifecycle._init", userID, projectID)
+				subject := fmt.Sprintf("mclaude.users.%s.projects.%s.lifecycle._init", string(userSlug), string(projectSlug))
 				payload, _ := json.Marshal(map[string]string{
 					"type":      "session_failed",
 					"sessionId": "_init",
@@ -187,7 +212,7 @@ func main() {
 		}
 	}
 
-	agent, err := NewAgent(nc, userID, projectID, claudePath, dataDir, log.Logger, m, credMgr, gitIdentityID)
+	agent, err := NewAgent(nc, userID, userSlug, projectID, projectSlug, claudePath, dataDir, log.Logger, m, credMgr, gitIdentityID)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create agent")
 	}

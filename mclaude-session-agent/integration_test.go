@@ -11,6 +11,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/rs/zerolog"
+
+	"mclaude.io/common/pkg/slug"
 	testutil "mclaude-session-agent/testutil"
 )
 
@@ -90,7 +92,7 @@ func TestSessionCRUDInKV(t *testing.T) {
 	}
 
 	// Create.
-	key := sessionKVKey("integ-user", st.ProjectID, st.ID)
+	key := sessionKVKey(slug.UserSlug("integ-user"), slug.ProjectSlug(st.ProjectID), slug.SessionSlug(st.ID))
 	data, err := json.Marshal(st)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -261,7 +263,7 @@ func TestNewAgentCreatesEventStream(t *testing.T) {
 	// NewAgent should be able to create or confirm the MCLAUDE_EVENTS stream.
 	// StartDeps pre-creates the KV buckets; we re-use the connection.
 	logger := zerolog.New(io.Discard)
-	agent, err := NewAgent(deps.NATSConn, "integ-user", "integ-proj", "claude", "", logger, nil, nil, "")
+	agent, err := NewAgent(deps.NATSConn, "integ-user", slug.UserSlug("integ-user"), "integ-proj", slug.ProjectSlug("integ-proj"), "claude", "", logger, nil, nil, "")
 	if err != nil {
 		t.Fatalf("NewAgent: %v", err)
 	}
@@ -294,12 +296,12 @@ func TestNewAgentCreatesEventStream(t *testing.T) {
 	}
 	found := false
 	for _, subj := range info.Config.Subjects {
-		if subj == "mclaude.*.*.events.*" {
+		if subj == "mclaude.users.*.projects.*.events.*" {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("subjects: %v does not include mclaude.*.*.events.*", info.Config.Subjects)
+		t.Errorf("subjects: %v does not include mclaude.users.*.projects.*.events.*", info.Config.Subjects)
 	}
 }
 
@@ -312,13 +314,13 @@ func TestNewAgentEventStreamIdempotent(t *testing.T) {
 	logger := zerolog.New(io.Discard)
 
 	// First call — creates the stream.
-	_, err := NewAgent(deps.NATSConn, "integ-user", "integ-proj", "claude", "", logger, nil, nil, "")
+	_, err := NewAgent(deps.NATSConn, "integ-user", slug.UserSlug("integ-user"), "integ-proj", slug.ProjectSlug("integ-proj"), "claude", "", logger, nil, nil, "")
 	if err != nil {
 		t.Fatalf("first NewAgent: %v", err)
 	}
 
 	// Second call on the same connection — stream already exists, must not error.
-	_, err = NewAgent(deps.NATSConn, "integ-user", "integ-proj-2", "claude", "", logger, nil, nil, "")
+	_, err = NewAgent(deps.NATSConn, "integ-user", slug.UserSlug("integ-user"), "integ-proj-2", slug.ProjectSlug("integ-proj-2"), "claude", "", logger, nil, nil, "")
 	if err != nil {
 		t.Fatalf("second NewAgent (idempotent): %v", err)
 	}

@@ -626,7 +626,7 @@ func TestPublishLifecycleFailedFormat(t *testing.T) {
 	// Replace the nc.Publish path by exercising the logic directly.
 	// Since publishLifecycleFailed uses a.nc.Publish internally, we can't
 	// easily inject without NATS.  Instead, test the payload builder directly.
-	subject := "mclaude.u1.p1.lifecycle.sess-fail"
+	subject := "mclaude.users.u1.projects.p1.lifecycle.sess-fail"
 	payload, _ := json.Marshal(map[string]string{
 		"type":      "session_failed",
 		"sessionId": "sess-fail",

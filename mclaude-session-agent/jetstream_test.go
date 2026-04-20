@@ -35,6 +35,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/rs/zerolog"
+
+	"mclaude.io/common/pkg/slug"
 	testutil "mclaude-session-agent/testutil"
 )
 
@@ -88,7 +90,7 @@ func TestJsToNatsMsg(t *testing.T) {
 	h.Set("X-Test", "val")
 
 	jm := &fakeJSMsg{
-		subject: "mclaude.u1.p1.api.sessions.create",
+		subject: "mclaude.users.u1.projects.p1.api.sessions.create",
 		data:    []byte(`{"name":"test"}`),
 		headers: h,
 	}
@@ -150,7 +152,7 @@ func TestDispatchCmdRouting(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		subject := "mclaude.u1.p1.api.sessions" + tc.suffix
+		subject := "mclaude.users.u1.projects.p1.api.sessions" + tc.suffix
 		switch {
 		case strings.HasSuffix(subject, ".create"):
 			if tc.want != "create" {
@@ -189,7 +191,8 @@ func TestMCLAUDE_APIStreamCreated(t *testing.T) {
 	// NewAgent creates both MCLAUDE_EVENTS and MCLAUDE_API streams.
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"test-user", "test-proj",
+		"test-user", slug.UserSlug("test-user"),
+		"test-proj", slug.ProjectSlug("test-proj"),
 		"claude", "",
 		zerolog.Nop(),
 		nil,
@@ -213,8 +216,8 @@ func TestMCLAUDE_APIStreamCreated(t *testing.T) {
 	if info.Config.Name != "MCLAUDE_API" {
 		t.Errorf("stream name: got %q, want MCLAUDE_API", info.Config.Name)
 	}
-	if len(info.Config.Subjects) != 1 || info.Config.Subjects[0] != "mclaude.*.*.api.sessions.>" {
-		t.Errorf("subjects: got %v, want [mclaude.*.*.api.sessions.>]", info.Config.Subjects)
+	if len(info.Config.Subjects) != 1 || info.Config.Subjects[0] != "mclaude.users.*.projects.*.api.sessions.>" {
+		t.Errorf("subjects: got %v, want [mclaude.users.*.projects.*.api.sessions.>]", info.Config.Subjects)
 	}
 	if info.Config.Retention != jetstream.LimitsPolicy {
 		t.Errorf("retention: got %v, want LimitsPolicy", info.Config.Retention)
@@ -242,7 +245,8 @@ func TestJetStreamConsumersCreated(t *testing.T) {
 
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"u2", "p2",
+		"u2", slug.UserSlug("u2"),
+		"p2", slug.ProjectSlug("p2"),
 		"claude", "",
 		zerolog.Nop(),
 		nil,
@@ -285,7 +289,7 @@ func TestJetStreamConsumersCreated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cmd consumer info: %v", err)
 	}
-	prefix := "mclaude.u2.p2.api.sessions."
+	prefix := "mclaude.users.u2.projects.p2.api.sessions."
 	wantCmdSubjects := []string{
 		prefix + "create",
 		prefix + "delete",
@@ -342,7 +346,8 @@ func TestRunConsumerDispatchesMessages(t *testing.T) {
 
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"u3", "p3",
+		"u3", slug.UserSlug("u3"),
+		"p3", slug.ProjectSlug("p3"),
 		"claude", "",
 		zerolog.Nop(),
 		nil,
@@ -362,7 +367,7 @@ func TestRunConsumerDispatchesMessages(t *testing.T) {
 	cons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
 		Durable:       consumerName,
 		AckPolicy:     jetstream.AckExplicitPolicy,
-		FilterSubjects: []string{"mclaude.u3.p3.api.sessions.input"},
+		FilterSubjects: []string{"mclaude.users.u3.projects.p3.api.sessions.input"},
 	})
 	if err != nil {
 		t.Fatalf("create consumer: %v", err)
@@ -382,7 +387,7 @@ func TestRunConsumerDispatchesMessages(t *testing.T) {
 
 	// Publish a message to the stream.
 	payload := `{"session_id":"s1","type":"user","message":{}}`
-	if _, err := deps.JetStream.Publish(ctx, "mclaude.u3.p3.api.sessions.input", []byte(payload)); err != nil {
+	if _, err := deps.JetStream.Publish(ctx, "mclaude.users.u3.projects.p3.api.sessions.input", []byte(payload)); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 
@@ -680,7 +685,8 @@ func TestClearUpdatingState(t *testing.T) {
 
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"u4", "p4",
+		"u4", slug.UserSlug("u4"),
+		"p4", slug.ProjectSlug("p4"),
 		"claude", "",
 		zerolog.Nop(),
 		nil,
@@ -797,7 +803,8 @@ func TestRecoverSessionsSkipsKVWriteForUpdating(t *testing.T) {
 
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"u5", "p5",
+		"u5", slug.UserSlug("u5"),
+		"p5", slug.ProjectSlug("p5"),
 		"not-a-real-claude-binary", "",
 		zerolog.Nop(),
 		nil,
@@ -884,7 +891,7 @@ func TestPublishAPIError(t *testing.T) {
 	ctx := context.Background()
 
 	// Subscribe to the _api events subject before publishing.
-	apiSubject := "mclaude.u6.p6.events._api"
+	apiSubject := "mclaude.users.u6.projects.p6.events._api"
 	sub, err := deps.NATSConn.SubscribeSync(apiSubject)
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
@@ -893,7 +900,8 @@ func TestPublishAPIError(t *testing.T) {
 
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"u6", "p6",
+		"u6", slug.UserSlug("u6"),
+		"p6", slug.ProjectSlug("p6"),
 		"claude", "",
 		zerolog.Nop(),
 		nil,
@@ -946,7 +954,7 @@ func TestHandleCreateErrorPublishesAPIError(t *testing.T) {
 	skipIfNoDockerJS(t)
 	deps := testutil.StartDeps(t)
 
-	apiSubject := "mclaude.u7.p7.events._api"
+	apiSubject := "mclaude.users.u7.projects.p7.events._api"
 	sub, err := deps.NATSConn.SubscribeSync(apiSubject)
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
@@ -955,7 +963,8 @@ func TestHandleCreateErrorPublishesAPIError(t *testing.T) {
 
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"u7", "p7",
+		"u7", slug.UserSlug("u7"),
+		"p7", slug.ProjectSlug("p7"),
 		"claude", "",
 		zerolog.Nop(),
 		nil,
@@ -1000,7 +1009,7 @@ func TestHandleRestartErrorPublishesAPIError(t *testing.T) {
 	skipIfNoDockerJS(t)
 	deps := testutil.StartDeps(t)
 
-	apiSubject := "mclaude.u8.p8.events._api"
+	apiSubject := "mclaude.users.u8.projects.p8.events._api"
 	sub, err := deps.NATSConn.SubscribeSync(apiSubject)
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
@@ -1009,7 +1018,8 @@ func TestHandleRestartErrorPublishesAPIError(t *testing.T) {
 
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"u8", "p8",
+		"u8", slug.UserSlug("u8"),
+		"p8", slug.ProjectSlug("p8"),
 		"claude", "",
 		zerolog.Nop(),
 		nil,
@@ -1055,7 +1065,7 @@ func TestReplyNoOpWhenReplyEmpty(t *testing.T) {
 
 	// A message with no Reply field (as JetStream messages produce).
 	msg := &nats.Msg{
-		Subject: "mclaude.u1.p1.api.sessions.create",
+		Subject: "mclaude.users.u1.projects.p1.api.sessions.create",
 		Data:    []byte(`{"name":"test"}`),
 		// Reply is "" — not set
 	}
@@ -1076,7 +1086,8 @@ func TestSubscribeTerminalAPIOnlyTerminal(t *testing.T) {
 
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"u9", "p9",
+		"u9", slug.UserSlug("u9"),
+		"p9", slug.ProjectSlug("p9"),
 		"claude", "",
 		zerolog.Nop(),
 		nil,
@@ -1101,7 +1112,7 @@ func TestSubscribeTerminalAPIOnlyTerminal(t *testing.T) {
 		t.Errorf("subs count: got %d, want 3", n)
 	}
 
-	prefix := "mclaude.u9.p9.api.terminal."
+	prefix := "mclaude.users.u9.projects.p9.api.terminal."
 	for _, sub := range subs {
 		if !strings.HasPrefix(sub.Subject, prefix) {
 			t.Errorf("subscription %q is not a terminal subject", sub.Subject)
