@@ -474,7 +474,16 @@ export function SessionDetailScreen({
     }
   }, [turns, conversationVM])
 
-  const isWorking = sessionState === 'running'
+  // "working" = any state where Claude is actively processing a turn.
+  // Includes requires_action and plan_mode so the Stop button stays visible
+  // throughout tool use and permission prompts -- the turn is not yet complete
+  // and the user must be able to abort at any point (ADR-0022).
+  const isWorking = (
+    sessionState === 'running' ||
+    sessionState === 'requires_action' ||
+    sessionState === 'plan_mode' ||
+    sessionState === 'waiting_for_input'
+  )
   const isUpdating = sessionState === 'updating'
   const needsPermission = sessionState === 'requires_action'
   const isPlanMode = sessionState === 'plan_mode'
