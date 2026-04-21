@@ -1,0 +1,5 @@
+{
+  "name": "mclaude-workspace",
+  "private": true,
+  "workspaces": ["mclaude-docs-mcp", "mclaude-docs-dashboard"]
+}
