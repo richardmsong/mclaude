@@ -65,7 +65,7 @@ All endpoints return JSON with `Content-Type: application/json` unless noted. CO
 | GET    | `/api/adrs?status=<s>`                                    | `listDocs({category: "adr", status})`   | `ListDoc[]` (shape from docs-mcp: includes `status`, `commit_count`, `last_status_change`) |
 | GET    | `/api/specs`                                              | `listDocs({category: "spec"})`          | `ListDoc[]`                                                              |
 | GET    | `/api/doc?path=<p>`                                       | `listDocs` (single-path filter) + `readRawDoc` | `DocResponse` (below) — sections come from the `ListDoc.sections` field; no per-section `getSection` call (that would be N+1). |
-| GET    | `/api/lineage?doc=<p>&heading=<h>`                        | `getLineage`                            | `LineageResult[]` (includes `status`)                                    |
+| GET    | `/api/lineage?doc=<p>[&heading=<h>]`                      | `getLineage`                            | `LineageResult[]` (includes `status`). With `heading`: section mode. Without `heading` or with empty `heading`: doc mode — rows aggregated per ADR-0031 (server-side collapse; `heading` on returned rows is `""`). |
 | GET    | `/api/search?q=<q>&limit=<n>&category=<c>&status=<s>`     | `searchDocs`                            | `SearchResult[]`                                                         |
 | GET    | `/api/graph?focus=<p>`                                    | `graph-queries.ts` (direct SQL)         | `GraphResponse` (below)                                                  |
 | GET    | `/events`                                                 | SSE broker                              | `text/event-stream` (see SSE section)                                    |
@@ -253,7 +253,14 @@ Rendered via shared `MarkdownView` component using `marked` + `highlight.js`. Th
 
 So clicks inside the rendered markdown navigate within the dashboard.
 
-Each H2 heading gets a small `≡` icon injected by a marked renderer extension. Hover opens a `LineagePopover`; click pins it (lets the cursor leave without dismissing). Esc or outside-click dismisses.
+Each H2 heading gets a small `≡` icon injected by a marked renderer extension. The H1 title of every spec and ADR detail page gets the same `≡` icon, rendered inline next to the title (ADR-0031 — doc-level lineage). Hover opens a `LineagePopover`; click pins it (lets the cursor leave without dismissing). Esc or outside-click dismisses.
+
+The popover has two modes determined by where the `≡` was activated:
+
+- **Section mode** (H2 `≡`): calls `/api/lineage?doc=<p>&heading=<h>`. Client collapses rows by `section_b_doc` per ADR-0030.
+- **Doc mode** (H1 `≡`): calls `/api/lineage?doc=<p>` with no `heading`. Rows arrive already collapsed by the server per ADR-0031. The popover renders them unchanged.
+
+Both modes produce the same row format (below).
 
 Popover content (ADR-0030):
 
@@ -268,7 +275,7 @@ Open graph centered here
 - Sort order: descending by the collapsed `commit_count`.
 - Row click target: `#/adr/<slug>` or `#/spec/<path>` — the doc's top, no heading anchor, because the row no longer identifies a single heading.
 - Status framing: rows whose linked doc is `superseded` or `withdrawn` render muted; `draft` rows render with a dashed outline. Per-doc status still applies after the collapse.
-- Final row: "Open graph centered here" → `#/graph?focus=<doc_path>&section=<heading>` (uses the *current* section — the one whose `≡` was clicked — not a popover row).
+- Final row: "Open graph centered here" → `#/graph?focus=<doc_path>&section=<heading>` in section mode; `#/graph?focus=<doc_path>` (no `section`) in doc mode.
 - The section-level detail is intentionally not dropped at the data layer. Future disclosure/expand affordances inside the popover or a dedicated drill-down view can re-consume `/api/lineage` without a contract change.
 
 Status badge renders next to the H1 title on ADR detail pages: colored pill with status text; the full `Status history` list is already part of the ADR body (markdown) so it renders inline immediately below the title — no hover popover is needed for it.
