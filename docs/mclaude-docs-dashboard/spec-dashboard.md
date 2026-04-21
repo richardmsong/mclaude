@@ -51,7 +51,7 @@ All endpoints return JSON with `Content-Type: application/json` unless noted. CO
 |--------|-----------------------------------------------------------|-----------------------------------------|--------------------------------------------------------------------------|
 | GET    | `/api/adrs?status=<s>`                                    | `listDocs({category: "adr", status})`   | `ListDoc[]` (shape from docs-mcp: includes `status`, `commit_count`, `last_status_change`) |
 | GET    | `/api/specs`                                              | `listDocs({category: "spec"})`          | `ListDoc[]`                                                              |
-| GET    | `/api/doc?path=<p>`                                       | `listDocs` + `readRawDoc` + `getSection` per section | `DocResponse` (below)                                                    |
+| GET    | `/api/doc?path=<p>`                                       | `listDocs` (single-path filter) + `readRawDoc` | `DocResponse` (below) — sections come from the `ListDoc.sections` field; no per-section `getSection` call (that would be N+1). |
 | GET    | `/api/lineage?doc=<p>&heading=<h>`                        | `getLineage`                            | `LineageResult[]` (includes `status`)                                    |
 | GET    | `/api/search?q=<q>&limit=<n>&category=<c>&status=<s>`     | `searchDocs`                            | `SearchResult[]`                                                         |
 | GET    | `/api/graph?focus=<p>`                                    | `graph-queries.ts` (direct SQL)         | `GraphResponse` (below)                                                  |
@@ -72,7 +72,7 @@ interface DocResponse {
 }
 ```
 
-`raw_markdown` is sourced by calling `readRawDoc(repoRoot, doc_path)`.
+`raw_markdown` is sourced by calling `readRawDoc(repoRoot, doc_path)`. Sections come from the `ListDoc.sections` field of a `listDocs` call scoped to the single requested path. No per-section DB query is issued.
 
 ### `GraphResponse`
 
@@ -251,7 +251,7 @@ Open graph centered here
 - Status framing: rows whose linked doc is `superseded` or `withdrawn` render muted; `draft` rows render with a dashed outline.
 - Final row: "Open graph centered here" → `#/graph?focus=<doc_path>&section=<heading>`.
 
-Status badge renders next to the H1 title on ADR detail pages: colored pill with status text; hovering shows the status history list.
+Status badge renders next to the H1 title on ADR detail pages: colored pill with status text; the full `Status history` list is already part of the ADR body (markdown) so it renders inline immediately below the title — no hover popover is needed for it.
 
 ### Search bar
 
@@ -282,16 +282,16 @@ Clicking any node → detail page for that doc.
 
 ### SSE hook
 
-`useEventSource("/events")` exposes `{type: "reindex", changed}` events to React. The hook maintains a `useRef` counter bumped on every reindex event for affected paths; route components subscribe and refetch when their doc path appears in `changed`.
+`useEventSource("/events")` exposes reindex events to React. Route components read the most recent event and, if their own doc path appears in `changed`, re-run their fetch. The exact internal mechanism (ref counter vs. state-driven subscription) is an implementation detail.
 
 ## Error handling
 
 | Failure                                                | Behavior                                                                                                   |
 |--------------------------------------------------------|------------------------------------------------------------------------------------------------------------|
 | `.git` not found walking up from cwd                   | Print error naming the cwd, exit non-zero.                                                                 |
-| `.docs-index.db` missing or corrupt                    | `openDb` rebuilds per ADR-0015 contract; dashboard runs `indexAllDocs`; UI shows "Indexing…" overlay.      |
+| `.docs-index.db` missing or corrupt                    | `openDb` rebuilds per ADR-0015 contract; dashboard runs `indexAllDocs` during boot (before `Bun.serve` starts accepting connections), so by the time the browser can hit the server the index is ready. No UI overlay needed. |
 | Port in use                                            | Fail fast: `Error: port <n> is in use. Use --port <m> or stop the other process.` Do not auto-increment.  |
-| `fs.watch` dead                                        | Fall back to 5 s polling (from docs-mcp `startWatcher`). Footer shows "Live updates via polling".          |
+| `fs.watch` dead                                        | Fall back to 5 s polling inside docs-mcp `startWatcher` (existing behavior). The polling path is transparent to the dashboard — `onReindex` still fires on changes. No UI indicator in v1. |
 | `/api/doc` or `/api/lineage` unknown path              | HTTP 404, JSON `{error: "not found", path}`. UI renders inline error in that pane.                         |
 | FTS5 syntax error                                      | HTTP 400 with error text. UI displays under search box.                                                    |
 | SSE connection dropped                                 | Browser `EventSource` auto-reconnects. Server sends `{type: "hello"}` on reconnect; client triggers full refetch. |
@@ -306,7 +306,7 @@ Clicking any node → detail page for that doc.
 
 ## Portability
 
-No mclaude-specific paths, component names, or branding in dashboard source. Repo root via walk-up-to-`.git`; DB path via `--db-path` with a sensible default. Designed to ship inside the `spec-driven-dev` plugin (ADR-0026) with zero rewrite when that ADR lands.
+No mclaude-specific branding or component names in the dashboard's UI, CLI, or server source. Repo root via walk-up-to-`.git`; DB path via `--db-path`. The `--db-path` default is `<repoRoot>/mclaude-docs-mcp/.docs-index.db` because that is the current location of the docs index (docs-mcp is the sibling package that owns the schema); when ADR-0026 plugin-wraps the dashboard, the plugin's bootstrap supplies `--db-path` pointing at the plugin's own index location, and no dashboard source changes. The `mclaude-docs-mcp` import identifier is a workspace-package name — it is not a filesystem assumption about the host repo.
 
 ## Package layout
 
