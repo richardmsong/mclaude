@@ -255,17 +255,21 @@ So clicks inside the rendered markdown navigate within the dashboard.
 
 Each H2 heading gets a small `≡` icon injected by a marked renderer extension. Hover opens a `LineagePopover`; click pins it (lets the cursor leave without dismissing). Esc or outside-click dismisses.
 
-Popover content:
+Popover content (ADR-0030):
 
 ```
-3× docs/spec-state-schema.md §Session KV
-2× docs/mclaude-docs-mcp/spec-docs-mcp.md §Schema
+3× docs/spec-state-schema.md
+2× docs/mclaude-docs-mcp/spec-docs-mcp.md
 Open graph centered here
 ```
 
-- Rows: `<commit_count>× <doc_path> §<heading>`, sorted by `commit_count` desc. Each row clickable → navigates to `#/spec/<path>` or `#/adr/<slug>` scrolled to the heading.
-- Status framing: rows whose linked doc is `superseded` or `withdrawn` render muted; `draft` rows render with a dashed outline.
-- Final row: "Open graph centered here" → `#/graph?focus=<doc_path>&section=<heading>`.
+- Rows are collapsed by the co-committed document (`section_b_doc`). The raw `/api/lineage` response is still section-granular — identical in shape to docs-mcp's `get_lineage` — but the popover groups every row sharing a `section_b_doc`, sums `commit_count`, and takes `last_commit` from the row with the highest `commit_count` (ties: first row in the response).
+- Row text: `<summed commit_count>× <doc_path>`. No `§heading` segment.
+- Sort order: descending by the collapsed `commit_count`.
+- Row click target: `#/adr/<slug>` or `#/spec/<path>` — the doc's top, no heading anchor, because the row no longer identifies a single heading.
+- Status framing: rows whose linked doc is `superseded` or `withdrawn` render muted; `draft` rows render with a dashed outline. Per-doc status still applies after the collapse.
+- Final row: "Open graph centered here" → `#/graph?focus=<doc_path>&section=<heading>` (uses the *current* section — the one whose `≡` was clicked — not a popover row).
+- The section-level detail is intentionally not dropped at the data layer. Future disclosure/expand affordances inside the popover or a dedicated drill-down view can re-consume `/api/lineage` without a contract change.
 
 Status badge renders next to the H1 title on ADR detail pages: colored pill with status text; the full `Status history` list is already part of the ADR body (markdown) so it renders inline immediately below the title — no hover popover is needed for it.
 
