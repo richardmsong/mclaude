@@ -11,7 +11,7 @@ Established by ADR-0027. A sibling package to `mclaude-docs-mcp`, imported as a 
 - Bun. Native `Bun.serve` for HTTP + SSE. No framework.
 - Vite + React 18 for the SPA (built into `ui/dist/`, served as static files).
 - Single process. Binds to `0.0.0.0:<port>` (default 4567) — reachable on every local interface, including Tailscale addresses (ADR-0028).
-- Entrypoint: `mclaude-docs-dashboard/src/server.ts`. On boot: parses CLI flags (`--port`, `--db-path`), resolves repo root (walk up from cwd to first `.git` directory; error out if none found), opens the shared DB in WAL mode, runs `indexAllDocs` once, starts `startWatcher` with an `onReindex` callback wired to the SSE broker, begins serving, and prints a startup banner listing every reachable URL (see Startup banner below).
+- Entrypoint: `mclaude-docs-dashboard/src/server.ts`. On boot: parses CLI flags (`--port`, `--db-path`), resolves repo root (walk up from cwd to first `.git` directory; error out if none found), opens the shared DB in WAL mode, runs `indexAllDocs` once, runs `runLineageScan(db, repoRoot)` once (ADR-0029 — populates the `lineage` table from `git log` so the dashboard is self-sufficient when docs-mcp hasn't run), starts `startWatcher` with an `onReindex` callback wired to the SSE broker (the watcher re-runs the scanner on HEAD advance, as already specified in `docs/mclaude-docs-mcp/spec-docs-mcp.md`), begins serving, and prints a startup banner listing every reachable URL (see Startup banner below). Both `indexAllDocs` and `runLineageScan` are wrapped in try/catch and log non-fatally — the dashboard still serves docs when indexing or scanning fails (e.g. a git error on a shallow clone).
 
 ## Startup banner
 
@@ -43,6 +43,7 @@ The dashboard's `package.json` declares `"mclaude-docs-mcp": "workspace:*"` as a
 import { parseMarkdown } from "mclaude-docs-mcp/parser";
 import { openDb } from "mclaude-docs-mcp/db";
 import { startWatcher } from "mclaude-docs-mcp/watcher";
+import { runLineageScan } from "mclaude-docs-mcp/lineage-scanner";
 import { searchDocs, getSection, getLineage, listDocs, readRawDoc } from "mclaude-docs-mcp/tools";
 ```
 
