@@ -2,8 +2,10 @@
 // for mclaude. Every helper accepts only typed slug wrappers from
 // mclaude-common/pkg/slug — passing a raw string is a compile-time error.
 //
-// Subject patterns are defined in docs/spec-state-schema.md and
-// docs/adr-0024-typed-slugs.md.
+// Subject patterns are defined in docs/spec-state-schema.md,
+// docs/adr-0024-typed-slugs.md, and docs/adr-0004-multi-laptop.md.
+// ADR-0004 inserts .hosts.{hslug}. between the user and project levels in
+// all project-scoped subjects, KV keys, and JetStream filter constants.
 package subj
 
 import (
@@ -12,19 +14,20 @@ import (
 
 // --------------------------------------------------------------------------
 // JetStream stream filter constants
+// ADR-0004: .hosts.*. inserted between user and project.
 // --------------------------------------------------------------------------
 
 // FilterMclaudeAPI is the subject filter for the MCLAUDE_API JetStream stream.
-const FilterMclaudeAPI = "mclaude.users.*.projects.*.api.sessions.>"
+const FilterMclaudeAPI = "mclaude.users.*.hosts.*.projects.*.api.sessions.>"
 
 // FilterMclaudeEvents is the subject filter for the MCLAUDE_EVENTS JetStream stream.
-const FilterMclaudeEvents = "mclaude.users.*.projects.*.events.*"
+const FilterMclaudeEvents = "mclaude.users.*.hosts.*.projects.*.events.*"
 
 // FilterMclaudeLifecycle is the subject filter for the MCLAUDE_LIFECYCLE JetStream stream.
-const FilterMclaudeLifecycle = "mclaude.users.*.projects.*.lifecycle.*"
+const FilterMclaudeLifecycle = "mclaude.users.*.hosts.*.projects.*.lifecycle.*"
 
 // --------------------------------------------------------------------------
-// User-scoped subjects (core pub/sub)
+// User-scoped subjects (core pub/sub — no host level)
 // --------------------------------------------------------------------------
 
 // UserAPIProjectsCreate returns:
@@ -55,75 +58,90 @@ func UserQuota(u slug.UserSlug) string {
 }
 
 // --------------------------------------------------------------------------
-// User+project-scoped API subjects
+// Host-scoped subjects (per ADR-0004)
 // --------------------------------------------------------------------------
 
-// UserProjectAPISessionsInput returns:
+// UserHostStatus returns:
 //
-//	mclaude.users.{uslug}.projects.{pslug}.api.sessions.input
+//	mclaude.users.{uslug}.hosts.{hslug}.status
 //
-// Publisher: SPA, daemon. Subscriber: session-agent.
-func UserProjectAPISessionsInput(u slug.UserSlug, p slug.ProjectSlug) string {
-	return "mclaude.users." + string(u) + ".projects." + string(p) + ".api.sessions.input"
+// Publisher: daemon (machine hosts, heartbeat every 30s).
+// Subscriber: control-plane (presence tracking), SPA.
+func UserHostStatus(u slug.UserSlug, h slug.HostSlug) string {
+	return "mclaude.users." + string(u) + ".hosts." + string(h) + ".status"
 }
 
-// UserProjectAPISessionsControl returns:
+// --------------------------------------------------------------------------
+// User+host+project-scoped API subjects (ADR-0004)
+// All project-scoped subjects include .hosts.{hslug}. between user and project.
+// --------------------------------------------------------------------------
+
+// UserHostProjectAPISessionsInput returns:
 //
-//	mclaude.users.{uslug}.projects.{pslug}.api.sessions.control
+//	mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.input
+//
+// Publisher: SPA, daemon. Subscriber: session-agent.
+func UserHostProjectAPISessionsInput(u slug.UserSlug, h slug.HostSlug, p slug.ProjectSlug) string {
+	return "mclaude.users." + string(u) + ".hosts." + string(h) + ".projects." + string(p) + ".api.sessions.input"
+}
+
+// UserHostProjectAPISessionsControl returns:
+//
+//	mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.control
 //
 // Publisher: SPA. Subscriber: session-agent.
-func UserProjectAPISessionsControl(u slug.UserSlug, p slug.ProjectSlug) string {
-	return "mclaude.users." + string(u) + ".projects." + string(p) + ".api.sessions.control"
+func UserHostProjectAPISessionsControl(u slug.UserSlug, h slug.HostSlug, p slug.ProjectSlug) string {
+	return "mclaude.users." + string(u) + ".hosts." + string(h) + ".projects." + string(p) + ".api.sessions.control"
 }
 
-// UserProjectAPISessionsCreate returns:
+// UserHostProjectAPISessionsCreate returns:
 //
-//	mclaude.users.{uslug}.projects.{pslug}.api.sessions.create
+//	mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.create
 //
 // Publisher: SPA, daemon. Subscriber: session-agent (request/reply).
-func UserProjectAPISessionsCreate(u slug.UserSlug, p slug.ProjectSlug) string {
-	return "mclaude.users." + string(u) + ".projects." + string(p) + ".api.sessions.create"
+func UserHostProjectAPISessionsCreate(u slug.UserSlug, h slug.HostSlug, p slug.ProjectSlug) string {
+	return "mclaude.users." + string(u) + ".hosts." + string(h) + ".projects." + string(p) + ".api.sessions.create"
 }
 
-// UserProjectAPISessionsDelete returns:
+// UserHostProjectAPISessionsDelete returns:
 //
-//	mclaude.users.{uslug}.projects.{pslug}.api.sessions.delete
+//	mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.delete
 //
 // Publisher: SPA, daemon. Subscriber: session-agent.
-func UserProjectAPISessionsDelete(u slug.UserSlug, p slug.ProjectSlug) string {
-	return "mclaude.users." + string(u) + ".projects." + string(p) + ".api.sessions.delete"
+func UserHostProjectAPISessionsDelete(u slug.UserSlug, h slug.HostSlug, p slug.ProjectSlug) string {
+	return "mclaude.users." + string(u) + ".hosts." + string(h) + ".projects." + string(p) + ".api.sessions.delete"
 }
 
-// UserProjectAPITerminal returns:
+// UserHostProjectAPITerminal returns:
 //
-//	mclaude.users.{uslug}.projects.{pslug}.api.terminal.{suffix}
+//	mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.{suffix}
 //
 // Publisher: SPA. Subscriber: session-agent. suffix is a raw terminal I/O
 // discriminator (e.g. "in", "out", "resize") — not a slug.
-func UserProjectAPITerminal(u slug.UserSlug, p slug.ProjectSlug, suffix string) string {
-	return "mclaude.users." + string(u) + ".projects." + string(p) + ".api.terminal." + suffix
+func UserHostProjectAPITerminal(u slug.UserSlug, h slug.HostSlug, p slug.ProjectSlug, suffix string) string {
+	return "mclaude.users." + string(u) + ".hosts." + string(h) + ".projects." + string(p) + ".api.terminal." + suffix
 }
 
 // --------------------------------------------------------------------------
-// Event and lifecycle subjects
+// Event and lifecycle subjects (ADR-0004)
 // --------------------------------------------------------------------------
 
-// UserProjectEvents returns:
+// UserHostProjectEvents returns:
 //
-//	mclaude.users.{uslug}.projects.{pslug}.events.{sslug}
+//	mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.events.{sslug}
 //
 // Publisher: session-agent. Subscriber: SPA (via MCLAUDE_EVENTS stream).
-func UserProjectEvents(u slug.UserSlug, p slug.ProjectSlug, s slug.SessionSlug) string {
-	return "mclaude.users." + string(u) + ".projects." + string(p) + ".events." + string(s)
+func UserHostProjectEvents(u slug.UserSlug, h slug.HostSlug, p slug.ProjectSlug, s slug.SessionSlug) string {
+	return "mclaude.users." + string(u) + ".hosts." + string(h) + ".projects." + string(p) + ".events." + string(s)
 }
 
-// UserProjectLifecycle returns:
+// UserHostProjectLifecycle returns:
 //
-//	mclaude.users.{uslug}.projects.{pslug}.lifecycle.{sslug}
+//	mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{sslug}
 //
 // Publisher: session-agent, daemon. Subscriber: SPA, daemon (via MCLAUDE_LIFECYCLE stream).
-func UserProjectLifecycle(u slug.UserSlug, p slug.ProjectSlug, s slug.SessionSlug) string {
-	return "mclaude.users." + string(u) + ".projects." + string(p) + ".lifecycle." + string(s)
+func UserHostProjectLifecycle(u slug.UserSlug, h slug.HostSlug, p slug.ProjectSlug, s slug.SessionSlug) string {
+	return "mclaude.users." + string(u) + ".hosts." + string(h) + ".projects." + string(p) + ".lifecycle." + string(s)
 }
 
 // --------------------------------------------------------------------------
@@ -149,21 +167,25 @@ func ClusterAPIStatus(c slug.ClusterSlug) string {
 }
 
 // --------------------------------------------------------------------------
-// KV key helpers
+// KV key helpers (ADR-0004)
 // --------------------------------------------------------------------------
 
 // SessionsKVKey returns the mclaude-sessions KV key:
 //
-//	{uslug}.{pslug}.{sslug}
-func SessionsKVKey(u slug.UserSlug, p slug.ProjectSlug, s slug.SessionSlug) string {
-	return string(u) + "." + string(p) + "." + string(s)
+//	{uslug}.{hslug}.{pslug}.{sslug}
+//
+// Per ADR-0004, {hslug} is inserted between user and project.
+func SessionsKVKey(u slug.UserSlug, h slug.HostSlug, p slug.ProjectSlug, s slug.SessionSlug) string {
+	return string(u) + "." + string(h) + "." + string(p) + "." + string(s)
 }
 
 // ProjectsKVKey returns the mclaude-projects KV key:
 //
-//	{uslug}.{pslug}
-func ProjectsKVKey(u slug.UserSlug, p slug.ProjectSlug) string {
-	return string(u) + "." + string(p)
+//	{uslug}.{hslug}.{pslug}
+//
+// Per ADR-0004, {hslug} is inserted between user and project.
+func ProjectsKVKey(u slug.UserSlug, h slug.HostSlug, p slug.ProjectSlug) string {
+	return string(u) + "." + string(h) + "." + string(p)
 }
 
 // ClustersKVKey returns the mclaude-clusters KV key:
@@ -171,25 +193,27 @@ func ProjectsKVKey(u slug.UserSlug, p slug.ProjectSlug) string {
 //	{uslug}
 //
 // The value is a JSON list of cluster slugs accessible to the user.
+// Unchanged by ADR-0004.
 func ClustersKVKey(u slug.UserSlug) string {
 	return string(u)
 }
 
-// LaptopsKVKey returns the mclaude-laptops KV key:
+// HostsKVKey returns the mclaude-hosts KV key:
 //
-//	{uslug}.{hostname}
+//	{uslug}.{hslug}
 //
-// hostname is the raw machine hostname (not a slug). Per ADR-0024, this
-// transitions to {uslug}.{hslug} when ADR-0004 (BYOH) lands.
-func LaptopsKVKey(u slug.UserSlug, hostname string) string {
-	return string(u) + "." + hostname
+// Replaces LaptopsKVKey. Per ADR-0004, {hslug} is a typed HostSlug (no longer
+// a raw machine hostname). Bucket name changed from mclaude-laptops to
+// mclaude-hosts.
+func HostsKVKey(u slug.UserSlug, h slug.HostSlug) string {
+	return string(u) + "." + string(h)
 }
 
 // JobQueueKVKey returns the mclaude-job-queue KV key:
 //
 //	{uslug}.{jobId}
 //
-// jobId stays UUID v4 shaped (not a slug).
+// jobId stays UUID v4 shaped (not a slug). Unchanged by ADR-0004.
 func JobQueueKVKey(u slug.UserSlug, jobID string) string {
 	return string(u) + "." + jobID
 }

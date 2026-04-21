@@ -49,25 +49,41 @@ Produces `{slugify(displayName)}-{first domain segment}` from a display name and
 
 Typed NATS subject and KV key builders. Every function accepts only typed slug wrappers from `pkg/slug`. See `spec-state-schema.md` for canonical subject and key formats.
 
-**JetStream stream filters:**
+ADR-0004 (BYOH) extends ADR-0024 by inserting `.hosts.{hslug}.` between the user and project levels in all project-scoped subjects, KV keys, and JetStream filter constants.
 
-| Constant                 | Pattern                                              |
-|--------------------------|------------------------------------------------------|
-| `FilterMclaudeAPI`       | `mclaude.users.*.projects.*.api.sessions.>`          |
-| `FilterMclaudeEvents`    | `mclaude.users.*.projects.*.events.*`                |
-| `FilterMclaudeLifecycle` | `mclaude.users.*.projects.*.lifecycle.*`              |
+**JetStream stream filters (ADR-0004):**
 
-**Subject helpers:** `UserAPIProjectsCreate`, `UserAPIProjectsUpdated`, `UserQuota`, `UserProjectAPISessionsInput`, `UserProjectAPISessionsControl`, `UserProjectAPISessionsCreate`, `UserProjectAPISessionsDelete`, `UserProjectAPITerminal`, `UserProjectEvents`, `UserProjectLifecycle`, `ClusterAPIProjectsProvision`, `ClusterAPIStatus`.
+| Constant                 | Pattern                                                    |
+|--------------------------|------------------------------------------------------------|
+| `FilterMclaudeAPI`       | `mclaude.users.*.hosts.*.projects.*.api.sessions.>`        |
+| `FilterMclaudeEvents`    | `mclaude.users.*.hosts.*.projects.*.events.*`              |
+| `FilterMclaudeLifecycle` | `mclaude.users.*.hosts.*.projects.*.lifecycle.*`           |
 
-**KV key helpers:**
+**User-scoped subject helpers (no host level):**
+`UserAPIProjectsCreate`, `UserAPIProjectsUpdated`, `UserQuota`
 
-| Helper           | Pattern                    | Bucket             |
-|------------------|----------------------------|--------------------|
-| `SessionsKVKey`  | `{uslug}.{pslug}.{sslug}` | mclaude-sessions   |
-| `ProjectsKVKey`  | `{uslug}.{pslug}`         | mclaude-projects   |
-| `ClustersKVKey`  | `{uslug}`                 | mclaude-clusters   |
-| `LaptopsKVKey`   | `{uslug}.{hostname}`      | mclaude-laptops    |
-| `JobQueueKVKey`  | `{uslug}.{jobId}`         | mclaude-job-queue  |
+**Host-scoped subject helper:**
+`UserHostStatus(u UserSlug, h HostSlug) string` -- host presence heartbeat.
+
+**User+host+project-scoped subject helpers (ADR-0004):**
+`UserHostProjectAPISessionsInput`, `UserHostProjectAPISessionsControl`, `UserHostProjectAPISessionsCreate`, `UserHostProjectAPISessionsDelete`, `UserHostProjectAPITerminal`, `UserHostProjectEvents`, `UserHostProjectLifecycle`
+
+All accept `(u UserSlug, h HostSlug, p ProjectSlug, ...)` -- the `h HostSlug` parameter is required for all project-scoped subjects.
+
+**Cluster-scoped subject helpers (unchanged):**
+`ClusterAPIProjectsProvision`, `ClusterAPIStatus`
+
+**KV key helpers (ADR-0004):**
+
+| Helper           | Signature                                          | Pattern                          | Bucket             |
+|------------------|----------------------------------------------------|----------------------------------|--------------------|
+| `SessionsKVKey`  | `(u, h, p, s)`                                     | `{uslug}.{hslug}.{pslug}.{sslug}` | mclaude-sessions   |
+| `ProjectsKVKey`  | `(u, h, p)`                                        | `{uslug}.{hslug}.{pslug}`        | mclaude-projects   |
+| `ClustersKVKey`  | `(u)`                                              | `{uslug}`                        | mclaude-clusters   |
+| `HostsKVKey`     | `(u, h)`                                           | `{uslug}.{hslug}`                | mclaude-hosts      |
+| `JobQueueKVKey`  | `(u, jobId string)`                                | `{uslug}.{jobId}`                | mclaude-job-queue  |
+
+Note: `LaptopsKVKey` (pre-ADR-0004) is removed. Use `HostsKVKey` with a typed `HostSlug`.
 
 ## Dependencies
 
