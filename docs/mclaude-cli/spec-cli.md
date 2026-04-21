@@ -26,7 +26,7 @@ Flags:
 
 #### `mclaude-cli session list`
 
-Resolves user and project slugs (from flags or context file), validates them, and prints the NATS KV key prefix and events subject that would be used to query sessions. Does not make network calls -- outputs the resolved parameters only.
+Resolves user and project slugs (from flags or context file), validates them, and prints the NATS KV key prefix that would be used to query sessions. Does not make network calls -- outputs the resolved parameters only.
 
 Flags:
 

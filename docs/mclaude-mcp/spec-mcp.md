@@ -34,7 +34,7 @@ All tools return JSON-formatted text content.
 
 | Tool | Parameters | Behavior |
 |---|---|---|
-| `create_session` | `cwd` (string), `prompt?` (string) | Creates a new Claude Code session in a tmux window at the given directory. If `prompt` is provided, waits for the session to become idle (up to 20 seconds), then sends the prompt as initial input. |
+| `create_session` | `cwd` (string), `prompt?` (string) | Creates a new Claude Code session in a tmux window at the given directory. If `prompt` is provided, waits for the session to become idle (up to 20 seconds), pauses 2 seconds for initialization, then sends the prompt as initial input. |
 | `send_input` | `id` (string), `text` (string) | Sends text input to an active session. |
 | `approve_session` | `id` (string) | Approves a pending permission prompt by sending Enter. |
 | `cancel_session` | `id` (string) | Cancels the current operation by sending Escape. |
@@ -50,3 +50,4 @@ All tools return JSON-formatted text content.
 - **mclaude-server** -- the HTTP API at `MCLAUDE_URL` that actually manages tmux sessions; every tool call proxies to it.
 - **Node.js** -- runtime (ES2022 target).
 - **@modelcontextprotocol/sdk** -- provides `McpServer` and `StdioServerTransport`.
+- **zod** -- schema validation for MCP tool parameters.

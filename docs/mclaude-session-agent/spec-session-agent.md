@@ -204,7 +204,7 @@ Four policies control how `control_request` events (tool-use permission prompts)
 | `allowlist` | Auto-approve listed tools; forward others to client |
 | `strict-allowlist` | Auto-approve listed tools; auto-deny all others |
 
-When no explicit allowed-tools list is provided for `allowlist` or `strict-allowlist`, a default set is applied: Read, Write, Edit, Glob, Grep, Bash, Agent, and Task* tools.
+When no explicit allowed-tools list is provided for `allowlist` or `strict-allowlist`, a default set is applied: Read, Write, Edit, Glob, Grep, Bash, Agent, TaskCreate, TaskUpdate, TaskGet, TaskList, TaskOutput, and TaskStop.
 
 The `strict-allowlist` policy invokes an `onStrictDeny` callback on denial, which publishes a `session_permission_denied` lifecycle event and signals the quota monitor.
 

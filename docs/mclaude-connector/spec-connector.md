@@ -81,8 +81,8 @@ Incoming `http_request` messages are routed based on path:
   original request headers, method, query string, and body.
 - **Non-API paths** (when `STATIC_DIR` is set) are served from the local
   filesystem. Path traversal is rejected. The content type is detected from the
-  file extension. All static responses carry `Cache-Control: no-cache` headers
-  to support live editing.
+  file extension. All static responses carry `Cache-Control: no-cache, no-store, must-revalidate` headers
+  to prevent caching during live editing.
 - **`/__static-version`** returns the mtime of `index.html` as JSON, enabling
   the web app to poll for changes and auto-reload.
 - When `STATIC_DIR` is not set, all paths are proxied to mclaude-server.
