@@ -2,7 +2,7 @@
 
 ## Role
 
-`mclaude-docs-dashboard` is a local development dashboard for the mclaude `docs/` corpus. It lists every ADR and spec, renders them as formatted markdown, shows each ADR's status (`draft | accepted | implemented | superseded | withdrawn`) at a glance, exposes spec↔ADR lineage both inline (hover popover on H2 headings) and globally (force-directed graph), and live-updates as files change. It is dev-only: loopback bind, no auth, no deploy, read-only.
+`mclaude-docs-dashboard` is a local development dashboard for the mclaude `docs/` corpus. It lists every ADR and spec, renders them as formatted markdown, shows each ADR's status (`draft | accepted | implemented | superseded | withdrawn`) at a glance, exposes spec↔ADR lineage both inline (hover popover on H2 headings) and globally (force-directed graph), and live-updates as files change. It is dev-only: no auth, no deploy, read-only. Binds to all local interfaces (`0.0.0.0`) so Tailnet peers (e.g. the operator's mobile device) can reach it — access control is delegated to the host network (ADR-0028).
 
 Established by ADR-0027. A sibling package to `mclaude-docs-mcp`, imported as a Bun workspace dependency. The dashboard reuses the parser, indexer, lineage scanner, watcher, and tool-layer query functions from `mclaude-docs-mcp/src/` — it does not reimplement any of them. Its only new logic is the HTTP/SSE surface, the two doc-level graph SQL queries (no helper exists in docs-mcp for this aggregation), and the React SPA.
 
@@ -10,8 +10,20 @@ Established by ADR-0027. A sibling package to `mclaude-docs-mcp`, imported as a 
 
 - Bun. Native `Bun.serve` for HTTP + SSE. No framework.
 - Vite + React 18 for the SPA (built into `ui/dist/`, served as static files).
-- Single process. Binds to `127.0.0.1:<port>` (default 4567).
-- Entrypoint: `mclaude-docs-dashboard/src/server.ts`. On boot: parses CLI flags (`--port`, `--db-path`), resolves repo root (walk up from cwd to first `.git` directory; error out if none found), opens the shared DB in WAL mode, runs `indexAllDocs` once, starts `startWatcher` with an `onReindex` callback wired to the SSE broker, and begins serving.
+- Single process. Binds to `0.0.0.0:<port>` (default 4567) — reachable on every local interface, including Tailscale addresses (ADR-0028).
+- Entrypoint: `mclaude-docs-dashboard/src/server.ts`. On boot: parses CLI flags (`--port`, `--db-path`), resolves repo root (walk up from cwd to first `.git` directory; error out if none found), opens the shared DB in WAL mode, runs `indexAllDocs` once, starts `startWatcher` with an `onReindex` callback wired to the SSE broker, begins serving, and prints a startup banner listing every reachable URL (see Startup banner below).
+
+## Startup banner
+
+After `Bun.serve` succeeds, the process logs one line per reachable URL to stdout:
+
+```
+Dashboard ready:
+  http://127.0.0.1:<port>/
+  http://<iface-ipv4>:<port>/   (for each non-loopback IPv4 address from os.networkInterfaces())
+```
+
+Loopback is always printed first. Every other line is a non-internal IPv4 address from `os.networkInterfaces()` (skip IPv6 and interfaces flagged `internal: true`). Interface order is the order Node returns them — no sorting. If the host has no non-loopback IPv4 (rare — a fully offline laptop), only the loopback line is printed. The banner replaces the prior single `Dashboard ready: http://127.0.0.1:<port>/` line.
 
 ## Workspace setup
 
@@ -41,11 +53,11 @@ import { searchDocs, getSection, getLineage, listDocs, readRawDoc } from "mclaud
 | `--port <n>` | `4567`                                       | HTTP listen port. Fail fast if in use.          |
 | `--db-path <p>` | `<repoRoot>/mclaude-docs-mcp/.docs-index.db` | Path to the shared SQLite index.                |
 
-No other flags. Binding is always `127.0.0.1`.
+No other flags. Binding is always `0.0.0.0` (ADR-0028).
 
 ## HTTP API
 
-All endpoints return JSON with `Content-Type: application/json` unless noted. CORS is wide-open (`Access-Control-Allow-Origin: *`) — loopback-only bind means no security concern.
+All endpoints return JSON with `Content-Type: application/json` unless noted. CORS is wide-open (`Access-Control-Allow-Origin: *`). The server is a read-only dev tool with no cookies or credentials, so the permissive CORS header does not widen any attack surface that the bind address (ADR-0028) does not already expose.
 
 | Method | Path                                                      | Underlying                             | Response                                                                 |
 |--------|-----------------------------------------------------------|-----------------------------------------|--------------------------------------------------------------------------|
@@ -302,10 +314,11 @@ Clicking any node → detail page for that doc.
 
 ## Security
 
-- Bind `127.0.0.1` only. No remote access.
-- No authentication. Loopback is the sandbox.
-- No write endpoints — browser cannot mutate filesystem or DB state.
-- CORS wide-open (`*`) — acceptable because bind is loopback.
+- Bind `0.0.0.0` — reachable on every local interface, including Tailnet and LAN addresses (ADR-0028).
+- No authentication. The trust boundary is the host network: the operator runs the tool on a machine whose reachable interfaces they already trust (Tailnet ACL, host firewall, or truly local). The process itself has no notion of identity.
+- No write endpoints — browser cannot mutate filesystem or DB state. The server exposes only GET routes over the docs corpus.
+- CORS wide-open (`*`) — no cookies or credentials are used, so the permissive header does not widen any attack surface beyond what the bind address already exposes.
+- Do not run the dashboard on an untrusted network. If the machine is on public WiFi or otherwise reachable by untrusted peers, the dashboard will be reachable too.
 
 ## Portability
 
