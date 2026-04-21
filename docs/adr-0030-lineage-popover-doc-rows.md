@@ -1,8 +1,9 @@
 # ADR: LineagePopover Collapses Rows by Doc
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-04-21: accepted
+- 2026-04-21: implemented — all scope CLEAN
 
 ## Overview
 
