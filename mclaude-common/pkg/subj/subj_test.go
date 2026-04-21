@@ -11,13 +11,14 @@ import (
 // raw strings is a compile-time error.
 var (
 	u = slug.MustParseUserSlug("alice-gmail")
+	h = slug.MustParseHostSlug("mbp16")
 	p = slug.MustParseProjectSlug("my-project")
 	s = slug.MustParseSessionSlug("s-abc123")
 	c = slug.MustParseClusterSlug("us-west")
 )
 
 // --------------------------------------------------------------------------
-// JetStream filter constants
+// JetStream filter constants (ADR-0004 — .hosts.*. between user and project)
 // --------------------------------------------------------------------------
 
 func TestFilterConstants(t *testing.T) {
@@ -26,9 +27,9 @@ func TestFilterConstants(t *testing.T) {
 		got  string
 		want string
 	}{
-		{"FilterMclaudeAPI", subj.FilterMclaudeAPI, "mclaude.users.*.projects.*.api.sessions.>"},
-		{"FilterMclaudeEvents", subj.FilterMclaudeEvents, "mclaude.users.*.projects.*.events.*"},
-		{"FilterMclaudeLifecycle", subj.FilterMclaudeLifecycle, "mclaude.users.*.projects.*.lifecycle.*"},
+		{"FilterMclaudeAPI", subj.FilterMclaudeAPI, "mclaude.users.*.hosts.*.projects.*.api.sessions.>"},
+		{"FilterMclaudeEvents", subj.FilterMclaudeEvents, "mclaude.users.*.hosts.*.projects.*.events.*"},
+		{"FilterMclaudeLifecycle", subj.FilterMclaudeLifecycle, "mclaude.users.*.hosts.*.projects.*.lifecycle.*"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -40,7 +41,7 @@ func TestFilterConstants(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// User-scoped subjects
+// User-scoped subjects (no host level — unchanged by ADR-0004)
 // --------------------------------------------------------------------------
 
 func TestUserAPIProjectsCreate(t *testing.T) {
@@ -68,71 +69,83 @@ func TestUserQuota(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// User+project-scoped API subjects
+// Host-scoped subject (ADR-0004)
 // --------------------------------------------------------------------------
 
-func TestUserProjectAPISessionsInput(t *testing.T) {
-	got := subj.UserProjectAPISessionsInput(u, p)
-	want := "mclaude.users.alice-gmail.projects.my-project.api.sessions.input"
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
-	}
-}
-
-func TestUserProjectAPISessionsControl(t *testing.T) {
-	got := subj.UserProjectAPISessionsControl(u, p)
-	want := "mclaude.users.alice-gmail.projects.my-project.api.sessions.control"
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
-	}
-}
-
-func TestUserProjectAPISessionsCreate(t *testing.T) {
-	got := subj.UserProjectAPISessionsCreate(u, p)
-	want := "mclaude.users.alice-gmail.projects.my-project.api.sessions.create"
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
-	}
-}
-
-func TestUserProjectAPISessionsDelete(t *testing.T) {
-	got := subj.UserProjectAPISessionsDelete(u, p)
-	want := "mclaude.users.alice-gmail.projects.my-project.api.sessions.delete"
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
-	}
-}
-
-func TestUserProjectAPITerminal(t *testing.T) {
-	got := subj.UserProjectAPITerminal(u, p, "resize")
-	want := "mclaude.users.alice-gmail.projects.my-project.api.terminal.resize"
+func TestUserHostStatus(t *testing.T) {
+	got := subj.UserHostStatus(u, h)
+	want := "mclaude.users.alice-gmail.hosts.mbp16.status"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
 // --------------------------------------------------------------------------
-// Event and lifecycle subjects
+// User+host+project-scoped API subjects (ADR-0004)
 // --------------------------------------------------------------------------
 
-func TestUserProjectEvents(t *testing.T) {
-	got := subj.UserProjectEvents(u, p, s)
-	want := "mclaude.users.alice-gmail.projects.my-project.events.s-abc123"
+func TestUserHostProjectAPISessionsInput(t *testing.T) {
+	got := subj.UserHostProjectAPISessionsInput(u, h, p)
+	want := "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.sessions.input"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
-func TestUserProjectLifecycle(t *testing.T) {
-	got := subj.UserProjectLifecycle(u, p, s)
-	want := "mclaude.users.alice-gmail.projects.my-project.lifecycle.s-abc123"
+func TestUserHostProjectAPISessionsControl(t *testing.T) {
+	got := subj.UserHostProjectAPISessionsControl(u, h, p)
+	want := "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.sessions.control"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestUserHostProjectAPISessionsCreate(t *testing.T) {
+	got := subj.UserHostProjectAPISessionsCreate(u, h, p)
+	want := "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.sessions.create"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestUserHostProjectAPISessionsDelete(t *testing.T) {
+	got := subj.UserHostProjectAPISessionsDelete(u, h, p)
+	want := "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.sessions.delete"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestUserHostProjectAPITerminal(t *testing.T) {
+	got := subj.UserHostProjectAPITerminal(u, h, p, "resize")
+	want := "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.terminal.resize"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
 // --------------------------------------------------------------------------
-// Cluster-scoped subjects
+// Event and lifecycle subjects (ADR-0004)
+// --------------------------------------------------------------------------
+
+func TestUserHostProjectEvents(t *testing.T) {
+	got := subj.UserHostProjectEvents(u, h, p, s)
+	want := "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.events.s-abc123"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestUserHostProjectLifecycle(t *testing.T) {
+	got := subj.UserHostProjectLifecycle(u, h, p, s)
+	want := "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.lifecycle.s-abc123"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// --------------------------------------------------------------------------
+// Cluster-scoped subjects (unchanged)
 // --------------------------------------------------------------------------
 
 func TestClusterAPIProjectsProvision(t *testing.T) {
@@ -152,20 +165,20 @@ func TestClusterAPIStatus(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// KV key helpers
+// KV key helpers (ADR-0004)
 // --------------------------------------------------------------------------
 
 func TestSessionsKVKey(t *testing.T) {
-	got := subj.SessionsKVKey(u, p, s)
-	want := "alice-gmail.my-project.s-abc123"
+	got := subj.SessionsKVKey(u, h, p, s)
+	want := "alice-gmail.mbp16.my-project.s-abc123"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
 func TestProjectsKVKey(t *testing.T) {
-	got := subj.ProjectsKVKey(u, p)
-	want := "alice-gmail.my-project"
+	got := subj.ProjectsKVKey(u, h, p)
+	want := "alice-gmail.mbp16.my-project"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -179,9 +192,9 @@ func TestClustersKVKey(t *testing.T) {
 	}
 }
 
-func TestLaptopsKVKey(t *testing.T) {
-	got := subj.LaptopsKVKey(u, "macbook-pro.local")
-	want := "alice-gmail.macbook-pro.local"
+func TestHostsKVKey(t *testing.T) {
+	got := subj.HostsKVKey(u, h)
+	want := "alice-gmail.mbp16"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -205,8 +218,10 @@ func TestJobQueueKVKey(t *testing.T) {
 // above without any unsafe casting.
 //
 // A separate documentation comment explains what WOULD fail at compile time:
-//   subj.UserAPIProjectsCreate("alice-gmail")    // compile error: cannot use string as slug.UserSlug
-//   subj.UserProjectAPISessionsCreate("alice-gmail", "my-project")  // compile error
+//
+//	subj.UserAPIProjectsCreate("alice-gmail")                               // compile error
+//	subj.UserHostProjectAPISessionsCreate("alice-gmail", "mbp16", "my-project") // compile error
+//
 // --------------------------------------------------------------------------
 
 func TestTypedWrapperEnforcement(t *testing.T) {
@@ -223,7 +238,7 @@ func TestTypedWrapperEnforcement(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestAllSpecSubjects(t *testing.T) {
-	// Enumerate all 12 subject patterns from spec-state-schema.md and
+	// Enumerate all subject patterns from spec-state-schema.md and
 	// verify each helper produces the expected pattern.
 	type specCase struct {
 		name string
@@ -232,22 +247,59 @@ func TestAllSpecSubjects(t *testing.T) {
 	}
 
 	cases := []specCase{
-		// User-level
+		// User-level (no host)
 		{"mclaude.users.{u}.api.projects.create", subj.UserAPIProjectsCreate(u), "mclaude.users.alice-gmail.api.projects.create"},
 		{"mclaude.users.{u}.api.projects.updated", subj.UserAPIProjectsUpdated(u), "mclaude.users.alice-gmail.api.projects.updated"},
 		{"mclaude.users.{u}.quota", subj.UserQuota(u), "mclaude.users.alice-gmail.quota"},
-		// User+project-level API
-		{"mclaude.users.{u}.projects.{p}.api.sessions.input", subj.UserProjectAPISessionsInput(u, p), "mclaude.users.alice-gmail.projects.my-project.api.sessions.input"},
-		{"mclaude.users.{u}.projects.{p}.api.sessions.control", subj.UserProjectAPISessionsControl(u, p), "mclaude.users.alice-gmail.projects.my-project.api.sessions.control"},
-		{"mclaude.users.{u}.projects.{p}.api.sessions.create", subj.UserProjectAPISessionsCreate(u, p), "mclaude.users.alice-gmail.projects.my-project.api.sessions.create"},
-		{"mclaude.users.{u}.projects.{p}.api.sessions.delete", subj.UserProjectAPISessionsDelete(u, p), "mclaude.users.alice-gmail.projects.my-project.api.sessions.delete"},
-		{"mclaude.users.{u}.projects.{p}.api.terminal.*", subj.UserProjectAPITerminal(u, p, "in"), "mclaude.users.alice-gmail.projects.my-project.api.terminal.in"},
+		// Host-level
+		{"mclaude.users.{u}.hosts.{h}.status", subj.UserHostStatus(u, h), "mclaude.users.alice-gmail.hosts.mbp16.status"},
+		// User+host+project-level API (ADR-0004)
+		{"mclaude.users.{u}.hosts.{h}.projects.{p}.api.sessions.input", subj.UserHostProjectAPISessionsInput(u, h, p), "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.sessions.input"},
+		{"mclaude.users.{u}.hosts.{h}.projects.{p}.api.sessions.control", subj.UserHostProjectAPISessionsControl(u, h, p), "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.sessions.control"},
+		{"mclaude.users.{u}.hosts.{h}.projects.{p}.api.sessions.create", subj.UserHostProjectAPISessionsCreate(u, h, p), "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.sessions.create"},
+		{"mclaude.users.{u}.hosts.{h}.projects.{p}.api.sessions.delete", subj.UserHostProjectAPISessionsDelete(u, h, p), "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.sessions.delete"},
+		{"mclaude.users.{u}.hosts.{h}.projects.{p}.api.terminal.*", subj.UserHostProjectAPITerminal(u, h, p, "in"), "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.terminal.in"},
 		// Events + lifecycle
-		{"mclaude.users.{u}.projects.{p}.events.{s}", subj.UserProjectEvents(u, p, s), "mclaude.users.alice-gmail.projects.my-project.events.s-abc123"},
-		{"mclaude.users.{u}.projects.{p}.lifecycle.{s}", subj.UserProjectLifecycle(u, p, s), "mclaude.users.alice-gmail.projects.my-project.lifecycle.s-abc123"},
+		{"mclaude.users.{u}.hosts.{h}.projects.{p}.events.{s}", subj.UserHostProjectEvents(u, h, p, s), "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.events.s-abc123"},
+		{"mclaude.users.{u}.hosts.{h}.projects.{p}.lifecycle.{s}", subj.UserHostProjectLifecycle(u, h, p, s), "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.lifecycle.s-abc123"},
 		// Cluster
 		{"mclaude.clusters.{c}.api.projects.provision", subj.ClusterAPIProjectsProvision(c), "mclaude.clusters.us-west.api.projects.provision"},
 		{"mclaude.clusters.{c}.api.status", subj.ClusterAPIStatus(c), "mclaude.clusters.us-west.api.status"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Errorf("got %q, want %q", tc.got, tc.want)
+			}
+		})
+	}
+}
+
+// --------------------------------------------------------------------------
+// Verify all spec-defined KV key patterns are covered
+// --------------------------------------------------------------------------
+
+func TestAllSpecKVKeys(t *testing.T) {
+	type specCase struct {
+		name string
+		got  string
+		want string
+	}
+
+	jobID := "550e8400-e29b-41d4-a716-446655440000"
+
+	cases := []specCase{
+		// mclaude-sessions: {uslug}.{hslug}.{pslug}.{sslug}
+		{"mclaude-sessions key", subj.SessionsKVKey(u, h, p, s), "alice-gmail.mbp16.my-project.s-abc123"},
+		// mclaude-projects: {uslug}.{hslug}.{pslug}
+		{"mclaude-projects key", subj.ProjectsKVKey(u, h, p), "alice-gmail.mbp16.my-project"},
+		// mclaude-clusters: {uslug}
+		{"mclaude-clusters key", subj.ClustersKVKey(u), "alice-gmail"},
+		// mclaude-hosts: {uslug}.{hslug}
+		{"mclaude-hosts key", subj.HostsKVKey(u, h), "alice-gmail.mbp16"},
+		// mclaude-job-queue: {uslug}.{jobId}
+		{"mclaude-job-queue key", subj.JobQueueKVKey(u, jobID), "alice-gmail." + jobID},
 	}
 
 	for _, tc := range cases {
