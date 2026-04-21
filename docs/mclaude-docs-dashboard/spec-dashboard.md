@@ -86,9 +86,10 @@ interface GraphResponse {
     commit_count: number;
   }[];
   edges: {
-    from: string;   // doc_path (canonicalized: from < to)
+    from: string;        // doc_path (canonicalized: from < to)
     to: string;
-    count: number;  // aggregated commit_count across section-pair edges
+    count: number;       // aggregated commit_count across section-pair edges
+    last_commit: string; // short hash — MAX(last_commit) across the aggregated section pairs, used by the edge hover tooltip
   }[];
 }
 ```
@@ -108,7 +109,8 @@ FROM documents;
 SELECT
   MIN(section_a_doc, section_b_doc) AS from_path,
   MAX(section_a_doc, section_b_doc) AS to_path,
-  SUM(commit_count)                 AS count
+  SUM(commit_count)                 AS count,
+  MAX(last_commit)                  AS last_commit
 FROM lineage
 WHERE section_a_doc != section_b_doc
 GROUP BY MIN(section_a_doc, section_b_doc), MAX(section_a_doc, section_b_doc);
@@ -123,7 +125,8 @@ The handler then applies sidebar filters (ADR↔spec default; optional ADR↔ADR
 SELECT
   MIN(section_a_doc, section_b_doc) AS from_path,
   MAX(section_a_doc, section_b_doc) AS to_path,
-  SUM(commit_count)                 AS count
+  SUM(commit_count)                 AS count,
+  MAX(last_commit)                  AS last_commit
 FROM lineage
 WHERE (section_a_doc = :focus OR section_b_doc = :focus)
   AND section_a_doc != section_b_doc
