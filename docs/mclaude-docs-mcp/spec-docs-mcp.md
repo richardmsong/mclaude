@@ -62,7 +62,7 @@ Primary key: `(section_a_doc, section_a_heading, section_b_doc, section_b_headin
 | Column          | Type    | Notes                                                                    |
 |-----------------|---------|--------------------------------------------------------------------------|
 | `doc_path`      | TEXT    | Repo-root-relative POSIX path of the document.                           |
-| `head_sha`      | TEXT    | Git HEAD short hash at which the cached response was computed.           |
+| `head_sha`      | TEXT    | Full 40-char Git HEAD SHA at which the cached response was computed (matches the output of `getHeadCommit(repoRoot)` from `lineage-scanner.ts`, which runs `git rev-parse HEAD` — no truncation). |
 | `response_json` | TEXT    | Serialized `{html, blocks}` response, exactly as returned by the tool.   |
 | `computed_at`   | INTEGER | Unix-epoch seconds the row was written. For cache-age debugging.         |
 
@@ -148,7 +148,12 @@ Compute pipeline (cache miss):
 4. Resolve each commit's co-committed doc paths via `git show --name-only --format= <sha>` (cached per-sha for the request's lifetime), filtering to tracked `docs/**/*.md` files. Partition into ADR docs (`docs/adr-*.md`), spec docs (`docs/**/spec-*.md`), and "other."
 5. Direction: if the requested doc's category is `spec`, `contributors` are the ADR docs; if `adr`, `contributors` are the spec docs. `non_adr_commits` are the commits that produced no contributor-category match for this direction.
 6. Dedupe `contributors` by `doc_path`, compute per-contributor `commit_count` (count of commits contributing) and `last_commit` (MAX commit sha by date), sort by `last_commit` DESC. Sort `non_adr_commits` by `commit_date` DESC.
-7. Render the doc's content to HTML by walking the same micromark events: wrap each block in its native element (`<p>`, `<li>`, `<tr>` containing `<td>`s, `<span class="code-line">`) annotated with `data-block-id="<id>"`. Inline markdown (emphasis, links, code spans) rendered in the usual CommonMark way. Headings, blockquotes, thematic breaks, and HTML passthrough render without `data-block-id` (they are not interactive blocks).
+7. Render the doc's content to HTML by walking the same micromark events: wrap each block in its native element (`<p>`, `<li>`, `<tr>` containing `<td>`s, `<span class="code-line">`) annotated with `data-block-id="<id>"`. Inline markdown (emphasis, links, code spans) rendered in the usual CommonMark way. Blockquotes, thematic breaks, and HTML passthrough render without `data-block-id` (they are not interactive blocks).
+   - Headings receive no `data-block-id` but **H2 headings must carry the same `data-lineage-heading` placeholder span emitted by the client-side `marked` renderer** so the existing H2 popover injection in `MarkdownView` keeps working unchanged when the view flips from client-rendered to server-rendered HTML:
+     - H1: plain `<h1 id="<slug>"><text></h1>` — no placeholder. The H1 doc-level `≡` affordance (ADR-0031) is rendered by `AdrDetail.tsx` / `SpecDetail.tsx` in the route's JSX header next to `doc.title`, **outside** `MarkdownView`; the body H1 must not emit a second placeholder or the page would show two doc-mode popovers.
+     - H2: `<h2 id="<slug>"><text><span data-lineage-heading="<url-encoded-text>"></span></h2>` (attribute value is the URL-encoded heading text, matching `MarkdownView.tsx:62`; signals section-mode popover, ADR-0030).
+     - H3 and deeper: plain `<hN id="<slug>"><text></hN>` — no placeholder, no popover.
+   - Relative markdown links inside any block are rewritten to in-dashboard hashes (`docs/adr-*.md` → `#/adr/<slug>`, `docs/**/spec-*.md` → `#/spec/<path>`) so the server HTML behaves identically to the client-rendered HTML for navigation.
 8. Assemble `{html, blocks}` and write to `line_lineage_cache`.
 
 Response shape:

@@ -13,7 +13,7 @@ The chart is installed via `helm install` / `helm upgrade` into the `mclaude-sys
 | `values.yaml` | Defaults for all knobs. Production-oriented images, persistence enabled, nginx ingress. |
 | `values-dev.yaml` | Local k3d development. Images built locally (`pullPolicy: Never`), persistence disabled, no ingress, devSeed enabled, slug-backfill disabled. |
 | `values-e2e.yaml` | CI end-to-end tests. Python HTTP stubs for control-plane and SPA, real NATS/Postgres, persistence disabled, slug-backfill disabled. |
-| `values-k3d-ghcr.yaml` | Local k3d preview with ghcr.io images. Traefik ingress with TLS, NATS WebSocket on a dedicated subdomain, GitHub OAuth provider pre-configured, persistence enabled. |
+| `values-k3d-ghcr.yaml` | Local k3d preview with ghcr.io images. Traefik ingress with TLS on `*.mclaude.richardmcsong.com` (cert issued by cert-manager in the cluster), NATS WebSocket on a dedicated subdomain, GitHub OAuth provider pre-configured, persistence enabled. |
 | `values-airgap.yaml` | Air-gapped deployments. All images pulled from an internal registry mirror via `global.imageRegistry`. |
 | `values-aks.yaml` | Azure Kubernetes Service production. `managed-csi-premium` storage class, larger PVC sizes, scaled replicas, higher resource limits. |
 
@@ -127,7 +127,7 @@ For Postgres table schemas, see `spec-state-schema.md`.
 
 | Key | Default | Description |
 |---|---|---|
-| `controlPlane.externalUrl` | `""` | **Required.** External URL (e.g. `https://mclaude.internal`). Chart fails if unset. |
+| `controlPlane.externalUrl` | `""` | **Required.** External URL (e.g. `https://dev.mclaude.richardmcsong.com`). Chart fails if unset. |
 | `controlPlane.providers` | `[]` | OAuth provider instances (GitHub, GitLab, etc.). |
 | `controlPlane.config.devSeed` | `false` | Create `dev@mclaude.local` user on startup. |
 | `controlPlane.config.natsWsUrl` | `""` | NATS WebSocket URL returned to browsers. |
@@ -167,9 +167,10 @@ For Postgres table schemas, see `spec-state-schema.md`.
 |---|---|---|
 | `ingress.enabled` | `true` | Create Ingress resources. |
 | `ingress.className` | `nginx` | IngressClass name. |
-| `ingress.host` | `""` | Platform hostname. |
+| `ingress.host` | `""` | Platform hostname (e.g. `dev.mclaude.richardmcsong.com`, `preview-<slug>.mclaude.richardmcsong.com`). |
 | `ingress.natsHost` | `""` | Separate hostname for NATS WebSocket. Creates a second Ingress when set. |
-| `ingress.tls` | `[]` | TLS configuration (secretName + hosts). |
+| `ingress.tls` | `[]` | TLS configuration (secretName + hosts). k3d and CI preview environments supply this via `values-k3d-ghcr.yaml` / `--set` flags pointing at the shared Secret `mclaude-richardmcsong-tls` populated by cert-manager. Other environments (AKS, air-gapped) leave it empty or supply their own TLS stanza. |
+| `ingress.externalDnsTarget` | `""` | When non-empty, both Ingresses emit `external-dns.alpha.kubernetes.io/hostname` + `external-dns.alpha.kubernetes.io/target: <value>` so ExternalDNS writes A records with this IP instead of the Service's LoadBalancer IP. Set to the k3d host's Tailscale IP at install time by `/deploy-local-preview` and by CI preview. Empty in all checked-in values files. |
 
 ### Slug Backfill
 
@@ -187,4 +188,5 @@ For Postgres table schemas, see `spec-state-schema.md`.
 - An Ingress controller (nginx or Traefik) when `ingress.enabled`
 - Pre-created Secrets: `mclaude-postgres` and `mclaude-control-plane` in the target namespace
 - Optional: trust-manager for corporate CA bundle injection into session-agent pods
-- Optional: cert-manager or manual TLS secret for HTTPS termination
+- For HTTPS: **cert-manager** in the cluster with a `ClusterIssuer` (typically `mclaude-letsencrypt-prod`) that owns the Secret named in `ingress.tls[0].secretName`. For the k3d / CI preview case, `/deploy-local-preview` bootstraps cert-manager + the ClusterIssuer + the wildcard Certificate CR. See `docs/spec-tls-certs.md`.
+- For DNS automation: **ExternalDNS** in the cluster, configured with the DigitalOcean provider and `domainFilters=[mclaude.richardmcsong.com]`, watching Ingresses — writes A records for every `ingress.host` / `ingress.natsHost`. See `docs/spec-tls-certs.md`.

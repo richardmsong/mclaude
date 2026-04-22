@@ -78,7 +78,7 @@ On dashboard boot, `boot.ts` calls `pruneLineLineageCache(db, repoRoot)` — sig
 - New HTTP endpoint `/api/line-lineage?doc=<p>` in `routes.ts`. `handleLineLineage` imports `getLineLineage` directly from `mclaude-docs-mcp/line-lineage` (the new module) — the same direct-module-import pattern `routes.ts` already uses for `getLineage` from `mclaude-docs-mcp/tools`. No IPC or MCP wire protocol on this path. Caller direction (spec-ward vs ADR-ward) is inferred server-side from the `doc`'s category.
 - `MarkdownView.tsx`: when line-lineage is active for the viewed doc, replace the current `marked` render path with `dangerouslySetInnerHTML` of the server-returned `html`. Delegate a single `onMouseOver` / `onMouseOut` handler on the outer div — it walks up from `event.target` via `closest("[data-block-id]")` to find the hovered block, looks it up in the `blocks` array, and opens the `LineagePopover` variant for line-lineage. The existing per-H2 `≡` popover and per-H1 doc-level popover remain unchanged (the server HTML preserves the heading placeholders those affordances already use).
 - SSE: `MarkdownView` subscribes to the existing `{type: "reindex", changed: string[]}` SSE event broadcast by `server.ts`. When `changed.includes(activeDocPath)` is true, the UI dismisses any open line-lineage popover and surfaces a brief toast ("Doc updated"). It then re-fetches `/api/line-lineage?doc=<p>` to refresh the HTML + blocks. No new SSE event type is introduced.
-- `SpecDetail` and `AdrDetail` both render via the updated `MarkdownView`. No other changes to these two routes.
+- `SpecDetail` and `AdrDetail` both render via the updated `MarkdownView`. The only code change to these two routes is that each route's existing `<LineagePopover docPath={doc.doc_path} heading={null} navigate={navigate} />` call (the ADR-0031 H1 popover in the route's JSX header) gains an explicit `mode="doc"` prop to satisfy the new discriminated-union `LineagePopoverProps` shape (see `docs/mclaude-docs-dashboard/spec-dashboard.md` § Detail views). No other behavioral changes.
 - Boot: `boot.ts` calls `pruneLineLineageCache(db, repoRoot)` after `runLineageScan` (ADR-0029) and before `startWatcher`. Failure is non-fatal (logged, continues).
 
 ## Data Model
@@ -138,7 +138,7 @@ Code components affected (implemented by `/feature-change`):
 - `mclaude-docs-dashboard/src/boot.ts` — call `pruneLineLineageCache` after `runLineageScan`, before `startWatcher`.
 - `mclaude-docs-dashboard/ui/src/components/MarkdownView.tsx` — wrap each block in a hover target; fetch + associate blocks by `block_id`.
 - `mclaude-docs-dashboard/ui/src/components/LineagePopover.tsx` — new rendering mode for line-lineage (contributors + muted non-ADR rows).
-- `mclaude-docs-dashboard/ui/src/components/Toast.tsx` (new or reused) — "Doc updated" toast.
+- `mclaude-docs-dashboard/ui/src/components/ReindexToast.tsx` (new) — "Doc updated" toast (dismissal + reload on reindex of the active doc).
 - `mclaude-docs-dashboard/ui/src/api.ts` — `fetchLineLineage(doc_path)`.
 
 ## Scope

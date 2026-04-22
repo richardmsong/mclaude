@@ -256,12 +256,22 @@ So clicks inside the rendered markdown navigate within the dashboard.
 
 Each H2 heading gets a small `≡` icon injected by a marked renderer extension. The H1 title of every spec and ADR detail page gets the same `≡` icon, rendered inline next to the title (ADR-0031 — doc-level lineage). Hover opens a `LineagePopover`; click pins it (lets the cursor leave without dismissing). Esc or outside-click dismisses.
 
-The popover has two modes determined by where the `≡` was activated:
+The popover has three modes determined by the props passed in. `LineagePopoverProps` is a discriminated union on `mode`:
 
-- **Section mode** (H2 `≡`): calls `/api/lineage?doc=<p>&heading=<h>`. Client collapses rows by `section_b_doc` per ADR-0030.
-- **Doc mode** (H1 `≡`): calls `/api/lineage?doc=<p>` with no `heading`. Rows arrive already collapsed by the server per ADR-0031. The popover renders them unchanged.
+```ts
+type LineagePopoverProps =
+  | { mode: "section"; docPath: string; heading: string; navigate: (href: string) => void }
+  | { mode: "doc";     docPath: string; navigate: (href: string) => void }
+  | { mode: "line";    docPath: string; block: Block; navigate: (href: string) => void };
+```
 
-Both modes produce the same row format (below).
+- **Section mode** (H2 `≡`): mounted by `MarkdownView`'s `createRoot` injection on each `[data-lineage-heading]` span. Calls `/api/lineage?doc=<p>&heading=<h>`. Client collapses rows by `section_b_doc` per ADR-0030.
+- **Doc mode** (H1 `≡`): mounted directly in the JSX of `AdrDetail.tsx` / `SpecDetail.tsx` next to `doc.title`. Calls `/api/lineage?doc=<p>` with no `heading`. Rows arrive already collapsed by the server per ADR-0031. The popover renders them unchanged.
+- **Line mode** (`data-block-id` hover, ADR-0032): mounted by `MarkdownView`'s delegated hover handler on each block. No additional fetch — the `Block` payload passed in already carries `contributors` and `non_adr_commits`. The popover renders the line-lineage content described below.
+
+When the discriminated-union props type is introduced, the existing H1 popover call sites in `AdrDetail.tsx` and `SpecDetail.tsx` must be updated to pass `mode="doc"` (replacing the current implicit `heading={null}` discriminant). This is the only behavioral/type change to those two route files under ADR-0032.
+
+All three modes produce rows using the same visual format (below), but line mode adds the `non_adr_commits` sub-list.
 
 Popover content (ADR-0030):
 
@@ -285,13 +295,13 @@ Status badge renders next to the H1 title on ADR detail pages: colored pill with
 
 `MarkdownView` on every ADR and spec detail page switches from client-side `marked` rendering to server-rendered HTML for the body, to enable per-block line lineage.
 
-- On mount, `MarkdownView` fires `GET /api/line-lineage?doc=<p>`. The response contains `{html, blocks}` (shape in `docs/mclaude-docs-mcp/spec-docs-mcp.md` § `LineLineageResponse`). `html` is the full markdown rendering with `data-block-id="<id>"` attributes wrapping every paragraph, list item, table row, and fenced code line; `blocks` is a keyed map of `block_id → { adr_contributors, non_adr_commits }`.
-- `MarkdownView` renders via `dangerouslySetInnerHTML={{ __html: response.html }}`. Link-rewriting still applies — the server-side renderer produces the same `#/adr/<slug>` / `#/spec/<path>` hashes the client extension used to produce. H2 and H1 `≡` affordances (ADR-0031) are emitted by the server renderer as inline elements so the existing doc-level and section-level popover wiring keeps working unchanged.
-- Hover is a single delegated `onMouseOver` on the `MarkdownView` root. The handler walks the event target via `element.closest("[data-block-id]")`. If it lands on a `data-block-id` element whose id exists in the `blocks` map, the handler opens `LineagePopover` in line-lineage mode anchored to that element. `onMouseOut` with `relatedTarget` outside the same block closes the popover. Click pins it (same affordance as section/doc popovers); Esc or outside-click dismisses.
-- **Line-lineage popover content** renders the `blocks[blockId]` payload:
-  - ADR contributors are grouped per ADR doc (aggregated per ADR-0030 rules — `<commit_count>× <doc_path>`). Each row links to `#/adr/<slug>`. Rows whose ADR is `superseded` or `withdrawn` render muted; `draft` renders with a dashed outline.
-  - Non-ADR commits render below the ADR rows in a muted sub-list, each line formatted `<short_sha> · <YYYY-MM-DD> · <subject>` with no click target.
-  - Sort: ADR rows by descending `commit_count` first, then non-ADR commits by descending `last_commit_date`.
+- On mount, `MarkdownView` fires `GET /api/line-lineage?doc=<p>`. The response shape is `LineLineageResponse` (defined in `docs/mclaude-docs-mcp/spec-docs-mcp.md`): `{html: string, blocks: Block[]}`. `html` is the full markdown rendering with `data-block-id="<id>"` attributes wrapping every paragraph, list item, table row, and fenced code line. `blocks` is an **array** of `Block` records (one per `data-block-id` emitted in the HTML), each carrying `block_id`, `contributors`, and `non_adr_commits`.
+- On fetch, `MarkdownView` builds a client-side `Map<string, Block>` keyed by `block_id` from the response array: `const blockMap = new Map(response.blocks.map(b => [b.block_id, b]))`. The map is rebuilt every time the response changes (mount, reload-after-reindex). This is purely a client-side lookup optimization — the wire contract stays array-shaped to match the existing `LineageResult[]` response pattern and to keep JSON emission straightforward on the server.
+- `MarkdownView` renders via `dangerouslySetInnerHTML={{ __html: response.html }}`. Link-rewriting still applies — the server-side renderer produces the same `#/adr/<slug>` / `#/spec/<path>` hashes the client extension used to produce. H2 `≡` affordances are preserved unchanged: the server HTML wraps each H2 text with `<span data-lineage-heading="<url-encoded-heading>"></span>`, matching the attribute shape the existing `createRoot` injection loop already scans for (see `spec-docs-mcp.md` § Line-lineage module, step 7). The injection loop queries `[data-lineage-heading]` → mounts `LineagePopover` in `section` mode. The H1 doc-level `≡` popover continues to live in `AdrDetail.tsx` / `SpecDetail.tsx`'s JSX header next to `doc.title` (its ADR-0031 position, outside `MarkdownView`); the body H1 emitted by the server renders plain so there is no second doc-mode popover inside the rendered markdown.
+- Hover is a single delegated `onMouseOver` on the `MarkdownView` root. The handler walks the event target via `element.closest("[data-block-id]")`. If it lands on a `data-block-id` element whose id exists in `blockMap`, the handler opens `LineagePopover` in line-lineage mode anchored to that element, passing `blockMap.get(id)` as the payload. `onMouseOut` with `relatedTarget` outside the same block closes the popover. Click pins it (same affordance as section/doc popovers); Esc or outside-click dismisses.
+- **Line-lineage popover content** renders the `Block` payload:
+  - `contributors` rows are already server-sorted by `last_commit` DESC (most-recently-touched first) and one-row-per-doc (deduped server-side). The popover renders them in received order without re-sorting. Row text: `<commit_count>× <doc_path>`. Each row links to `#/adr/<slug>`. Rows whose ADR is `superseded` or `withdrawn` render muted; `draft` renders with a dashed outline.
+  - `non_adr_commits` render below the ADR rows in a muted sub-list, each line formatted `<sha> · <commit_date> · <subject>` (sha truncated to 7 chars for display) with no click target. Already server-sorted by `commit_date` DESC; rendered in received order.
   - No final "Open graph" row — the graph does not include per-block focus.
 - **Fallback**: if `/api/line-lineage` returns a non-200 status (or a network error), `MarkdownView` falls back to client-side `marked` rendering of the doc's `raw_markdown`. The H1/H2 `≡` affordances continue to work; only the per-block hover is disabled. A one-line warning renders above the body: "Line-level lineage unavailable."
 

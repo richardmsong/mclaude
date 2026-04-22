@@ -122,4 +122,4 @@ Future: Figma designs linked per feature.
 
 | # | Feature | Description |
 |---|---------|-------------|
-| I1 | Preview DNS via CoreDNS | CoreDNS container on the k3d host bound to the Tailscale IP serves zone `mclaude.internal.`; Tailscale split DNS routes `*.mclaude.internal` from any Tailnet device (including cellular) to it. See `docs/spec-tailscale-dns.md`. |
+| I1 | Public DNS + Let's Encrypt TLS on `*.mclaude.richardmcsong.com` | DigitalOcean-hosted zone `richardmcsong.com`. cert-manager in-cluster issues a wildcard TLS cert via Let's Encrypt DNS-01 solver against DO. ExternalDNS in-cluster watches Ingresses and upserts A records at DO pointing at the k3d host's Tailscale IP. Tailnet-only reachability (public DNS, private IP). See `docs/spec-tls-certs.md`. |
