@@ -11,7 +11,7 @@ Established by ADR-0027. A sibling package to `mclaude-docs-mcp`, imported as a 
 - Bun. Native `Bun.serve` for HTTP + SSE. No framework.
 - Vite + React 18 for the SPA (built into `ui/dist/`, served as static files).
 - Single process. Binds to `0.0.0.0:<port>` (default 4567) — reachable on every local interface, including Tailscale addresses (ADR-0028).
-- Entrypoint: `mclaude-docs-dashboard/src/server.ts`. On boot: parses CLI flags (`--port`, `--db-path`), resolves repo root (walk up from cwd to first `.git` directory; error out if none found), opens the shared DB in WAL mode, runs `indexAllDocs` once, runs `runLineageScan(db, repoRoot)` once (ADR-0029 — populates the `lineage` table from `git log` so the dashboard is self-sufficient when docs-mcp hasn't run), starts `startWatcher` with an `onReindex` callback wired to the SSE broker (the watcher re-runs the scanner on HEAD advance, as already specified in `docs/mclaude-docs-mcp/spec-docs-mcp.md`), begins serving, and prints a startup banner listing every reachable URL (see Startup banner below). Both `indexAllDocs` and `runLineageScan` are wrapped in try/catch and log non-fatally — the dashboard still serves docs when indexing or scanning fails (e.g. a git error on a shallow clone).
+- Entrypoint: `mclaude-docs-dashboard/src/server.ts`. On boot: parses CLI flags (`--port`, `--db-path`), resolves repo root (walk up from cwd to first `.git` directory; error out if none found), opens the shared DB in WAL mode, runs `indexAllDocs` once, runs `runLineageScan(db, repoRoot)` once (ADR-0029 — populates the `lineage` table from `git log` so the dashboard is self-sufficient when docs-mcp hasn't run), runs `pruneLineLineageCache(db, repoRoot)` once (ADR-0032 — drops cache rows whose `head_sha` no longer matches current HEAD), starts `startWatcher` with an `onReindex` callback wired to the SSE broker (the watcher re-runs the scanner on HEAD advance, as already specified in `docs/mclaude-docs-mcp/spec-docs-mcp.md`), begins serving, and prints a startup banner listing every reachable URL (see Startup banner below). `indexAllDocs`, `runLineageScan`, and `pruneLineLineageCache` are each wrapped in try/catch and log non-fatally — the dashboard still serves docs when indexing, scanning, or cache pruning fails (e.g. a git error on a shallow clone).
 
 ## Startup banner
 
@@ -66,6 +66,7 @@ All endpoints return JSON with `Content-Type: application/json` unless noted. CO
 | GET    | `/api/specs`                                              | `listDocs({category: "spec"})`          | `ListDoc[]`                                                              |
 | GET    | `/api/doc?path=<p>`                                       | `listDocs` (single-path filter) + `readRawDoc` | `DocResponse` (below) — sections come from the `ListDoc.sections` field; no per-section `getSection` call (that would be N+1). |
 | GET    | `/api/lineage?doc=<p>[&heading=<h>]`                      | `getLineage`                            | `LineageResult[]` (includes `status`). With `heading`: section mode. Without `heading` or with empty `heading`: doc mode — rows aggregated per ADR-0031 (server-side collapse; `heading` on returned rows is `""`). |
+| GET    | `/api/line-lineage?doc=<p>`                               | `getLineLineage` (imported from `mclaude-docs-mcp/line-lineage`) | `LineLineageResponse` (shape from docs-mcp spec). Returns pre-rendered HTML with `data-block-id` annotations plus the per-block contributor/non-ADR arrays. Cached in `line_lineage_cache` on the docs DB (ADR-0032). |
 | GET    | `/api/search?q=<q>&limit=<n>&category=<c>&status=<s>`     | `searchDocs`                            | `SearchResult[]`                                                         |
 | GET    | `/api/graph?focus=<p>`                                    | `graph-queries.ts` (direct SQL)         | `GraphResponse` (below)                                                  |
 | GET    | `/events`                                                 | SSE broker                              | `text/event-stream` (see SSE section)                                    |
@@ -280,6 +281,30 @@ Open graph centered here
 
 Status badge renders next to the H1 title on ADR detail pages: colored pill with status text; the full `Status history` list is already part of the ADR body (markdown) so it renders inline immediately below the title — no hover popover is needed for it.
 
+### MarkdownView line-lineage mode (ADR-0032)
+
+`MarkdownView` on every ADR and spec detail page switches from client-side `marked` rendering to server-rendered HTML for the body, to enable per-block line lineage.
+
+- On mount, `MarkdownView` fires `GET /api/line-lineage?doc=<p>`. The response contains `{html, blocks}` (shape in `docs/mclaude-docs-mcp/spec-docs-mcp.md` § `LineLineageResponse`). `html` is the full markdown rendering with `data-block-id="<id>"` attributes wrapping every paragraph, list item, table row, and fenced code line; `blocks` is a keyed map of `block_id → { adr_contributors, non_adr_commits }`.
+- `MarkdownView` renders via `dangerouslySetInnerHTML={{ __html: response.html }}`. Link-rewriting still applies — the server-side renderer produces the same `#/adr/<slug>` / `#/spec/<path>` hashes the client extension used to produce. H2 and H1 `≡` affordances (ADR-0031) are emitted by the server renderer as inline elements so the existing doc-level and section-level popover wiring keeps working unchanged.
+- Hover is a single delegated `onMouseOver` on the `MarkdownView` root. The handler walks the event target via `element.closest("[data-block-id]")`. If it lands on a `data-block-id` element whose id exists in the `blocks` map, the handler opens `LineagePopover` in line-lineage mode anchored to that element. `onMouseOut` with `relatedTarget` outside the same block closes the popover. Click pins it (same affordance as section/doc popovers); Esc or outside-click dismisses.
+- **Line-lineage popover content** renders the `blocks[blockId]` payload:
+  - ADR contributors are grouped per ADR doc (aggregated per ADR-0030 rules — `<commit_count>× <doc_path>`). Each row links to `#/adr/<slug>`. Rows whose ADR is `superseded` or `withdrawn` render muted; `draft` renders with a dashed outline.
+  - Non-ADR commits render below the ADR rows in a muted sub-list, each line formatted `<short_sha> · <YYYY-MM-DD> · <subject>` with no click target.
+  - Sort: ADR rows by descending `commit_count` first, then non-ADR commits by descending `last_commit_date`.
+  - No final "Open graph" row — the graph does not include per-block focus.
+- **Fallback**: if `/api/line-lineage` returns a non-200 status (or a network error), `MarkdownView` falls back to client-side `marked` rendering of the doc's `raw_markdown`. The H1/H2 `≡` affordances continue to work; only the per-block hover is disabled. A one-line warning renders above the body: "Line-level lineage unavailable."
+
+### Reindex dismissal (ADR-0032)
+
+`MarkdownView` subscribes to SSE reindex events via the existing `useEventSource("/events")` hook. When an incoming `{type: "reindex", changed: string[]}` event's `changed` array includes the currently rendered doc's path, `MarkdownView`:
+
+1. Dismisses any open line-lineage popover immediately (state reset, no animation) — the block IDs in the open popover may no longer correspond to elements on the next render, so leaving it open would anchor against stale DOM.
+2. Shows a transient toast — top-right, 3 s auto-dismiss — with the text "Doc updated" and a "Reload" button that re-fires the `/api/line-lineage` fetch and re-renders the view. Clicking the toast itself (anywhere) also reloads.
+3. Until the user clicks Reload (or dismisses the toast), the rendered HTML stays on screen — stale but readable. Hovering blocks while the toast is visible does nothing (hover handler short-circuits on the stale-flag state).
+
+The stale flag clears once the refetch resolves. Section-level and doc-level `LineagePopover` instances (the H2/H1 `≡` popovers from ADR-0030/0031) are not affected by this dismissal — they are anchored to heading elements, which remain stable across re-renders.
+
 ### Search bar
 
 Top nav on every page. 150 ms debounce; on fire, `GET /api/search?q=<q>`. Results pane at `#/search?q=<q>` shows ranked list with FTS5 snippets (wrapped in `[...]`), doc path, heading; each row click → detail page scrolled to that section.
@@ -360,8 +385,9 @@ mclaude-docs-dashboard/
     │   │   ├── SearchResults.tsx
     │   │   └── Graph.tsx
     │   ├── components/
-    │   │   ├── MarkdownView.tsx          # marked + highlight.js + link rewriting
-    │   │   ├── LineagePopover.tsx
+    │   │   ├── MarkdownView.tsx          # server HTML (ADR-0032) w/ marked fallback + link rewriting
+    │   │   ├── LineagePopover.tsx        # section / doc / line-lineage modes
+    │   │   ├── ReindexToast.tsx          # "Doc updated" toast (ADR-0032)
     │   │   ├── StatusBadge.tsx
     │   │   └── SearchBar.tsx
     │   └── api.ts                        # typed fetch wrappers for /api/*

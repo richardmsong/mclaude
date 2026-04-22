@@ -14,7 +14,7 @@ Established by ADR-0015 (the v1 design), extended by ADR-0018 (status column + s
 
 ## Data store
 
-SQLite file at `<repoRoot>/mclaude-docs-mcp/.docs-index.db`, opened in WAL mode with foreign keys on. Schema lives in the `SCHEMA_SQL` constant in `src/db.ts`. Schema version is tracked in the `metadata` table under key `schema_version`; on mismatch or corruption, `openDb` deletes the file and rebuilds from scratch. Current version: `"3"` (ADR-0027).
+SQLite file at `<repoRoot>/mclaude-docs-mcp/.docs-index.db`, opened in WAL mode with foreign keys on. Schema lives in the `SCHEMA_SQL` constant in `src/db.ts`. Schema version is tracked in the `metadata` table under key `schema_version`; on mismatch or corruption, `openDb` deletes the file and rebuilds from scratch. Current version: `"4"` (ADR-0032).
 
 ### Tables
 
@@ -57,6 +57,22 @@ SQLite file at `<repoRoot>/mclaude-docs-mcp/.docs-index.db`, opened in WAL mode 
 
 Primary key: `(section_a_doc, section_a_heading, section_b_doc, section_b_heading)`. The scanner writes each observed pair exactly once per (A, B) ordering; `get_lineage` queries only the `section_a = doc/heading` position, so lookups are symmetric only when the scanner chose to write both orderings.
 
+**`line_lineage_cache`** — one row per `(doc_path, head_sha)` pair, caching the full per-block line-lineage response for a document at a specific HEAD (ADR-0032).
+
+| Column          | Type    | Notes                                                                    |
+|-----------------|---------|--------------------------------------------------------------------------|
+| `doc_path`      | TEXT    | Repo-root-relative POSIX path of the document.                           |
+| `head_sha`      | TEXT    | Git HEAD short hash at which the cached response was computed.           |
+| `response_json` | TEXT    | Serialized `{html, blocks}` response, exactly as returned by the tool.   |
+| `computed_at`   | INTEGER | Unix-epoch seconds the row was written. For cache-age debugging.         |
+
+Primary key: `(doc_path, head_sha)`. Index `idx_line_lineage_cache_doc` on `doc_path` for the batch DELETE path.
+
+Invalidation:
+
+- On HEAD advance (watcher signal): `git diff --name-only <prev> <new>` yields the changed paths. `DELETE FROM line_lineage_cache WHERE doc_path IN (<changed>)`. For unchanged docs, `UPDATE line_lineage_cache SET head_sha = :new_head WHERE head_sha = :prev_head AND doc_path NOT IN (<changed>)` — the computed response is still valid, so the key is re-stamped to the new HEAD.
+- On boot: `DELETE FROM line_lineage_cache WHERE head_sha != :current_head_sha` once. Bounds steady-state cache to ≤1 row per `doc_path`.
+
 **`metadata`** — key/value store. Currently holds `schema_version` and `last_lineage_commit` (short hash of the most recent commit the lineage scanner has processed).
 
 ## Parser (`src/parser.ts`)
@@ -98,6 +114,8 @@ Uses `fs.watch` on `docsDir` (recursive). Events are debounced 100 ms per change
 - Dedupe the collected paths; if non-empty, invoke `onReindex(changed)` once per sweep.
 - Returns a stop function that tears down the watcher.
 
+The watcher also polls `getHeadCommit(repoRoot)` and keeps a local `lastHead` variable. On each HEAD advance (`currentHead !== lastHead`), before updating `lastHead`, it calls `invalidateLineLineageCacheOnHeadAdvance(db, repoRoot, lastHead, currentHead)` from `line-lineage.ts` (ADR-0032). Failures from the invalidation helper are caught and logged; the watcher continues. It also triggers the existing `runLineageScan` on HEAD advance (ADR-0015).
+
 The MCP entrypoint does not pass an `onReindex` callback — the MCP server is a pure consumer of the index. The dashboard (`mclaude-docs-dashboard`) passes a callback that feeds its SSE broker.
 
 ## Lineage scanner (`src/lineage-scanner.ts`)
@@ -112,9 +130,56 @@ Runs on every boot of the MCP server, and again via the watcher whenever HEAD ad
 
 Incremental rescan: subsequent runs start where the previous run left off.
 
+## Line-lineage module (`src/line-lineage.ts`)
+
+Added by ADR-0032. Owns the block-level lineage computation, HTML rendering, and `line_lineage_cache` management.
+
+Exports:
+
+- `getLineLineage(db: Database, repoRoot: string, docPath: string): Promise<LineLineageResponse>` — the hot read path. Resolves HEAD via `getHeadCommit(repoRoot)` (falling back if the watcher's in-memory HEAD is unset), SELECTs from `line_lineage_cache` keyed on `(docPath, head_sha)` and returns the cached response on hit. On miss, runs the compute pipeline below, INSERTs the result, and returns.
+- `pruneLineLineageCache(db: Database, repoRoot: string): void` — `DELETE FROM line_lineage_cache WHERE head_sha != :current_head_sha`. Called from the dashboard's `boot.ts` after `runLineageScan` and before `startWatcher`. No-op when `getHeadCommit` returns `null` (non-git context).
+- `invalidateLineLineageCacheOnHeadAdvance(db: Database, repoRoot: string, prevHead: string, newHead: string): void` — runs `git diff --name-only <prevHead> <newHead>`. Issues `DELETE FROM line_lineage_cache WHERE doc_path IN (<changed>)` for changed docs and `UPDATE line_lineage_cache SET head_sha = :newHead WHERE head_sha = :prevHead AND doc_path NOT IN (<changed>)` for unchanged docs. Called from `watcher.ts` on every HEAD advance, before the local `lastHead` variable is updated.
+
+Compute pipeline (cache miss):
+
+1. Read the doc's current content via `readRawDoc(repoRoot, docPath)`.
+2. Parse with `micromark` + `micromark-extension-gfm-table`; walk events to extract block spans of kind `prose` (one paragraph → one block spanning its soft-wrapped source lines), `list_item` / `table_row` / `code_line` (one source line each). Compute `block_id = sha256("${start_line}:${end_line}:${content.trim()}").slice(0, 16)` for each block.
+3. For each block, run `git log -L<start>,<end>:<docPath> -M -w --format='%H|%s|%cs'` once; collect every commit (`sha`, `subject`, `commit_date`) that touched any source line in the block range.
+4. Resolve each commit's co-committed doc paths via `git show --name-only --format= <sha>` (cached per-sha for the request's lifetime), filtering to tracked `docs/**/*.md` files. Partition into ADR docs (`docs/adr-*.md`), spec docs (`docs/**/spec-*.md`), and "other."
+5. Direction: if the requested doc's category is `spec`, `contributors` are the ADR docs; if `adr`, `contributors` are the spec docs. `non_adr_commits` are the commits that produced no contributor-category match for this direction.
+6. Dedupe `contributors` by `doc_path`, compute per-contributor `commit_count` (count of commits contributing) and `last_commit` (MAX commit sha by date), sort by `last_commit` DESC. Sort `non_adr_commits` by `commit_date` DESC.
+7. Render the doc's content to HTML by walking the same micromark events: wrap each block in its native element (`<p>`, `<li>`, `<tr>` containing `<td>`s, `<span class="code-line">`) annotated with `data-block-id="<id>"`. Inline markdown (emphasis, links, code spans) rendered in the usual CommonMark way. Headings, blockquotes, thematic breaks, and HTML passthrough render without `data-block-id` (they are not interactive blocks).
+8. Assemble `{html, blocks}` and write to `line_lineage_cache`.
+
+Response shape:
+
+```ts
+interface LineLineageResponse {
+  html: string;                           // server-rendered markdown with data-block-id on each block
+  blocks: Block[];
+}
+interface Block {
+  block_id: string;                       // 16 hex chars
+  start_line: number;                     // 1-based inclusive
+  end_line: number;                       // 1-based inclusive
+  kind: "prose" | "list_item" | "table_row" | "code_line";
+  contributors: {
+    doc_path: string;
+    status: string | null;
+    commit_count: number;
+    last_commit: string;
+  }[];
+  non_adr_commits: {
+    sha: string;
+    subject: string;                      // truncated to 60 chars
+    commit_date: string;                  // ISO YYYY-MM-DD
+  }[];
+}
+```
+
 ## MCP tools (`src/tools.ts`)
 
-All four tools take a `Database` handle and a validated args object (Zod schemas in the same module). Returns are plain JS values JSON-serialized by the MCP SDK.
+All five tools take a `Database` handle and a validated args object (Zod schemas in the same module). Returns are plain JS values JSON-serialized by the MCP SDK.
 
 ### `search_docs`
 
@@ -154,6 +219,14 @@ interface LineageResult {
 }
 ```
 
+### `get_line_lineage`
+
+Input: `{doc_path: string}` (ADR-0032).
+
+Returns `LineLineageResponse` (shape defined in § "Line-lineage module" above). Direction is inferred from the requested doc's category: for `spec` docs, `contributors[]` contains ADRs; for `adr` docs, `contributors[]` contains specs. `non_adr_commits[]` carries pure-refactor or typo-fix commits that produced no contributor match for this direction, rendered as muted rows in the UI.
+
+The tool delegates to `getLineLineage(db, repoRoot, doc_path)` from `line-lineage.ts`. Cache-hit requests complete in well under a request frame; cache-miss requests take ~1-2s on a typical spec (100 blocks × one `git log -L` each). There is no request timeout in v1; a slow first fetch simply blocks until the cache populates, after which subsequent fetches are instant.
+
 ### `list_docs`
 
 Input: `{category?: "adr"|"spec", status?: AdrStatus}`.
@@ -192,6 +265,7 @@ Joins `repoRoot + docPath`, verifies the resolved path remains inside `repoRoot`
   "./db": "./src/db.ts",
   "./content-indexer": "./src/content-indexer.ts",
   "./lineage-scanner": "./src/lineage-scanner.ts",
+  "./line-lineage": "./src/line-lineage.ts",
   "./watcher": "./src/watcher.ts",
   "./tools": "./src/tools.ts"
 }
@@ -213,4 +287,5 @@ TypeScript source is published directly; both publisher and consumer run under B
 - `@modelcontextprotocol/sdk` — MCP server runtime.
 - `zod` — input validation.
 - `bun:sqlite` — SQLite bindings (WAL, FTS5).
-- Bun standard library — `fs`, `path`, `child_process` (lineage scanner shells out to `git`).
+- `micromark` + `micromark-extension-gfm-table` — markdown parsing for line-lineage block detection and HTML rendering (ADR-0032).
+- Bun standard library — `fs`, `path`, `crypto` (sha256 for `block_id`), `child_process` (lineage scanner + line-lineage shell out to `git`).
