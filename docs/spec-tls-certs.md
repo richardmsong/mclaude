@@ -184,10 +184,10 @@ when running `helm upgrade --install`.
 | Component | Responsibility |
 |-----------|---------------|
 | `/deploy-local-preview` skill | Bootstraps cert-manager, ExternalDNS, DO-token Secret, ClusterIssuer, and Certificate CR. Waits for the Certificate to become Ready. Then installs the mclaude chart with `ingress.externalDnsTarget=$TS_IP`. |
-| `.github/workflows/deploy-preview.yml` | Assumes cert-manager + ExternalDNS already exist in the cluster (bootstrapped once by `/deploy-local-preview`). Only runs `helm upgrade --install mclaude-<slug>` with the preview hostnames and the Tailscale IP as the ExternalDNS target. |
-| `charts/mclaude/templates/ingress.yaml` | Main Ingress. Emits `external-dns.alpha.kubernetes.io/hostname` + `target` annotations when `ingress.externalDnsTarget` is set. References `ingress.tls[0].secretName` (default `mclaude-richardmcsong-tls`). |
-| `charts/mclaude/templates/nats-ws-ingress.yaml` | NATS WebSocket Ingress. Same annotations, `hostname` is `ingress.natsHost`. |
-| `charts/mclaude/values.yaml` | Default `ingress.tls` references `mclaude-richardmcsong-tls`; `ingress.externalDnsTarget` defaults to empty (skill/CI sets it). |
+| `.github/workflows/deploy-preview.yml` | Assumes cert-manager + ExternalDNS already exist in the cluster (bootstrapped once by `/deploy-local-preview`). Runs `helm upgrade --install mclaude-preview-${BRANCH_SLUG} charts/mclaude` with the preview hostnames, the Tailscale IP as the ExternalDNS target, and the shared Secret `mclaude-richardmcsong-tls` in the `tls[0]` stanza. |
+| `charts/mclaude/templates/ingress.yaml` | Main Ingress. Emits `external-dns.alpha.kubernetes.io/hostname` + `target` annotations when `ingress.externalDnsTarget` is set. Consumes `ingress.tls` from values (caller supplies `mclaude-richardmcsong-tls` for k3d/CI). |
+| `charts/mclaude/templates/nats-ws-ingress.yaml` | NATS WebSocket Ingress. Same annotations, `hostname` is `ingress.natsHost`. Shares the `ingress.tls` stanza. |
+| `charts/mclaude/values.yaml` | `ingress.tls` default is `[]` (non-k3d environments supply their own or leave empty); `ingress.externalDnsTarget` defaults to empty. k3d and CI preview pass both via `values-k3d-ghcr.yaml` and `--set` flags respectively. |
 | Bitwarden | Source of truth for the DO API token. |
 
 ## Failure modes

@@ -3,7 +3,7 @@
 
 - **Specs**
   - [State Schema](spec-state-schema.md)
-  - [Tailscale DNS](spec-tailscale-dns.md)
+  - [TLS Certificates](spec-tls-certs.md)
   - [Doc Layout](spec-doc-layout.md)
 
 - **UI Specs (shared)**

@@ -1,8 +1,9 @@
 # ADR: Let's Encrypt TLS on *.mclaude.richardmcsong.com
 
-**Status**: draft
+**Status**: accepted
 **Status history**:
 - 2026-04-22: draft
+- 2026-04-22: accepted — paired with docs/spec-tls-certs.md (new), docs/charts-mclaude/spec-helm.md, docs/mclaude-control-plane/spec-control-plane.md, docs/feature-list.md, docs/_sidebar.md, docs/spec-doc-layout.md; docs/spec-tailscale-dns.md deleted
 
 ## Overview
 
@@ -143,12 +144,22 @@ bootstrapped cert-manager + ExternalDNS into.
   annotations.
 - `templates/nats-ws-ingress.yaml`: same pattern, with
   `hostname: {{ .Values.ingress.natsHost | quote }}`.
-- `values.yaml`: add `ingress.externalDnsTarget: ""` (empty default — skill /
-  CI sets it at install time). **Leave `ingress.tls` default as `[]`** so
-  non-k3d environments (`values-aks.yaml`, `values-airgap.yaml`) are
-  untouched — they don't reference the `mclaude-richardmcsong-tls` Secret,
-  which only exists in the k3d cluster. The TLS stanza is set per-environment
-  in `values-k3d-ghcr.yaml` and via `--set` flags in `deploy-preview.yml`.
+- `values.yaml`: add one new key `ingress.externalDnsTarget: ""` (empty
+  default — skill / CI sets it at install time). **Leave `ingress.tls`
+  default as `[]`** so non-k3d environments (`values-aks.yaml`,
+  `values-airgap.yaml`) are untouched — they don't reference the
+  `mclaude-richardmcsong-tls` Secret, which only exists in the k3d cluster.
+  The TLS stanza is set per-environment in `values-k3d-ghcr.yaml` and via
+  `--set` flags in `deploy-preview.yml`.
+
+  Note on workflow: the ADR + updated spec files (`spec-helm.md`,
+  `spec-tls-certs.md`) are committed in this plan-feature commit and
+  describe the post-implementation state. The matching `values.yaml` edit,
+  the template edits to `ingress.yaml` / `nats-ws-ingress.yaml`, and the
+  `values-k3d-ghcr.yaml` / `deploy-preview.yml` edits land in the
+  **subsequent** `/feature-change` → dev-harness commits. Until then,
+  `charts/mclaude/values.yaml` still lacks `ingress.externalDnsTarget` and
+  still lists the old TLS stanza; this is expected.
 - `values-k3d-ghcr.yaml`:
   - `ingress.host` → `dev.mclaude.richardmcsong.com`
   - `ingress.natsHost` → `dev-nats.mclaude.richardmcsong.com`
@@ -233,22 +244,25 @@ Cluster objects:
 
 ### `.github/workflows/deploy-preview.yml`
 
-The existing workflow sets only `ingress.host` via `--set`. Update the helm
-install step so every preview Ingress is fully addressable with TLS and
-DNS automation. Specifically:
+The existing workflow runs `helm upgrade --install
+"mclaude-preview-${BRANCH_SLUG}" ./charts/mclaude` and sets
+`ingress.host` + `controlPlane.externalUrl` (with `https://` already). Keep
+the release name `mclaude-preview-${BRANCH_SLUG}` unchanged — `cleanup-preview.yml`
+uses the same prefix to delete releases on branch removal. Add the following
+changes so every preview Ingress is fully addressable with TLS and DNS
+automation:
 
 - Compute `PREVIEW_HOST="preview-${BRANCH_SLUG}.mclaude.richardmcsong.com"`
   and `PREVIEW_NATS_HOST="nats-preview-${BRANCH_SLUG}.mclaude.richardmcsong.com"`.
 - Resolve `TS_IP=$(tailscale ip -4)` on the self-hosted runner.
-- Pass these additional flags to the existing `helm upgrade --install`:
-  - `--set "ingress.host=${PREVIEW_HOST}"`
+- Add these `--set` flags to the existing `helm upgrade --install` command:
   - `--set "ingress.natsHost=${PREVIEW_NATS_HOST}"`
   - `--set "ingress.tls[0].secretName=mclaude-richardmcsong-tls"`
   - `--set "ingress.tls[0].hosts[0]=${PREVIEW_HOST}"`
   - `--set "ingress.tls[0].hosts[1]=${PREVIEW_NATS_HOST}"`
   - `--set "ingress.externalDnsTarget=${TS_IP}"`
-  - `--set "controlPlane.externalUrl=https://${PREVIEW_HOST}"`
   - `--set "controlPlane.config.natsWsUrl=wss://${PREVIEW_NATS_HOST}"`
+- Change the final "Preview URL" echo from `http://...` to `https://...`.
 - No cert-manager / ExternalDNS install step is needed in this workflow —
   both controllers are already running in the cluster (bootstrapped by
   `/deploy-local-preview`). The workflow only consumes what's there.
@@ -368,6 +382,10 @@ Specs updated in this commit:
 - `docs/mclaude-control-plane/spec-control-plane.md` — `EXTERNAL_URL`
   example updated from `https://mclaude.internal` to
   `https://dev.mclaude.richardmcsong.com`.
+- `docs/_sidebar.md` — replace `[Tailscale DNS](spec-tailscale-dns.md)` entry
+  with `[TLS Certificates](spec-tls-certs.md)`.
+- `docs/spec-doc-layout.md` — replace `spec-tailscale-dns.md` with
+  `spec-tls-certs.md` in the Cross-cutting spec examples row.
 
 Components touched:
 - `charts/mclaude/` (values + two Ingress templates get ExternalDNS annotations)

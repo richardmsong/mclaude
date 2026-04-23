@@ -19,6 +19,48 @@
 | 7 | `values.yaml` default change would break non-k3d envs | Chosen: leave `ingress.tls` default as `[]`; put TLS stanza in `values-k3d-ghcr.yaml` and as `--set` flags in CI workflow. Non-k3d values files unchanged. | decision |
 | 8 | `spec-tls-certs.md` had no content outline in ADR | Impact section expanded to enumerate sections + normative resource names of the already-written spec file | factual |
 
+### Round 2
+
+**Gaps found: 3**
+
+#### Fixes applied
+
+| # | Gap | Resolution | Type |
+|---|-----|-----------|------|
+| 1 | `spec-helm.md` documented `ingress.tls` default as non-empty; ADR says keep it `[]` | Reverted `spec-helm.md` default row to `[]` and added note about per-env override pattern (k3d / CI supplies it, others leave empty) | factual |
+| 2 | Release name `mclaude-<slug>` in ADR vs `mclaude-preview-<slug>` in existing workflow + cleanup | Updated ADR User Flow and CI workflow section to use `mclaude-preview-${BRANCH_SLUG}` (existing convention; changing it would break `cleanup-preview.yml`) | factual |
+| 3 | `values.yaml` lacks `ingress.externalDnsTarget`, which spec-helm.md already documents — timing of spec vs code unclear | Added explicit note in ADR Component Changes that spec files land in this plan-feature commit (post-impl state) and values.yaml / template edits land in the subsequent `/feature-change` commits | factual |
+
+### Round 3
+
+**Gaps found: 2**
+
+#### Fixes applied
+
+| # | Gap | Resolution | Type |
+|---|-----|-----------|------|
+| 1 | `spec-tls-certs.md` Component Responsibilities table said `values.yaml` default `ingress.tls` references `mclaude-richardmcsong-tls` — contradicting the `[]` decision | Updated rows for `ingress.yaml` and `values.yaml` in the responsibilities table to match: default is `[]`, k3d/CI supply the wildcard secret via values-k3d-ghcr.yaml / --set | factual |
+| 2 | `spec-tls-certs.md` still used the old `mclaude-<slug>` release name | Updated to `mclaude-preview-${BRANCH_SLUG}` to match ADR + existing workflow + cleanup-preview.yml | factual |
+
+### Round 4
+
+**Gaps found: 2**
+
+#### Fixes applied
+
+| # | Gap | Resolution | Type |
+|---|-----|-----------|------|
+| 1 | `docs/_sidebar.md` linked to deleted `spec-tailscale-dns.md` and had no entry for new `spec-tls-certs.md` | Swapped the sidebar entry: `[Tailscale DNS](spec-tailscale-dns.md)` → `[TLS Certificates](spec-tls-certs.md)`. ADR Impact section updated to mention the sidebar. | factual |
+| 2 | `docs/spec-doc-layout.md` used `spec-tailscale-dns.md` as a canonical cross-cutting example | Replaced with `spec-tls-certs.md` in the Partitioning examples row. ADR Impact section updated. | factual |
+
+### Round 5
+
+CLEAN — no blocking gaps found.
+
+### Result
+
+**CLEAN** after 5 rounds, 15 total gaps resolved (12 factual fixes, 3 design decisions).
+
 ## Run: 2026-04-22T09:30:00Z
 
 **Gaps found: 8**
@@ -72,3 +114,45 @@
 3. **`ingress.externalDnsTarget` is not added to `values.yaml` despite the ADR requiring it as a new key** — The ADR states under Component Changes `charts/mclaude/` → `values.yaml`: "add `ingress.externalDnsTarget: \"\"` (empty default — skill / CI sets it at install time)." The current `charts/mclaude/values.yaml` has no `ingress.externalDnsTarget` key. The `spec-helm.md` already documents this key with its description and default. Without the key in `values.yaml`, the Helm template's `{{- if .Values.ingress.externalDnsTarget }}` conditional works (absent key evaluates falsy) but the chart is incomplete per its own spec, and `helm lint` / `values.yaml` review will show a missing documented key. More importantly, a developer reading the spec-helm.md will find the key documented as a real value with a default, and read the ADR saying to add it — the question "do I add it or did I miss something?" is a genuine stop.
    - **Doc**: Component Changes `charts/mclaude/` → `values.yaml`: "add `ingress.externalDnsTarget: \"\"` (empty default)"
    - **Code**: `charts/mclaude/values.yaml` has no `ingress.externalDnsTarget` key; `docs/charts-mclaude/spec-helm.md` line 173 documents it as an existing key with description
+
+## Run: 2026-04-22T13:00:00Z
+
+**Round 3 audit — re-evaluation after round 2 fixes**
+
+**Gaps found: 2**
+
+1. **`spec-tls-certs.md` Component Responsibilities table contradicts the ADR and `spec-helm.md` on the `values.yaml` `ingress.tls` default** — The ADR (Component Changes, `values.yaml`) says "**Leave `ingress.tls` default as `[]`**". `spec-helm.md` line 172 agrees: default is `[]`. But `docs/spec-tls-certs.md` line 190 says "Default `ingress.tls` **references `mclaude-richardmcsong-tls`**". Line 188 also says the ingress template "References `ingress.tls[0].secretName` (default `mclaude-richardmcsong-tls`)" — implying the default is non-empty. A developer implementing `values.yaml` reads the ADR and `spec-helm.md` saying leave it `[]`, then reads the canonical TLS spec saying the default references the wildcard secret. These are direct contradictions; the developer must stop and ask which is authoritative.
+   - **Doc**: ADR Component Changes `values.yaml`: "**Leave `ingress.tls` default as `[]`**". `docs/charts-mclaude/spec-helm.md` line 172: `ingress.tls | [] | ...`
+   - **Code**: `docs/spec-tls-certs.md` line 188: "References `ingress.tls[0].secretName` (default `mclaude-richardmcsong-tls`)"; line 190: "Default `ingress.tls` references `mclaude-richardmcsong-tls`"
+
+2. **`spec-tls-certs.md` still uses the old `mclaude-<slug>` release name format that was corrected in the ADR (round 2 fix)** — The round 2 fix updated the ADR to use `mclaude-preview-${BRANCH_SLUG}` throughout (matching the existing workflow and `cleanup-preview.yml`). But `docs/spec-tls-certs.md` line 187 was not updated: it still says "`helm upgrade --install mclaude-<slug>`". The spec file is the canonical contract per the ADR's Impact section. A developer reading the spec sees a different release name than the ADR and the existing workflow, creating an ambiguity about whether to use `mclaude-<slug>` (spec) or `mclaude-preview-${BRANCH_SLUG}` (ADR + existing workflow).
+   - **Doc**: ADR User Flow preview step 3: "`helm upgrade --install mclaude-preview-${BRANCH_SLUG} charts/mclaude`"
+   - **Code**: `docs/spec-tls-certs.md` line 187: "Only runs `helm upgrade --install mclaude-<slug>`"; `.github/workflows/cleanup-preview.yml` line 22: `RELEASE="mclaude-preview-${slug}"`
+
+## Run: 2026-04-22T15:00:00Z
+
+**Round 4 audit — re-evaluation after round 3 fixes**
+
+**Gaps found: 2**
+
+1. **`docs/_sidebar.md` still links to `spec-tailscale-dns.md`, which the ADR deletes — broken link after implementation, and the new `spec-tls-certs.md` has no sidebar entry** — The ADR Impact section says `docs/spec-tailscale-dns.md` is deleted entirely. `docs/_sidebar.md` line 6 has an active navigation link `[Tailscale DNS](spec-tailscale-dns.md)`. After the deletion this is a broken sidebar link. Simultaneously, the new `docs/spec-tls-certs.md` (created by this ADR) has no corresponding sidebar entry. The Impact section does not mention `docs/_sidebar.md` at all. A developer implementing the file deletion would encounter an inconsistent sidebar and must stop to decide whether to update it, and if so, what the new entry should say.
+   - **Doc**: Impact section lists files to delete, edit, or create; `docs/_sidebar.md` is absent.
+   - **Code**: `docs/_sidebar.md` line 6: `[Tailscale DNS](spec-tailscale-dns.md)` — live link to the file being deleted. No entry for `spec-tls-certs.md`.
+
+2. **`docs/spec-doc-layout.md` uses `spec-tailscale-dns.md` as a canonical example of a cross-cutting spec, which becomes stale when that file is deleted** — `docs/spec-doc-layout.md` line 15 has `docs/spec-tailscale-dns.md` in the "Cross-cutting spec" examples column. After the ADR's deletion, this example points to a non-existent file. The Impact section does not list `spec-doc-layout.md` as a file to update. A developer must either leave a stale example in the authoritative layout doc or stop and ask whether to update it (and if so, to what — `spec-tls-certs.md` would be the natural replacement example).
+   - **Doc**: ADR Impact section: does not mention `docs/spec-doc-layout.md`.
+   - **Code**: `docs/spec-doc-layout.md` line 15: `| Cross-cutting spec | \`docs/spec-<concern>.md\` | \`docs/spec-state-schema.md\`, \`docs/spec-tailscale-dns.md\` |`
+
+## Run: 2026-04-22T17:00:00Z
+
+**Round 5 audit — re-evaluation after round 4 fixes**
+
+CLEAN — no blocking gaps found.
+
+Verification:
+- `docs/_sidebar.md` line 7: `[TLS Certificates](spec-tls-certs.md)` — `spec-tailscale-dns.md` reference removed, new entry present.
+- `docs/spec-doc-layout.md` line 15: `docs/spec-tls-certs.md` in the cross-cutting examples column — `spec-tailscale-dns.md` reference replaced.
+- `docs/spec-tailscale-dns.md` — file does not exist (correctly deleted).
+- `docs/spec-tls-certs.md` — exists, fully populated with normative YAML, exact resource names, ExternalDNS install snippet with `txtOwnerId`, and component responsibilities table consistent with the ADR.
+- Residual references to `spec-tailscale-dns.md` exist in ADR-0020, ADR-0021, ADR-0026, and ADR-0027. These are in immutable, already-implemented ADR bodies. Per ADR-0018, broken cross-references in accepted ADR bodies are mechanical fixes — not blocking implementation gaps for ADR-0033.
+- Pre-implementation state of `charts/`, `deploy-preview.yml`, and the `deploy-local-preview` skill (still using old domains and missing ExternalDNS plumbing) is expected: the ADR explicitly states code changes land in the subsequent `/feature-change` commits, not this plan-feature commit.
