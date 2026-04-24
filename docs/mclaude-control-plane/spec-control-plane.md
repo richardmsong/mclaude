@@ -12,7 +12,7 @@ Runs as a single-replica Kubernetes pod in the `mclaude-system` namespace, built
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `EXTERNAL_URL` | Yes | (none -- exits on startup if empty) | Externally-accessible base URL (e.g. `https://mclaude.internal`) |
+| `EXTERNAL_URL` | Yes | (none -- exits on startup if empty) | Externally-accessible base URL (e.g. `https://dev.mclaude.richardmcsong.com`) |
 | `DATABASE_URL` / `DATABASE_DSN` | No | (none) | Postgres connection string; runs without persistence if unset |
 | `NATS_URL` | No | `nats://localhost:4222` | Internal NATS broker URL |
 | `NATS_WS_URL` | No | (empty) | External WebSocket URL for browser clients; empty means client derives from origin |

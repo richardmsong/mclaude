@@ -12,7 +12,7 @@ Every doc under `docs/` is one of these:
 | Kind | Location | Examples |
 |------|----------|----------|
 | ADR | `docs/adr-NNNN-<slug>.md` (always root) | `docs/adr-0001-telemetry.md` |
-| Cross-cutting spec | `docs/spec-<concern>.md` | `docs/spec-state-schema.md`, `docs/spec-tailscale-dns.md` |
+| Cross-cutting spec | `docs/spec-<concern>.md` | `docs/spec-state-schema.md`, `docs/spec-tls-certs.md` |
 | UI-cluster shared spec | `docs/ui/spec-<topic>.md` | `docs/ui/spec-design-system.md` |
 | UI-component-local spec | `docs/ui/<component>/spec-<topic>.md` | `docs/ui/mclaude-web/spec-screens.md` |
 | Component-local spec | `docs/<component>/spec-<topic>.md` | `docs/mclaude-docs-mcp/spec-docs-mcp.md` |
