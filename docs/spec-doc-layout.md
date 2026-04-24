@@ -15,7 +15,7 @@ Every doc under `docs/` is one of these:
 | Cross-cutting spec | `docs/spec-<concern>.md` | `docs/spec-state-schema.md`, `docs/spec-tls-certs.md` |
 | UI-cluster shared spec | `docs/ui/spec-<topic>.md` | `docs/ui/spec-design-system.md` |
 | UI-component-local spec | `docs/ui/<component>/spec-<topic>.md` | `docs/ui/mclaude-web/spec-screens.md` |
-| Component-local spec | `docs/<component>/spec-<topic>.md` | `docs/mclaude-docs-mcp/spec-docs-mcp.md` |
+| Component-local spec | `docs/<component>/spec-<topic>.md` | `docs/mclaude-control-plane/spec-control-plane.md` |
 | Inventory | `docs/feature-list.md` (unique) | `docs/feature-list.md` |
 
 ### Deciding where a new spec lives
@@ -119,7 +119,7 @@ Not allowed: changing what an ADR decided. Supersede with a new ADR instead.
 
 ## Docs MCP behavior
 
-The docs MCP (`mclaude-docs-mcp`):
+The docs MCP (provided by the `spec-driven-dev` plugin):
 
 - Indexes `docs/**/*.md` recursively.
 - Classifies by filename prefix only:

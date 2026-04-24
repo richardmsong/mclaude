@@ -1,5 +1,4 @@
 {
-  "effortLevel": "high",
   "permissions": {
     "allow": [
       "Read",
@@ -7,6 +6,7 @@
       "Grep",
       "Edit",
       "Write",
+      "Update",
       "Bash",
       "WebFetch",
       "WebSearch",
@@ -16,17 +16,8 @@
     ],
     "deny": []
   },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.agent/hooks/pre-tool-use.sh"
-          }
-        ]
-      }
-    ]
+  "effortLevel": "high",
+  "enabledPlugins": {
+    "spec-driven-dev@agent-plugins": true
   }
 }

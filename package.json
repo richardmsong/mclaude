@@ -1,8 +1,0 @@
-{
-  "name": "mclaude-workspace",
-  "private": true,
-  "workspaces": ["mclaude-docs-mcp", "mclaude-docs-dashboard"],
-  "devDependencies": {
-    "@happy-dom/global-registrator": "^20.9.0"
-  }
-}

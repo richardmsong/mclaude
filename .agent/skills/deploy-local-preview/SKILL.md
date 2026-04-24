@@ -351,10 +351,10 @@ if [ "$USE_LOCAL_IMAGES" = true ]; then
   )
 fi
 
-LOCAL_DEPLOY=1 helm upgrade --install mclaude ./charts/mclaude "${HELM_ARGS[@]}"
+SDD_DEBUG=1 helm upgrade --install mclaude ./charts/mclaude "${HELM_ARGS[@]}"
 ```
 
-`LOCAL_DEPLOY=1` is required — the pre-tool-use hook blocks `helm upgrade/install` unless this is set (CI-only guard).
+`SDD_DEBUG=1` is required — the spec-driven-dev hook blocks `helm upgrade/install` unless this is set (CI-only guard).
 
 > **Why this matters**: without `devOAuthToken`, the session-agent pod has no Claude credentials. It receives messages and silently does nothing. The token flows: Helm → `DEV_OAUTH_TOKEN` env on control-plane → reconciler writes `oauth-token` key into `user-secrets` Secret → session-agent mounts it at `/home/node/.user-secrets/oauth-token`.
 
@@ -401,7 +401,7 @@ k3d cluster delete mclaude-dev
 | NATS WebSocket fails | `natsUrl` in login response is internal cluster URL | Old binary — SPA falls back to `wss://<origin>/nats` which routes through Traefik correctly |
 | `projects` table missing (login succeeds but projects 500s) | pgx `pool.Exec` only runs first statement in multi-statement SQL | Manually create: `kubectl exec -it deploy/mclaude-postgres -n mclaude-system -- psql -U mclaude -c "CREATE TABLE IF NOT EXISTS projects (...)"` |
 | devSeed user not created (old binary) | Old ghcr.io `latest` predates devSeed feature | Manually seed: see "Manual DB Seeding" below |
-| `helm upgrade/install` blocked by hook | Pre-tool-use hook guards against local deploys | Set `LOCAL_DEPLOY=1` env var (Step 8) |
+| `helm upgrade/install` blocked by hook | spec-driven-dev hook guards against local deploys | Set `SDD_DEBUG=1` env var (Step 8) |
 | `StatefulSet.apps "mclaude-nats" / "mclaude-postgres" is invalid: spec: Forbidden: updates to statefulset spec for fields other than...` | An older install set `persistence.enabled: false`; chart defaults are now `true` and K8s forbids adding `volumeClaimTemplates` in place. | `helm uninstall mclaude -n mclaude-system` (wipes local NATS KV + postgres state — local dev only), then re-run `/deploy-local-preview`. |
 | Session-agent: `SSL certificate verification failed` | Corporate proxy intercepts TLS; container lacks CA bundle | Mount corporate CA bundle into container and set `NODE_EXTRA_CA_CERTS` |
 | Session-agent: `Not logged in · Please run /login` | `CLAUDE_CODE_OAUTH_TOKEN` not set in pod | Check `user-secrets` Secret has `oauth-token` key; if pod started before token was added, `kubectl rollout restart` |

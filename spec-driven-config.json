@@ -1,0 +1,42 @@
+{
+  "source_dirs": [
+    "mclaude-control-plane/**/*.go",
+    "mclaude-session-agent/**/*.go",
+    "mclaude-cli/**/*.go",
+    "mclaude-relay/**/*.go",
+    "mclaude-connector/**/*.go",
+    "mclaude-web/src/**"
+  ],
+  "blocked_commands": [
+    {
+      "pattern": "gh\\s+run\\s+watch",
+      "message": "Blocks until timeout. Use 'gh run view {id}' to poll.",
+      "category": "ban"
+    },
+    {
+      "pattern": "git\\s+apply",
+      "message": "Bypasses the spec→dev-harness→evaluator loop. Use /feature-change.",
+      "category": "ban"
+    },
+    {
+      "pattern": "helm\\s+(upgrade|install)",
+      "message": "Must run via CI. Push to branch and let deploy-preview.yml handle it. Set SDD_DEBUG=1 to override for local k3d deploys.",
+      "category": "guard"
+    },
+    {
+      "pattern": "docker\\s+build",
+      "message": "Must run via CI. Push to branch — the workflow builds and pushes to GHCR. Set SDD_DEBUG=1 to override for local k3d builds.",
+      "category": "guard"
+    },
+    {
+      "pattern": "k3d\\s+image\\s+import",
+      "message": "Bypasses CI. Push to branch — CI pushes to GHCR and the cluster pulls from there. Set SDD_DEBUG=1 to override for local k3d deploys.",
+      "category": "guard"
+    },
+    {
+      "pattern": "kubectl\\s+(create|apply|patch|delete|replace|edit|scale|rollout\\s+restart|exec)",
+      "message": "Cluster state should be managed by Helm + the reconciler, not manual kubectl. Use /feature-change for lasting changes. Set SDD_DEBUG=1 if this is just for debugging.",
+      "category": "guard"
+    }
+  ]
+}
