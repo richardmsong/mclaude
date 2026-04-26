@@ -218,22 +218,31 @@ Value: `JobEntry`
   "projectSlug": "string",
   "sessionId": "string (UUID v4)",
   "sessionSlug": "string",
-  "specPath": "string",
+  "claudeSessionID": "string (Claude Code session ID; captured from system/init stream-json event; used for --resume fallback)",
+  "prompt": "string (free-text initial user message)",
+  "title": "string (display label; falls back to branchSlug)",
+  "branchSlug": "string (matches ^[a-z0-9][a-z0-9-]*$)",
+  "resumePrompt": "string (caller-supplied nudge on resume; empty = platform default)",
   "priority": 5,
-  "threshold": 75,
+  "softThreshold": 75,
+  "hardHeadroomTokens": 50000,
   "autoContinue": false,
+  "permPolicy": "managed | auto | allowlist | strict-allowlist",
+  "allowedTools": ["string", "..."],
   "status": "queued | starting | running | paused | completed | failed | needs_spec_fix | cancelled",
-  "branch": "schedule/{slug}-{shortId}",
-  "prUrl": "string",
+  "pausedVia": "quota_soft | quota_hard | \"\" (empty when not paused)",
+  "branch": "schedule/{branchSlug} (no short-ID suffix; same slug = shared worktree)",
   "failedTool": "string",
   "error": "string",
   "retryCount": 0,
-  "resumeAt": "RFC3339 | null",
+  "resumeAt": "RFC3339 | null (set on autoContinue-paused jobs; = 5h reset time from QuotaStatus.r5)",
   "createdAt": "RFC3339",
   "startedAt": "RFC3339 | null",
   "completedAt": "RFC3339 | null"
 }
 ```
+
+Field origins: `specPath`, `threshold`, and `prUrl` from ADR-0009 are removed (see ADR-0034). `prompt`, `title`, `branchSlug`, `resumePrompt`, `softThreshold`, `hardHeadroomTokens`, `permPolicy`, `allowedTools`, `claudeSessionID`, `pausedVia` are introduced by ADR-0034.
 
 Writers: daemon HTTP server (`POST /jobs`), daemon dispatcher (status transitions), daemon lifecycle subscriber (terminal states)
 Readers: daemon dispatcher (KV watch), daemon HTTP server (`GET /jobs`)
@@ -534,11 +543,6 @@ Published to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{ss
 { "type": "session_stopped", "sessionId": "...", "ts": "RFC3339" }
 ```
 
-### `session_quota_interrupted`
-```json
-{ "type": "session_quota_interrupted", "sessionId": "...", "jobId": "...", "threshold": 75, "u5": 76, "r5": "RFC3339", "ts": "RFC3339" }
-```
-
 ### `session_permission_denied`
 ```json
 { "type": "session_permission_denied", "sessionId": "...", "tool": "...", "ts": "RFC3339" }
@@ -546,13 +550,33 @@ Published to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{ss
 
 ### `session_job_complete`
 ```json
-{ "type": "session_job_complete", "sessionId": "...", "jobId": "...", "prUrl": "...", "branch": "...", "ts": "RFC3339" }
+{ "type": "session_job_complete", "sessionId": "...", "jobId": "...", "branch": "...", "ts": "RFC3339" }
 ```
+
+Published by: QuotaMonitor's `publishExitLifecycle` when the session ended naturally (no platform-injected marker, Stop hook allowed, `sessions.delete` subsequently invoked by dispatcher). No `prUrl` — callers capture artifacts (PR URL, commit SHA, results) via git log, PR body, or external logging.
 
 ### `session_job_paused`
 ```json
-{ "type": "session_job_paused", "sessionId": "...", "jobId": "...", "priority": 5, "u5": 76, "ts": "RFC3339" }
+{
+  "type": "session_job_paused",
+  "sessionId": "...",
+  "jobId": "...",
+  "pausedVia": "quota_soft | quota_hard",
+  "u5": 76,
+  "r5": "RFC3339",
+  "outputTokensSinceSoftMark": 12345,
+  "ts": "RFC3339"
+}
 ```
+
+Published by: QuotaMonitor's `publishExitLifecycle` on soft-stop turn-end OR hard-stop interrupt. Both variants leave the Claude Code subprocess alive; `pausedVia` distinguishes them. `r5` is sourced from the monitor's most recent `QuotaStatus` snapshot and is load-bearing — the lifecycle subscriber uses it to set `JobEntry.ResumeAt` when `autoContinue` is true. `outputTokensSinceSoftMark` is present for `quota_hard` only (unset/zero for `quota_soft`). Supersedes ADR-0009's `session_quota_interrupted` (consolidated into this event).
+
+### `session_job_cancelled`
+```json
+{ "type": "session_job_cancelled", "sessionId": "...", "jobId": "...", "ts": "RFC3339" }
+```
+
+Published by: daemon dispatcher when handling `DELETE /jobs/{id}`, after publishing `sessions.delete` on `subj.UserHostProjectAPISessionsDelete`. The session-agent's existing `handleDelete` reaps the subprocess (its internal `stopAndWait` sends the `control_request` interrupt) and publishes its own generic `session_stopped` event; the dispatcher's additional `session_job_cancelled` publish is what marks this as a job cancellation. The lifecycle subscriber picks it up and writes `Status = cancelled`. The dispatcher does NOT send a separate `sessions.input` interrupt — that would be redundant with `stopAndWait`'s internal interrupt.
 
 ### `session_job_failed`
 ```json

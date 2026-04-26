@@ -5,6 +5,21 @@
 - 2026-04-14: accepted
 
 
+> **Note:** The `scheduledSessionPrompt` template, the `specPath → component`
+> mapping, the `SESSION_JOB_COMPLETE:{prUrl}` completion marker, the
+> single-threshold quota model, the same-prompt-on-redispatch continuation
+> model, and the `/schedule-feature` skill described below are superseded
+> by `adr-0034-generic-scheduler-prompt.md`. The scheduler primitive is
+> now content-agnostic — callers supply a free-text prompt and a branch
+> slug directly; completion is signalled by Claude Code's Stop hook, not
+> by stdout marker; quota is two-tier (soft percentage + hard output-token
+> budget); paused sessions stay alive in the session-agent pod so resume
+> is just a new user message rather than a restart. The `specPath` and
+> `threshold` fields on `JobEntry` are removed; `PRUrl` is removed. New
+> fields: `prompt`, `title`, `branchSlug`, `softThreshold`,
+> `hardHeadroomTokens`, `permPolicy`, `allowedTools`, `resumePrompt`,
+> `claudeSessionID`, `pausedVia`.
+
 > **Note:** Sections of this ADR that describe slug derivation from the `docs/plan-` filename prefix are superseded by `adr-0021-docs-plan-spec-refactor.md`. The scheduler still takes a `specPath` but the prefix is now `docs/adr-YYYY-MM-DD-` or `docs/spec-` — the code derives the slug by stripping the leading `docs/` and trailing `.md`, then additionally stripping any `adr-YYYY-MM-DD-` or `spec-` prefix.
 
 ## Overview
