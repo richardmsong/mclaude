@@ -23,9 +23,13 @@ import (
 )
 
 func main() {
-	// Subcommand routing: the Helm pre-install Job calls "control-plane init-keys".
+	// Subcommand routing: Helm pre-install Jobs call these.
 	if len(os.Args) > 1 && os.Args[1] == "init-keys" {
 		runInitKeys()
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "gen-leaf-creds" {
+		runGenLeafCreds()
 		return
 	}
 

@@ -91,6 +91,16 @@ nats:
     websocketPort: 8080
 
 ## ---------------------------------------------------------------------------
+## Control-plane image (used by gen-leaf-creds pre-install Job)
+## ---------------------------------------------------------------------------
+controlPlane:
+  image:
+    registry: ghcr.io
+    repository: richardmsong/mclaude-control-plane
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+
+## ---------------------------------------------------------------------------
 ## Controller (mclaude-controller-k8s)
 ## ---------------------------------------------------------------------------
 controller:

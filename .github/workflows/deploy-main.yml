@@ -208,6 +208,7 @@ jobs:
 
           helm upgrade --install "mclaude-worker" ./charts/mclaude-worker \
             -f ./charts/mclaude-worker/values-k3d-ghcr.yaml \
+            --set controlPlane.image.tag="${IMAGE_TAG}" \
             --set controller.image.tag="${IMAGE_TAG}" \
             --set sessionAgent.image.tag="${IMAGE_TAG}" \
             --set trustChain.operatorJwt="${OPERATOR_JWT}" \

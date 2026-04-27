@@ -39,9 +39,7 @@ data:
           {{- if .Values.trustChain.accountPublicKey }}
           account: "{{ .Values.trustChain.accountPublicKey }}"
           {{- end }}
-          {{- if or .Values.leafCreds.existingSecret .Values.leafCreds.jwt }}
           credentials: "/etc/nats/leaf-creds/leaf.creds"
-          {{- end }}
         }
       ]
     }

@@ -5,6 +5,13 @@ clusterSlug: local
 jsDomain: local
 leafUrl: "nats://mclaude-cp-nats.mclaude-system.svc:7422"
 
+controlPlane:
+  image:
+    registry: ghcr.io
+    repository: richardmsong/mclaude-control-plane
+    tag: "main"
+    pullPolicy: IfNotPresent
+
 controller:
   image:
     registry: ghcr.io

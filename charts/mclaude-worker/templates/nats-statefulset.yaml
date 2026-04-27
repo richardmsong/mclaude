@@ -49,11 +49,9 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /etc/nats
-            {{- if or .Values.leafCreds.existingSecret .Values.leafCreds.jwt }}
             - name: leaf-creds
               mountPath: /etc/nats/leaf-creds
               readOnly: true
-            {{- end }}
             - name: trust
               mountPath: /etc/nats/trust
               readOnly: true
@@ -79,7 +77,6 @@ spec:
         - name: config
           configMap:
             name: {{ include "mclaude-worker.fullname" . }}-nats-config
-        {{- if or .Values.leafCreds.existingSecret .Values.leafCreds.jwt }}
         - name: leaf-creds
           secret:
             {{- if .Values.leafCreds.existingSecret }}
@@ -87,7 +84,6 @@ spec:
             {{- else }}
             secretName: {{ include "mclaude-worker.fullname" . }}-nats-leaf-creds
             {{- end }}
-        {{- end }}
         - name: trust
           secret:
             secretName: {{ include "mclaude-worker.fullname" . }}-nats-trust

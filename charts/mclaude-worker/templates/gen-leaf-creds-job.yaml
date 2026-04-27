@@ -1,0 +1,57 @@
+{{- if and .Values.nats.enabled (not .Values.leafCreds.existingSecret) (not .Values.leafCreds.jwt) }}
+## Pre-install hook Job: generates NATS leaf-node credentials from the
+## account seed in operator-keys Secret. Writes the .creds file to a new
+## Secret for the worker NATS leaf-node connection.
+##
+## Used for single-cluster degenerate installs where `mclaude cluster register`
+## hasn't been run. Idempotent: exits 0 if the Secret already exists.
+##
+## Ref: ADR-0039
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "mclaude-worker.fullname" . }}-gen-leaf-creds-{{ .Release.Revision }}
+  namespace: {{ include "mclaude-worker.namespace" . }}
+  labels:
+    {{- include "mclaude-worker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gen-leaf-creds
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  template:
+    metadata:
+      labels:
+        {{- include "mclaude-worker.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: gen-leaf-creds
+    spec:
+      restartPolicy: Never
+      {{- include "mclaude-worker.podSecurityContext" . | nindent 6 }}
+      {{- include "mclaude-worker.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ include "mclaude-worker.fullname" . }}-gen-leaf-creds
+      containers:
+        - name: gen-leaf-creds
+          image: {{ include "mclaude-worker.image" (dict "imageValues" .Values.controlPlane.image "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.controlPlane.image.pullPolicy }}
+          {{- include "mclaude-worker.securityContext" . | nindent 10 }}
+          command: ["control-plane", "gen-leaf-creds"]
+          env:
+            - name: NAMESPACE
+              value: {{ include "mclaude-worker.namespace" . | quote }}
+            - name: LEAF_CREDS_SECRET
+              value: {{ include "mclaude-worker.fullname" . }}-nats-leaf-creds
+            - name: ACCOUNT_SEED_SECRET
+              value: operator-keys
+            - name: ACCOUNT_SEED_KEY
+              value: accountSeed
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+{{- end }}
