@@ -35,6 +35,58 @@ Flags:
 | `-u <uslug>` | User slug | Value from `~/.mclaude/context.json` |
 | `-p <pslug>` | Project slug (accepts `@pslug` short form) | Value from `~/.mclaude/context.json` |
 
+#### `mclaude host register [--name <name>]`
+
+Device-code registration flow for BYOH machines. Prompts for a hostname (default = `hostname` output, slugified). Generates an NKey pair locally — the private seed never leaves the machine, written to `~/.mclaude/hosts/{hslug}/nkey.seed` (mode 0600). Calls `POST /api/users/{uslug}/hosts/code` with `{publicKey}` to get a 6-character device code, then prints instructions for the user to open the dashboard and enter the code. Polls `GET /api/users/{uslug}/hosts/code/{code}` until the status changes from `pending` to `completed`. On completion, writes `~/.mclaude/hosts/{hslug}/{nats.creds, config.json}` from the returned JWT + the locally-stored seed, and symlinks `~/.mclaude/active-host → {hslug}`.
+
+Flags:
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--name <name>` | Display name for the host | `hostname` output, slugified |
+
+#### `mclaude host list`
+
+Lists all hosts the authenticated user owns or has been granted access to. Calls `GET /api/users/{uslug}/hosts` and prints a table of slug, name, type, role, and online status.
+
+#### `mclaude host use <hslug>`
+
+Sets the active host by symlinking `~/.mclaude/active-host → ~/.mclaude/hosts/{hslug}/`. Subsequent commands that require a host slug (e.g. `mclaude daemon`) read from this symlink when `--host` is not provided.
+
+#### `mclaude host rm <hslug>`
+
+Removes a host registration. Calls `DELETE /api/users/{uslug}/hosts/{hslug}` and removes the local `~/.mclaude/hosts/{hslug}/` directory. If the removed host is the active host, the `active-host` symlink is also removed.
+
+#### `mclaude cluster register`
+
+Admin-only. Registers a new K8s worker cluster. Calls `POST /admin/clusters`.
+
+Flags:
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--slug <cslug>` | Cluster slug (required; becomes the `hosts.slug` for all granted users) | (none) |
+| `--name <display>` | Display name | Defaults to slug |
+| `--jetstream-domain <jsd>` | JetStream domain for the worker NATS | (required) |
+| `--leaf-url <url>` | Worker NATS leaf-node URL (e.g. `nats-leaf://hub:7422`) | (required) |
+| `--direct-nats-url <wss>` | Externally-reachable WebSocket URL for SPA direct-to-worker | (optional) |
+
+Returns `{slug, leafJwt, leafSeed, accountJwt, operatorJwt, jsDomain, directNatsUrl}` for the admin to drop into the worker cluster's NATS Secret + `mclaude-worker` Helm values.
+
+#### `mclaude cluster grant <cluster-slug> <uslug>`
+
+Admin-only. Grants a user access to a cluster. Calls `POST /admin/clusters/{cluster-slug}/grants` with `{userSlug}`. Control-plane creates a new `hosts` row for that user with the cluster-shared fields copied from the existing cluster host row, and mints a per-user JWT.
+
+#### `mclaude daemon --host <hslug>`
+
+Starts the BYOH local controller daemon. Reads `--host` from the flag or from `~/.mclaude/active-host` symlink if unset. Connects to hub NATS using the host's credentials from `~/.mclaude/hosts/{hslug}/nats.creds`, subscribes to `mclaude.users.{uslug}.hosts.{hslug}.api.projects.>`, and starts session-agent subprocesses for each provisioned project. Intended to run as a launchd / systemd service.
+
+Flags:
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--host <hslug>` | Host slug | Read from `~/.mclaude/active-host` symlink |
+
 ### Context file
 
 `~/.mclaude/context.json` stores `userSlug`, `projectSlug`, and `hostSlug` defaults. The path is overridable via the `MCLAUDE_CONTEXT_FILE` environment variable. If the file does not exist, all fields default to empty.

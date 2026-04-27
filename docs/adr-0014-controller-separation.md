@@ -1,9 +1,12 @@
 # Controller Separation & Multi-Cluster Architecture
 
-**Status**: draft
+**Status**: superseded
 **Status history**:
 - 2026-04-17: accepted
 - 2026-04-19: reverted to draft — retroactive accepted tag incorrect; implementation not confirmed, needs per-ADR review
+- 2026-04-26: superseded by ADR-0035 (Unified Host Architecture). The binary boundary (control-plane = HTTP+NATS+Postgres, zero K8s; `mclaude-controller-k8s` = kubebuilder operator; `mclaude-controller-local` = BYOH-machine process supervisor) is preserved and folded into the unified architecture.
+
+> Superseded by [ADR-0035](adr-0035-unified-host-architecture.md). This file remains for historical reference; the unified host model is the current source of truth.
 
 
 ## Overview

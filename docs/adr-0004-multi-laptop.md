@@ -1,12 +1,15 @@
 # ADR: Bring Your Own Host (BYOH)
 
-**Status**: accepted
+**Status**: superseded
 **Status history**:
 - 2026-04-10: accepted
 - 2026-04-19: reverted to draft — retroactive accepted tag incorrect; implementation not confirmed
 - 2026-04-20: rewritten against current NATS + control-plane + session-agent architecture
 - 2026-04-20: paused pending slug-scheme ADR-0024
 - 2026-04-20: resumed — ADR-0024 resolved; all decisions finalized; accepted
+- 2026-04-26: superseded by ADR-0035 (Unified Host Architecture). The BYOH host model — `hosts` table, host-scoped subjects, device-code registration, $SYS-based liveness — is folded into ADR-0035 alongside the multi-cluster topology (ADR-0011) and controller separation (ADR-0014).
+
+> Superseded by [ADR-0035](adr-0035-unified-host-architecture.md). This file remains for historical reference; the unified host model is the current source of truth.
 
 > File slug remains `adr-0004-multi-laptop.md` for link stability; the concept generalizes from "laptop" to any user-owned host.
 

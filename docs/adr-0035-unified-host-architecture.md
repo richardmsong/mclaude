@@ -32,7 +32,7 @@ The cheapest fix is one ADR that owns the whole story end-to-end. Older ADRs bec
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Host identity | Single `hosts` table; per-user unique slug; `type ∈ {'machine', 'cluster'}` discriminator; `role ∈ {'owner', 'user'}` per-user. Cluster-shared fields (`js_domain`, `leaf_url`, `account_jwt`) are NULL for machine hosts and populated (duplicated across users granted to the same cluster) for cluster hosts. No separate `clusters` table. | Unifies BYOH machines and K8s clusters as first-class peers under one schema. The duplication of cluster-shared fields across user rows is acceptable at mclaude's scale and avoids a parallel infrastructure-vs-access table split. |
+| Host identity | Single `hosts` table; per-user unique slug; `type ∈ {'machine', 'cluster'}` discriminator; `role ∈ {'owner', 'user'}` per-user. Cluster-shared fields (`js_domain`, `leaf_url`, `account_jwt`, `direct_nats_url`, and `public_key` — the cluster controller's NKey) are NULL for machine hosts and populated (duplicated across users granted to the same cluster) for cluster hosts. The `online` boolean lives in `mclaude-hosts` KV (single-writer control-plane, sourced from `$SYS`), not in Postgres — `last_seen_at` is the durable historical record. No separate `clusters` table. | Unifies BYOH machines and K8s clusters as first-class peers under one schema. The duplication of cluster-shared fields across user rows is acceptable at mclaude's scale and avoids a parallel infrastructure-vs-access table split. KV-not-Postgres for `online` keeps the live-state path on a single source (NATS) and avoids dual writes. |
 | Subject scheme | `mclaude.users.{uslug}.hosts.{hslug}.…` is the **only** project-scoped subject family. No `mclaude.clusters.{cslug}.>` subjects exist. Sessions API, events, lifecycle, terminal, and project provisioning all route through user/host scope. | Unifies machine and cluster hosts under a single subject family. The cluster-scoped subjects from ADR-0011 are eliminated entirely. ADR-0024 typed-slug invariant maintained. |
 | Cluster runtime topology | Hub NATS on the control-plane cluster; each worker cluster runs its own NATS connected as a leaf node. JetStream is per-cluster with a unique domain per worker. Worker controllers run K8s reconciler + session-agent pods. | Inherits ADR-0011's surviving topology unchanged in shape; only the subject scheme is normalized to ADR-0024 form. |
 | Single-cluster degenerate case | When `hosts` contains exactly one row of type `cluster` (or one of type `machine` for BYOH-only), the SPA still uses host-qualified subjects. JetStream domain qualification is conditional: SPA inspects `jsDomain` from the login response and includes it only when present. | Consistent subject scheme regardless of deployment shape (ADR-0024 invariant). Domain qualification is the only place the single-cluster case differs. |
@@ -46,9 +46,9 @@ The cheapest fix is one ADR that owns the whole story end-to-end. Older ADRs bec
 | Operator/account key bootstrap | Helm pre-install hook runs `mclaude-cp init-keys` as a Job. The Job generates `operatorNKey` + `accountNKey` pairs + corresponding JWTs (account JWT signed by operator key, operator JWT self-signed) and writes them to K8s Secret `mclaude-system/operator-keys`. Hub NATS pod depends on the Secret existing; when it starts, its config references the Secret for `resolver_preload`. Control-plane Deployment also reads the Secret to sign per-host user JWTs. Subsequent deploys: the Job sees the Secret already exists and exits without regenerating. When admin runs `mclaude cluster register`, the control-plane returns `operatorJwt` + `accountJwt` so the new worker cluster's NATS can be deployed with the same trust chain. | Solves the chicken-and-egg ordering (NATS needs JWTs to validate; control-plane creates JWTs) by running key generation BEFORE NATS starts. Zero-touch on subsequent deploys. |
 | First admin user | Helm values include `bootstrapAdminEmail`. The init-keys Job (same one that generates operator/account keys) also writes a `users` row with `email = bootstrapAdminEmail`, `is_admin = true`, `oauth_id = NULL`. When that user signs in via OAuth for the first time, control-plane matches their email to the bootstrap row and links the OAuth identity (sets `oauth_id`). Further admin promotion is via admin API (`POST /admin/users/{uslug}/promote`) or direct SQL. | Lets the first admin be created without requiring SQL surgery; matches the email-as-identity model the rest of mclaude uses. |
 | Admin CLI auth | All admin commands (`mclaude cluster register`, `mclaude cluster grant`, `mclaude admin users …`) use the same bearer token issued by `mclaude login`. Token persisted to `~/.mclaude/auth.json` at 0600. CLI sends `Authorization: Bearer <token>` on every HTTP call. Control-plane checks `users.is_admin` for endpoints under `/admin/`; non-admin calls return 403. | Standard pattern. Server-side admin check means no separate token state on the client. |
-| Heartbeat / liveness | **`$SYS.ACCOUNT.*.CONNECT`/`DISCONNECT` only.** Control-plane subscribes on hub NATS. On `CONNECT`: updates `hosts.last_seen_at = NOW()`, `online = true`. On `DISCONNECT`: `online = false`. No periodic heartbeat publishes; no `mclaude-heartbeats` bucket. Online means "NATS connection is live"; offline means "connection dropped." Coarse but cheap; daemon idle for 5 min still shows online until the connection actually drops. | Per ADR-0004. Cleaner than periodic publishes; works uniformly for machine and cluster hosts. The coarseness is acceptable — finer-grained activity tracking is not required for v1. |
+| Heartbeat / liveness | **`$SYS.ACCOUNT.*.CONNECT`/`DISCONNECT` only.** Control-plane subscribes on hub NATS. The handler discriminates on `client.kind` and `client.nkey`: (1) `kind="Client"` + `client.nkey` matches a `hosts.public_key` row with `type='machine'` → update that single row's `last_seen_at` and KV `online=true`; (2) `kind="Leafnode"` + `client.nkey` matches a row with `type='cluster'` → update **all** rows where `slug=found.slug AND type='cluster'` (cluster-shared liveness across granted users); (3) no match (SPA's per-login ephemeral NKey, control-plane's own connection) → ignore. DISCONNECT mirrors with `online=false` and does not rewrite `last_seen_at`. No periodic heartbeat publishes; no `mclaude-heartbeats` bucket. | Per ADR-0004. Cleaner than periodic publishes; works uniformly for machine and cluster hosts. The `client.kind` switch correctly separates machine-daemon connections from cluster leaf-links and naturally ignores ephemeral SPA connections without extra bookkeeping. |
 | SPA NATS connections | SPA opens a hub connection (always, for control-plane subjects + JetStream domain-qualified watches). On demand for active sessions, SPA opens a direct worker connection using `directNatsUrl` from the login response. Falls back to hub-via-leaf-node if direct is unreachable. | Per ADR-0011. Latency win for terminal I/O; works without direct connection. |
-| Login response shape | `{ user, jwt, nkeySeed, projects: [...], hosts: [...], clusters: [...] }`. Each project carries `{ id, slug, hostSlug, hostType, jsDomain?, directNatsUrl? }`. Each host carries `{ slug, name, type, role, lastSeenAt, online }`. Each cluster (subset of hosts where `type='cluster'`) carries `{ slug, jsDomain, directNatsUrl }`. | The SPA picks per-project NATS connection strategy from this. |
+| Login response shape | `{ user, jwt, nkeySeed, hubUrl, hosts: [...], projects: [...] }`. Each host carries `{ slug, name, type, role, online, lastSeenAt, jsDomain?, directNatsUrl? }` (cluster-specific fields present only on `type='cluster'` entries). Each project carries `{ slug, name, hostSlug, hostType, jsDomain?, directNatsUrl? }` (cluster-specific fields present only when the project's host is a cluster). There is **no** top-level `clusters` array — the SPA derives it with `hosts.filter(h => h.type === 'cluster')`. | The SPA picks per-project NATS connection strategy from this. |
 | Helm chart split | `mclaude-cp` Helm chart deploys control-plane + hub NATS + Postgres + SPA. `mclaude-worker` Helm chart deploys worker NATS (leaf-node config) + `mclaude-controller-k8s` + session-agent template. | Per ADR-0011. Single-cluster deployments install both into the same cluster with the leaf-node config pointing at localhost. |
 | Session-agent host slug source | Set via `HOST_SLUG` env var (cluster pods, injected by `buildPodTemplate` from `projects.host_id`'s slug); `--host <hslug>` flag for BYOH daemon (read from CLI arg or `~/.mclaude/active-host` symlink). Required, not derived. | Hard-fail on absence. Avoids subtle routing bugs that would land messages on the wrong host. |
 | Code-gap closure | This ADR's implementation plan covers: `Agent.hostSlug` field plumbing, `DaemonConfig.HostSlug` field, all 7 enumerated `subj` call-site fixes in `agent.go`/`daemon_jobs.go`, `state.go` struct/wrapper updates, `mclaude-control-plane`'s `hosts` HTTP endpoints + Postgres DDL, `mclaude-cli`'s `host` subcommand, `mclaude-web`'s `subj.ts` host-scoped builders + per-cluster connection logic, `mclaude-controller-local` binary scaffold, removal of `mclaude-heartbeats` bucket. | Single ADR owning the whole story; implementation closes the half-migrated state under one workstream. |
@@ -58,19 +58,19 @@ The cheapest fix is one ADR that owns the whole story end-to-end. Older ADRs bec
 ### A. New user, BYOH machine
 
 1. User runs `mclaude host register` on their laptop.
-2. CLI prompts: hostname (default = `hostname` output, slugified). Calls `POST /api/users/{uslug}/hosts/code` to get a 6-char device code; prints "Open `<dashboard>/host/code` and enter `XXXX-YY`."
-3. User opens dashboard, signs in (existing auth), enters code. Dashboard calls `POST /api/hosts/register` with the code; control-plane creates the `hosts` row, generates an NKey pair + per-host user JWT, returns `{slug, jwt, nkeySeed, hubUrl}`.
-4. CLI receives the response (poll-based: device-code endpoint exposes a status check), writes `~/.mclaude/hosts/{hslug}/{creds.json, daemon.toml}`, symlinks `~/.mclaude/active-host → {hslug}`.
-5. User runs `mclaude daemon` — daemon reads `--host` (from `active-host` symlink), connects to hub NATS using its host JWT, registers controller subscription, starts session-agent process supervision.
+2. CLI prompts: hostname (default = `hostname` output, slugified). Generates an NKey pair locally — the **private seed never leaves the laptop**, written to `~/.mclaude/hosts/{hslug}/nkey.seed` (mode 0600). Calls `POST /api/users/{uslug}/hosts/code` with `{publicKey}` to get a 6-char device code; the server stores the public key with the code. CLI prints "Open `<dashboard>/host/code` and enter `XXXX-YY`."
+3. User opens dashboard, signs in (existing auth), enters code + display name. Dashboard calls `POST /api/hosts/register` with `{code, name}`. Control-plane looks up the stored `publicKey` from the code record, creates the `hosts` row with `public_key = publicKey`, mints a per-host user JWT (signed by the account key) scoped to `mclaude.users.{uslug}.hosts.{hslug}.>`, and returns `{slug, jwt, hubUrl}` to the dashboard. The seed is never sent over the wire.
+4. CLI polls `GET /api/users/{uslug}/hosts/code/{code}` until the status changes from `pending` to `completed`. On completion, the response includes `{slug, jwt, hubUrl}`. CLI writes `~/.mclaude/hosts/{hslug}/{nats.creds, config.json}` from the JWT + the locally-stored seed, and symlinks `~/.mclaude/active-host → {hslug}`.
+5. User runs `mclaude daemon --host <hslug>` (or invokes the launchd / systemd unit they configured) — the local controller reads `--host` (from `active-host` symlink if unset), connects to hub NATS using the host JWT, subscribes to `mclaude.users.{uslug}.hosts.{hslug}.api.projects.>`, and starts session-agent subprocesses for each provisioned project.
 6. SPA login response includes the new host. User can launch sessions on their laptop from the dashboard.
 
 ### B. Cluster host (multi-cluster operator)
 
-1. Admin runs `mclaude cluster register --slug us-east --jetstream-domain us-east --leaf-url nats-leaf://hub.mclaude.example:7422`.
-2. CLI calls `POST /admin/clusters` (admin-only). Control-plane creates a `hosts` row for the admin with `type='cluster'`, `slug='us-east'`, `js_domain='us-east'`, `leaf_url='nats-leaf://...'`, `role='owner'`. Control-plane generates a per-user JWT for admin scoped to `mclaude.users.{adminSlug}.hosts.us-east.>`. Control-plane separately generates a per-cluster leaf JWT scoped to `mclaude.users.*.hosts.us-east.>` (this is the JWT the worker NATS uses to leaf-link into the hub) and signs an account JWT for the cluster signed by the deployment-level account key. The latter two are signed by the account key stored in the operator-keys Secret.
-3. Control-plane returns `{slug: "us-east", leafJwt, leafSeed, accountJwt, operatorJwt, jsDomain: "us-east"}`. Admin places these into the worker cluster's NATS Secret + Helm values.
+1. Admin runs `mclaude cluster register --slug us-east --jetstream-domain us-east --leaf-url nats-leaf://hub.mclaude.example:7422 --direct-nats-url wss://us-east.mclaude.example/nats`.
+2. CLI calls `POST /admin/clusters` (admin-only). Control-plane generates a per-cluster NKey pair (the private seed will be returned to the admin once and stored in the worker NATS Secret), then creates a `hosts` row for the admin with `type='cluster'`, `slug='us-east'`, `js_domain='us-east'`, `leaf_url='nats-leaf://…'`, `direct_nats_url='wss://…/nats'`, `public_key='<cluster NKey pubkey>'`, `role='owner'`. Control-plane mints a per-user JWT for the admin scoped to `mclaude.users.{adminSlug}.hosts.us-east.>` and a per-cluster leaf JWT scoped to `mclaude.users.*.hosts.us-east.>` (this is both the JWT the worker NATS uses to leaf-link into the hub **and** the credentials `mclaude-controller-k8s` uses for its NATS connection). All JWTs are signed by the account key from `mclaude-system/operator-keys`. The existing deployment-level `accountJwt` and `operatorJwt` are read from the Secret and returned in the response (not regenerated — there is one operator and one account per install).
+3. Control-plane returns `{slug: "us-east", leafJwt, leafSeed, accountJwt, operatorJwt, jsDomain: "us-east", directNatsUrl: "wss://…/nats"}`. Admin places these into the worker cluster's NATS Secret + Helm values.
 4. Worker cluster comes up. Worker NATS connects to the hub as a leaf node. Hub `$SYS.ACCOUNT.*.CONNECT` fires for the cluster's account key; control-plane updates `hosts.last_seen_at` for the admin's `us-east` row.
-5. Admin grants user access: `mclaude cluster grant us-east bob-gmail`. Control-plane creates a NEW `hosts` row for bob with `type='cluster'`, `slug='us-east'`, `js_domain='us-east'`, `leaf_url='...'`, `account_jwt='...'` (cluster-shared fields **copied** from admin's row), `role='user'`. Generates a per-user JWT for bob scoped to `mclaude.users.bob-gmail.hosts.us-east.>`.
+5. Admin grants user access: `mclaude cluster grant us-east bob-gmail`. Control-plane creates a NEW `hosts` row for bob with `type='cluster'`, `slug='us-east'`, and the cluster-shared fields **copied** from admin's row (`js_domain`, `leaf_url`, `account_jwt`, `direct_nats_url`, `public_key`), `role='user'`. Generates a per-user JWT for bob scoped to `mclaude.users.bob-gmail.hosts.us-east.>`.
 6. Bob's next login response includes `us-east` as a host. SPA can launch sessions there. The cluster-controller-k8s subscribes with wildcard `mclaude.users.*.hosts.us-east.api.projects.provision` and routes both alice's and bob's project requests.
 
 ### C. Project creation (control-plane → controller)
@@ -94,22 +94,36 @@ The cheapest fix is one ADR that owns the whole story end-to-end. Older ADRs bec
 
 ### `mclaude-common/pkg/subj`
 
-No changes required — this package is already at the canonical 4-arg / 3-arg shapes ADR-0004 + ADR-0024 prescribed. Listed for completeness:
+The host-scoped helpers exist and stay (4-arg `SessionsKVKey`, 3-arg `ProjectsKVKey`, etc.). Listed for completeness:
 - `UserHostProjectAPISessionsCreate(u, h, p)`, `…Input`, `…Delete`, `…Control`
 - `UserHostProjectAPITerminal(u, h, p, suffix)`
 - `UserHostProjectLifecycle(u, h, p, s)`
 - `UserHostProjectEvents(u, h, p, s)`
 - `SessionsKVKey(u, h, p, s)`, `ProjectsKVKey(u, h, p)`, `HostsKVKey(u, h)`
 
+**Removals required by this ADR** (these helpers exist in the package today but produce subjects that are eliminated):
+- `ClusterAPIProjectsProvision` — emits `mclaude.clusters.{cslug}.api.projects.provision`. Eliminated; cluster controllers subscribe to user-level wildcards on host-scoped subjects instead.
+- `ClusterAPIStatus` — emits `mclaude.clusters.{cslug}.api.status`. Eliminated; cluster liveness flows through `$SYS` events, not a dedicated subject.
+- `UserHostStatus` — emits `mclaude.users.{uslug}.hosts.{hslug}.status`. Eliminated; daemon does not publish heartbeats anymore.
+
+Also moves: `FormatNATSCredentials` from `mclaude-control-plane` into `mclaude-common/pkg/nats/creds.go` so the CLI can reuse it for BYOH bootstrap.
+
+Adds: `mclaude-common/pkg/nats/operator-keys.go` — used by the `mclaude-cp init-keys` Helm Job to generate operator + account NKey pairs and JWTs.
+
 ### `mclaude-session-agent`
 
 - **`state.go`**: add `HostSlug` to `DaemonConfig`; add `hostSlug` to `Agent` (already required by ADR-0034); update `JobEntry`, `ProjectState`, `SessionState` if they're missing `hostSlug` (ADR-0034 already adds it to JobEntry); update `sessionKVKey` and `heartbeatKVKey` wrappers to take host slug (ADR-0034 already covers this).
 - **`agent.go`**: 7 enumerated call sites — replace `subj.UserProject…` with `subj.UserHostProject…`, source `hostSlug` from `a.hostSlug`. Specifically: line 285 (sessions.create), line 547 (terminal), lines 1136–1179 (4× lifecycle publishes).
-- **`daemon.go`**: read `HOST_SLUG` env var in K8s pods; read `--host` flag in BYOH daemon mode; populate `DaemonConfig.HostSlug`; fail-fast on absence.
-- **`daemon_jobs.go`**: 4 enumerated call sites at lines 342, 377, 438, 491, 635 — already covered by ADR-0034's "Modify all subject/KV key construction" section.
+- **`daemon.go`** — these are the full set of edits required to make the daemon compile:
+  - **Add** `HostSlug` to `DaemonConfig`; populate from `HOST_SLUG` env (K8s) or `--host` flag (BYOH); fail-fast at startup on absence with `FATAL: HOST_SLUG required`.
+  - **Remove** `UserAPIProjectsCreate` subscription (currently at line 126) — project provisioning is owned by `mclaude-controller-{k8s,local}` per this ADR; the session-agent daemon no longer subscribes to project-create.
+  - **Remove** `LaptopsKVKey` invocations (currently at lines 148 and 170) — replaced by nothing; the daemon does not write to host KV.
+  - **Remove** `laptopsKV` field on the daemon struct (line 57) and any `mclaude-laptops` bucket open call (line 85). The bucket no longer exists.
+  - **Remove** the `runLaptopHeartbeat` goroutine entirely. Liveness moves to `$SYS` (control-plane subscribes on hub).
+- **`daemon_jobs.go`**: 5 enumerated call sites at lines 342, 377, 438, 491, 635 — already covered by ADR-0034's "Modify all subject/KV key construction" section.
 - **`main.go`**: hardcoded lifecycle init subject at line 200 — replace with the host-scoped form.
-- **Remove `mclaude-laptops` / `mclaude-heartbeats` references**: `kvBucketHeartbeats` constant deleted; `hbKV` field removed from daemon; `runHeartbeat` deleted (replaced by NATS `$SYS` presence subscription on the control-plane side).
-- **Pod env vars**: when running as a K8s session-agent, the pod must be launched with `USER_SLUG`, `HOST_SLUG`, `PROJECT_SLUG` env vars set. The reconciler injects these via `buildPodTemplate` (see `mclaude-controller` changes).
+- **Constants / package-level**: `kvBucketHeartbeats` constant deleted; `hbKV` field removed from daemon; any reference to `mclaude-laptops` / `mclaude-heartbeats` deleted.
+- **Pod env vars**: when running as a K8s session-agent, the pod must be launched with `USER_SLUG`, `HOST_SLUG`, `PROJECT_SLUG` env vars set. The cluster controller injects these via `buildPodTemplate` (see `mclaude-controller` changes).
 
 ### `mclaude-control-plane` → splits into `mclaude-control-plane` + `mclaude-controller-k8s` + `mclaude-controller-local`
 
@@ -117,7 +131,7 @@ No changes required — this package is already at the canonical 4-arg / 3-arg s
   - Remove all K8s client code (`reconciler.go`, `nkeys.go` partial — `IssueHostJWT` stays here as it's auth, not K8s).
   - Add `hosts` table DDL + migration in `db.go`. Schema per Data Model below.
   - Add `host_id` column to `projects` table; new `UNIQUE(user_id, host_id, slug)` constraint; remove old `UNIQUE(user_id, slug)` if present.
-  - Add HTTP endpoints: `GET/POST/PUT/DELETE /api/users/{uslug}/hosts`, `POST /api/users/{uslug}/hosts/code`, `POST /api/hosts/register`, admin endpoints `POST/GET /admin/clusters`, `POST /admin/clusters/{cslug}/grants` (manage user-cluster access).
+  - Add HTTP endpoints: `GET/POST/PUT/DELETE /api/users/{uslug}/hosts`, `POST /api/users/{uslug}/hosts/code`, `GET /api/users/{uslug}/hosts/code/{code}` (poll status), `POST /api/hosts/register`, admin endpoints `POST/GET /admin/clusters`, `POST /admin/clusters/{cslug}/grants` (manage user-cluster access).
   - Add `IssueHostJWT(userId, hostSlug)` — issues per-host user JWT scoped to `mclaude.users.{uslug}.hosts.{hslug}.>`.
   - Add NATS publisher: on project create/update/delete, publish to `mclaude.users.{uslug}.hosts.{hslug}.api.projects.{create,update,delete}` (request/reply, 10s timeout) instead of touching K8s. The host-scoped subject ensures the request routes to the appropriate controller (controller-k8s subscribes via wildcard for cluster hosts; controller-local subscribes specifically for its own user/host).
   - Subscribe to `$SYS.ACCOUNT.{accountKey}.CONNECT/DISCONNECT` on hub NATS; map account-id-to-host-slug via the host's NKey public key; update `hosts.last_seen_at`.
@@ -132,6 +146,35 @@ No changes required — this package is already at the canonical 4-arg / 3-arg s
   - Manages `mclaude-session-agent` subprocesses via process supervision (`exec.Cmd`, restart-on-crash) instead of K8s reconciler.
   - Maintains `~/.mclaude/projects/{pslug}/worktree/` directories that mirror what the cluster controller would create as PVCs.
 
+### Provisioning request/reply contract
+
+All four `mclaude.users.{uslug}.hosts.{hslug}.api.projects.{provision,create,update,delete}` subjects use NATS request/reply with a 10s timeout (`PROVISION_TIMEOUT_SECONDS`). The contract is shared by both controller variants.
+
+**Request payload** (control-plane → controller):
+```json
+{
+  "userSlug":      "alice-gmail",
+  "hostSlug":      "us-east",
+  "projectSlug":   "billing",
+  "gitUrl":        "https://github.com/alice/billing.git",
+  "gitIdentityId": "uuid-or-null"
+}
+```
+
+**Reply on success:**
+```json
+{ "ok": true, "projectSlug": "billing" }
+```
+
+**Reply on failure:**
+```json
+{ "ok": false, "error": "human-readable description", "code": "rbac_failed | image_pull_failed | git_clone_failed | not_found | …" }
+```
+
+The control-plane treats a NATS request timeout the same as a 503-style reply, surfaces `503 Service Unavailable` to the SPA with `{error: "host {hslug} unreachable"}`, and marks `projects.status = 'failed'` (or rolls back the row, implementation choice). Delete is idempotent: if the project is already gone, the controller still replies `{ok: true}`.
+
+The controller-spec at `docs/mclaude-controller/spec-controller.md` is the authoritative reference; the schema here is repeated so the ADR is self-sufficient.
+
 ### `mclaude-cli`
 
 - New `host` subcommand:
@@ -140,8 +183,8 @@ No changes required — this package is already at the canonical 4-arg / 3-arg s
   - `mclaude host use <hslug>` — symlink `~/.mclaude/active-host`.
   - `mclaude host rm <hslug>` — call `DELETE /api/users/{uslug}/hosts/{hslug}`.
 - New `cluster` subcommand (admin-only):
-  - `mclaude cluster register --name … --jetstream-domain … --leaf-url …` — creates `clusters` + corresponding `hosts` (type=cluster) row.
-  - `mclaude cluster grant <cluster-slug> <uslug>` — grants a user access. Calls `POST /admin/clusters/{cluster-slug}/grants` with `{userSlug}`. Control-plane creates a new `hosts` row for that user with `slug=<cluster-slug>`, `type='cluster'`, `role='user'`, copies cluster-shared fields (`js_domain`, `leaf_url`, `account_jwt`) from the existing cluster host row, and mints a per-user JWT.
+  - `mclaude cluster register --slug <cslug> [--name <display>] --jetstream-domain <jsd> --leaf-url <url> [--direct-nats-url <wss>]` — calls `POST /admin/clusters` with `{slug, name, jsDomain, leafUrl, directNatsUrl?}`. `--slug` is required (it becomes the `hosts.slug` for every user granted to this cluster, and is the literal token in the controller's wildcard subscription `mclaude.users.*.hosts.{slug}.>`). `--name` defaults to the slug when omitted. Returns `{slug, leafJwt, leafSeed, accountJwt, operatorJwt, jsDomain, directNatsUrl}` for the admin to drop into the worker cluster's NATS Secret + `mclaude-worker` Helm values.
+  - `mclaude cluster grant <cluster-slug> <uslug>` — grants a user access. Calls `POST /admin/clusters/{cluster-slug}/grants` with `{userSlug}`. Control-plane creates a new `hosts` row for that user with `slug=<cluster-slug>`, `type='cluster'`, `role='user'`, copies the cluster-shared fields (`js_domain`, `leaf_url`, `account_jwt`, `direct_nats_url`, `public_key`) from the existing cluster host row, and mints a per-user JWT.
 - Daemon mode: `mclaude daemon --host <hslug>` (or read from `~/.mclaude/active-host`).
 
 ### `mclaude-web` (SPA)
@@ -157,7 +200,7 @@ No changes required — this package is already at the canonical 4-arg / 3-arg s
 
 - Split into two charts:
   - `charts/mclaude-cp/` — control-plane + hub NATS + Postgres + SPA. Hub NATS configured with `leafnodes { listen: 0.0.0.0:7422 }` + JWT auth chain.
-  - `charts/mclaude-worker/` — worker NATS + `mclaude-controller-k8s` + session-agent template. Worker NATS configured with `leafnodes { remotes: [{url: nats-leaf://hub:7422, nkey: /etc/nats/leaf.nk}] }` + `jetstream { domain: $JS_DOMAIN }`.
+  - `charts/mclaude-worker/` — worker NATS + `mclaude-controller-k8s` + session-agent template. Worker NATS configured with `leafnodes { remotes: [{url: nats-leaf://hub:7422, credentials: /etc/nats/leaf.creds}] }` + `jetstream { domain: $JS_DOMAIN }`. The `.creds` file contains the leaf JWT + NKey seed returned by `mclaude cluster register` (the 3-tier JWT chain requires `credentials:`, not raw `nkey:`).
 - Single-cluster install: deploy both charts into the same K8s cluster with `leaf-url=localhost:7422`. SPA login response returns one cluster, JetStream domain present, behavior identical to multi-cluster except domain values are local.
 
 ## Data Model
@@ -166,31 +209,39 @@ No changes required — this package is already at the canonical 4-arg / 3-arg s
 
 ```sql
 CREATE TABLE hosts (
-  id            TEXT PRIMARY KEY,
-  user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  slug          TEXT NOT NULL,
-  name          TEXT NOT NULL,
-  type          TEXT NOT NULL CHECK (type IN ('machine', 'cluster')),
-  role          TEXT NOT NULL DEFAULT 'owner' CHECK (role IN ('owner', 'user')),
+  id              TEXT PRIMARY KEY,
+  user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  slug            TEXT NOT NULL,
+  name            TEXT NOT NULL,
+  type            TEXT NOT NULL CHECK (type IN ('machine', 'cluster')),
+  role            TEXT NOT NULL DEFAULT 'owner' CHECK (role IN ('owner', 'user')),
 
   -- Cluster-shared infrastructure fields (NULL for machine hosts).
   -- For cluster hosts, these are duplicated across all user rows referencing
   -- the same cluster. Admin update propagates via UPDATE WHERE slug='...'.
-  js_domain     TEXT,
-  leaf_url      TEXT,
-  account_jwt   TEXT,
+  js_domain       TEXT,
+  leaf_url        TEXT,
+  account_jwt     TEXT,
+  direct_nats_url TEXT,                       -- WebSocket URL for SPA direct-to-worker (NULL for machine; optional for cluster)
 
-  -- Per-user NATS identity. NULL until user runs registration.
-  public_key    TEXT,                       -- NKey public key for $SYS presence mapping
-  user_jwt      TEXT,                       -- per-user JWT scoped to mclaude.users.{uslug}.hosts.{hslug}.>
+  -- NATS identity.
+  -- Machine: host-generated NKey pubkey (private seed never leaves machine).
+  -- Cluster: cluster controller / leaf JWT NKey pubkey (CP-generated at register;
+  -- duplicated across user rows for the same cluster — see decisions table).
+  public_key      TEXT,
+  user_jwt        TEXT,                       -- per-user JWT scoped to mclaude.users.{uslug}.hosts.{hslug}.>
 
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  last_seen_at  TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at    TIMESTAMPTZ,                -- updated by $SYS subscriber; durable historical record
 
   UNIQUE (user_id, slug),
   CHECK (type = 'machine' OR (js_domain IS NOT NULL AND leaf_url IS NOT NULL AND account_jwt IS NOT NULL))
 );
 ```
+
+The `online` boolean is **not** in this table — it lives in the `mclaude-hosts` KV bucket (single-writer control-plane, sourced from `$SYS.ACCOUNT.*.CONNECT/DISCONNECT`).
+
+The `users` table (canonical reference: `docs/spec-state-schema.md`) gains two columns at the same migration: `oauth_id TEXT NULL` (provider's stable user identifier; populated on first OAuth callback whose email matches) and `is_admin BOOLEAN NOT NULL DEFAULT FALSE` (gate for `/admin/*` endpoints; set TRUE for the bootstrap admin email by the `init-keys` Helm Job).
 
 **Key invariants:**
 - `(user_id, slug)` is unique. Slugs are user-scoped, but for cluster hosts the admin grant flow ensures all users granted to a cluster receive the **same** slug — by convention, the cluster's canonical name. This is what enables the wildcard subscription `mclaude.users.*.hosts.us-east.…` to route across all users.
@@ -276,8 +327,8 @@ History: 1
     }
   ],
   "projects": [
-    { "slug": "myrepo", "name": "My Repo", "hostSlug": "mbp16" },
-    { "slug": "billing", "name": "billing service", "hostSlug": "us-east" }
+    { "slug": "myrepo", "name": "My Repo", "hostSlug": "mbp16", "hostType": "machine" },
+    { "slug": "billing", "name": "billing service", "hostSlug": "us-east", "hostType": "cluster", "jsDomain": "us-east", "directNatsUrl": "wss://us-east.mclaude.example/nats" }
   ]
 }
 ```
@@ -344,7 +395,7 @@ The `hosts` array is the single source of truth. SPA filters `hosts.filter(h => 
 - `mclaude-controller-k8s` extracted as new binary (kubebuilder operator from existing reconciler code).
 - `mclaude-controller-local` new binary (BYOH process supervisor).
 - `mclaude-control-plane` reduced to HTTP+NATS+Postgres; K8s client removed; NATS-based provisioning publish.
-- Host endpoints: `GET/POST/PUT/DELETE /api/users/{uslug}/hosts`, `POST /api/users/{uslug}/hosts/code`, `POST /api/hosts/register`.
+- Host endpoints: `GET/POST/PUT/DELETE /api/users/{uslug}/hosts`, `POST /api/users/{uslug}/hosts/code`, `GET /api/users/{uslug}/hosts/code/{code}` (device-code poll), `POST /api/hosts/register`.
 - Admin endpoints: `POST/GET /admin/clusters`, `POST /admin/clusters/{cslug}/grants`.
 - `$SYS.ACCOUNT.*.CONNECT/DISCONNECT` subscription on hub; `hosts.last_seen_at` updates.
 - `mclaude-session-agent`: `Agent.hostSlug` field, `DaemonConfig.HostSlug` field, all 7 enumerated subj call-site fixes (closes the compile failure), `state.go` struct + wrapper updates.

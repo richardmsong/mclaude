@@ -2,7 +2,9 @@
 
 ## Role
 
-The session agent is a per-project process supervisor that manages **multiple concurrent Claude Code sessions** within a single project. One Agent instance owns all sessions for a `(userId, projectId)` pair, holding them in an in-memory session map. It spawns and manages Claude Code child processes (one per session), bridges their stream-json I/O to NATS, maintains per-session state in NATS KV, manages git worktrees, handles permission policies, provides PTY-based terminal sessions, and exposes debug unix sockets for CLI attach. It operates in two modes: as a standalone per-project agent (K8s pod or single-project laptop) or as a laptop daemon that spawns one child agent per project and runs the job queue dispatcher.
+The session agent is a per-project process supervisor that manages **multiple concurrent Claude Code sessions** within a single project. One Agent instance owns all sessions for a `(userId, hostSlug, projectId)` triple, holding them in an in-memory session map. It spawns and manages Claude Code child processes (one per session), bridges their stream-json I/O to NATS, maintains per-session state in NATS KV, manages git worktrees, handles permission policies, provides PTY-based terminal sessions, and exposes debug unix sockets for CLI attach. It operates in two modes: as a standalone per-project agent (K8s pod or single-project laptop) or as a laptop daemon that spawns one child agent per project and runs the job queue dispatcher.
+
+Per ADR-0035, every NATS subject the agent uses is host-scoped: `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.…`. The host slug is required configuration — sourced from the `HOST_SLUG` env var in K8s pods and from the `--host` flag (or `~/.mclaude/active-host` symlink) on BYOH machines. Absence is fatal at startup.
 
 ## Deployment
 
@@ -14,9 +16,11 @@ The container image is Alpine-based with Node.js 22, Claude Code (native binary)
 
 The Go binary runs credential helper setup and initial repo clone/init before entering the NATS session lifecycle.
 
-### Daemon Mode (Laptop)
+### Daemon Mode (BYOH machine)
 
-Runs as a long-lived process on the user's laptop with `--daemon`. The daemon spawns one supervised child agent per project, manages JWT credential refresh, writes laptop presence to KV, publishes quota status, dispatches scheduled jobs, and exposes a local HTTP API for job management.
+Runs as a long-lived process on the user's machine (laptop, desktop, VM) with `--daemon --host <hslug>`. The daemon spawns one supervised child agent per project, manages JWT credential refresh, publishes quota status, dispatches scheduled jobs, and exposes a local HTTP API for job management.
+
+Liveness is reported by the hub NATS via `$SYS.ACCOUNT.*.CONNECT/DISCONNECT` events that the control-plane subscribes to. The daemon does **not** publish periodic heartbeats and does **not** write to `mclaude-hosts` or to any removed bucket (`mclaude-laptops`, `mclaude-heartbeats`).
 
 ### Configuration
 
@@ -27,13 +31,12 @@ Runs as a long-lived process on the user's laptop with `--daemon`. The daemon sp
 | `--user-id` / `USER_ID` | Flag or env | User UUID (required) |
 | `--project-id` / `PROJECT_ID` | Flag or env | Project UUID (required in standalone) |
 | `--user-slug` / `USER_SLUG` | Flag or env | User typed slug per ADR-0024 |
+| `--host` / `HOST_SLUG` | Flag or env | **Required.** Host slug per ADR-0035 (`mclaude.users.{uslug}.hosts.{hslug}.…`). K8s pods read `HOST_SLUG` injected by `mclaude-controller-k8s`'s `buildPodTemplate`. BYOH daemons read `--host` (defaulting to the target of `~/.mclaude/active-host` if unset). Hard fail at startup on absence. |
 | `--project-slug` / `PROJECT_SLUG` | Flag or env | Project typed slug per ADR-0024 |
 | `--claude-path` / `CLAUDE_PATH` | Flag or env | Path to Claude binary (default: `claude`) |
 | `--data-dir` | Flag | Project PVC mount (default: `/data`) |
 | `--mode` | Flag | `k8s` or `standalone` (default: `standalone`) |
-| `--daemon` | Flag | Enable laptop daemon mode |
-| `--hostname` / `HOSTNAME` | Flag or env | Hostname for collision detection (daemon only) |
-| `--machine-id` / `MACHINE_ID` | Flag or env | Machine ID for collision detection (daemon only) |
+| `--daemon` | Flag | Enable BYOH daemon mode |
 | `--refresh-url` / `REFRESH_URL` | Flag or env | JWT refresh endpoint URL (daemon only) |
 | `LOG_LEVEL` | Env | Zerolog level (default: `info`) |
 | `METRICS_ADDR` | Env | Prometheus metrics listen address (default: `:9091`) |
@@ -62,31 +65,34 @@ The agent creates two durable pull consumers on MCLAUDE_API:
 ### NATS KV Buckets (Read/Write)
 
 - **mclaude-sessions** (write) -- Writes session state on creation, every state change, usage accumulation, and compaction boundary. See `spec-state-schema.md` section "NATS KV Buckets / mclaude-sessions".
-- **mclaude-heartbeats** (write) -- Writes project heartbeat every 30 seconds.
 
 ### NATS KV Buckets (Read-Only)
 
 - **mclaude-projects** (read) -- Read by daemon for job dispatch context.
 - **mclaude-sessions** (read) -- Read by daemon for startup recovery and session state polling.
 - **mclaude-job-queue** (read/write, daemon only) -- Job entries for the scheduled job dispatcher. See `spec-state-schema.md` section "NATS KV Buckets / mclaude-job-queue".
-- **mclaude-laptops** (read/write, daemon only) -- Laptop presence registration and hostname collision detection.
+
+The agent does not write to `mclaude-hosts` (single-writer is control-plane, sourced from `$SYS` events). The previous `mclaude-laptops` and `mclaude-heartbeats` buckets are removed entirely per ADR-0035.
 
 ### NATS Subjects (Publish)
 
-- **Lifecycle events** to `mclaude.users.{uslug}.projects.{pslug}.lifecycle.{sslug}` -- Published on session creation, stop, resume, restart, upgrade, failure, permission denial, quota interruption, and job completion. See `spec-state-schema.md` section "Lifecycle Event Payloads".
-- **Stream-json events** to `mclaude.users.{uslug}.projects.{pslug}.events.{sslug}` -- Raw Claude Code stdout lines, forwarded to the MCLAUDE_EVENTS stream.
-- **API error events** to `mclaude.users.{uslug}.projects.{pslug}.events._api` -- Published when a create/delete/restart handler encounters an error.
-- **Quota status** to `mclaude.users.{uslug}.quota` (daemon only) -- Published every 60 seconds from Anthropic API polling. See `spec-state-schema.md` section "Quota Status".
+All publishes use the host-scoped pattern per ADR-0035: `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.…`.
+
+- **Lifecycle events** to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{sslug}` -- Published on session creation, stop, resume, restart, upgrade, failure, permission denial, quota interruption, and job completion. See `spec-state-schema.md` section "Lifecycle Event Payloads".
+- **Stream-json events** to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.events.{sslug}` -- Raw Claude Code stdout lines, forwarded to the MCLAUDE_EVENTS stream.
+- **API error events** to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.events._api` -- Published when a create/delete/restart handler encounters an error.
+- **Quota status** to `mclaude.users.{uslug}.quota` (daemon only) -- Published every 60 seconds from Anthropic API polling. The quota subject is user-scoped (no host segment) because quota is an account-wide signal. See `spec-state-schema.md` section "Quota Status".
 
 ### NATS Subjects (Subscribe)
 
-All API subscriptions are at project scope — the Agent subscribes once per project and demultiplexes to the correct session internally. Messages include a `sessionId` field (or `sessionSlug`) that the Agent uses to route to the right `Session` in its map. Control requests without a specific session target are broadcast to all active sessions.
+All API subscriptions are at host-and-project scope — the Agent subscribes once per `(uslug, hslug, pslug)` triple and demultiplexes to the correct session internally. Messages include a `sessionId` field (or `sessionSlug`) that the Agent uses to route to the right `Session` in its map. Control requests without a specific session target are broadcast to all active sessions.
 
-- **Session API commands** via JetStream pull consumers on MCLAUDE_API (create, delete, input, restart, control).
-- **Terminal API** via core NATS subscriptions on `mclaude.users.{uslug}.projects.{pslug}.api.terminal.{create,delete,resize}` -- Latency-sensitive; stays on core NATS.
-- **Project create** (daemon only) via core NATS on `mclaude.users.{uslug}.api.projects.create`.
-- **Lifecycle events** (daemon only) via core NATS wildcard on `mclaude.users.{uslug}.projects.*.lifecycle.*` -- Updates job queue KV on terminal job events.
+- **Session API commands** via JetStream pull consumers on MCLAUDE_API (create, delete, input, restart, control). Filter subjects are host-scoped: `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.{create,delete,input,restart,control}`.
+- **Terminal API** via core NATS subscriptions on `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.{create,delete,resize}` -- Latency-sensitive; stays on core NATS.
+- **Lifecycle events** (daemon only) via core NATS wildcard on `mclaude.users.{uslug}.hosts.{hslug}.projects.*.lifecycle.*` -- Updates job queue KV on terminal job events.
 - **Quota status** (per-session QuotaMonitor) via core NATS on `mclaude.users.{uslug}.quota`.
+
+The daemon does **not** subscribe to project-creation requests; project provisioning per ADR-0035 is handled by `mclaude-controller-local` (BYOH) or `mclaude-controller-k8s` (cluster), each subscribing to `mclaude.users.{uslug}.hosts.{hslug}.api.projects.>` (or the user-level wildcard variant for the cluster controller).
 
 ### Unix Sockets
 
@@ -254,13 +260,15 @@ The shutdown sequence preserves in-progress work and enables zero-downtime upgra
 7. Publish `session_upgrading` lifecycle event per session.
 8. Exit.
 
-### Daemon: Child Process Supervision
+### Daemon: Child Process Supervision (legacy single-binary mode)
 
-The daemon spawns one child agent per project via `manageChild`, which restarts the child on crash with a 2-second delay. On daemon shutdown, all children receive SIGINT.
+In the legacy single-binary BYOH daemon (carryover behavior, used until `mclaude-controller-local` lands), the daemon spawns one child agent per project via `manageChild`, which restarts the child on crash with a 2-second delay. On daemon shutdown, all children receive SIGINT.
+
+Per ADR-0035 process supervision migrates out of the session-agent daemon into the new `mclaude-controller-local` binary; the session-agent daemon is then invoked as a child process **by** the local controller, not the other way around. See `docs/mclaude-controller/spec-controller.md`.
 
 ### Daemon: JWT Refresh
 
-The daemon checks NATS credential file JWT TTL every 60 seconds. When remaining TTL falls below 15 minutes, it POSTs to the refresh URL with the current JWT and writes the new JWT back to the credentials file.
+The daemon checks its host JWT (`~/.mclaude/hosts/{hslug}/nats.creds`) TTL every 60 seconds. When remaining TTL falls below 15 minutes, it POSTs to the refresh URL with the current JWT and writes the new JWT back to the credentials file.
 
 ### Daemon: Job Dispatcher
 
@@ -271,9 +279,9 @@ The dispatcher watches `mclaude-job-queue` KV and quota updates:
 - **Quota recovery:** When utilization drops below all running thresholds, unpauses paused jobs in descending priority order.
 - **Job status transitions:** The lifecycle subscriber updates job status in KV on `session_job_complete`, `session_quota_interrupted`, `session_permission_denied`, and `session_job_failed` events.
 
-### Daemon: Laptop Presence
+### Daemon: Liveness
 
-The daemon writes a laptop entry to `mclaude-laptops` KV on startup and refreshes every 12 hours. On startup, it checks for hostname collision (same hostname but different machine ID) and fails fast if detected.
+Liveness is signalled by the NATS connection itself. When the daemon connects to hub NATS, the hub publishes `$SYS.ACCOUNT.{accountKey}.CONNECT`; control-plane subscribes and updates `hosts.last_seen_at` and the `mclaude-hosts` KV entry. On disconnect, control-plane sets `online=false`. There is no periodic heartbeat publish; the previous `mclaude-laptops` collision-detection flow is removed (slug uniqueness is enforced server-side at registration time).
 
 ### Terminal Sessions
 
@@ -295,7 +303,8 @@ Terminal sessions spawn a PTY shell and bridge I/O through core NATS subjects. T
 | JetStream fetch error | Exponential backoff (100ms to 5s) with retry |
 | Event exceeds 8 MB NATS payload | Content field stripped; `truncated: true` added |
 | JWT refresh fails (daemon) | Logged as warning; children use current JWT until expiry |
-| Hostname collision (daemon) | Fatal: daemon refuses to start |
+| `HOST_SLUG` / `--host` not provided | Fatal: agent or daemon refuses to start with `FATAL: HOST_SLUG required (set via env or --host flag)` (no fallback). |
+| Host JWT signed for the wrong host | Hub NATS auth rejects publishes/subscribes; the agent surfaces this as a NATS auth error and exits or refuses the failing operation. |
 | Job dispatch — session never reaches idle | Job retried up to 3 times, then marked `failed` |
 | Debug socket start fails | Logged as warning; CLI attach disabled but sessions function normally |
 
