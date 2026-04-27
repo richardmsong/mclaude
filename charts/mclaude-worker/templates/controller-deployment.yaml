@@ -45,6 +45,10 @@ spec:
                   key: accountSeed
             - name: NATS_CREDENTIALS_PATH
               value: /etc/nats/leaf-creds/leaf.creds
+            - name: METRICS_ADDR
+              value: ":{{ .Values.controller.service.metricsPort }}"
+            - name: HEALTH_PROBE_ADDR
+              value: ":8081"
             - name: LOG_LEVEL
               value: {{ .Values.controller.config.logLevel | quote }}
             - name: LEADER_ELECTION
@@ -58,14 +62,14 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: metrics
+              port: 8081
             initialDelaySeconds: 15
             periodSeconds: 30
             timeoutSeconds: 5
           readinessProbe:
             httpGet:
               path: /readyz
-              port: metrics
+              port: 8081
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
