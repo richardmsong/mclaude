@@ -1,5 +1,5 @@
 import type { INATSClient } from '@/types'
-import { kvKeyHeartbeatsForUser } from '@/lib/subj'
+import { kvKeyHostsForUser } from '@/lib/subj'
 import type { UserSlug } from '@/lib/slug'
 
 export interface HeartbeatHealth {
@@ -9,6 +9,10 @@ export interface HeartbeatHealth {
 
 export type HealthListener = (projectId: string, healthy: boolean) => void
 
+/**
+ * HeartbeatMonitor tracks host liveness via the mclaude-hosts KV bucket (ADR-0035).
+ * Renamed from mclaude-heartbeats to mclaude-hosts; uses kvKeyHostsForUser.
+ */
 export class HeartbeatMonitor {
   private _health = new Map<string, HeartbeatHealth>()
   private _listeners: HealthListener[] = []
@@ -29,7 +33,7 @@ export class HeartbeatMonitor {
   start(checkIntervalMs = 5_000): void {
     this.stop()
 
-    this._unwatcher = this.natsClient.kvWatch('mclaude-heartbeats', kvKeyHeartbeatsForUser(this.userSlug as UserSlug), (entry) => {
+    this._unwatcher = this.natsClient.kvWatch('mclaude-hosts', kvKeyHostsForUser(this.userSlug as UserSlug), (entry) => {
       const projectId = entry.key.split('.')[1]
       if (!projectId) return
       try {

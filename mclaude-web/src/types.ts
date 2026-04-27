@@ -44,6 +44,43 @@ export interface AuthTokens {
   /** User slug derived from the `slug` JWT claim (ADR-0024). Defaults to userId if absent. */
   userSlug?: string
   natsUrl?: string
+  /** Hub NATS URL from login response (ADR-0035). Falls back to natsUrl when absent. */
+  hubUrl?: string
+  /** Hosts from login response (ADR-0035). */
+  hosts?: HostInfo[]
+  /** Projects from login response (ADR-0035). */
+  projects?: LoginProject[]
+}
+
+// ─── Host / project info from login response (ADR-0035) ──────────────────────
+
+export type HostType = 'machine' | 'cluster'
+export type HostRole = 'owner' | 'user'
+
+/** Host entry from the login response (ADR-0035). */
+export interface HostInfo {
+  slug: string
+  name: string
+  type: HostType
+  role: HostRole
+  online: boolean
+  lastSeenAt?: string
+  /** JetStream domain — present only for cluster-type hosts. */
+  jsDomain?: string
+  /** Direct NATS URL — present only for cluster-type hosts with direct access. */
+  directNatsUrl?: string
+}
+
+/** Project entry from the login response (ADR-0035). */
+export interface LoginProject {
+  slug: string
+  name: string
+  hostSlug: string
+  hostType: HostType
+  /** JetStream domain — present only when the project's host is a cluster. */
+  jsDomain?: string
+  /** Direct NATS URL — present only when the project's host is a cluster. */
+  directNatsUrl?: string
 }
 
 export interface IAuthClient {
@@ -109,6 +146,8 @@ export interface SessionKVState {
   userSlug?: string
   /** Project slug (ADR-0024). Present once session-agent is updated. */
   projectSlug?: string
+  /** Host slug (ADR-0035). Present once session-agent is updated. */
+  hostSlug?: string
   projectId: string
   branch: string
   worktree: string
@@ -130,6 +169,8 @@ export interface ProjectKVState {
   slug?: string
   /** User slug of the project owner (ADR-0024). Present once control-plane is updated. */
   userSlug?: string
+  /** Host slug (ADR-0035). Present once control-plane is updated. */
+  hostSlug?: string
   name: string
   gitUrl: string
   gitIdentityId?: string | null

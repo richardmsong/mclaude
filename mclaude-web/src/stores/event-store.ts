@@ -22,7 +22,7 @@ import type {
 import { logger } from '@/logger'
 import { computeCost, loadCalibration } from '@/lib/pricing'
 import { subjEvents } from '@/lib/subj'
-import type { UserSlug, ProjectSlug, SessionSlug } from '@/lib/slug'
+import type { UserSlug, HostSlug, ProjectSlug, SessionSlug } from '@/lib/slug'
 
 export interface EventStoreOptions {
   natsClient: INATSClient
@@ -31,6 +31,8 @@ export interface EventStoreOptions {
   sessionId: string
   /** User slug for subject construction (ADR-0024). Falls back to userId when absent. */
   userSlug?: string
+  /** Host slug for subject construction (ADR-0035). Required for host-scoped subjects. */
+  hostSlug?: string
   /** Project slug for subject construction (ADR-0024). Falls back to projectId when absent. */
   projectSlug?: string
   /** Session slug for subject construction (ADR-0024). Falls back to sessionId when absent. */
@@ -79,9 +81,10 @@ export class EventStore {
 
   start(replayFromSeq?: number): void {
     const uslug = (this.opts.userSlug ?? this.opts.userId) as UserSlug
+    const hslug = (this.opts.hostSlug ?? 'local') as HostSlug
     const pslug = (this.opts.projectSlug ?? this.opts.projectId) as ProjectSlug
     const sslug = (this.opts.sessionSlug ?? this.opts.sessionId) as SessionSlug
-    const subject = subjEvents(uslug, pslug, sslug)
+    const subject = subjEvents(uslug, hslug, pslug, sslug)
     const startSeq = replayFromSeq ?? 0
     this._replayFromSeq = startSeq
 

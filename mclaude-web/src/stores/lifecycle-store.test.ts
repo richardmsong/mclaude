@@ -19,7 +19,7 @@ describe('LifecycleStore', () => {
       const events: LifecycleEvent[] = []
       store.onLifecycleEvent(e => events.push(e))
       mockNats.simulateReceive(
-        'mclaude.users.user-1.projects.project-1.lifecycle.session-1',
+        'mclaude.users.user-1.hosts.local.projects.project-1.lifecycle.session-1',
         { type: 'session_created', sessionId: 'session-1' } as unknown as LifecycleEvent,
       )
       expect(events).toHaveLength(1)
@@ -32,7 +32,7 @@ describe('LifecycleStore', () => {
       store.onLifecycleEvent(e => events.push(e))
 
       mockNats.simulateReceive(
-        'mclaude.users.user-1.projects.project-1.lifecycle.session-1',
+        'mclaude.users.user-1.hosts.local.projects.project-1.lifecycle.session-1',
         { type: 'session_created', sessionId: 'session-1' } as unknown as LifecycleEvent,
       )
       expect(events).toHaveLength(1)
@@ -40,7 +40,7 @@ describe('LifecycleStore', () => {
       store.stop()
 
       mockNats.simulateReceive(
-        'mclaude.users.user-1.projects.project-1.lifecycle.session-1',
+        'mclaude.users.user-1.hosts.local.projects.project-1.lifecycle.session-1',
         { type: 'session_stopped', sessionId: 'session-1' } as unknown as LifecycleEvent,
       )
       // No new events after stop
@@ -55,7 +55,7 @@ describe('LifecycleStore', () => {
       store.onLifecycleEvent(e => events.push(e))
 
       mockNats.simulateReceive(
-        'mclaude.users.user-1.projects.project-1.lifecycle.session-1',
+        'mclaude.users.user-1.hosts.local.projects.project-1.lifecycle.session-1',
         { type: 'session_created', sessionId: 'session-1' } as unknown as LifecycleEvent,
       )
       // Should only receive once, not twice
@@ -73,7 +73,7 @@ describe('LifecycleStore', () => {
       store.onLifecycleEvent(e => events2.push(e))
 
       mockNats.simulateReceive(
-        'mclaude.users.user-1.projects.project-1.lifecycle.session-1',
+        'mclaude.users.user-1.hosts.local.projects.project-1.lifecycle.session-1',
         { type: 'session_restarting', sessionId: 'session-1' } as unknown as LifecycleEvent,
       )
 
@@ -88,7 +88,7 @@ describe('LifecycleStore', () => {
       const unsub = store.onLifecycleEvent(e => events.push(e))
 
       mockNats.simulateReceive(
-        'mclaude.users.user-1.projects.project-1.lifecycle.session-1',
+        'mclaude.users.user-1.hosts.local.projects.project-1.lifecycle.session-1',
         { type: 'session_created', sessionId: 'session-1' } as unknown as LifecycleEvent,
       )
       expect(events).toHaveLength(1)
@@ -96,7 +96,7 @@ describe('LifecycleStore', () => {
       unsub()
 
       mockNats.simulateReceive(
-        'mclaude.users.user-1.projects.project-1.lifecycle.session-1',
+        'mclaude.users.user-1.hosts.local.projects.project-1.lifecycle.session-1',
         { type: 'session_stopped', sessionId: 'session-1' } as unknown as LifecycleEvent,
       )
       expect(events).toHaveLength(1) // no new events
@@ -110,11 +110,11 @@ describe('LifecycleStore', () => {
 
       // Different session IDs under same project
       mockNats.simulateReceive(
-        'mclaude.users.user-1.projects.project-1.lifecycle.session-abc',
+        'mclaude.users.user-1.hosts.local.projects.project-1.lifecycle.session-abc',
         { type: 'session_created', sessionId: 'session-abc' } as unknown as LifecycleEvent,
       )
       mockNats.simulateReceive(
-        'mclaude.users.user-1.projects.project-1.lifecycle.session-xyz',
+        'mclaude.users.user-1.hosts.local.projects.project-1.lifecycle.session-xyz',
         { type: 'session_stopped', sessionId: 'session-xyz' } as unknown as LifecycleEvent,
       )
       expect(events).toHaveLength(2)
@@ -127,7 +127,7 @@ describe('LifecycleStore', () => {
       store.onLifecycleEvent(e => events.push(e))
 
       // Publish raw malformed bytes
-      mockNats.publish('mclaude.users.user-1.projects.project-1.lifecycle.session-1', new TextEncoder().encode('not-json'))
+      mockNats.publish('mclaude.users.user-1.hosts.local.projects.project-1.lifecycle.session-1', new TextEncoder().encode('not-json'))
       // Should not throw, and no events delivered
       expect(events).toHaveLength(0)
       store.stop()

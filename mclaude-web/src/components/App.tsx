@@ -17,17 +17,22 @@ import { Settings } from './Settings'
 import { TokenUsage } from './TokenUsage'
 import { UserManagement } from './UserManagement'
 
-// ── Hash routing (ADR-0024: typed slugs) ─────────────────────────────────
-// Session hash format: #s/{uslug}/{pslug}/{sslug} (new, slug-based)
-// Legacy format: #s/{sessionId} (UUID, kept for backward compat)
-function getRoute(): { screen: string; sessionId?: string } {
+// ── Hash routing (ADR-0024 + ADR-0035: typed slugs + host-scoped) ─────────
+// Session hash format: #u/{uslug}/h/{hslug}/p/{pslug}/s/{sslug} (new, host-scoped)
+// Legacy slug format: #s/{uslug}/{pslug}/{sslug} (backward compat)
+// Legacy UUID format: #s/{sessionId} (UUID, kept for backward compat)
+function getRoute(): { screen: string; sessionId?: string; hostSlug?: string } {
   const hash = window.location.hash.slice(1) // remove leading #
   if (!hash || hash === '/') return { screen: 'dashboard' }
   if (hash === 'settings') return { screen: 'settings' }
   if (hash === 'usage') return { screen: 'usage' }
   if (hash === 'users') return { screen: 'users' }
-  // New slug-based format: s/{uslug}/{pslug}/{sslug}
-  const slugSessionMatch = /^s\/([a-z0-9][a-z0-9-]*)\/(.[a-z0-9-]*)\/(.[a-z0-9-]*)$/.exec(hash)
+  if (hash === 'hosts') return { screen: 'hosts' }
+  // ADR-0035 host-scoped format: u/{uslug}/h/{hslug}/p/{pslug}/s/{sslug}
+  const hostScopedMatch = /^u\/([a-z0-9][a-z0-9-]*)\/h\/([a-z0-9][a-z0-9-]*)\/p\/([a-z0-9][a-z0-9-]*)\/s\/([a-z0-9][a-z0-9-]*)$/.exec(hash)
+  if (hostScopedMatch) return { screen: 'session', sessionId: hostScopedMatch[4], hostSlug: hostScopedMatch[2] }
+  // Legacy slug format: s/{uslug}/{pslug}/{sslug}
+  const slugSessionMatch = /^s\/([a-z0-9][a-z0-9-]*)\/([a-z0-9][a-z0-9-]*)\/([a-z0-9][a-z0-9-]*)$/.exec(hash)
   if (slugSessionMatch) return { screen: 'session', sessionId: slugSessionMatch[3] }
   // Legacy UUID format: s/{uuid-or-id}
   const sessionMatch = /^s\/(.+)$/.exec(hash)
@@ -404,8 +409,10 @@ export function App() {
     const uslug = authState.userSlug ?? authState.userId
     if (!uslug) return
     // Check if current hash is already in slug format: s/{uslug}/{pslug}/{sslug}
+    const rewriteProject = sessionStore.projects.get(session.projectId)
+    const hslug = session.hostSlug ?? rewriteProject?.hostSlug ?? 'local'
     const currentHash = window.location.hash.slice(1)
-    const expectedHash = `s/${uslug}/${session.projectSlug}/${session.slug}`
+    const expectedHash = `u/${uslug}/h/${hslug}/p/${session.projectSlug}/s/${session.slug}`
     if (currentHash !== expectedHash) {
       // Use replaceState so the slug URL doesn't create an extra history entry
       history.replaceState(null, '', `#${expectedHash}`)
@@ -425,6 +432,7 @@ export function App() {
     const session = sessionStore?.resolveSession(route.sessionId!)
     const project = session ? sessionStore?.projects.get(session.projectId) : undefined
     const resolvedUserSlug = authState.userSlug ?? authState.userId
+    const resolvedHostSlug = project?.hostSlug ?? session?.hostSlug ?? route.hostSlug ?? 'local'
     const resolvedProjectSlug = project?.slug ?? resolvedProjectId
     const resolvedSessionSlug = session?.slug ?? route.sessionId!
     const store = new EventStore({
@@ -433,16 +441,17 @@ export function App() {
       projectId: resolvedProjectId,
       sessionId: route.sessionId,
       userSlug: resolvedUserSlug,
+      hostSlug: resolvedHostSlug,
       projectSlug: resolvedProjectSlug ?? undefined,
       sessionSlug: resolvedSessionSlug,
     })
     // Start from replayFromSeq in KV — skips events before last clear/compaction (spec: plan-client-architecture.md)
     const replayFromSeq = session?.replayFromSeq ?? undefined
     store.start(replayFromSeq)
-    const vm = new ConversationVM(store, sessionStore, natsClient, authState.userId, resolvedProjectId, route.sessionId, resolvedUserSlug, resolvedProjectSlug ?? resolvedProjectId)
-    const lifecycle = new LifecycleStore(natsClient, authState.userId, resolvedProjectId, resolvedUserSlug, resolvedProjectSlug ?? resolvedProjectId)
+    const vm = new ConversationVM(store, sessionStore, natsClient, authState.userId, resolvedProjectId, route.sessionId, resolvedUserSlug, resolvedHostSlug, resolvedProjectSlug ?? resolvedProjectId)
+    const lifecycle = new LifecycleStore(natsClient, authState.userId, resolvedProjectId, resolvedUserSlug, resolvedHostSlug, resolvedProjectSlug ?? resolvedProjectId)
     lifecycle.start()
-    const tvm = new TerminalVM(natsClient, authState.userId, resolvedProjectId, resolvedUserSlug, resolvedProjectSlug ?? resolvedProjectId)
+    const tvm = new TerminalVM(natsClient, authState.userId, resolvedProjectId, resolvedUserSlug, resolvedHostSlug, resolvedProjectSlug ?? resolvedProjectId)
     setEventStore(store)
     setConversationVM(vm)
     setTerminalVm(tvm)

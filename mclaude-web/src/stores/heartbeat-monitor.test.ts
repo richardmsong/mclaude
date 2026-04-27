@@ -31,7 +31,7 @@ describe('HeartbeatMonitor', () => {
     it('returns true immediately after a recent heartbeat', () => {
       monitor.start()
       const now = new Date().toISOString()
-      mockNats.kvSet('mclaude-heartbeats', 'user-1.project-1', makeHeartbeat(now))
+      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', makeHeartbeat(now))
       expect(monitor.isHealthy('project-1')).toBe(true)
     })
 
@@ -39,7 +39,7 @@ describe('HeartbeatMonitor', () => {
       monitor.start()
       // Timestamp 90s in the past
       const old = new Date(Date.now() - 90_000).toISOString()
-      mockNats.kvSet('mclaude-heartbeats', 'user-1.project-1', makeHeartbeat(old))
+      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', makeHeartbeat(old))
       expect(monitor.isHealthy('project-1')).toBe(false)
     })
   })
@@ -51,7 +51,7 @@ describe('HeartbeatMonitor', () => {
       monitor.onHealthChanged((pid, h) => changes.push({ projectId: pid, healthy: h }))
 
       const now = new Date().toISOString()
-      mockNats.kvSet('mclaude-heartbeats', 'user-1.project-1', makeHeartbeat(now))
+      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', makeHeartbeat(now))
 
       expect(changes).toHaveLength(1)
       expect(changes[0]!.projectId).toBe('project-1')
@@ -65,7 +65,7 @@ describe('HeartbeatMonitor', () => {
 
       // Start with a recent heartbeat — healthy
       const now = new Date().toISOString()
-      mockNats.kvSet('mclaude-heartbeats', 'user-1.project-1', makeHeartbeat(now))
+      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', makeHeartbeat(now))
       expect(changes.find(c => c.healthy === true)).toBeDefined()
 
       // Advance time past threshold (60s) + check interval (1s)
@@ -82,11 +82,11 @@ describe('HeartbeatMonitor', () => {
       monitor.onHealthChanged((_, h) => changes.push({ healthy: h }))
 
       const now = new Date().toISOString()
-      mockNats.kvSet('mclaude-heartbeats', 'user-1.project-1', makeHeartbeat(now))
+      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', makeHeartbeat(now))
       const countAfterFirst = changes.length
 
       // Same timestamp — health should stay the same
-      mockNats.kvSet('mclaude-heartbeats', 'user-1.project-1', makeHeartbeat(now))
+      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', makeHeartbeat(now))
       // No new change event since health didn't change (still healthy)
       expect(changes.length).toBe(countAfterFirst)
     })
@@ -99,7 +99,7 @@ describe('HeartbeatMonitor', () => {
       unsub()
 
       const now = new Date().toISOString()
-      mockNats.kvSet('mclaude-heartbeats', 'user-1.project-1', makeHeartbeat(now))
+      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', makeHeartbeat(now))
       expect(changes).toHaveLength(0)
     })
   })
@@ -111,7 +111,7 @@ describe('HeartbeatMonitor', () => {
       monitor.onHealthChanged((_, h) => changes.push({ healthy: h }))
 
       const now = new Date().toISOString()
-      mockNats.kvSet('mclaude-heartbeats', 'user-1.project-1', makeHeartbeat(now))
+      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', makeHeartbeat(now))
 
       monitor.stop()
 

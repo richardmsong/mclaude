@@ -1,6 +1,6 @@
 import type { INATSClient, LifecycleEvent } from '@/types'
 import { subjLifecycleWildcard } from '@/lib/subj'
-import type { UserSlug, ProjectSlug } from '@/lib/slug'
+import type { UserSlug, HostSlug, ProjectSlug } from '@/lib/slug'
 
 export type LifecycleListener = (event: LifecycleEvent) => void
 
@@ -14,13 +14,15 @@ export class LifecycleStore {
     projectId: string,
     /** User slug for subject construction (ADR-0024). Falls back to userId when absent. */
     private readonly userSlug: string = userId,
+    /** Host slug for subject construction (ADR-0035). Falls back to 'local' when absent. */
+    private readonly hostSlug: string = 'local',
     /** Project slug for subject construction (ADR-0024). Falls back to projectId when absent. */
     private readonly projectSlug: string = projectId,
   ) {}
 
   start(): void {
     this.stop()
-    const subject = subjLifecycleWildcard(this.userSlug as UserSlug, this.projectSlug as ProjectSlug)
+    const subject = subjLifecycleWildcard(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug)
     this._unsubscribe = this.natsClient.subscribe(subject, (msg) => {
       try {
         const event = JSON.parse(new TextDecoder().decode(msg.data)) as LifecycleEvent

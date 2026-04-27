@@ -21,7 +21,7 @@ describe('TerminalVM', () => {
   describe('createTerminal', () => {
     it('requests terminal creation via api.terminal.create and returns terminalId', async () => {
       mockNats.requestHandlers.set(
-        'mclaude.users.user-1.projects.project-1.api.terminal.create',
+        'mclaude.users.user-1.hosts.local.projects.project-1.api.terminal.create',
         () => enc.encode(JSON.stringify({ terminalId: 'term-1' })),
       )
 
@@ -34,19 +34,19 @@ describe('TerminalVM', () => {
 
     it('publishes to mclaude.{userId}.{projectId}.api.terminal.create with cwd', async () => {
       mockNats.requestHandlers.set(
-        'mclaude.users.user-1.projects.project-1.api.terminal.create',
+        'mclaude.users.user-1.hosts.local.projects.project-1.api.terminal.create',
         () => enc.encode(JSON.stringify({ terminalId: 'term-2' })),
       )
 
       await vm.createTerminal('/tmp')
-      const req = mockNats.requests.find(r => r.subject === 'mclaude.users.user-1.projects.project-1.api.terminal.create')
+      const req = mockNats.requests.find(r => r.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.api.terminal.create')
       expect(req).toBeDefined()
       expect(parsePublished(req!.data)).toMatchObject({ cwd: '/tmp' })
     })
 
     it('subscribes to terminal output after creation', async () => {
       mockNats.requestHandlers.set(
-        'mclaude.users.user-1.projects.project-1.api.terminal.create',
+        'mclaude.users.user-1.hosts.local.projects.project-1.api.terminal.create',
         () => enc.encode(JSON.stringify({ terminalId: 'term-3' })),
       )
 
@@ -54,7 +54,7 @@ describe('TerminalVM', () => {
       const received: Uint8Array[] = []
       vm.onOutput(id, data => received.push(data))
 
-      const outputSubject = `mclaude.users.user-1.projects.project-1.api.terminal.${id}.output`
+      const outputSubject = `mclaude.users.user-1.hosts.local.projects.project-1.api.terminal.${id}.output`
       mockNats.simulateReceive(outputSubject, 'hello from pty')
       expect(received).toHaveLength(1)
     })
@@ -63,7 +63,7 @@ describe('TerminalVM', () => {
   describe('deleteTerminal', () => {
     it('requests terminal deletion via api.terminal.delete', async () => {
       mockNats.requestHandlers.set(
-        'mclaude.users.user-1.projects.project-1.api.terminal.create',
+        'mclaude.users.user-1.hosts.local.projects.project-1.api.terminal.create',
         () => enc.encode(JSON.stringify({ terminalId: 'term-del' })),
       )
       const id = await vm.createTerminal()
@@ -72,7 +72,7 @@ describe('TerminalVM', () => {
       await vm.deleteTerminal(id)
 
       expect(vm.terminals).toHaveLength(0)
-      const req = mockNats.requests.find(r => r.subject === 'mclaude.users.user-1.projects.project-1.api.terminal.delete')
+      const req = mockNats.requests.find(r => r.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.api.terminal.delete')
       expect(req).toBeDefined()
       expect(parsePublished(req!.data)).toMatchObject({ terminalId: id })
     })
@@ -83,7 +83,7 @@ describe('TerminalVM', () => {
       const data = enc.encode('\x04') // Ctrl+D
       vm.sendInput('term-1', data)
 
-      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.projects.project-1.api.terminal.term-1.input')
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.api.terminal.term-1.input')
       expect(pub).toBeDefined()
       expect(pub!.data).toEqual(data)
     })
@@ -93,7 +93,7 @@ describe('TerminalVM', () => {
     it('publishes resize event to api.terminal.resize', () => {
       vm.resize('term-1', 24, 80)
 
-      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.projects.project-1.api.terminal.resize')
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.api.terminal.resize')
       expect(pub).toBeDefined()
       expect(parsePublished(pub!.data)).toMatchObject({ terminalId: 'term-1', rows: 24, cols: 80 })
     })
@@ -102,7 +102,7 @@ describe('TerminalVM', () => {
   describe('onOutput', () => {
     it('delivers output to all registered listeners for that terminal', async () => {
       mockNats.requestHandlers.set(
-        'mclaude.users.user-1.projects.project-1.api.terminal.create',
+        'mclaude.users.user-1.hosts.local.projects.project-1.api.terminal.create',
         () => enc.encode(JSON.stringify({ terminalId: 'term-out' })),
       )
       const id = await vm.createTerminal()
@@ -112,14 +112,14 @@ describe('TerminalVM', () => {
       vm.onOutput(id, d => received1.push(d))
       vm.onOutput(id, d => received2.push(d))
 
-      mockNats.simulateReceive(`mclaude.users.user-1.projects.project-1.api.terminal.${id}.output`, 'data')
+      mockNats.simulateReceive(`mclaude.users.user-1.hosts.local.projects.project-1.api.terminal.${id}.output`, 'data')
       expect(received1).toHaveLength(1)
       expect(received2).toHaveLength(1)
     })
 
     it('unsubscribe stops listener from receiving output', async () => {
       mockNats.requestHandlers.set(
-        'mclaude.users.user-1.projects.project-1.api.terminal.create',
+        'mclaude.users.user-1.hosts.local.projects.project-1.api.terminal.create',
         () => enc.encode(JSON.stringify({ terminalId: 'term-unsub' })),
       )
       const id = await vm.createTerminal()
@@ -128,7 +128,7 @@ describe('TerminalVM', () => {
       const unsub = vm.onOutput(id, d => received.push(d))
       unsub()
 
-      mockNats.simulateReceive(`mclaude.users.user-1.projects.project-1.api.terminal.${id}.output`, 'data')
+      mockNats.simulateReceive(`mclaude.users.user-1.hosts.local.projects.project-1.api.terminal.${id}.output`, 'data')
       expect(received).toHaveLength(0)
     })
   })

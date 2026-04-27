@@ -21,15 +21,16 @@ import {
   kvKeyProject,
   kvKeyProjectsForUser,
   kvKeyUserClusters,
-  kvKeyLaptop,
-  kvKeyHeartbeatsForUser,
+  kvKeyHost,
+  kvKeyHostsForUser,
   kvKeyJob,
 } from './subj'
-import type { UserSlug, ProjectSlug, SessionSlug, ClusterSlug } from './slug'
+import type { UserSlug, HostSlug, ProjectSlug, SessionSlug, ClusterSlug } from './slug'
 
 // ── Type-safe test slugs ──────────────────────────────────────────────────────
 // These casts are intentional — in tests we bypass the brand constructors.
 const U = 'alice-gmail' as UserSlug
+const H = 'mbp16' as HostSlug
 const P = 'mclaude' as ProjectSlug
 const S = 's-42' as SessionSlug
 const C = 'us-west' as ClusterSlug
@@ -49,72 +50,72 @@ describe('NATS subject builders', () => {
     })
   })
 
-  describe('project-scoped API subjects', () => {
+  describe('host+project-scoped API subjects (ADR-0035)', () => {
     it('subjSessionsInput matches spec', () => {
-      expect(subjSessionsInput(U, P)).toBe(
-        'mclaude.users.alice-gmail.projects.mclaude.api.sessions.input',
+      expect(subjSessionsInput(U, H, P)).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.api.sessions.input',
       )
     })
 
     it('subjSessionsControl matches spec', () => {
-      expect(subjSessionsControl(U, P)).toBe(
-        'mclaude.users.alice-gmail.projects.mclaude.api.sessions.control',
+      expect(subjSessionsControl(U, H, P)).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.api.sessions.control',
       )
     })
 
     it('subjSessionsCreate matches spec', () => {
-      expect(subjSessionsCreate(U, P)).toBe(
-        'mclaude.users.alice-gmail.projects.mclaude.api.sessions.create',
+      expect(subjSessionsCreate(U, H, P)).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.api.sessions.create',
       )
     })
 
     it('subjSessionsDelete matches spec', () => {
-      expect(subjSessionsDelete(U, P)).toBe(
-        'mclaude.users.alice-gmail.projects.mclaude.api.sessions.delete',
+      expect(subjSessionsDelete(U, H, P)).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.api.sessions.delete',
       )
     })
 
     it('subjSessionsRestart matches spec', () => {
-      expect(subjSessionsRestart(U, P)).toBe(
-        'mclaude.users.alice-gmail.projects.mclaude.api.sessions.restart',
+      expect(subjSessionsRestart(U, H, P)).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.api.sessions.restart',
       )
     })
 
     it('subjTerminal(create) matches spec', () => {
-      expect(subjTerminal(U, P, 'create')).toBe(
-        'mclaude.users.alice-gmail.projects.mclaude.api.terminal.create',
+      expect(subjTerminal(U, H, P, 'create')).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.api.terminal.create',
       )
     })
 
     it('subjTerminalWildcard matches spec wildcard pattern', () => {
-      expect(subjTerminalWildcard(U, P)).toBe(
-        'mclaude.users.alice-gmail.projects.mclaude.api.terminal.>',
+      expect(subjTerminalWildcard(U, H, P)).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.api.terminal.>',
       )
     })
   })
 
-  describe('events and lifecycle subjects', () => {
+  describe('events and lifecycle subjects (ADR-0035)', () => {
     it('subjEvents matches spec', () => {
-      expect(subjEvents(U, P, S)).toBe(
-        'mclaude.users.alice-gmail.projects.mclaude.events.s-42',
+      expect(subjEvents(U, H, P, S)).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.events.s-42',
       )
     })
 
     it('subjEventsApi uses _api sentinel', () => {
-      expect(subjEventsApi(U, P)).toBe(
-        'mclaude.users.alice-gmail.projects.mclaude.events._api',
+      expect(subjEventsApi(U, H, P)).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.events._api',
       )
     })
 
     it('subjLifecycle matches spec', () => {
-      expect(subjLifecycle(U, P, S)).toBe(
-        'mclaude.users.alice-gmail.projects.mclaude.lifecycle.s-42',
+      expect(subjLifecycle(U, H, P, S)).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.lifecycle.s-42',
       )
     })
 
     it('subjLifecycleWildcard matches spec wildcard pattern', () => {
-      expect(subjLifecycleWildcard(U, P)).toBe(
-        'mclaude.users.alice-gmail.projects.mclaude.lifecycle.>',
+      expect(subjLifecycleWildcard(U, H, P)).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.lifecycle.>',
       )
     })
   })
@@ -136,7 +137,7 @@ describe('NATS subject builders', () => {
   describe('typed-literal structure invariants', () => {
     it('user-scoped subjects always start with mclaude.users.{uslug}', () => {
       expect(subjProjectsCreate(U)).toMatch(/^mclaude\.users\.alice-gmail\./)
-      expect(subjSessionsInput(U, P)).toMatch(/^mclaude\.users\.alice-gmail\./)
+      expect(subjSessionsInput(U, H, P)).toMatch(/^mclaude\.users\.alice-gmail\./)
     })
 
     it('cluster-scoped subjects always start with mclaude.clusters.{cslug}', () => {
@@ -151,42 +152,44 @@ describe('NATS subject builders', () => {
       expect(tokens[2]).toBe('alice-gmail')
     })
 
-    it('reserved word "projects" appears as literal between user and project slugs', () => {
-      const s = subjSessionsInput(U, P)
+    it('host-scoped subjects contain .hosts.{hslug}. between user and project', () => {
+      const s = subjSessionsInput(U, H, P)
       const tokens = s.split('.')
-      expect(tokens[3]).toBe('projects')
-      expect(tokens[4]).toBe('mclaude')
+      expect(tokens[3]).toBe('hosts')
+      expect(tokens[4]).toBe('mbp16')
+      expect(tokens[5]).toBe('projects')
+      expect(tokens[6]).toBe('mclaude')
     })
   })
 })
 
-describe('KV key builders', () => {
-  it('kvKeySession: {uslug}.{pslug}.{sslug}', () => {
-    expect(kvKeySession(U, P, S)).toBe('alice-gmail.mclaude.s-42')
+describe('KV key builders (ADR-0035)', () => {
+  it('kvKeySession: {uslug}.{hslug}.{pslug}.{sslug}', () => {
+    expect(kvKeySession(U, H, P, S)).toBe('alice-gmail.mbp16.mclaude.s-42')
   })
 
   it('kvKeySessionsForUser: {uslug}.>', () => {
     expect(kvKeySessionsForUser(U)).toBe('alice-gmail.>')
   })
 
-  it('kvKeyProject: {uslug}.{pslug}', () => {
-    expect(kvKeyProject(U, P)).toBe('alice-gmail.mclaude')
+  it('kvKeyProject: {uslug}.{hslug}.{pslug}', () => {
+    expect(kvKeyProject(U, H, P)).toBe('alice-gmail.mbp16.mclaude')
   })
 
-  it('kvKeyProjectsForUser: {uslug}.*', () => {
-    expect(kvKeyProjectsForUser(U)).toBe('alice-gmail.*')
+  it('kvKeyProjectsForUser: {uslug}.>', () => {
+    expect(kvKeyProjectsForUser(U)).toBe('alice-gmail.>')
   })
 
   it('kvKeyUserClusters: {uslug}', () => {
     expect(kvKeyUserClusters(U)).toBe('alice-gmail')
   })
 
-  it('kvKeyLaptop: {uslug}.{hostname}', () => {
-    expect(kvKeyLaptop(U, 'my-macbook-pro')).toBe('alice-gmail.my-macbook-pro')
+  it('kvKeyHost: {uslug}.{hslug} (renamed from kvKeyLaptop)', () => {
+    expect(kvKeyHost(U, H)).toBe('alice-gmail.mbp16')
   })
 
-  it('kvKeyHeartbeatsForUser: {uslug}.*', () => {
-    expect(kvKeyHeartbeatsForUser(U)).toBe('alice-gmail.*')
+  it('kvKeyHostsForUser: {uslug}.*', () => {
+    expect(kvKeyHostsForUser(U)).toBe('alice-gmail.*')
   })
 
   it('kvKeyJob: {uslug}.{jobId}', () => {

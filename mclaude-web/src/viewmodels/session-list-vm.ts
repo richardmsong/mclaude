@@ -8,7 +8,7 @@ import {
   subjSessionsRestart,
   subjEventsApi,
 } from '@/lib/subj'
-import type { UserSlug, ProjectSlug } from '@/lib/slug'
+import type { UserSlug, HostSlug, ProjectSlug } from '@/lib/slug'
 
 const FILTER_PROJECT_KEY = 'mclaude.filterProjectId'
 
@@ -35,6 +35,8 @@ export interface SessionVM {
   stateSince: string
   /** Raw CLI flags string passed at session create/restart. Empty string if none. */
   extraFlags: string
+  /** Host slug from session KV (ADR-0035). */
+  hostSlug: string
 }
 
 export interface ProjectVM {
@@ -43,6 +45,8 @@ export interface ProjectVM {
   status: string
   healthy: boolean
   sessions: SessionVM[]
+  /** Host slug from project KV (ADR-0035). Falls back to 'local'. */
+  hostSlug: string
 }
 
 export interface ProjectGroup {
@@ -80,6 +84,7 @@ export class SessionListVM {
       name: p.name,
       status: p.status,
       healthy: this.heartbeatMonitor.isHealthy(p.id),
+      hostSlug: p.hostSlug ?? 'local',
       sessions: this.sessionStore.getSessionsForProject(p.id).map(s => ({
         id: s.id,
         name: s.name,
@@ -91,6 +96,7 @@ export class SessionListVM {
         hasPendingPermission: Object.keys(s.pendingControls).length > 0,
         stateSince: s.stateSince,
         extraFlags: s.extraFlags ?? '',
+        hostSlug: s.hostSlug ?? p.hostSlug ?? 'local',
       })),
     }))
   }
@@ -164,10 +170,11 @@ export class SessionListVM {
 
   async createSession(projectId: string, branch: string, name: string, opts?: { extraFlags?: string }): Promise<string> {
     const requestId = crypto.randomUUID()
-    // ADR-0024: use slug-based subject. Fall back to projectId if no slug available yet.
+    // ADR-0035: use host-scoped subject. Resolve hostSlug + pslug from project KV.
     const project = this.sessionStore.projects.get(projectId)
     const pslug = (project?.slug ?? projectId) as ProjectSlug
-    const subject = subjSessionsCreate(this.userSlug as UserSlug, pslug)
+    const hslug = (project?.hostSlug ?? 'local') as HostSlug
+    const subject = subjSessionsCreate(this.userSlug as UserSlug, hslug, pslug)
     const payload = {
       projectId,
       branch,
@@ -201,7 +208,7 @@ export class SessionListVM {
 
       // Error: temporary core NATS sub on project-level _api subject
       unsubErr = this.natsClient.subscribe(
-        subjEventsApi(this.userSlug as UserSlug, pslug),
+        subjEventsApi(this.userSlug as UserSlug, hslug, pslug),
         (msg) => {
           try {
             const event = JSON.parse(new TextDecoder().decode(msg.data)) as { type?: string; request_id?: string; error?: string }
@@ -223,7 +230,8 @@ export class SessionListVM {
     if (!session) return
     const delProject = this.sessionStore.projects.get(session.projectId)
     const delPslug = (delProject?.slug ?? session.projectId) as ProjectSlug
-    const subject = subjSessionsDelete(this.userSlug as UserSlug, delPslug)
+    const delHslug = (delProject?.hostSlug ?? session.hostSlug ?? 'local') as HostSlug
+    const subject = subjSessionsDelete(this.userSlug as UserSlug, delHslug, delPslug)
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify({ sessionId })))
   }
 
@@ -232,7 +240,8 @@ export class SessionListVM {
     if (!session) return
     const rstProject = this.sessionStore.projects.get(session.projectId)
     const rstPslug = (rstProject?.slug ?? session.projectId) as ProjectSlug
-    const subject = subjSessionsRestart(this.userSlug as UserSlug, rstPslug)
+    const rstHslug = (rstProject?.hostSlug ?? session.hostSlug ?? 'local') as HostSlug
+    const subject = subjSessionsRestart(this.userSlug as UserSlug, rstHslug, rstPslug)
     const payload = {
       sessionId,
       ...(opts?.extraFlags !== undefined ? { extraFlags: opts.extraFlags } : {}),

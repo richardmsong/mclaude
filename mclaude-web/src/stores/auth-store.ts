@@ -1,4 +1,4 @@
-import type { IAuthClient, INATSClient, AuthTokens } from '@/types'
+import type { IAuthClient, INATSClient, AuthTokens, HostInfo, LoginProject } from '@/types'
 import { logger } from '@/logger'
 
 export type AuthStatus = 'unauthenticated' | 'authenticated' | 'refreshing' | 'expired'
@@ -27,6 +27,41 @@ export class AuthStore {
   get state(): AuthState {
     return this._state
   }
+
+  // ── ADR-0035 accessors ──────────────────────────────────────────────────
+
+  /** All hosts from the login response (ADR-0035). Empty if not yet logged in. */
+  getHosts(): HostInfo[] {
+    return this._tokens?.hosts ?? []
+  }
+
+  /** All projects from the login response (ADR-0035). Empty if not yet logged in. */
+  getProjects(): LoginProject[] {
+    return this._tokens?.projects ?? []
+  }
+
+  /** Cluster-type hosts derived from hosts (ADR-0035). No separate clusters array. */
+  getClusters(): HostInfo[] {
+    return this.getHosts().filter(h => h.type === 'cluster')
+  }
+
+  /** Current JWT (ADR-0035). Null if not yet logged in. */
+  getJwt(): string | null {
+    return this._tokens?.jwt ?? null
+  }
+
+  /** Current NKey seed (ADR-0035). Null if not yet logged in. */
+  getNkeySeed(): string | null {
+    return this._tokens?.nkeySeed ?? null
+  }
+
+  /** Resolve hostSlug for a given projectSlug from login response projects. */
+  resolveHostSlug(projectSlug: string): string | undefined {
+    const proj = this.getProjects().find(p => p.slug === projectSlug)
+    return proj?.hostSlug
+  }
+
+  // ── Login / Logout ──────────────────────────────────────────────────────
 
   async login(email: string, password: string): Promise<void> {
     const tokens = await this.authClient.login(email, password)
