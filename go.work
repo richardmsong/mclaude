@@ -5,6 +5,7 @@ use (
 	./mclaude-common
 	./mclaude-connector
 	./mclaude-control-plane
+	./mclaude-controller-local
 	./mclaude-relay
 	./mclaude-session-agent
 )
