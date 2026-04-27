@@ -1,8 +1,9 @@
 # ADR: Fix mclaude-worker Helm Chart Bootstrap
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-04-27: accepted
+- 2026-04-27: implemented — worker NATS Running with leaf-node auth, trust chain from hub
 
 ## Overview
 
