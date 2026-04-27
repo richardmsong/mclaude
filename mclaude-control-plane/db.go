@@ -19,7 +19,28 @@ type User struct {
 	Email        string
 	Name         string
 	PasswordHash string // bcrypt — empty for SSO-only accounts
+	OAuthID      *string
+	IsAdmin      bool
 	CreatedAt    time.Time
+}
+
+// Host is a row from the hosts table. Per ADR-0035, this is the single source
+// of truth for both BYOH machines and K8s clusters.
+type Host struct {
+	ID            string
+	UserID        string
+	Slug          string
+	Name          string
+	Type          string  // 'machine' or 'cluster'
+	Role          string  // 'owner' or 'user'
+	JsDomain      *string // NULL for machine hosts
+	LeafURL       *string // NULL for machine hosts
+	AccountJWT    *string // NULL for machine hosts
+	DirectNATSURL *string // Optional even for cluster hosts
+	PublicKey     *string
+	UserJWT       *string
+	CreatedAt     time.Time
+	LastSeenAt    *time.Time
 }
 
 // ConnectDB opens a pgxpool connection to the given DSN and verifies connectivity.
@@ -58,10 +79,10 @@ func (db *DB) Migrate(ctx context.Context) error {
 // GetUserByEmail looks up a user by email address. Returns nil, nil if not found.
 func (db *DB) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	row := db.pool.QueryRow(ctx,
-		`SELECT id, email, name, password_hash, created_at FROM users WHERE email = $1`,
+		`SELECT id, email, name, password_hash, oauth_id, is_admin, created_at FROM users WHERE email = $1`,
 		email)
 	u := &User{}
-	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.CreatedAt)
+	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.OAuthID, &u.IsAdmin, &u.CreatedAt)
 	if err != nil {
 		if err.Error() == "no rows in result set" {
 			return nil, nil
@@ -74,10 +95,10 @@ func (db *DB) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 // GetUserByID looks up a user by ID. Returns nil, nil if not found.
 func (db *DB) GetUserByID(ctx context.Context, id string) (*User, error) {
 	row := db.pool.QueryRow(ctx,
-		`SELECT id, email, name, password_hash, created_at FROM users WHERE id = $1`,
+		`SELECT id, email, name, password_hash, oauth_id, is_admin, created_at FROM users WHERE id = $1`,
 		id)
 	u := &User{}
-	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.CreatedAt)
+	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.OAuthID, &u.IsAdmin, &u.CreatedAt)
 	if err != nil {
 		if err.Error() == "no rows in result set" {
 			return nil, nil
@@ -110,8 +131,10 @@ type Project struct {
 	ID            string
 	UserID        string
 	Name          string
+	Slug          string
 	GitURL        string
 	Status        string
+	HostID        *string // nullable during migration; NOT NULL for new installs
 	GitIdentityID *string
 	CreatedAt     time.Time
 }
@@ -136,7 +159,7 @@ func (db *DB) CreateProjectWithIdentity(ctx context.Context, id, userID, name, g
 // GetProjectsByUser returns all projects owned by a user.
 func (db *DB) GetProjectsByUser(ctx context.Context, userID string) ([]*Project, error) {
 	rows, err := db.pool.Query(ctx,
-		`SELECT id, user_id, name, git_url, status, created_at, git_identity_id FROM projects WHERE user_id = $1 ORDER BY created_at`,
+		`SELECT id, user_id, name, slug, git_url, status, host_id, created_at, git_identity_id FROM projects WHERE user_id = $1 ORDER BY created_at`,
 		userID)
 	if err != nil {
 		return nil, fmt.Errorf("get projects: %w", err)
@@ -145,7 +168,7 @@ func (db *DB) GetProjectsByUser(ctx context.Context, userID string) ([]*Project,
 	var projects []*Project
 	for rows.Next() {
 		p := &Project{}
-		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.GitURL, &p.Status, &p.CreatedAt, &p.GitIdentityID); err != nil {
+		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Slug, &p.GitURL, &p.Status, &p.HostID, &p.CreatedAt, &p.GitIdentityID); err != nil {
 			return nil, err
 		}
 		projects = append(projects, p)
@@ -156,9 +179,9 @@ func (db *DB) GetProjectsByUser(ctx context.Context, userID string) ([]*Project,
 // GetProjectByID returns a project by ID, or nil if not found.
 func (db *DB) GetProjectByID(ctx context.Context, id string) (*Project, error) {
 	row := db.pool.QueryRow(ctx,
-		`SELECT id, user_id, name, git_url, status, created_at, git_identity_id FROM projects WHERE id = $1`, id)
+		`SELECT id, user_id, name, slug, git_url, status, host_id, created_at, git_identity_id FROM projects WHERE id = $1`, id)
 	p := &Project{}
-	err := row.Scan(&p.ID, &p.UserID, &p.Name, &p.GitURL, &p.Status, &p.CreatedAt, &p.GitIdentityID)
+	err := row.Scan(&p.ID, &p.UserID, &p.Name, &p.Slug, &p.GitURL, &p.Status, &p.HostID, &p.CreatedAt, &p.GitIdentityID)
 	if err != nil {
 		if err.Error() == "no rows in result set" {
 			return nil, nil
@@ -311,22 +334,49 @@ func scanOAuthConnection(row interface {
 }
 
 // schema is the DDL applied on startup via Migrate().
+// Table creation order matters for foreign keys: users → hosts → projects → oauth_connections.
+// ALTER TABLE statements handle backward-compatible migration of existing installations.
+// The DO block backfills a default 'local' machine host per user and sets host_id on projects.
 const schema = `
+-- Base tables (for fresh installations, includes all ADR-0035 columns).
 CREATE TABLE IF NOT EXISTS users (
     id            TEXT PRIMARY KEY,
     email         TEXT UNIQUE NOT NULL,
     name          TEXT NOT NULL,
     password_hash TEXT NOT NULL DEFAULT '',
+    oauth_id      TEXT,
+    is_admin      BOOLEAN NOT NULL DEFAULT FALSE,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS hosts (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    slug            TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    type            TEXT NOT NULL CHECK (type IN ('machine', 'cluster')),
+    role            TEXT NOT NULL DEFAULT 'owner' CHECK (role IN ('owner', 'user')),
+    js_domain       TEXT,
+    leaf_url        TEXT,
+    account_jwt     TEXT,
+    direct_nats_url TEXT,
+    public_key      TEXT,
+    user_jwt        TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at    TIMESTAMPTZ,
+    UNIQUE (user_id, slug),
+    CHECK (type = 'machine' OR (js_domain IS NOT NULL AND leaf_url IS NOT NULL AND account_jwt IS NOT NULL))
+);
+
 CREATE TABLE IF NOT EXISTS projects (
-    id         TEXT PRIMARY KEY,
-    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    name       TEXT NOT NULL,
-    git_url    TEXT NOT NULL DEFAULT '',
-    status     TEXT NOT NULL DEFAULT 'active',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,
+    slug            TEXT NOT NULL DEFAULT '',
+    git_url         TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'active',
+    host_id         TEXT REFERENCES hosts(id) ON DELETE CASCADE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS oauth_connections (
@@ -345,5 +395,41 @@ CREATE TABLE IF NOT EXISTS oauth_connections (
     UNIQUE(user_id, base_url, provider_user_id)
 );
 
+-- Backward-compatible column additions for existing installations.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS oauth_id TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS slug TEXT NOT NULL DEFAULT '';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS host_id TEXT REFERENCES hosts(id) ON DELETE CASCADE;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS git_identity_id TEXT REFERENCES oauth_connections(id) ON DELETE SET NULL;
+
+-- Backfill: create a default 'local' machine host for every user that lacks one,
+-- then set host_id on orphaned projects.
+DO $$
+DECLARE
+    u RECORD;
+    hid TEXT;
+BEGIN
+    FOR u IN SELECT id FROM users WHERE NOT EXISTS (
+        SELECT 1 FROM hosts WHERE hosts.user_id = u.id AND hosts.slug = 'local'
+    ) LOOP
+        hid := gen_random_uuid()::text;
+        INSERT INTO hosts (id, user_id, slug, name, type, role)
+        VALUES (hid, u.id, 'local', 'Local Machine', 'machine', 'owner');
+    END LOOP;
+END
+$$;
+
+UPDATE projects p
+SET host_id = h.id
+FROM hosts h
+WHERE p.user_id = h.user_id AND h.slug = 'local' AND p.host_id IS NULL;
+
+-- Backfill slug from name for projects that have no slug set.
+UPDATE projects
+SET slug = lower(regexp_replace(name, '[^a-zA-Z0-9]+', '-', 'g'))
+WHERE slug IS NULL OR slug = '';
+
+-- Unique index: projects are unique-by-slug per user per host (ADR-0035).
+CREATE UNIQUE INDEX IF NOT EXISTS projects_user_id_host_id_slug_uniq ON projects (user_id, host_id, slug);
 `
