@@ -201,6 +201,9 @@ ingress:
   #   - secretName: mclaude-tls
   #     hosts:
   #       - mclaude.example.com
+  ## When set, ExternalDNS annotations are emitted on both Ingresses pointing
+  ## A records at this IP. Leave empty for non-k3d environments.
+  externalDnsTarget: ""
 
 ## ---------------------------------------------------------------------------
 ## Session Agent pod template (control-plane instantiates per project)

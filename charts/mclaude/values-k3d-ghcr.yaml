@@ -5,7 +5,7 @@
 ## ── control-plane: ghcr.io image ───────────────────────────────────────────
 controlPlane:
   ## External URL for the dev k3d cluster. Must match the ingress host scheme.
-  externalUrl: "https://dev.mclaude.local"
+  externalUrl: "https://dev.mclaude.richardmcsong.com"
   image:
     registry: ghcr.io
     repository: richardmsong/mclaude-control-plane
@@ -15,7 +15,7 @@ controlPlane:
     enabled: false
   config:
     devSeed: true
-    natsWsUrl: "wss://dev-nats.mclaude.local"
+    natsWsUrl: "wss://dev-nats.mclaude.richardmcsong.com"
   probe:
     liveness:
       path: /healthz
@@ -66,12 +66,12 @@ ingress:
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
     traefik.ingress.kubernetes.io/router.tls: "true"
-  host: "dev.mclaude.local"
-  natsHost: "dev-nats.mclaude.local"
+  host: "dev.mclaude.richardmcsong.com"
+  natsHost: "dev-nats.mclaude.richardmcsong.com"
   tls:
-    - secretName: mclaude-local-tls
+    - secretName: mclaude-richardmcsong-tls
       hosts:
-        - dev.mclaude.local
+        - dev.mclaude.richardmcsong.com
 
 ## ── pull secret for private ghcr.io images ─────────────────────────────────
 global:

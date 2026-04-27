@@ -192,13 +192,17 @@ jobs:
           echo "spa=$SPA_TAG" >> "$GITHUB_OUTPUT"
           echo "sa=$SA_TAG" >> "$GITHUB_OUTPUT"
 
-          PREVIEW_HOST="preview-${BRANCH_SLUG}.mclaude.internal"
+          PREVIEW_HOST="preview-${BRANCH_SLUG}.mclaude.richardmcsong.com"
+          PREVIEW_NATS_HOST="nats-preview-${BRANCH_SLUG}.mclaude.richardmcsong.com"
+          TS_IP=$(tailscale ip -4)
           echo "host=$PREVIEW_HOST" >> "$GITHUB_OUTPUT"
+          echo "nats_host=$PREVIEW_NATS_HOST" >> "$GITHUB_OUTPUT"
+          echo "ts_ip=$TS_IP" >> "$GITHUB_OUTPUT"
 
           echo "control-plane: ghcr.io/richardmsong/mclaude-control-plane:${CP_TAG}"
           echo "spa:           ghcr.io/richardmsong/mclaude-spa:${SPA_TAG}"
           echo "session-agent: ghcr.io/richardmsong/mclaude-session-agent:${SA_TAG}"
-          echo "preview URL:   http://${PREVIEW_HOST}"
+          echo "preview URL:   https://${PREVIEW_HOST}"
 
       - name: Helm deploy preview
         env:
@@ -206,6 +210,8 @@ jobs:
           SPA_TAG: ${{ steps.tags.outputs.spa }}
           SA_TAG: ${{ steps.tags.outputs.sa }}
           PREVIEW_HOST: ${{ steps.tags.outputs.host }}
+          PREVIEW_NATS_HOST: ${{ steps.tags.outputs.nats_host }}
+          TS_IP: ${{ steps.tags.outputs.ts_ip }}
         run: |
           helm upgrade --install "mclaude-preview-${BRANCH_SLUG}" ./charts/mclaude \
             --set controlPlane.image.tag="${CP_TAG}" \
@@ -215,12 +221,18 @@ jobs:
             --set "global.imagePullSecrets[0]=ghcr-pull-secret" \
             --set controlPlane.migrations.enabled=false \
             --set controlPlane.config.devSeed=true \
-            --set controlPlane.externalUrl="https://${PREVIEW_HOST}" \
+            --set "controlPlane.externalUrl=https://${PREVIEW_HOST}" \
+            --set "controlPlane.config.natsWsUrl=wss://${PREVIEW_NATS_HOST}" \
             --set ingress.className=traefik \
-            --set ingress.host="${PREVIEW_HOST}" \
+            --set "ingress.host=${PREVIEW_HOST}" \
+            --set "ingress.natsHost=${PREVIEW_NATS_HOST}" \
+            --set "ingress.tls[0].secretName=mclaude-richardmcsong-tls" \
+            --set "ingress.tls[0].hosts[0]=${PREVIEW_HOST}" \
+            --set "ingress.tls[0].hosts[1]=${PREVIEW_NATS_HOST}" \
+            --set "ingress.externalDnsTarget=${TS_IP}" \
             --namespace "mclaude-system" \
             --wait --timeout 5m \
             --force-conflicts
 
       - name: Preview URL
-        run: echo "✓ Preview live at http://${{ steps.tags.outputs.host }}"
+        run: echo "✓ Preview live at https://${{ steps.tags.outputs.host }}"

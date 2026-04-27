@@ -1,9 +1,10 @@
 # ADR: Let's Encrypt TLS on *.mclaude.richardmcsong.com
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-04-22: draft
 - 2026-04-22: accepted — paired with docs/spec-tls-certs.md (new), docs/charts-mclaude/spec-helm.md, docs/mclaude-control-plane/spec-control-plane.md, docs/feature-list.md, docs/_sidebar.md, docs/spec-doc-layout.md; docs/spec-tailscale-dns.md deleted
+- 2026-04-26: implemented — all scope CLEAN
 
 ## Overview
 

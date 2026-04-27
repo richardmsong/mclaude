@@ -10,9 +10,15 @@ metadata:
   labels:
     {{- include "mclaude.labels" . | nindent 4 }}
     app.kubernetes.io/component: nats-ws-ingress
-  {{- with .Values.ingress.annotations }}
+  {{- if or .Values.ingress.annotations .Values.ingress.externalDnsTarget }}
   annotations:
+    {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if .Values.ingress.externalDnsTarget }}
+    external-dns.alpha.kubernetes.io/hostname: {{ .Values.ingress.natsHost | quote }}
+    external-dns.alpha.kubernetes.io/target: {{ .Values.ingress.externalDnsTarget | quote }}
+    {{- end }}
   {{- end }}
 spec:
   {{- if .Values.ingress.className }}

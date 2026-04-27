@@ -12,7 +12,7 @@
       "WebSearch",
       "Agent",
       "mcp__playwright__*",
-      "mcp__docs__*"
+      "mcp__plugin_spec-driven-dev_docs__*"
     ],
     "deny": []
   },

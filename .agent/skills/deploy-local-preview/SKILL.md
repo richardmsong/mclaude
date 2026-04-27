@@ -1,14 +1,14 @@
 ---
 name: deploy-local-preview
-description: Stand up a local k3d cluster and deploy mclaude to it. Builds images locally if ghcr.io images are unavailable. HTTPS via Traefik with a self-signed wildcard cert. Idempotent — safe to re-run.
+description: Stand up a local k3d cluster and deploy mclaude to it. Builds images locally if ghcr.io images are unavailable. HTTPS via Let's Encrypt wildcard cert for *.mclaude.richardmcsong.com. DNS via DigitalOcean + ExternalDNS. Idempotent — safe to re-run.
 user_invocable: true
 ---
 
 # Deploy Local Preview (k3d)
 
-Deploys mclaude to a local k3d cluster. Tries ghcr.io images first, falls back to local Docker builds. HTTPS via Traefik with a self-signed wildcard cert for `*.mclaude.local`. DNS via CoreDNS inside the cluster, surfaced to the host via NodePort on UDP 5053.
+Deploys mclaude to a local k3d cluster. Tries ghcr.io images first, falls back to local Docker builds. HTTPS via a Let's Encrypt wildcard cert for `*.mclaude.richardmcsong.com` obtained by cert-manager using the DigitalOcean DNS-01 solver. DNS A records are managed by ExternalDNS pointing at the k3d host's Tailscale IP.
 
-**Ingress URL**: `https://dev.mclaude.local`
+**Ingress URL**: `https://dev.mclaude.richardmcsong.com`
 
 ---
 
@@ -28,16 +28,15 @@ These must be in place before running. Check, don't assume.
 
 ```bash
 which k3d kubectl helm gh    # all must exist on PATH
-which bw                     # bitwarden CLI (for OAuth token)
+which bw                     # bitwarden CLI (for OAuth + DO API token)
 docker info                  # Docker Desktop must be running
 gh auth status               # must be authenticated
 bw status                    # must be unlocked
 ```
 
-Also check that port 53 UDP is free on the host (used for DNS NodePort):
-```bash
-lsof -iUDP:5053 2>/dev/null | grep LISTEN && echo "port in use!" || echo "free"
-```
+Also ensure a Bitwarden entry exists with the **exact name**:
+`"DigitalOcean API token — richardmcsong.com zone edit"`
+holding a DigitalOcean API token scoped to write on the `richardmcsong.com` zone.
 
 ---
 
@@ -47,6 +46,7 @@ lsof -iUDP:5053 2>/dev/null | grep LISTEN && echo "port in use!" || echo "free"
 
 ```bash
 CLUSTER="mclaude-dev"
+TS_IP=$(tailscale ip -4)
 
 if k3d cluster list 2>/dev/null | grep -q "^${CLUSTER} "; then
   echo "cluster already exists, reusing"
@@ -72,7 +72,6 @@ EOF
   k3d cluster create "$CLUSTER" \
     --port "80:80@loadbalancer" \
     --port "443:443@loadbalancer" \
-    --port "53:30053/udp@server:0" \
     --registry-config /tmp/k3d-registries.yaml \
     --wait
 fi
@@ -134,123 +133,107 @@ else
 fi
 ```
 
-### Step 4 — TLS certificate for *.mclaude.local
+### Step 4 — cert-manager, ExternalDNS, and Let's Encrypt wildcard cert
 
-Generate a self-signed wildcard cert and install it as the default Traefik TLS cert:
+Pull the DigitalOcean API token from Bitwarden and apply it as a K8s Secret in both namespaces:
 
 ```bash
-# Generate self-signed wildcard cert (valid 10 years)
-openssl req -x509 -nodes -days 3650 \
-  -newkey rsa:2048 \
-  -keyout /tmp/mclaude-local.key \
-  -out /tmp/mclaude-local.crt \
-  -subj "/CN=*.mclaude.local" \
-  -addext "subjectAltName=DNS:*.mclaude.local,DNS:mclaude.local"
+DO_TOKEN=$(bw get password "DigitalOcean API token — richardmcsong.com zone edit")
 
-# Create K8s TLS secret
-kubectl create secret tls mclaude-local-tls \
-  --namespace mclaude-system \
-  --cert=/tmp/mclaude-local.crt \
-  --key=/tmp/mclaude-local.key \
+kubectl create namespace cert-manager --dry-run=client -o yaml | kubectl apply -f -
+kubectl create namespace external-dns --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl create secret generic digitalocean-api-token \
+  --namespace cert-manager \
+  --from-literal=access-token="${DO_TOKEN}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# Also install the cert in kube-system for Traefik's default TLS store
-kubectl create secret tls mclaude-local-tls \
-  --namespace kube-system \
-  --cert=/tmp/mclaude-local.crt \
-  --key=/tmp/mclaude-local.key \
+kubectl create secret generic digitalocean-api-token \
+  --namespace external-dns \
+  --from-literal=access-token="${DO_TOKEN}" \
   --dry-run=client -o yaml | kubectl apply -f -
-
-# Set as Traefik's default TLS cert via TLSStore CRD
-kubectl apply -f - <<'EOF'
-apiVersion: traefik.io/v1alpha1
-kind: TLSStore
-metadata:
-  name: default
-  namespace: kube-system
-spec:
-  defaultCertificate:
-    secretName: mclaude-local-tls
-EOF
 ```
 
-Trust the cert on macOS (tell the user to run this themselves — requires sudo):
+Install cert-manager (waits for CRDs to be registered before continuing):
 
 ```bash
-sudo security add-trusted-cert -d -r trustRoot \
-  -k /Library/Keychains/System.keychain /tmp/mclaude-local.crt
+helm repo add jetstack https://charts.jetstack.io --force-update
+helm upgrade --install cert-manager jetstack/cert-manager \
+  -n cert-manager --create-namespace \
+  --set installCRDs=true \
+  --wait
 ```
 
-> **Why self-signed**: k3d is local-only. The cert is trusted via macOS Keychain so browsers don't warn. The wildcard covers `dev.mclaude.local`, `dev-nats.mclaude.local`, and any future subdomains.
-
-### Step 5 — CoreDNS custom zone for *.mclaude.local
-
-Add a custom zone to the cluster's CoreDNS so `*.mclaude.local` resolves to the host's Tailscale IP:
+Install ExternalDNS (DigitalOcean provider, watches Ingresses):
 
 ```bash
-TS_IP=$(tailscale ip -4)
-
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: coredns-custom
-  namespace: kube-system
-data:
-  mclaude.local.server: |
-    mclaude.local. {
-        template IN A {
-            answer "{{ .Name }} 60 IN A ${TS_IP}"
-        }
-        log
-        errors
-    }
-EOF
-
-kubectl rollout restart deployment/coredns -n kube-system
-kubectl rollout status deployment/coredns -n kube-system --timeout=60s
+helm repo add external-dns https://kubernetes-sigs.github.io/external-dns/ --force-update
+helm upgrade --install external-dns external-dns/external-dns \
+  -n external-dns --create-namespace \
+  --set provider=digitalocean \
+  --set env[0].name=DO_TOKEN \
+  --set env[0].valueFrom.secretKeyRef.name=digitalocean-api-token \
+  --set env[0].valueFrom.secretKeyRef.key=access-token \
+  --set domainFilters[0]=mclaude.richardmcsong.com \
+  --set policy=sync \
+  --set txtOwnerId=mclaude-k3d \
+  --set sources[0]=ingress \
+  --wait
 ```
 
-Then create a NodePort service to expose CoreDNS on UDP 5053 (required because `kubectl port-forward` is TCP-only; DNS needs UDP):
+Apply the ClusterIssuer and wildcard Certificate CR:
 
 ```bash
 kubectl apply -f - <<'EOF'
-apiVersion: v1
-kind: Service
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
 metadata:
-  name: coredns-nodeport
-  namespace: kube-system
+  name: mclaude-letsencrypt-prod
 spec:
-  selector:
-    k8s-app: kube-dns
-  type: NodePort
-  ports:
-    - name: dns-udp
-      port: 53
-      targetPort: 53
-      nodePort: 30053
-      protocol: UDP
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: richard@richardmcsong.com
+    privateKeySecretRef:
+      name: mclaude-letsencrypt-prod-account
+    solvers:
+      - dns01:
+          digitalocean:
+            tokenSecretRef:
+              name: digitalocean-api-token
+              key: access-token
+EOF
+
+kubectl apply -f - <<'EOF'
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mclaude-richardmcsong-wildcard
+  namespace: mclaude-system
+spec:
+  secretName: mclaude-richardmcsong-tls
+  issuerRef:
+    kind: ClusterIssuer
+    name: mclaude-letsencrypt-prod
+  commonName: "*.mclaude.richardmcsong.com"
+  dnsNames:
+    - "*.mclaude.richardmcsong.com"
+    - "mclaude.richardmcsong.com"
+  duration: 2160h
+  renewBefore: 720h
 EOF
 ```
 
-### Step 6 — Tailscale split DNS (one-time)
+Wait for cert issuance (DNS-01 challenge + LE validation takes ~60–180s):
 
-The cluster's CoreDNS is exposed on host port 53. Configure Tailscale split DNS so all tailnet devices (including iPhones) resolve `*.mclaude.local` automatically:
-
-- Tailscale admin console → DNS → Nameservers → Add custom nameserver
-- IP: `<tailscale-ip>` (output of `tailscale ip -4`)
-- Restrict to domain: `mclaude.local`
-
-Verify:
 ```bash
-dig @$(tailscale ip -4) dev.mclaude.local +short   # should return Tailscale IP
+kubectl wait --for=condition=Ready \
+  certificate/mclaude-richardmcsong-wildcard \
+  -n mclaude-system --timeout=5m
 ```
 
-**Enterprise setup** (no Tailscale): DNS is handled by the relay/gateway — not covered here.
+> **No keychain step**: the Let's Encrypt cert is trusted by every device out of the box. No `sudo security add-trusted-cert` needed.
 
-> **Why `.local`**: The corporate PAC file (`corporate-proxy.pac`) explicitly bypasses the proxy for `shExpMatch(host, "*.local")`. Using `.internal` or `.mclaude.internal` goes through the proxy and the browser can't reach the cluster.
-
-### Step 7 — Build images locally (if ghcr.io images are unavailable)
+### Step 5 — Build images locally (if ghcr.io images are unavailable)
 
 Try pulling from ghcr.io first. If the images don't exist (no packages published yet), build locally and import into k3d:
 
@@ -298,7 +281,7 @@ fi
 
 > **Why local build**: ghcr.io packages may not exist yet (no CI publishing configured). The Go binaries are cross-compiled for linux/arm64 (k3d runs arm64 Linux nodes on Apple Silicon). The SPA Dockerfile does the npm build internally.
 
-### Step 8 — Helm install
+### Step 6 — Helm install
 
 The `values-k3d-ghcr.yaml` file in this repo is the authoritative values for this setup.
 
@@ -322,13 +305,14 @@ if [ -z "$OAUTH_TOKEN" ]; then
 fi
 ```
 
-Build the helm install command. TLS ingress annotations and the TLS secret name are in `values-k3d-ghcr.yaml` — no `--set` needed for those. If local images were built, override the image tags:
+Build the helm install command. TLS ingress settings and hostnames are in `values-k3d-ghcr.yaml`. The Tailscale IP is passed via `--set` since it is not known at file-edit time. If local images were built, override the image tags:
 
 ```bash
 HELM_ARGS=(
   -n mclaude-system
   -f charts/mclaude/values-k3d-ghcr.yaml
   --set "controlPlane.devOAuthToken=${OAUTH_TOKEN}"
+  --set "ingress.externalDnsTarget=${TS_IP}"
   --wait --timeout 5m
   --force-conflicts
 )
@@ -358,7 +342,7 @@ SDD_DEBUG=1 helm upgrade --install mclaude ./charts/mclaude "${HELM_ARGS[@]}"
 
 > **Why this matters**: without `devOAuthToken`, the session-agent pod has no Claude credentials. It receives messages and silently does nothing. The token flows: Helm → `DEV_OAUTH_TOKEN` env on control-plane → reconciler writes `oauth-token` key into `user-secrets` Secret → session-agent mounts it at `/home/node/.user-secrets/oauth-token`.
 
-### Step 9 — Wait for pods
+### Step 7 — Wait for pods
 
 ```bash
 kubectl rollout status deployment/mclaude-control-plane -n mclaude-system --timeout=120s
@@ -368,14 +352,14 @@ kubectl get pods -n mclaude-system
 
 All pods should show `1/1 Running`.
 
-### Step 10 — Verify
+### Step 8 — Verify
 
 ```bash
-# Ingress resolves (use -k if cert not yet trusted)
-curl -s https://dev.mclaude.local/healthz   # should return 200 from control-plane
+# Ingress resolves with valid Let's Encrypt cert
+curl -s https://dev.mclaude.richardmcsong.com/healthz   # should return 200
 
 # SPA
-open https://dev.mclaude.local
+open https://dev.mclaude.richardmcsong.com
 ```
 
 ---
@@ -395,9 +379,9 @@ k3d cluster delete mclaude-dev
 | `server gave HTTP response to HTTPS client` | kubeconfig has `0.0.0.0` as server address | Step 2: repoint server to `127.0.0.1:<port>` |
 | `ErrImagePull` / 403 from ghcr.io | GHCR token expired in registry config | Re-run Step 1 (delete cluster first if needed): `k3d cluster delete mclaude-dev` |
 | `ErrImagePull` / TLS handshake failure | Corporate proxy intercepts TLS | Ensure `insecure_skip_verify: true` is in `/tmp/k3d-registries.yaml` and cluster was created with `--registry-config` |
-| DNS doesn't resolve (`ping dev.mclaude.local` hangs) | `/etc/resolver/mclaude.local` missing or wrong port | Step 6: check file exists with `cat /etc/resolver/mclaude.local`; dig `@127.0.0.1 -p 5053 dev.mclaude.local` to test CoreDNS directly |
-| Browser can't connect despite DNS working | Corporate proxy intercepting (wrong TLD) | Ensure using `.local` not `.internal`; `.local` is already in PAC bypass list |
-| Login 405 | Ingress not routing to control-plane | Check `kubectl get ingress -n mclaude-system`; host must be `dev.mclaude.local` |
+| DNS doesn't resolve (`ping dev.mclaude.richardmcsong.com` hangs) | ExternalDNS hasn't written A records yet (takes ~1 min after Ingress is created) | `kubectl logs -n external-dns deploy/external-dns`; verify DO API token is valid; retry after 60s |
+| Certificate stuck in `Issuing` | DO API token invalid or DNS propagation slow | `kubectl describe certificate mclaude-richardmcsong-wildcard -n mclaude-system`; check cert-manager logs; verify token with `curl -X GET -H "Authorization: Bearer ${DO_TOKEN}" "https://api.digitalocean.com/v2/domains"` |
+| Login 405 | Ingress not routing to control-plane | Check `kubectl get ingress -n mclaude-system`; host must be `dev.mclaude.richardmcsong.com` |
 | NATS WebSocket fails | `natsUrl` in login response is internal cluster URL | Old binary — SPA falls back to `wss://<origin>/nats` which routes through Traefik correctly |
 | `projects` table missing (login succeeds but projects 500s) | pgx `pool.Exec` only runs first statement in multi-statement SQL | Manually create: `kubectl exec -it deploy/mclaude-postgres -n mclaude-system -- psql -U mclaude -c "CREATE TABLE IF NOT EXISTS projects (...)"` |
 | devSeed user not created (old binary) | Old ghcr.io `latest` predates devSeed feature | Manually seed: see "Manual DB Seeding" below |
