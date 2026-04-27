@@ -1,0 +1,60 @@
+## Pre-install hook Job: generates operator + account NKey pairs and JWTs,
+## writes them to Secret mclaude-system/operator-keys.
+## Also creates bootstrap admin row in Postgres when bootstrapAdminEmail is set.
+##
+## Idempotent: if the Secret already exists, exits without regenerating.
+##
+## Ref: ADR-0035 § "Operator/account key bootstrap"
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "mclaude-cp.fullname" . }}-init-keys-{{ .Release.Revision }}
+  namespace: {{ include "mclaude-cp.namespace" . }}
+  labels:
+    {{- include "mclaude-cp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: init-keys
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  template:
+    metadata:
+      labels:
+        {{- include "mclaude-cp.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: init-keys
+    spec:
+      restartPolicy: Never
+      {{- include "mclaude-cp.podSecurityContext" . | nindent 6 }}
+      {{- include "mclaude-cp.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ include "mclaude-cp.serviceAccountName" . }}
+      containers:
+        - name: init-keys
+          image: {{ include "mclaude-cp.image" (dict "imageValues" .Values.controlPlane.image "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.controlPlane.image.pullPolicy }}
+          {{- include "mclaude-cp.securityContext" . | nindent 10 }}
+          command: ["mclaude-cp", "init-keys"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgres.auth.existingSecret | default "mclaude-postgres" }}
+                  key: database-url
+                  optional: true
+            - name: OPERATOR_KEYS_SECRET
+              value: "operator-keys"
+            - name: NAMESPACE
+              value: {{ include "mclaude-cp.namespace" . | quote }}
+            {{- if .Values.controlPlane.bootstrapAdminEmail }}
+            - name: BOOTSTRAP_ADMIN_EMAIL
+              value: {{ .Values.controlPlane.bootstrapAdminEmail | quote }}
+            {{- end }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

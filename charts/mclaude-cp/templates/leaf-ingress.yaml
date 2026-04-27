@@ -1,0 +1,48 @@
+{{- if and .Values.ingress.enabled .Values.ingress.leafHost }}
+## Ingress for leaf-node port — exposes hub NATS leaf-node listener
+## for worker clusters connecting over WAN.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "mclaude-cp.fullname" . }}-leaf
+  namespace: {{ include "mclaude-cp.namespace" . }}
+  labels:
+    {{- include "mclaude-cp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats-leaf-ingress
+  {{- if or .Values.ingress.annotations .Values.ingress.externalDnsTarget }}
+  annotations:
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if .Values.ingress.externalDnsTarget }}
+    external-dns.alpha.kubernetes.io/hostname: {{ .Values.ingress.leafHost | quote }}
+    external-dns.alpha.kubernetes.io/target: {{ .Values.ingress.externalDnsTarget | quote }}
+    {{- end }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- range .Values.ingress.tls }}
+    - secretName: {{ .secretName }}
+      hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+        - {{ $.Values.ingress.leafHost | quote }}
+    {{- end }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.leafHost | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "mclaude-cp.fullname" . }}-nats
+                port:
+                  number: {{ .Values.nats.leafNodes.listenPort }}
+{{- end }}

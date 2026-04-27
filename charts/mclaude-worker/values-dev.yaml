@@ -1,0 +1,26 @@
+## Dev values for local k3d cluster (worker chart).
+## Single-cluster degenerate install — leaf URL points at in-cluster hub.
+
+clusterSlug: "local"
+jsDomain: "local"
+leafUrl: "nats-leaf://mclaude-cp-nats.mclaude-system.svc:7422"
+
+nats:
+  persistence:
+    enabled: false
+
+controller:
+  image:
+    registry: ""
+    repository: mclaude-controller-k8s
+    tag: "dev"
+    pullPolicy: Never
+
+sessionAgent:
+  image:
+    registry: ""
+    repository: mclaude-session-agent
+    tag: "dev"
+
+namespace:
+  name: mclaude-system

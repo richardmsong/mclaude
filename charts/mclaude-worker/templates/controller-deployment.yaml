@@ -1,0 +1,77 @@
+{{- if .Values.controller.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mclaude-worker.fullname" . }}-controller
+  namespace: {{ include "mclaude-worker.namespace" . }}
+  labels:
+    {{- include "mclaude-worker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      {{- include "mclaude-worker.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        {{- include "mclaude-worker.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: controller
+    spec:
+      {{- include "mclaude-worker.podSecurityContext" . | nindent 6 }}
+      {{- include "mclaude-worker.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ include "mclaude-worker.controllerServiceAccountName" . }}
+      containers:
+        - name: controller
+          image: {{ include "mclaude-worker.image" (dict "imageValues" .Values.controller.image "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.controller.image.pullPolicy }}
+          {{- include "mclaude-worker.securityContext" . | nindent 10 }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.controller.service.metricsPort }}
+              protocol: TCP
+          env:
+            - name: CLUSTER_SLUG
+              value: {{ required "clusterSlug is required" .Values.clusterSlug | quote }}
+            - name: JS_DOMAIN
+              value: {{ required "jsDomain is required" .Values.jsDomain | quote }}
+            - name: NATS_URL
+              value: "nats://{{ include "mclaude-worker.fullname" . }}-nats:{{ .Values.nats.service.clientPort }}"
+            - name: NATS_CREDENTIALS_PATH
+              value: /etc/nats/leaf-creds/leaf.creds
+            - name: LOG_LEVEL
+              value: {{ .Values.controller.config.logLevel | quote }}
+            - name: LEADER_ELECTION
+              value: "true"
+            - name: SESSION_AGENT_TEMPLATE_CM
+              value: {{ include "mclaude-worker.fullname" . }}-session-agent-template
+          volumeMounts:
+            - name: leaf-creds
+              mountPath: /etc/nats/leaf-creds
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+      volumes:
+        - name: leaf-creds
+          secret:
+            {{- if .Values.leafCreds.existingSecret }}
+            secretName: {{ .Values.leafCreds.existingSecret }}
+            {{- else }}
+            secretName: {{ include "mclaude-worker.fullname" . }}-nats-leaf-creds
+            {{- end }}
+{{- end }}

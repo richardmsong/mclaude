@@ -1,0 +1,101 @@
+{{- if .Values.nats.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "mclaude-cp.fullname" . }}-nats
+  namespace: {{ include "mclaude-cp.namespace" . }}
+  labels:
+    {{- include "mclaude-cp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+spec:
+  replicas: {{ .Values.nats.replicas }}
+  serviceName: {{ include "mclaude-cp.fullname" . }}-nats-headless
+  selector:
+    matchLabels:
+      {{- include "mclaude-cp.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: nats
+  template:
+    metadata:
+      labels:
+        {{- include "mclaude-cp.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: nats
+    spec:
+      {{- include "mclaude-cp.podSecurityContext" . | nindent 6 }}
+      {{- include "mclaude-cp.imagePullSecrets" . | nindent 6 }}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: nats
+          image: {{ include "mclaude-cp.image" (dict "imageValues" .Values.nats.image "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.nats.image.pullPolicy }}
+          {{- include "mclaude-cp.securityContext" . | nindent 10 }}
+          ports:
+            - name: client
+              containerPort: {{ .Values.nats.service.clientPort }}
+              protocol: TCP
+            - name: monitor
+              containerPort: {{ .Values.nats.service.monitorPort }}
+              protocol: TCP
+            - name: websocket
+              containerPort: {{ .Values.nats.service.websocketPort }}
+              protocol: TCP
+            - name: leafnodes
+              containerPort: {{ .Values.nats.leafNodes.listenPort }}
+              protocol: TCP
+          args:
+            - "-c"
+            - "/etc/nats/nats.conf"
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nats
+            - name: operator-keys
+              mountPath: /etc/nats/operator-keys
+              readOnly: true
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: monitor
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz?js-enabled=true
+              port: monitor
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.nats.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "mclaude-cp.fullname" . }}-nats-config
+        - name: operator-keys
+          secret:
+            secretName: operator-keys
+            optional: true
+        {{- if not .Values.nats.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.nats.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.nats.persistence.storageClass }}
+        storageClassName: {{ .Values.nats.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.nats.persistence.size }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,24 @@
+## ConfigMap containing the session-agent pod template.
+## The mclaude-controller-k8s reads this on startup and uses it as the template
+## when creating Deployment resources for each user project.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mclaude-worker.fullname" . }}-session-agent-template
+  namespace: {{ include "mclaude-worker.namespace" . }}
+  labels:
+    {{- include "mclaude-worker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: session-agent-template
+data:
+  image: {{ include "mclaude-worker.image" (dict "imageValues" .Values.sessionAgent.image "global" .Values.global) | quote }}
+  imagePullPolicy: {{ .Values.sessionAgent.image.pullPolicy | quote }}
+  terminationGracePeriodSeconds: {{ .Values.sessionAgent.terminationGracePeriodSeconds | quote }}
+  resourcesJson: |
+    {{ toJson .Values.sessionAgent.resources }}
+  projectPvcSize: {{ .Values.sessionAgent.persistence.size | quote }}
+  projectPvcStorageClass: {{ .Values.sessionAgent.persistence.storageClass | quote }}
+  nixPvcSize: {{ .Values.sessionAgent.nix.size | quote }}
+  nixPvcStorageClass: {{ .Values.sessionAgent.nix.storageClass | quote }}
+  corporateCAEnabled: {{ .Values.sessionAgent.corporateCA.enabled | quote }}
+  corporateCAConfigMapName: {{ .Values.sessionAgent.corporateCA.configMapName | quote }}
+  corporateCAConfigMapKey: {{ .Values.sessionAgent.corporateCA.configMapKey | quote }}

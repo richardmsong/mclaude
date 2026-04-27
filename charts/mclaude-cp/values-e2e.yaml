@@ -1,0 +1,72 @@
+## E2E test values for control-plane chart.
+## Python stubs for control-plane and SPA; real NATS + Postgres.
+
+nats:
+  persistence:
+    enabled: false
+
+postgres:
+  persistence:
+    enabled: false
+
+controlPlane:
+  image:
+    registry: docker.io
+    repository: python
+    tag: "3.12-alpine"
+    pullPolicy: IfNotPresent
+  migrations:
+    enabled: false
+  command:
+    - python3
+    - -c
+    - |
+      import http.server
+      class H(http.server.BaseHTTPRequestHandler):
+          def do_GET(self):
+              self.send_response(200)
+              self.send_header('Content-Type', 'application/json')
+              self.end_headers()
+              self.wfile.write(b'{"version":"0.1.0"}')
+          def do_POST(self):
+              self.do_GET()
+          def log_message(self, *args):
+              pass
+      print("stub control-plane listening on :8080", flush=True)
+      http.server.HTTPServer(('', 8080), H).serve_forever()
+  probe:
+    liveness:
+      path: /healthz
+    readiness:
+      path: /readyz
+
+spa:
+  image:
+    registry: docker.io
+    repository: python
+    tag: "3.12-alpine"
+    pullPolicy: IfNotPresent
+  containerPort: 8080
+  service:
+    port: 8080
+  command:
+    - python3
+    - -c
+    - |
+      import http.server
+      class H(http.server.BaseHTTPRequestHandler):
+          def do_GET(self):
+              self.send_response(200)
+              self.end_headers()
+              self.wfile.write(b'ok')
+          def log_message(self, *args):
+              pass
+      print("stub SPA listening on :8080", flush=True)
+      http.server.HTTPServer(('', 8080), H).serve_forever()
+
+namespace:
+  create: false
+  name: mclaude-system
+
+ingress:
+  enabled: false

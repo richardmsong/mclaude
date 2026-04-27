@@ -1,0 +1,51 @@
+{{- if .Values.controller.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "mclaude-worker.fullname" . }}-test-smoke
+  namespace: {{ include "mclaude-worker.namespace" . }}
+  labels:
+    {{- include "mclaude-worker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  {{- include "mclaude-worker.podSecurityContext" . | nindent 2 }}
+  restartPolicy: Never
+  {{- include "mclaude-worker.imagePullSecrets" . | nindent 2 }}
+  containers:
+    - name: smoke
+      image: {{ include "mclaude-worker.image" (dict "imageValues" .Values.tests.curl "global" .Values.global) }}
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 100
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      command:
+        - sh
+        - -c
+        - |
+          set -e
+          echo "Smoke: Worker NATS monitoring endpoint"
+          curl --fail --silent --show-error --max-time 10 \
+            "http://{{ include "mclaude-worker.fullname" . }}-nats:{{ .Values.nats.service.monitorPort }}/healthz"
+          echo ""
+          echo "Smoke: Controller metrics endpoint"
+          curl --fail --silent --show-error --max-time 10 \
+            "http://{{ include "mclaude-worker.fullname" . }}-controller-metrics:{{ .Values.controller.service.metricsPort }}/healthz"
+          echo ""
+          echo "All smoke tests passed."
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
+{{- end }}

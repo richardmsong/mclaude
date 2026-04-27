@@ -1,0 +1,33 @@
+## AKS Production values for worker chart.
+## managed-csi-premium storage.
+
+nats:
+  config:
+    maxFileStoreSize: "53687091200"
+  persistence:
+    storageClass: managed-csi-premium
+    size: 50Gi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+controller:
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+sessionAgent:
+  persistence:
+    storageClass: managed-csi-premium
+    size: 100Gi
+  nix:
+    storageClass: azurefile-csi-premium
+    size: 50Gi

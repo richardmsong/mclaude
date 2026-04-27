@@ -1,0 +1,61 @@
+{{- if .Values.nats.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mclaude-worker.fullname" . }}-nats-config
+  namespace: {{ include "mclaude-worker.namespace" . }}
+  labels:
+    {{- include "mclaude-worker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+data:
+  nats.conf: |
+    # mclaude Worker NATS Server Configuration
+    # Ref: ADR-0035 — leaf-linked to hub NATS, per-cluster JetStream domain
+    #
+    # Auth: same 3-tier operator → account → user JWT chain as the hub.
+    # Leaf-node remote connects to hub NATS using per-cluster credentials.
+
+    port: {{ .Values.nats.service.clientPort }}
+    http_port: {{ .Values.nats.service.monitorPort }}
+
+    # JetStream — per-cluster domain
+    jetstream {
+      store_dir: /data/jetstream
+      max_file_store: {{ .Values.nats.config.maxFileStoreSize }}
+      domain: {{ required "jsDomain is required" .Values.jsDomain }}
+    }
+
+    # WebSocket — session-agent and SPA direct connections
+    websocket {
+      port: {{ .Values.nats.service.websocketPort }}
+      no_tls: true
+    }
+
+    # Leaf-node remote — connect to hub NATS
+    leafnodes {
+      remotes: [
+        {
+          url: "{{ required "leafUrl is required" .Values.leafUrl }}"
+          credentials: "/etc/nats/leaf-creds/leaf.creds"
+        }
+      ]
+    }
+
+    # 3-tier JWT auth chain (same operator/account as hub)
+    operator: /etc/nats/trust/operatorJwt
+    resolver: MEMORY
+    resolver_preload: {
+      include /etc/nats/trust/accountPublicKey.conf
+    }
+
+    # Max message payload: 8MB for large tool results
+    max_payload: {{ .Values.nats.config.maxPayload }}
+
+    # Cluster name for JetStream
+    server_name: $POD_NAME
+
+    # Logging
+    logtime: true
+    debug: false
+    trace: false
+{{- end }}

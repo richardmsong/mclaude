@@ -1,0 +1,43 @@
+## Dev values for local k3d cluster (control-plane chart).
+## Images built locally (pullPolicy: Never). No persistence.
+
+nats:
+  persistence:
+    enabled: false
+
+postgres:
+  persistence:
+    enabled: false
+
+controlPlane:
+  image:
+    registry: ""
+    repository: mclaude-control-plane
+    tag: "dev"
+    pullPolicy: Never
+  migrations:
+    enabled: false
+  config:
+    devSeed: true
+  probe:
+    liveness:
+      path: /healthz
+    readiness:
+      path: /readyz
+
+spa:
+  image:
+    registry: ""
+    repository: mclaude-spa
+    tag: "dev"
+    pullPolicy: Never
+  containerPort: 8080
+  service:
+    port: 8080
+
+namespace:
+  create: false
+  name: mclaude-system
+
+ingress:
+  enabled: false

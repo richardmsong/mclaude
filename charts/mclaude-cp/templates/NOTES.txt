@@ -1,0 +1,46 @@
+mclaude control-plane (mclaude-cp) has been deployed.
+
+Components enabled:
+{{- if .Values.nats.enabled }}
+  - Hub NATS (leafnodes on port {{ .Values.nats.leafNodes.listenPort }})
+{{- end }}
+{{- if .Values.postgres.enabled }}
+  - PostgreSQL
+{{- end }}
+{{- if .Values.controlPlane.enabled }}
+  - Control Plane
+{{- end }}
+{{- if .Values.spa.enabled }}
+  - SPA
+{{- end }}
+
+Namespace: {{ include "mclaude-cp.namespace" . }}
+
+Pre-install Job `init-keys` generates operator + account NKey pairs into
+Secret `operator-keys` (if it doesn't already exist).
+
+Before the platform is functional, create the required Secrets:
+
+  # Postgres password
+  kubectl create secret generic mclaude-postgres \
+    --namespace {{ include "mclaude-cp.namespace" . }} \
+    --from-literal=postgres-password="$(openssl rand -base64 32)"
+
+  # Control-plane credentials (replace <POSTGRES_PASSWORD> with the password above)
+  kubectl create secret generic mclaude-control-plane \
+    --namespace {{ include "mclaude-cp.namespace" . }} \
+    --from-literal=admin-token="$(openssl rand -base64 32)" \
+    --from-literal=database-url="<POSTGRES_CONNECTION_STRING>"
+
+{{- if .Values.ingress.enabled }}
+  {{- if .Values.ingress.host }}
+
+The platform will be available at: https://{{ .Values.ingress.host }}
+  {{- end }}
+{{- end }}
+
+To deploy worker clusters, run:
+  mclaude cluster register --slug <name> --jetstream-domain <domain> \
+    --leaf-url nats-leaf://{{ include "mclaude-cp.fullname" . }}-nats.{{ include "mclaude-cp.namespace" . }}.svc:{{ .Values.nats.leafNodes.listenPort }}
+
+Then install mclaude-worker in each worker cluster with the returned credentials.

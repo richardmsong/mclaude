@@ -1,0 +1,159 @@
+## mclaude-worker Helm Chart Values
+## Worker chart: worker NATS (leaf-linked), controller-k8s, session-agent template.
+## Ref: ADR-0035, docs/charts-mclaude/spec-helm.md
+
+global:
+  ## Override image registry for all images (air-gapped mirror)
+  imageRegistry: ""
+  ## Global image pull secrets
+  imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+## Namespace to deploy into.
+namespace:
+  name: mclaude-system
+
+## ---------------------------------------------------------------------------
+## Required cluster identity (from `mclaude cluster register`)
+## ---------------------------------------------------------------------------
+
+## Cluster's canonical slug. Must match the slug used at registration.
+clusterSlug: ""
+
+## JetStream domain — must match --jetstream-domain from registration.
+jsDomain: ""
+
+## Hub leaf-node URL (e.g. nats-leaf://hub.mclaude.example:7422).
+## For single-cluster degenerate installs, use:
+##   nats-leaf://<cp-release>-nats.mclaude-system.svc:7422
+leafUrl: ""
+
+## Hub URL for SPA direct connections (informational, used for reference).
+hubUrl: ""
+
+## ---------------------------------------------------------------------------
+## Leaf-node credentials (from `mclaude cluster register`)
+## ---------------------------------------------------------------------------
+leafCreds:
+  ## Name of a pre-created Secret with key "leaf.creds".
+  ## If empty, the chart creates one from jwt/seed values below.
+  existingSecret: ""
+  ## Raw JWT for the leaf-node connection
+  jwt: ""
+  ## Raw NKey seed for the leaf-node connection
+  seed: ""
+
+## ---------------------------------------------------------------------------
+## Trust chain (from `mclaude cluster register`)
+## ---------------------------------------------------------------------------
+trustChain:
+  ## Operator JWT from cluster registration response
+  operatorJwt: ""
+  ## Account JWT from cluster registration response
+  accountJwt: ""
+  ## Account public key (NKey) — used in resolver_preload
+  accountPublicKey: ""
+
+## ---------------------------------------------------------------------------
+## Worker NATS JetStream
+## ---------------------------------------------------------------------------
+nats:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: nats
+    tag: "2.10.24-alpine"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 10Gi
+  config:
+    ## Max NATS message size (bytes). 8MB to handle large tool results.
+    maxPayload: "8388608"
+    ## JetStream max file store in bytes (10GB default).
+    maxFileStoreSize: "10737418240"
+  service:
+    clientPort: 4222
+    monitorPort: 8222
+    websocketPort: 8080
+
+## ---------------------------------------------------------------------------
+## Controller (mclaude-controller-k8s)
+## ---------------------------------------------------------------------------
+controller:
+  enabled: true
+  image:
+    registry: ghcr.io
+    repository: richardmsong/mclaude-controller-k8s
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  service:
+    metricsPort: 9091
+  config:
+    logLevel: info
+
+## ---------------------------------------------------------------------------
+## Session Agent pod template (controller instantiates per project)
+## ---------------------------------------------------------------------------
+sessionAgent:
+  image:
+    registry: ghcr.io
+    repository: richardmsong/mclaude-session-agent
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  terminationGracePeriodSeconds: 86400
+  persistence:
+    storageClass: ""
+    size: 50Gi
+  nix:
+    storageClass: ""
+    size: 20Gi
+  corporateCA:
+    enabled: false
+    bundleName: ""
+    configMapName: ""
+    configMapKey: "ca-certificates.crt"
+
+## ---------------------------------------------------------------------------
+## Helm test configuration
+## ---------------------------------------------------------------------------
+tests:
+  curl:
+    registry: docker.io
+    repository: curlimages/curl
+    tag: "8.11.1"
+    pullPolicy: IfNotPresent
+
+## ---------------------------------------------------------------------------
+## ServiceAccount for controller (ClusterRole for cross-namespace ops)
+## ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""

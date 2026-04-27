@@ -1,0 +1,12 @@
+{{- if and .Values.controlPlane.enabled .Values.controlPlane.providers }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mclaude-cp.fullname" . }}-provider-config
+  namespace: {{ include "mclaude-cp.namespace" . }}
+  labels:
+    {{- include "mclaude-cp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+data:
+  providers.json: {{ .Values.controlPlane.providers | toJson | quote }}
+{{- end }}

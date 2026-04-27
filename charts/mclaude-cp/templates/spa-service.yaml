@@ -1,0 +1,20 @@
+{{- if .Values.spa.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mclaude-cp.fullname" . }}-spa
+  namespace: {{ include "mclaude-cp.namespace" . }}
+  labels:
+    {{- include "mclaude-cp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: spa
+spec:
+  type: {{ .Values.spa.service.type }}
+  selector:
+    {{- include "mclaude-cp.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: spa
+  ports:
+    - name: http
+      port: {{ .Values.spa.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

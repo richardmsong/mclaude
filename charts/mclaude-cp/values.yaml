@@ -1,0 +1,197 @@
+## mclaude-cp Helm Chart Values
+## Control-plane chart: hub NATS, Postgres, control-plane, SPA.
+## Ref: ADR-0035, docs/charts-mclaude/spec-helm.md
+
+global:
+  ## Override image registry for all images (air-gapped mirror)
+  imageRegistry: ""
+  ## Global image pull secrets
+  imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+## Namespace to deploy into. Created if namespace.create is true.
+namespace:
+  create: true
+  name: mclaude-system
+
+## ---------------------------------------------------------------------------
+## Hub NATS JetStream
+## ---------------------------------------------------------------------------
+nats:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: nats
+    tag: "2.10.24-alpine"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 10Gi
+  config:
+    ## Max NATS message size (bytes). 8MB to handle large tool results.
+    maxPayload: "8388608"
+    ## JetStream max file store in bytes (10GB default).
+    maxFileStoreSize: "10737418240"
+  service:
+    clientPort: 4222
+    monitorPort: 8222
+    websocketPort: 8080
+  ## Leaf-node listen port for worker NATS clusters
+  leafNodes:
+    listenPort: 7422
+
+## ---------------------------------------------------------------------------
+## PostgreSQL
+## ---------------------------------------------------------------------------
+postgres:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: postgres
+    tag: "16.6-alpine"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 20Gi
+  auth:
+    database: mclaude
+    username: mclaude
+    ## Name of existing Secret with key "postgres-password"
+    existingSecret: "mclaude-postgres"
+    secretPasswordKey: "postgres-password"
+
+## ---------------------------------------------------------------------------
+## Control Plane
+## ---------------------------------------------------------------------------
+controlPlane:
+  enabled: true
+  ## External URL for this deployment (e.g. https://mclaude.internal).
+  ## Required — template fails at install time if unset.
+  externalUrl: ""
+  ## First admin's email. The init-keys Job pre-creates a users row with
+  ## is_admin=true. First OAuth login matching this email links identity.
+  bootstrapAdminEmail: ""
+  ## OAuth provider instances.
+  providers: []
+  image:
+    registry: ghcr.io
+    repository: richardmsong/mclaude-control-plane
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  service:
+    type: ClusterIP
+    httpPort: 8080
+    adminPort: 9090
+    metricsPort: 9091
+  config:
+    logLevel: info
+    jwtExpirySeconds: 28800
+    jwtRefreshThresholdSeconds: 900
+    devSeed: false
+    natsWsUrl: ""
+  ## Name of existing Secret containing:
+  ##   admin-token  — break-glass bearer token
+  ##   database-url — Postgres connection string
+  existingSecret: "mclaude-control-plane"
+  ## Dev OAuth token (for dev environments only)
+  devOAuthToken: ""
+  ## Override container command (e.g. for e2e stubs)
+  command: []
+  ## Whether to run dbmate schema migrations as an init container
+  migrations:
+    enabled: false
+  ## Health probe paths
+  probe:
+    liveness:
+      path: /healthz
+    readiness:
+      path: /readyz
+
+## ---------------------------------------------------------------------------
+## SPA (static web client)
+## ---------------------------------------------------------------------------
+spa:
+  enabled: true
+  image:
+    registry: ghcr.io
+    repository: richardmsong/mclaude-spa
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+  service:
+    type: ClusterIP
+    port: 80
+  containerPort: 8080
+  command: []
+
+## ---------------------------------------------------------------------------
+## Ingress
+## ---------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "8m"
+  ## Hostname for the platform
+  host: ""
+  ## Separate hostname for NATS WebSocket
+  natsHost: ""
+  ## Hostname for leaf-node ingress (cross-cluster WAN deployments)
+  leafHost: ""
+  tls: []
+  ## ExternalDNS A-record target override
+  externalDnsTarget: ""
+
+## ---------------------------------------------------------------------------
+## Helm test configuration
+## ---------------------------------------------------------------------------
+tests:
+  curl:
+    registry: docker.io
+    repository: curlimages/curl
+    tag: "8.11.1"
+    pullPolicy: IfNotPresent
+
+## ---------------------------------------------------------------------------
+## ServiceAccount for control-plane (no K8s permissions per ADR-0035)
+## ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""

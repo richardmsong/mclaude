@@ -1,0 +1,60 @@
+{{- if .Values.nats.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mclaude-cp.fullname" . }}-nats-config
+  namespace: {{ include "mclaude-cp.namespace" . }}
+  labels:
+    {{- include "mclaude-cp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+data:
+  nats.conf: |
+    # mclaude Hub NATS Server Configuration
+    # Ref: ADR-0035 — 3-tier operator → account → user JWT auth chain
+    #
+    # Subject structure (host-scoped, ADR-0035):
+    #   mclaude.users.{uslug}.hosts.{hslug}.>  — all host-scoped messages
+    #
+    # Auth: operator JWT + account JWT loaded from operator-keys Secret.
+    # Worker NATS clusters connect as leaf nodes on port 7422.
+
+    port: {{ .Values.nats.service.clientPort }}
+    http_port: {{ .Values.nats.service.monitorPort }}
+
+    # JetStream — event bus, KV state, replay
+    jetstream {
+      store_dir: /data/jetstream
+      max_file_store: {{ .Values.nats.config.maxFileStoreSize }}
+      domain: hub
+    }
+
+    # WebSocket — browser clients connect via /nats WebSocket proxy
+    websocket {
+      port: {{ .Values.nats.service.websocketPort }}
+      no_tls: true
+    }
+
+    # Leaf nodes — worker NATS clusters connect here
+    leafnodes {
+      listen: "0.0.0.0:{{ .Values.nats.leafNodes.listenPort }}"
+    }
+
+    # 3-tier JWT auth chain: operator → account → user
+    # operator-keys Secret is mounted at /etc/nats/operator-keys/
+    operator: /etc/nats/operator-keys/operatorJwt
+    resolver: MEMORY
+    resolver_preload: {
+      include /etc/nats/operator-keys/accountPublicKey.conf
+    }
+
+    # Max message payload: 8MB for large tool results
+    max_payload: {{ .Values.nats.config.maxPayload }}
+
+    # Cluster name for JetStream
+    server_name: $POD_NAME
+
+    # Logging
+    logtime: true
+    debug: false
+    trace: false
+{{- end }}

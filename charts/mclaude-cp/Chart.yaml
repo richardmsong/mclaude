@@ -1,0 +1,16 @@
+apiVersion: v2
+name: mclaude-cp
+description: >-
+  mclaude control-plane chart — hub NATS, Postgres, control-plane,
+  SPA, and operator/account NKey bootstrap.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - mclaude
+  - control-plane
+  - nats
+  - kubernetes
+maintainers:
+  - name: mclaude
+home: https://github.com/richardmsong/mclaude

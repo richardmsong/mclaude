@@ -1,0 +1,21 @@
+{{- if .Values.controller.enabled }}
+## Metrics-only service for the controller (Prometheus scrape target).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mclaude-worker.fullname" . }}-controller-metrics
+  namespace: {{ include "mclaude-worker.namespace" . }}
+  labels:
+    {{- include "mclaude-worker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mclaude-worker.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+  ports:
+    - name: metrics
+      port: {{ .Values.controller.service.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

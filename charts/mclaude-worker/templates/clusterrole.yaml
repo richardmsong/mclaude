@@ -1,0 +1,47 @@
+{{- if and .Values.serviceAccount.create .Values.controller.enabled }}
+## ClusterRole: the controller needs to manage namespaces, Deployments,
+## PVCs, Secrets, ServiceAccounts, Roles, and MCProject CRDs across namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "mclaude-worker.fullname" . }}-controller
+  labels:
+    {{- include "mclaude-worker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+rules:
+  ## Namespace management (user provisioning / deprovisioning)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  ## Pod management (read project pod status)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "delete"]
+  ## Deployment management (per-project session-agent deployments)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  ## PVC management (per-project data volumes)
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  ## Secret management (per-namespace NATS credentials)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  ## ConfigMap management (per-namespace user config seeds)
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  ## ServiceAccount + RBAC (per-namespace SA for session agents)
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  ## MCProject CRD (kubebuilder reconciler)
+  - apiGroups: ["mclaude.io"]
+    resources: ["mcprojects", "mcprojects/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+{{- end }}

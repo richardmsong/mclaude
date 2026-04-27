@@ -1,0 +1,23 @@
+mclaude worker (mclaude-worker) has been deployed.
+
+Cluster slug: {{ .Values.clusterSlug }}
+JetStream domain: {{ .Values.jsDomain }}
+Leaf URL: {{ .Values.leafUrl }}
+
+Components:
+{{- if .Values.nats.enabled }}
+  - Worker NATS (leaf-linked to hub, domain={{ .Values.jsDomain }})
+{{- end }}
+{{- if .Values.controller.enabled }}
+  - mclaude-controller-k8s
+{{- end }}
+
+Namespace: {{ include "mclaude-worker.namespace" . }}
+
+The worker NATS connects to the hub via leaf-node at {{ .Values.leafUrl }}.
+
+Prerequisites:
+  1. The mclaude-cp chart must be installed in the hub cluster.
+  2. Run `mclaude cluster register --slug {{ .Values.clusterSlug }}` against the hub
+     to obtain the leaf credentials and trust chain JWTs.
+  3. Provide those credentials via Helm values or a pre-created Secret.

@@ -1,0 +1,71 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "mclaude-cp.fullname" . }}
+  namespace: {{ include "mclaude-cp.namespace" . }}
+  labels:
+    {{- include "mclaude-cp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingress
+  {{- if or .Values.ingress.annotations .Values.ingress.externalDnsTarget }}
+  annotations:
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if .Values.ingress.externalDnsTarget }}
+    external-dns.alpha.kubernetes.io/hostname: {{ .Values.ingress.host | quote }}
+    external-dns.alpha.kubernetes.io/target: {{ .Values.ingress.externalDnsTarget | quote }}
+    {{- end }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- toYaml .Values.ingress.tls | nindent 4 }}
+  {{- end }}
+  rules:
+    - {{- if .Values.ingress.host }}
+      host: {{ .Values.ingress.host | quote }}
+      {{- end }}
+      http:
+        paths:
+          ## Auth + API + Admin + SCIM → control-plane
+          - path: /auth
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "mclaude-cp.fullname" . }}-control-plane
+                port:
+                  name: http
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "mclaude-cp.fullname" . }}-control-plane
+                port:
+                  name: http
+          - path: /admin
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "mclaude-cp.fullname" . }}-control-plane
+                port:
+                  name: http
+          - path: /scim
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "mclaude-cp.fullname" . }}-control-plane
+                port:
+                  name: http
+          ## SPA static files — catch-all
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "mclaude-cp.fullname" . }}-spa
+                port:
+                  name: http
+{{- end }}

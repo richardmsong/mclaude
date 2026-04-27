@@ -1,0 +1,48 @@
+## AKS Production values for control-plane chart.
+## managed-csi-premium storage, scaled replicas.
+
+nats:
+  config:
+    maxFileStoreSize: "53687091200"
+  persistence:
+    storageClass: managed-csi-premium
+    size: 50Gi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+
+postgres:
+  persistence:
+    storageClass: managed-csi-premium
+    size: 100Gi
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 4Gi
+
+controlPlane:
+  replicas: 2
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+spa:
+  replicas: 2
+
+ingress:
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
