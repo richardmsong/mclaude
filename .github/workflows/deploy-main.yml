@@ -198,9 +198,19 @@ jobs:
           IMAGE_TAG: ${{ needs.tag.outputs.image_tag }}
         run: |
           echo "Deploying worker at tag: ${IMAGE_TAG}"
+
+          # Read trust chain from hub's operator-keys Secret for single-cluster install
+          OPERATOR_JWT=$(kubectl get secret operator-keys -n mclaude-system -o jsonpath='{.data.operatorJwt}' | base64 -d)
+          ACCOUNT_JWT=$(kubectl get secret operator-keys -n mclaude-system -o jsonpath='{.data.accountJwt}' | base64 -d)
+          ACCOUNT_SEED=$(kubectl get secret operator-keys -n mclaude-system -o jsonpath='{.data.accountSeed}' | base64 -d)
+          RESOLVER_PRELOAD=$(kubectl get secret operator-keys -n mclaude-system -o jsonpath='{.data.resolverPreload}' | base64 -d)
+
           helm upgrade --install "mclaude-worker" ./charts/mclaude-worker \
             -f ./charts/mclaude-worker/values-k3d-ghcr.yaml \
             --set controller.image.tag="${IMAGE_TAG}" \
             --set sessionAgent.image.tag="${IMAGE_TAG}" \
+            --set trustChain.operatorJwt="${OPERATOR_JWT}" \
+            --set trustChain.accountJwt="${ACCOUNT_JWT}" \
+            --set trustChain.resolverPreload="${RESOLVER_PRELOAD}" \
             --namespace mclaude-system \
             --wait --timeout 5m

@@ -55,6 +55,8 @@ trustChain:
   accountJwt: ""
   ## Account public key (NKey) — used in resolver_preload
   accountPublicKey: ""
+  ## Preformatted resolver_preload content (both system + app account lines)
+  resolverPreload: ""
 
 ## ---------------------------------------------------------------------------
 ## Worker NATS JetStream

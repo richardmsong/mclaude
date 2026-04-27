@@ -36,7 +36,9 @@ data:
       remotes: [
         {
           url: "{{ required "leafUrl is required" .Values.leafUrl }}"
+          {{- if or .Values.leafCreds.existingSecret .Values.leafCreds.jwt }}
           credentials: "/etc/nats/leaf-creds/leaf.creds"
+          {{- end }}
         }
       ]
     }
@@ -45,7 +47,7 @@ data:
     operator: /etc/nats/trust/operatorJwt
     resolver: MEMORY
     resolver_preload: {
-      include /etc/nats/trust/accountPublicKey.conf
+      include trust/resolverPreload
     }
 
     # Max message payload: 8MB for large tool results
