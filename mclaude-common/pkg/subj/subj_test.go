@@ -14,7 +14,6 @@ var (
 	h = slug.MustParseHostSlug("mbp16")
 	p = slug.MustParseProjectSlug("my-project")
 	s = slug.MustParseSessionSlug("s-abc123")
-	c = slug.MustParseClusterSlug("us-west")
 )
 
 // --------------------------------------------------------------------------
@@ -63,18 +62,6 @@ func TestUserAPIProjectsUpdated(t *testing.T) {
 func TestUserQuota(t *testing.T) {
 	got := subj.UserQuota(u)
 	want := "mclaude.users.alice-gmail.quota"
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
-	}
-}
-
-// --------------------------------------------------------------------------
-// Host-scoped subject (ADR-0004)
-// --------------------------------------------------------------------------
-
-func TestUserHostStatus(t *testing.T) {
-	got := subj.UserHostStatus(u, h)
-	want := "mclaude.users.alice-gmail.hosts.mbp16.status"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -139,26 +126,6 @@ func TestUserHostProjectEvents(t *testing.T) {
 func TestUserHostProjectLifecycle(t *testing.T) {
 	got := subj.UserHostProjectLifecycle(u, h, p, s)
 	want := "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.lifecycle.s-abc123"
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
-	}
-}
-
-// --------------------------------------------------------------------------
-// Cluster-scoped subjects (unchanged)
-// --------------------------------------------------------------------------
-
-func TestClusterAPIProjectsProvision(t *testing.T) {
-	got := subj.ClusterAPIProjectsProvision(c)
-	want := "mclaude.clusters.us-west.api.projects.provision"
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
-	}
-}
-
-func TestClusterAPIStatus(t *testing.T) {
-	got := subj.ClusterAPIStatus(c)
-	want := "mclaude.clusters.us-west.api.status"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -251,8 +218,6 @@ func TestAllSpecSubjects(t *testing.T) {
 		{"mclaude.users.{u}.api.projects.create", subj.UserAPIProjectsCreate(u), "mclaude.users.alice-gmail.api.projects.create"},
 		{"mclaude.users.{u}.api.projects.updated", subj.UserAPIProjectsUpdated(u), "mclaude.users.alice-gmail.api.projects.updated"},
 		{"mclaude.users.{u}.quota", subj.UserQuota(u), "mclaude.users.alice-gmail.quota"},
-		// Host-level
-		{"mclaude.users.{u}.hosts.{h}.status", subj.UserHostStatus(u, h), "mclaude.users.alice-gmail.hosts.mbp16.status"},
 		// User+host+project-level API (ADR-0004)
 		{"mclaude.users.{u}.hosts.{h}.projects.{p}.api.sessions.input", subj.UserHostProjectAPISessionsInput(u, h, p), "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.sessions.input"},
 		{"mclaude.users.{u}.hosts.{h}.projects.{p}.api.sessions.control", subj.UserHostProjectAPISessionsControl(u, h, p), "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.sessions.control"},
@@ -262,9 +227,6 @@ func TestAllSpecSubjects(t *testing.T) {
 		// Events + lifecycle
 		{"mclaude.users.{u}.hosts.{h}.projects.{p}.events.{s}", subj.UserHostProjectEvents(u, h, p, s), "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.events.s-abc123"},
 		{"mclaude.users.{u}.hosts.{h}.projects.{p}.lifecycle.{s}", subj.UserHostProjectLifecycle(u, h, p, s), "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.lifecycle.s-abc123"},
-		// Cluster
-		{"mclaude.clusters.{c}.api.projects.provision", subj.ClusterAPIProjectsProvision(c), "mclaude.clusters.us-west.api.projects.provision"},
-		{"mclaude.clusters.{c}.api.status", subj.ClusterAPIStatus(c), "mclaude.clusters.us-west.api.status"},
 	}
 
 	for _, tc := range cases {

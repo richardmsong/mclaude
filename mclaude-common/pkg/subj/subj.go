@@ -58,20 +58,6 @@ func UserQuota(u slug.UserSlug) string {
 }
 
 // --------------------------------------------------------------------------
-// Host-scoped subjects (per ADR-0004)
-// --------------------------------------------------------------------------
-
-// UserHostStatus returns:
-//
-//	mclaude.users.{uslug}.hosts.{hslug}.status
-//
-// Publisher: daemon (machine hosts, heartbeat every 30s).
-// Subscriber: control-plane (presence tracking), SPA.
-func UserHostStatus(u slug.UserSlug, h slug.HostSlug) string {
-	return "mclaude.users." + string(u) + ".hosts." + string(h) + ".status"
-}
-
-// --------------------------------------------------------------------------
 // User+host+project-scoped API subjects (ADR-0004)
 // All project-scoped subjects include .hosts.{hslug}. between user and project.
 // --------------------------------------------------------------------------
@@ -142,28 +128,6 @@ func UserHostProjectEvents(u slug.UserSlug, h slug.HostSlug, p slug.ProjectSlug,
 // Publisher: session-agent, daemon. Subscriber: SPA, daemon (via MCLAUDE_LIFECYCLE stream).
 func UserHostProjectLifecycle(u slug.UserSlug, h slug.HostSlug, p slug.ProjectSlug, s slug.SessionSlug) string {
 	return "mclaude.users." + string(u) + ".hosts." + string(h) + ".projects." + string(p) + ".lifecycle." + string(s)
-}
-
-// --------------------------------------------------------------------------
-// Cluster-scoped subjects
-// --------------------------------------------------------------------------
-
-// ClusterAPIProjectsProvision returns:
-//
-//	mclaude.clusters.{cslug}.api.projects.provision
-//
-// Publisher: control-plane. Subscriber: worker controller (request/reply).
-func ClusterAPIProjectsProvision(c slug.ClusterSlug) string {
-	return "mclaude.clusters." + string(c) + ".api.projects.provision"
-}
-
-// ClusterAPIStatus returns:
-//
-//	mclaude.clusters.{cslug}.api.status
-//
-// Publisher: worker controller. Subscriber: control-plane.
-func ClusterAPIStatus(c slug.ClusterSlug) string {
-	return "mclaude.clusters." + string(c) + ".api.status"
 }
 
 // --------------------------------------------------------------------------

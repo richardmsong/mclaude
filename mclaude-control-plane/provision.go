@@ -19,6 +19,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+
+	mclnats "mclaude.io/common/pkg/nats"
 )
 
 // K8sProvisioner creates per-project Kubernetes resources (Namespace, Deployment, PVC)
@@ -343,7 +345,7 @@ func (p *K8sProvisioner) ensureUserSecrets(ctx context.Context, ns, userID strin
 		if existing.Data == nil {
 			existing.Data = make(map[string][]byte)
 		}
-		existing.Data["nats-creds"] = FormatNATSCredentials(jwt, seed)
+		existing.Data["nats-creds"] = mclnats.FormatNATSCredentials(jwt, seed)
 		_, err = p.client.CoreV1().Secrets(ns).Update(ctx, existing, metav1.UpdateOptions{})
 		return err
 	}
@@ -356,7 +358,7 @@ func (p *K8sProvisioner) ensureUserSecrets(ctx context.Context, ns, userID strin
 	if err != nil {
 		return fmt.Errorf("issue session-agent jwt for %s: %w", userID, err)
 	}
-	natsCreds := FormatNATSCredentials(jwt, seed)
+	natsCreds := mclnats.FormatNATSCredentials(jwt, seed)
 
 	_, err = p.client.CoreV1().Secrets(ns).Create(ctx, &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "user-secrets", Namespace: ns},

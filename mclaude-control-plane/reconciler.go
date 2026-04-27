@@ -33,6 +33,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	mclnats "mclaude.io/common/pkg/nats"
 )
 
 // MCProjectReconciler reconciles MCProject CRs.
@@ -249,7 +251,7 @@ func (r *MCProjectReconciler) reconcileSecrets(ctx context.Context, mcp *MCProje
 			if issueErr != nil {
 				return fmt.Errorf("issue session-agent jwt: %w", issueErr)
 			}
-			existingSecret.Data["nats-creds"] = FormatNATSCredentials(jwtStr, seed)
+			existingSecret.Data["nats-creds"] = mclnats.FormatNATSCredentials(jwtStr, seed)
 			needsUpdate = true
 		}
 		if r.devOAuthToken != "" && string(existingSecret.Data["oauth-token"]) != r.devOAuthToken {
@@ -269,7 +271,7 @@ func (r *MCProjectReconciler) reconcileSecrets(ctx context.Context, mcp *MCProje
 		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: "user-secrets", Namespace: userNs},
 			Data: map[string][]byte{
-				"nats-creds": FormatNATSCredentials(jwtStr, seed),
+				"nats-creds": mclnats.FormatNATSCredentials(jwtStr, seed),
 			},
 		}
 		if r.devOAuthToken != "" {

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/nats-io/nkeys"
+
+	mclnats "mclaude.io/common/pkg/nats"
 )
 
 // ---- Subject permission construction ----
@@ -326,7 +328,7 @@ func TestFormatNATSCredentials_Format(t *testing.T) {
 		t.Fatalf("IssueSessionAgentJWT: %v", err)
 	}
 
-	creds := FormatNATSCredentials(jwtStr, seed)
+	creds := mclnats.FormatNATSCredentials(jwtStr, seed)
 	credsStr := string(creds)
 
 	if !strings.Contains(credsStr, "-----BEGIN NATS USER JWT-----") {
@@ -353,7 +355,7 @@ func TestFormatNATSCredentials_SeedInBody(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
 
 	jwtStr, seed, _ := IssueSessionAgentJWT("seed-check-user", accountKP)
-	creds := FormatNATSCredentials(jwtStr, seed)
+	creds := mclnats.FormatNATSCredentials(jwtStr, seed)
 	credsStr := string(creds)
 
 	// Verify the seed appears in the creds file and round-trips correctly.
