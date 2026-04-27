@@ -1,7 +1,7 @@
 // Tests for cmd.RunSessionList.
 //
 // Covers: context defaults, flag overrides, @pslug short form,
-// invalid slug rejection, missing user/project slug errors,
+// invalid slug rejection, missing user/project/host slug errors,
 // and pkg/subj output correctness.
 package cmd_test
 
@@ -38,6 +38,7 @@ func TestSessionListContextDefaults(t *testing.T) {
 	ctxPath := writeContext(t, clicontext.Context{
 		UserSlug:    "alice-gmail",
 		ProjectSlug: "my-project",
+		HostSlug:    "my-laptop",
 	})
 
 	var out bytes.Buffer
@@ -52,9 +53,12 @@ func TestSessionListContextDefaults(t *testing.T) {
 	if result.ProjectSlug != "my-project" {
 		t.Errorf("ProjectSlug = %q; want my-project", result.ProjectSlug)
 	}
-	// KV prefix should be "{uslug}.{pslug}"
-	if result.KVKeyPrefix != "alice-gmail.my-project" {
-		t.Errorf("KVKeyPrefix = %q; want alice-gmail.my-project", result.KVKeyPrefix)
+	if result.HostSlug != "my-laptop" {
+		t.Errorf("HostSlug = %q; want my-laptop", result.HostSlug)
+	}
+	// KV prefix should be "{uslug}.{hslug}.{pslug}" per ADR-0004.
+	if result.KVKeyPrefix != "alice-gmail.my-laptop.my-project" {
+		t.Errorf("KVKeyPrefix = %q; want alice-gmail.my-laptop.my-project", result.KVKeyPrefix)
 	}
 }
 
@@ -64,6 +68,7 @@ func TestSessionListProjectFlagOverride(t *testing.T) {
 	ctxPath := writeContext(t, clicontext.Context{
 		UserSlug:    "alice-gmail",
 		ProjectSlug: "default-project",
+		HostSlug:    "my-laptop",
 	})
 
 	var out bytes.Buffer
@@ -86,7 +91,10 @@ func TestSessionListProjectFlagOverride(t *testing.T) {
 // ── @pslug short form ─────────────────────────────────────────────────────────
 
 func TestSessionListAtPrefixProjectFlag(t *testing.T) {
-	ctxPath := writeContext(t, clicontext.Context{UserSlug: "bob-rbc"})
+	ctxPath := writeContext(t, clicontext.Context{
+		UserSlug: "bob-rbc",
+		HostSlug: "bobs-mac",
+	})
 
 	var out bytes.Buffer
 	result, err := cmd.RunSessionList(cmd.SessionListFlags{
@@ -106,7 +114,10 @@ func TestSessionListAtPrefixProjectFlag(t *testing.T) {
 // ── Slug validation ───────────────────────────────────────────────────────────
 
 func TestSessionListInvalidProjectSlug(t *testing.T) {
-	ctxPath := writeContext(t, clicontext.Context{UserSlug: "alice-gmail"})
+	ctxPath := writeContext(t, clicontext.Context{
+		UserSlug: "alice-gmail",
+		HostSlug: "my-laptop",
+	})
 
 	var out bytes.Buffer
 	_, err := cmd.RunSessionList(cmd.SessionListFlags{
@@ -135,7 +146,10 @@ func TestSessionListInvalidUserSlug(t *testing.T) {
 
 func TestSessionListMissingUserSlug(t *testing.T) {
 	// Empty context, no flag — user slug must be required.
-	ctxPath := writeContext(t, clicontext.Context{ProjectSlug: "my-project"})
+	ctxPath := writeContext(t, clicontext.Context{
+		ProjectSlug: "my-project",
+		HostSlug:    "my-laptop",
+	})
 
 	var out bytes.Buffer
 	_, err := cmd.RunSessionList(cmd.SessionListFlags{ContextPath: ctxPath}, &out)
@@ -149,7 +163,10 @@ func TestSessionListMissingUserSlug(t *testing.T) {
 
 func TestSessionListMissingProjectSlug(t *testing.T) {
 	// User slug set, project slug missing.
-	ctxPath := writeContext(t, clicontext.Context{UserSlug: "alice-gmail"})
+	ctxPath := writeContext(t, clicontext.Context{
+		UserSlug: "alice-gmail",
+		HostSlug: "my-laptop",
+	})
 
 	var out bytes.Buffer
 	_, err := cmd.RunSessionList(cmd.SessionListFlags{ContextPath: ctxPath}, &out)
@@ -161,12 +178,30 @@ func TestSessionListMissingProjectSlug(t *testing.T) {
 	}
 }
 
+func TestSessionListMissingHostSlug(t *testing.T) {
+	// User slug + project slug set, host slug missing.
+	ctxPath := writeContext(t, clicontext.Context{
+		UserSlug:    "alice-gmail",
+		ProjectSlug: "my-project",
+	})
+
+	var out bytes.Buffer
+	_, err := cmd.RunSessionList(cmd.SessionListFlags{ContextPath: ctxPath}, &out)
+	if err == nil {
+		t.Error("RunSessionList: expected error when host slug is missing; got nil")
+	}
+	if !strings.Contains(err.Error(), "host slug required") {
+		t.Errorf("error %q; want 'host slug required'", err.Error())
+	}
+}
+
 // ── pkg/subj output ──────────────────────────────────────────────────────────
 
 func TestSessionListKVKeyPrefixShape(t *testing.T) {
 	ctxPath := writeContext(t, clicontext.Context{
 		UserSlug:    "richard-rbc",
 		ProjectSlug: "mclaude",
+		HostSlug:    "richards-mac",
 	})
 
 	var out bytes.Buffer
@@ -175,14 +210,14 @@ func TestSessionListKVKeyPrefixShape(t *testing.T) {
 		t.Fatalf("RunSessionList: %v", err)
 	}
 
-	// KV key must match the ADR-0024 format: {uslug}.{pslug}
-	wantKV := "richard-rbc.mclaude"
+	// KV key must match the ADR-0004 format: {uslug}.{hslug}.{pslug}
+	wantKV := "richard-rbc.richards-mac.mclaude"
 	if result.KVKeyPrefix != wantKV {
 		t.Errorf("KVKeyPrefix = %q; want %q", result.KVKeyPrefix, wantKV)
 	}
 
-	// Events subject must start with the correct typed-slug prefix.
-	wantEventsPrefix := "mclaude.users.richard-rbc.projects.mclaude.events."
+	// Events subject must include host slug per ADR-0004.
+	wantEventsPrefix := "mclaude.users.richard-rbc.hosts.richards-mac.projects.mclaude.events."
 	if !strings.HasPrefix(result.EventsSubject, wantEventsPrefix) {
 		t.Errorf("EventsSubject = %q; want prefix %q", result.EventsSubject, wantEventsPrefix)
 	}
@@ -194,6 +229,7 @@ func TestSessionListOutputContainsSlug(t *testing.T) {
 	ctxPath := writeContext(t, clicontext.Context{
 		UserSlug:    "alice-gmail",
 		ProjectSlug: "my-project",
+		HostSlug:    "my-laptop",
 	})
 
 	var out bytes.Buffer
@@ -208,5 +244,8 @@ func TestSessionListOutputContainsSlug(t *testing.T) {
 	}
 	if !strings.Contains(output, "my-project") {
 		t.Errorf("output %q missing project slug", output)
+	}
+	if !strings.Contains(output, "my-laptop") {
+		t.Errorf("output %q missing host slug", output)
 	}
 }

@@ -134,6 +134,18 @@ func ParseUserSlug(s string) (string, error) {
 	return s, nil
 }
 
+// ParseHostSlug parses s into a validated host slug string. Returns "" for
+// empty input.
+func ParseHostSlug(s string) (string, error) {
+	if s == "" {
+		return "", nil
+	}
+	if err := slug.Validate(s); err != nil {
+		return "", fmt.Errorf("invalid host slug %q: %w", s, err)
+	}
+	return s, nil
+}
+
 // --------------------------------------------------------------------------
 // Helpers
 // --------------------------------------------------------------------------
