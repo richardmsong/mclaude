@@ -151,7 +151,7 @@ No changes required — this package is already at the canonical 4-arg / 3-arg s
 - **SessionStore**: open per-cluster JetStream KV watch with `domain` from project's `jsDomain`; aggregate session lists across hosts.
 - **EventStore**: dual-NATS strategy. Hub connection always open. On project selection, attempt direct worker connection using `directNatsUrl`; fall back to hub-via-leaf if unreachable.
 - **Routes**: `/u/{uslug}/h/{hslug}/p/{pslug}/s/{sslug}` for project/session detail; host picker in dashboard; Settings → Hosts screen.
-- **Component-local spec required**: `docs/mclaude-web/spec-host-picker.md` is created in this commit (host picker UI behavior).
+- **Component-local spec required**: `docs/ui/mclaude-web/spec-host-picker.md` is created in this commit (host picker UI behavior). The `docs/ui/mclaude-web/` folder already exists for SPA-screen specs; the host picker joins the dashboard / session-detail / settings-web siblings.
 
 ### `mclaude-helm`
 
@@ -311,9 +311,9 @@ The `hosts` array is the single source of truth. SPA filters `hosts.filter(h => 
 - `docs/spec-state-schema.md` — `hosts` table DDL, `projects.host_id` column, NATS auth resolver config (3-tier JWT chain on hub + workers), JetStream domain config, `mclaude-hosts` bucket, removal of `mclaude-heartbeats` references, login response shape.
 - `docs/mclaude-control-plane/spec-control-plane.md` — project creation flow rewritten (NATS-based provisioning to controller, no K8s touch); admin endpoints for clusters; host endpoints; remove all K8s reconciler content.
 - `docs/mclaude-session-agent/spec-session-agent.md` — `HOST_SLUG` configuration; host-scoped subject patterns; remove `mclaude-laptops` references.
-- `docs/mclaude-web/spec-host-picker.md` — created (component-local spec for host picker UI).
-- `docs/mclaude-helm/spec-helm.md` — created or updated for the chart split (mclaude-cp vs mclaude-worker).
-- `docs/mclaude-controller/spec-controller.md` — created (covers both K8s and local variants).
+- `docs/ui/mclaude-web/spec-host-picker.md` — created (component-local spec for host picker UI; joins existing `docs/ui/mclaude-web/` SPA specs).
+- `docs/charts-mclaude/spec-helm.md` — updated for the chart split (mclaude-cp vs mclaude-worker). The existing single-chart spec is rewritten in place.
+- `docs/mclaude-controller/spec-controller.md` — created (new component folder; covers both K8s and local variants).
 
 **Components implementing the change:**
 - `mclaude-common` — only the move of `FormatNATSCredentials` into `pkg/nats/creds.go` (mclaude-common is already host-scoped).
