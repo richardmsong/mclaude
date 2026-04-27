@@ -1,9 +1,10 @@
 # ADR: CI/CD Migration to Split Helm Charts
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-04-26: draft
 - 2026-04-26: accepted
+- 2026-04-26: implemented
 
 ## Overview
 
