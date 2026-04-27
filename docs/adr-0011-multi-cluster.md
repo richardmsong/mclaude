@@ -1,14 +1,14 @@
 # Multi-Cluster Architecture
 
+> **Superseded by [ADR-0035](adr-0035-unified-host-architecture.md).**
+> This ADR's decisions are absorbed by the unified host architecture ADR. Read ADR-0035 for the current design. This document is retained as historical reference.
+
 **Status**: superseded
 **Status history**:
 - 2026-04-15: accepted
 - 2026-04-19: reverted to draft — retroactive accepted tag incorrect; implementation not confirmed, needs per-ADR review
 - 2026-04-20: partially superseded by ADR-0004 (BYOH) — registry/identity/RBAC model replaced by unified `hosts` table. Infrastructure topology (leaf nodes, hub NATS, JetStream domains, worker controller) preserved unchanged.
 - 2026-04-26: fully superseded by ADR-0035 (Unified Host Architecture). The surviving infrastructure topology is folded in; subjects are normalized to host-scoped form (no `mclaude.clusters.*` subjects); separate Helm chart split (`mclaude-cp` + `mclaude-worker`) is preserved.
-
-> Superseded by [ADR-0035](adr-0035-unified-host-architecture.md). This file remains for historical reference; the unified host model is the current source of truth.
-
 
 ## Overview
 
