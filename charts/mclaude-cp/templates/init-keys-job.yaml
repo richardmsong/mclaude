@@ -29,7 +29,7 @@ spec:
       restartPolicy: Never
       {{- include "mclaude-cp.podSecurityContext" . | nindent 6 }}
       {{- include "mclaude-cp.imagePullSecrets" . | nindent 6 }}
-      serviceAccountName: default
+      serviceAccountName: {{ include "mclaude-cp.fullname" . }}-init-keys
       containers:
         - name: init-keys
           image: {{ include "mclaude-cp.image" (dict "imageValues" .Values.controlPlane.image "global" .Values.global) }}
