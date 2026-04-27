@@ -16,11 +16,11 @@ func TestKVKeyConstruction(t *testing.T) {
 		sessionID string
 		want      string
 	}{
-		{"user-1", "proj-1", "sess-1", "user-1.proj-1.sess-1"},
-		{"alice", "myproject", "abc-123-def", "alice.myproject.abc-123-def"},
+		{"user-1", "proj-1", "sess-1", "user-1.local.proj-1.sess-1"},
+		{"alice", "myproject", "abc-123-def", "alice.local.myproject.abc-123-def"},
 	}
 	for _, tc := range cases {
-		got := sessionKVKey(slug.UserSlug(tc.userID), slug.ProjectSlug(tc.projectID), slug.SessionSlug(tc.sessionID))
+		got := sessionKVKey(slug.UserSlug(tc.userID), slug.HostSlug("local"), slug.ProjectSlug(tc.projectID), slug.SessionSlug(tc.sessionID))
 		if got != tc.want {
 			t.Errorf("sessionKVKey(%q,%q,%q) = %q, want %q",
 				tc.userID, tc.projectID, tc.sessionID, got, tc.want)
@@ -28,13 +28,6 @@ func TestKVKeyConstruction(t *testing.T) {
 	}
 }
 
-func TestHeartbeatKVKey(t *testing.T) {
-	got := heartbeatKVKey(slug.UserSlug("user-1"), slug.ProjectSlug("proj-1"))
-	want := "user-1.proj-1"
-	if got != want {
-		t.Errorf("heartbeatKVKey = %q, want %q", got, want)
-	}
-}
 
 // TestPendingControlsOps verifies add/remove operations on PendingControls.
 func TestPendingControlsOps(t *testing.T) {

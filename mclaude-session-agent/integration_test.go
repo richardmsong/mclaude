@@ -92,7 +92,7 @@ func TestSessionCRUDInKV(t *testing.T) {
 	}
 
 	// Create.
-	key := sessionKVKey(slug.UserSlug("integ-user"), slug.ProjectSlug(st.ProjectID), slug.SessionSlug(st.ID))
+	key := sessionKVKey(slug.UserSlug("integ-user"), slug.HostSlug("local"), slug.ProjectSlug(st.ProjectID), slug.SessionSlug(st.ID))
 	data, err := json.Marshal(st)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -146,32 +146,6 @@ func TestSessionCRUDInKV(t *testing.T) {
 	}
 }
 
-// TestHeartbeatWrite verifies the heartbeat KV write pattern used by the agent.
-func TestHeartbeatWrite(t *testing.T) {
-	skipIfNoDocker(t)
-	deps := testutil.StartDeps(t)
-
-	ctx := context.Background()
-	kv, err := deps.JetStream.KeyValue(ctx, "mclaude-heartbeats")
-	if err != nil {
-		t.Fatalf("get heartbeats KV: %v", err)
-	}
-
-	key := heartbeatKVKey("integ-user", "integ-proj")
-	payload := []byte(`{"ts":"` + time.Now().UTC().Format(time.RFC3339) + `"}`)
-
-	if _, err := kv.Put(ctx, key, payload); err != nil {
-		t.Fatalf("heartbeat put: %v", err)
-	}
-
-	entry, err := kv.Get(ctx, key)
-	if err != nil {
-		t.Fatalf("heartbeat get: %v", err)
-	}
-	if string(entry.Value()) != string(payload) {
-		t.Errorf("heartbeat value: got %q, want %q", entry.Value(), payload)
-	}
-}
 
 // TestLifecycleEventPubSub verifies publish and consume of lifecycle events
 // on the MCLAUDE_LIFECYCLE JetStream stream.
@@ -263,7 +237,7 @@ func TestNewAgentCreatesEventStream(t *testing.T) {
 	// NewAgent should be able to create or confirm the MCLAUDE_EVENTS stream.
 	// StartDeps pre-creates the KV buckets; we re-use the connection.
 	logger := zerolog.New(io.Discard)
-	agent, err := NewAgent(deps.NATSConn, "integ-user", slug.UserSlug("integ-user"), "integ-proj", slug.ProjectSlug("integ-proj"), "claude", "", logger, nil, nil, "")
+	agent, err := NewAgent(deps.NATSConn, "integ-user", slug.UserSlug("integ-user"), slug.HostSlug("local"), "integ-proj", slug.ProjectSlug("integ-proj"), "claude", "", logger, nil, nil, "")
 	if err != nil {
 		t.Fatalf("NewAgent: %v", err)
 	}
@@ -314,13 +288,13 @@ func TestNewAgentEventStreamIdempotent(t *testing.T) {
 	logger := zerolog.New(io.Discard)
 
 	// First call — creates the stream.
-	_, err := NewAgent(deps.NATSConn, "integ-user", slug.UserSlug("integ-user"), "integ-proj", slug.ProjectSlug("integ-proj"), "claude", "", logger, nil, nil, "")
+	_, err := NewAgent(deps.NATSConn, "integ-user", slug.UserSlug("integ-user"), slug.HostSlug("local"), "integ-proj", slug.ProjectSlug("integ-proj"), "claude", "", logger, nil, nil, "")
 	if err != nil {
 		t.Fatalf("first NewAgent: %v", err)
 	}
 
 	// Second call on the same connection — stream already exists, must not error.
-	_, err = NewAgent(deps.NATSConn, "integ-user", slug.UserSlug("integ-user"), "integ-proj-2", slug.ProjectSlug("integ-proj-2"), "claude", "", logger, nil, nil, "")
+	_, err = NewAgent(deps.NATSConn, "integ-user", slug.UserSlug("integ-user"), slug.HostSlug("local"), "integ-proj-2", slug.ProjectSlug("integ-proj-2"), "claude", "", logger, nil, nil, "")
 	if err != nil {
 		t.Fatalf("second NewAgent (idempotent): %v", err)
 	}

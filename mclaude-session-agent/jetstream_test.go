@@ -191,7 +191,7 @@ func TestMCLAUDE_APIStreamCreated(t *testing.T) {
 	// NewAgent creates both MCLAUDE_EVENTS and MCLAUDE_API streams.
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"test-user", slug.UserSlug("test-user"),
+		"test-user", slug.UserSlug("test-user"), slug.HostSlug("local"),
 		"test-proj", slug.ProjectSlug("test-proj"),
 		"claude", "",
 		zerolog.Nop(),
@@ -245,7 +245,7 @@ func TestJetStreamConsumersCreated(t *testing.T) {
 
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"u2", slug.UserSlug("u2"),
+		"u2", slug.UserSlug("u2"), slug.HostSlug("local"),
 		"p2", slug.ProjectSlug("p2"),
 		"claude", "",
 		zerolog.Nop(),
@@ -346,7 +346,7 @@ func TestRunConsumerDispatchesMessages(t *testing.T) {
 
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"u3", slug.UserSlug("u3"),
+		"u3", slug.UserSlug("u3"), slug.HostSlug("local"),
 		"p3", slug.ProjectSlug("p3"),
 		"claude", "",
 		zerolog.Nop(),
@@ -685,7 +685,7 @@ func TestClearUpdatingState(t *testing.T) {
 
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"u4", slug.UserSlug("u4"),
+		"u4", slug.UserSlug("u4"), slug.HostSlug("local"),
 		"p4", slug.ProjectSlug("p4"),
 		"claude", "",
 		zerolog.Nop(),
@@ -733,7 +733,7 @@ func TestClearUpdatingState(t *testing.T) {
 	}
 
 	// Verify KV was written with idle state.
-	key := sessionKVKey("u4", "p4", "sess-upd-1")
+	key := sessionKVKey(slug.UserSlug("u4"), slug.HostSlug("local"), slug.ProjectSlug("p4"), slug.SessionSlug("sess-upd-1"))
 	entry, err := agent.sessKV.Get(ctx, key)
 	if err != nil {
 		t.Fatalf("KV get: %v", err)
@@ -803,7 +803,7 @@ func TestRecoverSessionsSkipsKVWriteForUpdating(t *testing.T) {
 
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"u5", slug.UserSlug("u5"),
+		"u5", slug.UserSlug("u5"), slug.HostSlug("local"),
 		"p5", slug.ProjectSlug("p5"),
 		"not-a-real-claude-binary", "",
 		zerolog.Nop(),
@@ -824,7 +824,7 @@ func TestRecoverSessionsSkipsKVWriteForUpdating(t *testing.T) {
 		CreatedAt:       now,
 		PendingControls: make(map[string]any),
 	}
-	key := sessionKVKey("u5", "p5", "sess-recovering")
+	key := sessionKVKey(slug.UserSlug("u5"), slug.HostSlug("local"), slug.ProjectSlug("p5"), slug.SessionSlug("sess-recovering"))
 	data, _ := json.Marshal(st)
 	if _, err := agent.sessKV.Put(ctx, key, data); err != nil {
 		t.Fatalf("seed KV: %v", err)
@@ -839,7 +839,7 @@ func TestRecoverSessionsSkipsKVWriteForUpdating(t *testing.T) {
 		CreatedAt:       now,
 		PendingControls: make(map[string]any),
 	}
-	idleKey := sessionKVKey("u5", "p5", "sess-idle-recovering")
+	idleKey := sessionKVKey(slug.UserSlug("u5"), slug.HostSlug("local"), slug.ProjectSlug("p5"), slug.SessionSlug("sess-idle-recovering"))
 	idleData, _ := json.Marshal(idleSt)
 	if _, err := agent.sessKV.Put(ctx, idleKey, idleData); err != nil {
 		t.Fatalf("seed idle KV: %v", err)
@@ -900,7 +900,7 @@ func TestPublishAPIError(t *testing.T) {
 
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"u6", slug.UserSlug("u6"),
+		"u6", slug.UserSlug("u6"), slug.HostSlug("local"),
 		"p6", slug.ProjectSlug("p6"),
 		"claude", "",
 		zerolog.Nop(),
@@ -963,7 +963,7 @@ func TestHandleCreateErrorPublishesAPIError(t *testing.T) {
 
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"u7", slug.UserSlug("u7"),
+		"u7", slug.UserSlug("u7"), slug.HostSlug("local"),
 		"p7", slug.ProjectSlug("p7"),
 		"claude", "",
 		zerolog.Nop(),
@@ -1018,7 +1018,7 @@ func TestHandleRestartErrorPublishesAPIError(t *testing.T) {
 
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"u8", slug.UserSlug("u8"),
+		"u8", slug.UserSlug("u8"), slug.HostSlug("local"),
 		"p8", slug.ProjectSlug("p8"),
 		"claude", "",
 		zerolog.Nop(),
@@ -1086,7 +1086,7 @@ func TestSubscribeTerminalAPIOnlyTerminal(t *testing.T) {
 
 	agent, err := NewAgent(
 		deps.NATSConn,
-		"u9", slug.UserSlug("u9"),
+		"u9", slug.UserSlug("u9"), slug.HostSlug("local"),
 		"p9", slug.ProjectSlug("p9"),
 		"claude", "",
 		zerolog.Nop(),
