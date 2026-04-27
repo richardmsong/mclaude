@@ -1,8 +1,9 @@
 # ADR: Fix mclaude-cp Helm Chart Bootstrap (NATS JWT Auth + Postgres Connectivity)
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-04-27: accepted
+- 2026-04-27: implemented — all mclaude-cp pods Running (NATS, Postgres, control-plane, SPA)
 
 ## Overview
 
