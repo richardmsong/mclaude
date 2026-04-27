@@ -6,6 +6,7 @@ use (
 	./mclaude-connector
 	./mclaude-control-plane
 	./mclaude-controller-local
+	./mclaude-controller-k8s
 	./mclaude-relay
 	./mclaude-session-agent
 )
