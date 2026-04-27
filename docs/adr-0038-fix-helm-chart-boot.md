@@ -6,7 +6,7 @@
 
 ## Overview
 
-Fix five boot failures in the `mclaude-cp` Helm chart that prevent the control-plane, hub NATS, and Postgres from starting after the ADR-0035 chart split.
+Fix six boot failures in the `mclaude-cp` Helm chart that prevent the control-plane, hub NATS, and Postgres from starting after the ADR-0035 chart split.
 
 ## Motivation
 
@@ -27,13 +27,14 @@ After ADR-0035 and ADR-0037 landed, the deploy workflow triggers but all pods ex
 | Control-plane NATS auth | Helm template sets `NATS_ACCOUNT_SEED` from operator-keys Secret. Go code generates a user JWT signed by the account key and connects with `nats.UserJWT()` credentials. | With JWT auth on the server, all clients must present valid credentials. |
 | SQL backfill DO block | Alias `users` table as `usr` in the FOR...IN SELECT to avoid PL/pgSQL variable shadowing. | PL/pgSQL resolves `u.id` as the loop variable before assignment. |
 | NATS resolver_preload path | Relative path `operator-keys/resolverPreload`, not absolute. | Absolute path gets doubled: `/etc/nats/etc/nats/...`. |
+| Account JetStream limits | Set `JetStreamLimits{MemoryStorage: -1, DiskStorage: -1, Streams: -1, Consumer: -1}` on the account claims before encoding the account JWT. | NATS disables JetStream for accounts that don't explicitly set JetStream limits. Without this, the control-plane gets `jetstream not enabled for account` when creating KV buckets. |
 
 ## Impact
 
 **No specs updated** — these are bug fixes restoring compliance with spec-helm.md's described behavior. The spec already says the init-keys Job creates the operator-keys Secret and NATS uses it for the trust chain.
 
 **Components implementing the change:**
-- `mclaude-common/pkg/nats/operator_keys.go` — add `SystemAccount` to operator claims
+- `mclaude-common/pkg/nats/operator_keys.go` — add `SystemAccount` to operator claims, set JetStream limits on account
 - `mclaude-control-plane/init_keys.go` — add `accountPublicKey` + `resolverPreload` to Secret
 - `charts/mclaude-cp/templates/nats-configmap.yaml` — fix resolver_preload include path, use absolute path
 - `charts/mclaude-cp/templates/control-plane-deployment.yaml` — construct DATABASE_URL from service name + password Secret

@@ -72,6 +72,12 @@ func GenerateOperatorAccount(operatorName, accountName string) (*OperatorAccount
 	// 4. Issue account JWT signed by the operator.
 	acctClaims := natsjwt.NewAccountClaims(acctPub)
 	acctClaims.Name = accountName
+	acctClaims.Limits.JetStreamLimits = natsjwt.JetStreamLimits{
+		MemoryStorage: -1,
+		DiskStorage:   -1,
+		Streams:       -1,
+		Consumer:      -1,
+	}
 	acctJWT, err := acctClaims.Encode(opKP)
 	if err != nil {
 		return nil, fmt.Errorf("encode account jwt: %w", err)
