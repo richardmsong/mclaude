@@ -1,8 +1,9 @@
 # mclaude Client Architecture
 
-**Status**: accepted
+**Status**: superseded
 **Status history**:
 - 2026-04-11: accepted
+- 2026-04-26: superseded by adr-0036-client-architecture-v2.md
 
 
 ## Principle

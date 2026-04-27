@@ -41,7 +41,21 @@ Flags:
 
 ### Wire protocol
 
-The attach REPL communicates over a newline-delimited JSON (JSONL) protocol on the unix socket. Outbound messages are either `user` (chat message) or `control_response` (permission allow/deny). Inbound events include types: `system`, `stream_event`, `assistant`, `user`, `control_request`, `tool_progress`, and `result`.
+The attach REPL communicates over a newline-delimited JSON (JSONL) protocol on the unix socket. Outbound messages are either `user` (chat message) or `control_response` (permission allow/deny). Inbound events include types: `system`, `stream_event`, `assistant`, `user`, `control_request`, `tool_progress`, `result`, and `clear`.
+
+### Accumulator behavior
+
+The CLI accumulates inbound events into a conversation model for rendering. Block types rendered: `TextBlock`, `StreamingTextBlock`, `ToolUseBlock`, `ToolResultBlock`, `ControlRequestBlock`, `CompactionBlock`. Block types silently discarded: `ThinkingBlock`, `SkillInvocationBlock`, `SystemMessageBlock`.
+
+When an event carries a non-null `parent_tool_use_id`, the resulting turn is nested under the parent ToolUseBlock's agent turn (subagent nesting).
+
+On `clear` event: the accumulator resets all turns to empty (no divider rendered, just a blank conversation state).
+
+On `compact_boundary` system event: the accumulator resets all turns and renders a `--- context compacted ---` divider.
+
+### Reconnection
+
+No reconnection. If the unix socket drops, the CLI exits immediately. The user re-runs `mclaude-cli attach <session-id>` to reconnect.
 
 ## Dependencies
 

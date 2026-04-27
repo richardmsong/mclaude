@@ -139,9 +139,17 @@ Only shown when not paired with a tool_use. Monospace card, `--surf2` background
 
 ### System Event (`.ev-sys`)
 
-Centered, `--text3` color, small text. Examples:
-- "Turn completed in 3.2s"
-- "— conversation compacted —"
+Centered, `--text3` color, small text. Two subtypes:
+
+**CompactionBlock** (from `compact_boundary` system event): renders `"— conversation compacted —"` as a centered divider. The conversation model resets all prior turns; only events after the compaction boundary are displayed.
+
+**Clear event** (from `clear` event): resets the conversation model to empty — no turns, no divider. The UI shows a blank conversation state. Unlike compaction, no summary or divider is rendered.
+
+Other system events (turn completion, etc.): `"Turn completed in 3.2s"`.
+
+### System Message (`.ev-sys-msg`)
+
+Rendered from user events with the `isSynthetic` flag set. These are system notifications injected by the platform (not typed by the user). Centered, `--text3` color, small text — visually identical to `.ev-sys` but semantically distinct (user-turn origin, not system-event origin). Not shown as a user bubble.
 
 ### Subagent Group (`.ev-agent-group`)
 
@@ -158,3 +166,14 @@ Collapsible group for Agent tool calls with nested sub-events:
 ```
 
 Orange left border on the whole card. Sub-events render using the same event rendering rules.
+
+## User-Message Parsing Rules
+
+When a `user` event arrives with text content (not a tool_result):
+
+1. **Synthetic**: if `isSynthetic` flag is set, render as a System Message (`.ev-sys-msg`). Do not show as a user bubble.
+2. **Skill invocation**: if text starts with `"Base directory for this skill:"`, render as a Skill Invocation Chip (`.ev-skill`).
+3. **System notification discard**: if text starts with `"[SYSTEM NOTIFICATION"`, discard entirely — do not create any turn or visual element.
+4. **Normal message**: dedup against optimistic pending messages — match by `event.uuid` (primary) or exact text content (fallback). On match, clear the `pendingUuid` on the existing optimistic turn (no new turn created). No match: create a new user Turn with TextBlock(s).
+
+For user messages containing image content blocks: render as User Message (`.ev-user`) with image thumbnails per the image rendering rules above.
