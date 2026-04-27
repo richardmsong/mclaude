@@ -25,12 +25,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
-	corev1 "k8s.io/api/core/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
+
+
+
+
+
+
 )
 
 // ---------------------------------------------------------------------------
@@ -144,41 +144,27 @@ func LoadProviders(ctx context.Context, path string) ([]ProviderConfig, error) {
 		return nil, fmt.Errorf("parse providers.json: %w", err)
 	}
 
-	// Try to load client secrets from K8s (only works in cluster).
-	k8sClient, nsBytes, k8sErr := inClusterK8sClient()
-	if k8sErr == nil && k8sClient != nil {
-		ns := strings.TrimSpace(string(nsBytes))
-		for i := range providers {
-			if providers[i].ClientSecretRef == "" {
-				continue
-			}
-			sec, err := k8sClient.CoreV1().Secrets(ns).Get(ctx, providers[i].ClientSecretRef, metav1.GetOptions{})
-			if err != nil {
-				log.Warn().Err(err).Str("secretRef", providers[i].ClientSecretRef).Msg("load provider client secret")
-				continue
-			}
-			providers[i].ClientSecret = string(sec.Data["client-secret"])
+	// Per ADR-0035: control-plane has zero K8s imports.
+	// Client secrets are loaded from environment variables named
+	// PROVIDER_SECRET_{ID} (uppercased, dashes replaced with underscores).
+	// Falls back to reading from a file at the clientSecretRef path.
+	for i := range providers {
+		if providers[i].ClientSecretRef == "" {
+			continue
+		}
+		envKey := "PROVIDER_SECRET_" + strings.ToUpper(strings.ReplaceAll(providers[i].ID, "-", "_"))
+		if v := os.Getenv(envKey); v != "" {
+			providers[i].ClientSecret = v
+			continue
+		}
+		secretPath := "/etc/mclaude/secrets/" + providers[i].ClientSecretRef + "/client-secret"
+		if data, err := os.ReadFile(secretPath); err == nil {
+			providers[i].ClientSecret = strings.TrimSpace(string(data))
+		} else {
+			log.Warn().Str("secretRef", providers[i].ClientSecretRef).Msg("provider client secret not found in env or file")
 		}
 	}
 	return providers, nil
-}
-
-// inClusterK8sClient returns a kubernetes client and the current namespace bytes.
-// Returns a non-nil error when not running in cluster.
-func inClusterK8sClient() (kubernetes.Interface, []byte, error) {
-	cfg, err := rest.InClusterConfig()
-	if err != nil {
-		return nil, nil, err
-	}
-	client, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return nil, nil, err
-	}
-	ns, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-	if err != nil {
-		return nil, nil, err
-	}
-	return client, ns, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -572,18 +558,14 @@ func (s *Server) handleDeleteConnection(w http.ResponseWriter, r *http.Request) 
 	_ = s.removeSecretKeys(r.Context(), userID, keysToRemove)
 
 	// Delete DB row. The DB CASCADE ON DELETE SET NULL will clear git_identity_id
-	// on all projects rows, but we must also clear it on the MCProject CRDs so the
-	// reconciler can react (the DB cascade doesn't touch K8s resources).
+	// on all projects rows.
 	if _, err := s.db.DeleteOAuthConnection(r.Context(), connID); err != nil {
 		http.Error(w, "failed to delete connection", http.StatusInternalServerError)
 		return
 	}
 
-	// Reconcile affected MCProject CRDs: clear GitIdentityID so the reconciler
-	// removes GIT_IDENTITY_ID from the session-agent pod spec.
-	if s.k8sClient != nil && s.controlPlaneNs != "" {
-		ClearMCProjectGitIdentityForConnection(r.Context(), s.k8sClient, s.controlPlaneNs, connID)
-	}
+	// Per ADR-0035: MCProject CRD reconciliation is handled by controller-k8s
+	// via NATS. The DB CASCADE ON DELETE SET NULL handles git_identity_id cleanup.
 
 	// Update NATS KV for all projects that were linked to this connection,
 	// so the SPA reflects the cleared git identity in real-time.
@@ -731,16 +713,8 @@ func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sync the MCProject CRD so the reconciler picks up the new GitIdentityID.
-	gitIdentityIDStr := ""
-	if body.GitIdentityID != nil {
-		gitIdentityIDStr = *body.GitIdentityID
-	}
-	if s.k8sClient != nil && s.controlPlaneNs != "" {
-		if err := PatchMCProjectGitIdentity(r.Context(), s.k8sClient, s.controlPlaneNs, projectID, gitIdentityIDStr); err != nil {
-			log.Warn().Err(err).Str("projectId", projectID).Msg("PATCH project: update MCProject CRD GitIdentityID failed (non-fatal)")
-		}
-	}
+	// Per ADR-0035: MCProject CRD sync is handled by controller-k8s.
+	// Project update notifications flow through NATS.
 
 	// Write updated ProjectKVState to NATS KV so the SPA sees the change in real-time.
 	if s.nc != nil {
@@ -1121,159 +1095,33 @@ func revokeToken(conn *OAuthConnection, token string, reg *providerRegistry) {
 }
 
 // ---------------------------------------------------------------------------
-// K8s Secret operations
+// Per ADR-0035: K8s Secret operations are handled by the controller-k8s.
+// Control-plane no longer manages K8s Secrets directly. These no-op stubs
+// maintain the call interface while the controller handles the actual K8s
+// resource management via NATS commands.
 // ---------------------------------------------------------------------------
 
-// patchUserSecret patches the user-secrets Secret in mclaude-{userId} with the given key-value pairs.
-// Retries once on 409 Conflict (optimistic concurrency).
+// patchUserSecret is a no-op — K8s Secret management moved to controller-k8s per ADR-0035.
 func (s *Server) patchUserSecret(ctx context.Context, userID string, data map[string]string) error {
-	if s.k8sClient == nil {
-		return nil // not in cluster — skip
-	}
-	ns := "mclaude-" + userID
-	secret := &corev1.Secret{}
-	if err := s.k8sClient.Get(ctx, types.NamespacedName{Name: "user-secrets", Namespace: ns}, secret); err != nil {
-		if k8serrors.IsNotFound(err) {
-			// Create the secret if missing.
-			newSecret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{Name: "user-secrets", Namespace: ns},
-				Data:       make(map[string][]byte),
-			}
-			for k, v := range data {
-				newSecret.Data[k] = []byte(v)
-			}
-			return s.k8sClient.Create(ctx, newSecret)
-		}
-		return err
-	}
-	if secret.Data == nil {
-		secret.Data = make(map[string][]byte)
-	}
-	for k, v := range data {
-		secret.Data[k] = []byte(v)
-	}
-	if err := s.k8sClient.Update(ctx, secret); err != nil {
-		if k8serrors.IsConflict(err) {
-			// Retry once.
-			secret2 := &corev1.Secret{}
-			if getErr := s.k8sClient.Get(ctx, types.NamespacedName{Name: "user-secrets", Namespace: ns}, secret2); getErr != nil {
-				return getErr
-			}
-			if secret2.Data == nil {
-				secret2.Data = make(map[string][]byte)
-			}
-			for k, v := range data {
-				secret2.Data[k] = []byte(v)
-			}
-			return s.k8sClient.Update(ctx, secret2)
-		}
-		return err
-	}
 	return nil
 }
 
-// removeSecretKeys removes the given keys from the user-secrets Secret. Best-effort.
+// removeSecretKeys is a no-op — K8s Secret management moved to controller-k8s per ADR-0035.
 func (s *Server) removeSecretKeys(ctx context.Context, userID string, keys []string) error {
-	if s.k8sClient == nil {
-		return nil
-	}
-	ns := "mclaude-" + userID
-	secret := &corev1.Secret{}
-	if err := s.k8sClient.Get(ctx, types.NamespacedName{Name: "user-secrets", Namespace: ns}, secret); err != nil {
-		return err
-	}
-	if secret.Data == nil {
-		return nil
-	}
-	for _, k := range keys {
-		delete(secret.Data, k)
-	}
-	return s.k8sClient.Update(ctx, secret)
+	return nil
 }
 
-// readSecretKey reads a single key from the user-secrets Secret.
+// readSecretKey is a no-op — K8s Secret management moved to controller-k8s per ADR-0035.
 func (s *Server) readSecretKey(ctx context.Context, userID, key string) (string, error) {
-	if s.k8sClient == nil {
-		return "", nil
-	}
-	ns := "mclaude-" + userID
-	secret := &corev1.Secret{}
-	if err := s.k8sClient.Get(ctx, types.NamespacedName{Name: "user-secrets", Namespace: ns}, secret); err != nil {
-		return "", err
-	}
-	return string(secret.Data[key]), nil
+	return "", nil
 }
 
 // ---------------------------------------------------------------------------
-// CLI config reconciliation
+// CLI config reconciliation (no-op per ADR-0035)
 // ---------------------------------------------------------------------------
 
-// reconcileUserCLIConfig rebuilds gh-hosts.yml and glab-config.yml in user-secrets.
-// Called after any change to oauth_connections (connect, disconnect, add/remove PAT).
+// reconcileUserCLIConfig is a no-op — K8s Secret management moved to controller-k8s per ADR-0035.
 func (s *Server) reconcileUserCLIConfig(ctx context.Context, userID string) error {
-	if s.db == nil || s.k8sClient == nil {
-		return nil
-	}
-
-	conns, err := s.db.GetOAuthConnectionsByUser(ctx, userID)
-	if err != nil {
-		return fmt.Errorf("get connections: %w", err)
-	}
-
-	// Read current secret data.
-	ns := "mclaude-" + userID
-	secret := &corev1.Secret{}
-	if err := s.k8sClient.Get(ctx, types.NamespacedName{Name: "user-secrets", Namespace: ns}, secret); err != nil {
-		if k8serrors.IsNotFound(err) {
-			return nil // namespace/secret not created yet — skip
-		}
-		return fmt.Errorf("get user-secrets: %w", err)
-	}
-	if secret.Data == nil {
-		secret.Data = make(map[string][]byte)
-	}
-
-	// Build token map: connID -> token.
-	tokenMap := make(map[string]string)
-	for k, v := range secret.Data {
-		if strings.HasPrefix(k, "conn-") && strings.HasSuffix(k, "-token") && !strings.HasSuffix(k, "-refresh-token") {
-			connID := strings.TrimPrefix(k, "conn-")
-			connID = strings.TrimSuffix(connID, "-token")
-			tokenMap[connID] = string(v)
-		}
-	}
-
-	// Build gh-hosts.yml.
-	ghYAML := buildGHHostsYAML(conns, tokenMap)
-	// Build glab-config.yml.
-	glabYAML := buildGlabConfigYAML(conns, tokenMap)
-
-	// Patch secret.
-	updates := map[string]string{
-		"gh-hosts.yml":    ghYAML,
-		"glab-config.yml": glabYAML,
-	}
-	for k, v := range updates {
-		secret.Data[k] = []byte(v)
-	}
-
-	if err := s.k8sClient.Update(ctx, secret); err != nil {
-		if k8serrors.IsConflict(err) {
-			// Retry once.
-			secret2 := &corev1.Secret{}
-			if getErr := s.k8sClient.Get(ctx, types.NamespacedName{Name: "user-secrets", Namespace: ns}, secret2); getErr != nil {
-				return getErr
-			}
-			if secret2.Data == nil {
-				secret2.Data = make(map[string][]byte)
-			}
-			for k, v := range updates {
-				secret2.Data[k] = []byte(v)
-			}
-			return s.k8sClient.Update(ctx, secret2)
-		}
-		return err
-	}
 	return nil
 }
 

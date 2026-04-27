@@ -22,6 +22,27 @@ type ProjectKVState struct {
 	GitIdentityID *string `json:"gitIdentityId,omitempty"`
 }
 
+// ProvisionRequest is the NATS request payload sent from control-plane
+// to the appropriate controller (K8s or local) per ADR-0035.
+type ProvisionRequest struct {
+	UserSlug      string `json:"userSlug"`
+	HostSlug      string `json:"hostSlug"`
+	ProjectSlug   string `json:"projectSlug"`
+	GitURL        string `json:"gitUrl,omitempty"`
+	GitIdentityID string `json:"gitIdentityId,omitempty"`
+}
+
+// ProvisionReply is the NATS reply from the controller.
+type ProvisionReply struct {
+	OK          bool   `json:"ok"`
+	ProjectSlug string `json:"projectSlug,omitempty"`
+	Error       string `json:"error,omitempty"`
+	Code        string `json:"code,omitempty"`
+}
+
+// ProvisionTimeoutSeconds is the NATS request/reply timeout for project provisioning.
+const ProvisionTimeoutSeconds = 10
+
 // StartProjectsSubscriber connects to NATS, ensures the mclaude-projects and
 // mclaude-job-queue KV buckets exist, and subscribes to
 // mclaude.*.api.projects.create.
@@ -55,6 +76,7 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 			Name          string  `json:"name"`
 			GitURL        string  `json:"gitUrl"`
 			GitIdentityID *string `json:"gitIdentityId"`
+			HostSlug      string  `json:"hostSlug,omitempty"` // ADR-0035: target host
 		}
 		if err := json.Unmarshal(msg.Data, &req); err != nil || req.Name == "" {
 			replyError(msg, "name required")
@@ -91,40 +113,38 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 			return
 		}
 
-		// Determine gitIdentityID string for MCProject.
-		gitIdentityIDStr := ""
-		if req.GitIdentityID != nil {
-			gitIdentityIDStr = *req.GitIdentityID
-		}
-
-		// Create MCProject CR to trigger the reconciler to provision K8s resources.
-		// When k8sClient is available (running in cluster), we use the reconciler-driven
-		// path. Falls back to direct provisioning via K8sProvisioner for backward
-		// compatibility when the Manager is not running (e.g., local dev without cluster).
-		// Non-fatal — project record and KV entry are always created.
-		if s.k8sClient != nil {
-			if err := CreateMCProject(context.Background(), s.k8sClient, s.controlPlaneNs, userID, id, req.GitURL, gitIdentityIDStr); err != nil {
-				log.Error().Err(err).
-					Str("userId", userID).
-					Str("projectId", id).
-					Msg("create MCProject CR failed — session-agent pod will not start")
-			} else {
-				log.Info().
-					Str("userId", userID).
-					Str("projectId", id).
-					Msg("MCProject CR created — reconciler will provision K8s resources")
+		// ADR-0035: publish provisioning request to the host-scoped subject
+		// so the appropriate controller (K8s or local) can provision resources.
+		if req.HostSlug != "" {
+			gitIdentityIDStr := ""
+			if req.GitIdentityID != nil {
+				gitIdentityIDStr = *req.GitIdentityID
 			}
-		} else if s.k8sProvisioner != nil {
-			if err := s.k8sProvisioner.ProvisionProject(context.Background(), userID, id, req.GitURL); err != nil {
+			provReq := ProvisionRequest{
+				UserSlug:      userID,
+				HostSlug:      req.HostSlug,
+				ProjectSlug:   proj.Slug,
+				GitURL:        req.GitURL,
+				GitIdentityID: gitIdentityIDStr,
+			}
+			provData, _ := json.Marshal(provReq)
+			provSubject := "mclaude.users." + userID + ".hosts." + req.HostSlug + ".api.projects.create"
+			reply, err := nc.Request(provSubject, provData, ProvisionTimeoutSeconds*time.Second)
+			if err != nil {
 				log.Error().Err(err).
 					Str("userId", userID).
+					Str("hostSlug", req.HostSlug).
 					Str("projectId", id).
-					Msg("k8s provisioning failed — session-agent pod will not start")
+					Msg("provisioning request timed out — host unreachable")
 			} else {
-				log.Info().
-					Str("userId", userID).
-					Str("projectId", id).
-					Msg("k8s resources provisioned for project")
+				var provReply ProvisionReply
+				if jsonErr := json.Unmarshal(reply.Data, &provReply); jsonErr == nil && !provReply.OK {
+					log.Error().
+						Str("userId", userID).
+						Str("projectId", id).
+						Str("error", provReply.Error).
+						Msg("provisioning failed")
+				}
 			}
 		}
 
@@ -139,8 +159,7 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 		}
 		val, _ := json.Marshal(state)
 		if _, err := kv.Put(userID+"."+id, val); err != nil {
-			// Non-fatal: DB row was created; KV is best-effort and will be
-			// back-filled if the control-plane reconnects.
+			// Non-fatal: DB row was created; KV is best-effort.
 			_ = err
 		}
 
@@ -169,8 +188,6 @@ func writeProjectKV(nc *nats.Conn, userID string, proj *Project) error {
 		GitIdentityID: proj.GitIdentityID,
 	}
 	val, _ := json.Marshal(state)
-	// Key uses "." as separator — NATS uses "." as the token separator for
-	// wildcard matching (">" and "*"). Using "/" would break kvWatch patterns.
 	_, err = kv.Put(userID+"."+proj.ID, val)
 	return err
 }
@@ -181,7 +198,6 @@ func ensureProjectsKV(js nats.JetStreamContext) (nats.KeyValue, error) {
 	if err == nil {
 		return kv, nil
 	}
-	// Bucket doesn't exist — create it.
 	return js.CreateKeyValue(&nats.KeyValueConfig{
 		Bucket:  "mclaude-projects",
 		History: 1,
@@ -194,7 +210,6 @@ func ensureJobQueueKV(js nats.JetStreamContext) (nats.KeyValue, error) {
 	if err == nil {
 		return kv, nil
 	}
-	// Bucket doesn't exist — create it.
 	return js.CreateKeyValue(&nats.KeyValueConfig{
 		Bucket:  "mclaude-job-queue",
 		History: 1,

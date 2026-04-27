@@ -10,7 +10,6 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"golang.org/x/crypto/bcrypt"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // LoginRequest is the body for POST /auth/login.
@@ -36,38 +35,30 @@ type LoginResponse struct {
 }
 
 // Server holds application-wide dependencies.
+// Per ADR-0035: zero K8s client. Project provisioning is delegated to
+// controllers via NATS request/reply.
 type Server struct {
-	db              *DB
-	accountKP       nkeys.KeyPair
-	natsURL         string // internal broker URL (used by session-agent, not returned to browser clients)
-	natsWsURL       string // external WebSocket URL returned to browser clients on login; empty = client derives from origin
-	jwtExpiry       time.Duration
-	adminToken      string          // break-glass admin bearer token
-	k8sProvisioner  *K8sProvisioner // nil when not running in a Kubernetes cluster
-	k8sClient       client.Client   // controller-runtime client; nil when not in cluster
-	controlPlaneNs  string          // K8s namespace where the control-plane runs (mclaude-system)
-	helmReleaseName string          // Helm release name, used to derive namespace for MCProject CRs
-	providers       *providerRegistry // OAuth provider config and state store; nil when no providers configured
-	nc              *nats.Conn      // NATS connection for KV writes from HTTP handlers; nil when NATS unavailable
+	db         *DB
+	accountKP  nkeys.KeyPair
+	natsURL    string // internal broker URL (used by session-agent, not returned to browser clients)
+	natsWsURL  string // external WebSocket URL returned to browser clients on login; empty = client derives from origin
+	jwtExpiry  time.Duration
+	adminToken string          // break-glass admin bearer token
+	providers  *providerRegistry // OAuth provider config and state store; nil when no providers configured
+	nc         *nats.Conn      // NATS connection for KV writes from HTTP handlers; nil when NATS unavailable
 }
 
 // NewServer constructs a Server. accountKP must be an account-level NKey pair —
 // it signs per-user JWTs. natsWsURL is the WebSocket URL returned to browser clients
 // on login; if empty the client derives it from window.location.origin.
-// k8sClient is the controller-runtime client for creating MCProject CRs; nil when not in cluster.
-// helmReleaseName is used to derive the control-plane namespace for MCProject CRs.
-func NewServer(db *DB, accountKP nkeys.KeyPair, natsURL, natsWsURL string, jwtExpiry time.Duration, adminToken string, k8s *K8sProvisioner, k8sClient client.Client, controlPlaneNs, helmReleaseName string) *Server {
+func NewServer(db *DB, accountKP nkeys.KeyPair, natsURL, natsWsURL string, jwtExpiry time.Duration, adminToken string) *Server {
 	return &Server{
-		db:              db,
-		accountKP:       accountKP,
-		natsURL:         natsURL,
-		natsWsURL:       natsWsURL,
-		jwtExpiry:       jwtExpiry,
-		adminToken:      adminToken,
-		k8sProvisioner:  k8s,
-		k8sClient:       k8sClient,
-		controlPlaneNs:  controlPlaneNs,
-		helmReleaseName: helmReleaseName,
+		db:         db,
+		accountKP:  accountKP,
+		natsURL:    natsURL,
+		natsWsURL:  natsWsURL,
+		jwtExpiry:  jwtExpiry,
+		adminToken: adminToken,
 	}
 }
 
@@ -271,8 +262,6 @@ func checkPassword(password, hash string) bool {
 	if hash == "" {
 		return false
 	}
-	// bcrypt comparison — import golang.org/x/crypto/bcrypt in production.
-	// Stubbed here; fleshed out in auth category implementation.
 	return bcryptCheck(password, hash)
 }
 

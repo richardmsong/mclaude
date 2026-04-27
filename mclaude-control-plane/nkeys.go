@@ -39,6 +39,17 @@ func SessionAgentSubjectPermissions(userID string) NATSPermissions {
 	}
 }
 
+// HostSubjectPermissions returns the NATS pub/sub permissions for a per-host
+// user JWT (ADR-0035). uslug may be "*" for cluster controllers (wildcard at
+// the user level).
+func HostSubjectPermissions(uslug, hslug string) NATSPermissions {
+	prefix := fmt.Sprintf("mclaude.users.%s.hosts.%s.>", uslug, hslug)
+	return NATSPermissions{
+		PubAllow: []string{prefix, "_INBOX.>", "$JS.*.API.>", "$SYS.ACCOUNT.*.CONNECT", "$SYS.ACCOUNT.*.DISCONNECT"},
+		SubAllow: []string{prefix, "_INBOX.>", "$JS.*.API.>"},
+	}
+}
+
 // NKeyPair wraps an nkeys.KeyPair with its encoded public key.
 type NKeyPair struct {
 	KeyPair   nkeys.KeyPair
@@ -117,6 +128,35 @@ func IssueUserJWT(userID string, accountKP nkeys.KeyPair, expirySecs int64) (jwt
 	return encoded, userSeed, nil
 }
 
+// IssueHostJWT issues a per-host NATS user JWT scoped to
+// mclaude.users.{uslug}.hosts.{hslug}.> (ADR-0035).
+//
+// For machine hosts: uslug is the user's slug, hslug is the host slug.
+// For cluster controllers: uslug is "*" (wildcard), hslug is the cluster slug.
+//
+// Returns the encoded JWT string and the NKey seed.
+func IssueHostJWT(uslug, hslug string, accountKP nkeys.KeyPair) (jwt string, seed []byte, err error) {
+	userKP, userSeed, err := GenerateUserNKey()
+	if err != nil {
+		return "", nil, fmt.Errorf("generate host nkey: %w", err)
+	}
+
+	perms := HostSubjectPermissions(uslug, hslug)
+
+	claims := natsjwt.NewUserClaims(userKP.PublicKey)
+	claims.Name = fmt.Sprintf("host-%s-%s", uslug, hslug)
+	// No expiry for host credentials (service credentials).
+	claims.Permissions.Pub.Allow = perms.PubAllow
+	claims.Permissions.Sub.Allow = perms.SubAllow
+
+	encoded, err := claims.Encode(accountKP)
+	if err != nil {
+		return "", nil, fmt.Errorf("encode host jwt: %w", err)
+	}
+
+	return encoded, userSeed, nil
+}
+
 // IssueSessionAgentJWT issues a long-lived NATS user JWT for a session-agent,
 // scoped to mclaude.{userID}.> with no _INBOX.> (session-agents don't use
 // request/reply). No expiry — these are service credentials.
@@ -147,21 +187,11 @@ func IssueSessionAgentJWT(userID string, accountKP nkeys.KeyPair) (jwt string, s
 
 // DecodeUserJWT decodes and validates a NATS user JWT.
 // Returns the claims if the JWT was issued by accountPubKey and is not expired.
-//
-// Verification is two-layered:
-//  1. The Issuer field inside the JWT payload must match accountPubKey.
-//  2. The claims must pass NATS structural validation (expiry, type, etc.).
-//
-// Note: the NATS broker performs full NKey cryptographic signature
-// verification. The control-plane uses this function to validate its own
-// issued tokens for refresh flows — the broker is authoritative for pub/sub.
 func DecodeUserJWT(token string, accountPubKey string) (*natsjwt.UserClaims, error) {
 	claims, err := natsjwt.DecodeUserClaims(token)
 	if err != nil {
 		return nil, fmt.Errorf("decode user jwt: %w", err)
 	}
-	// Verify the JWT was issued by the expected account key.
-	// The Issuer field is the NKey public key of the signing account.
 	if accountPubKey != "" && claims.Issuer != accountPubKey {
 		return nil, fmt.Errorf("jwt issuer %q does not match account key %q", claims.Issuer, accountPubKey)
 	}

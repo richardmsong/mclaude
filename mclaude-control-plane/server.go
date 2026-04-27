@@ -3,8 +3,6 @@ package main
 import (
 	"net/http"
 	"strings"
-
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // RegisterRoutes wires all HTTP handlers onto the given mux.
@@ -86,6 +84,12 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 		}
 		http.NotFound(w, r)
 	})))
+
+	// Host CRUD endpoints (ADR-0035)
+	mux.Handle("/api/users/", s.authMiddleware(http.HandlerFunc(s.handleHostRoutes)))
+
+	// Device-code registration (ADR-0035)
+	mux.HandleFunc("/api/hosts/register", s.handleHostRegister)
 }
 
 // AdminMux returns an http.ServeMux for the break-glass admin port (:9091).
@@ -93,7 +97,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 // This port must not be exposed externally — bind to 127.0.0.1 in production.
 func (s *Server) AdminMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.Handle("/admin/", s.adminAuthMiddleware(http.HandlerFunc(s.handleAdminUsers)))
+	mux.Handle("/admin/", s.adminAuthMiddleware(http.HandlerFunc(s.handleAdminRoutes)))
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	return mux
 }
@@ -113,10 +117,4 @@ func (s *Server) adminAuthMiddleware(next http.Handler) http.Handler {
 // handleMetrics serves Prometheus metrics from MetricsRegistry.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	metricsHandler().ServeHTTP(w, r)
-}
-
-// k8sClientWrapper is nil-safe: it holds a controller-runtime client.Client.
-// When nil, MCProject CR creation is skipped (not running in cluster).
-type k8sClientWrapper struct {
-	c client.Client
 }
