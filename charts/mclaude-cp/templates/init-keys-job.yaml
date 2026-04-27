@@ -35,7 +35,7 @@ spec:
           image: {{ include "mclaude-cp.image" (dict "imageValues" .Values.controlPlane.image "global" .Values.global) }}
           imagePullPolicy: {{ .Values.controlPlane.image.pullPolicy }}
           {{- include "mclaude-cp.securityContext" . | nindent 10 }}
-          command: ["mclaude-cp", "init-keys"]
+          command: ["control-plane", "init-keys"]
           env:
             - name: DATABASE_URL
               valueFrom:
