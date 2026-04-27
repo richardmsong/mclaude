@@ -347,13 +347,13 @@ The `hosts` array is the single source of truth. SPA filters `hosts.filter(h => 
 | `$SYS` presence event arrives for unknown account | Logged at info level; ignored. Likely a misconfigured client. |
 | Device-code registration: code expired (>10 min) | `POST /api/hosts/register` returns 410 Gone with `{"error": "code expired, restart registration"}`. |
 | Device-code: code already redeemed | Returns 409 Conflict. CLI prompts user to restart. |
-| Project create on offline cluster | Control-plane's NATS request to the worker times out (10s); HTTP returns 503 with `{"error": "cluster {cslug} unreachable"}`. SPA shows the host as offline; project creation queued for retry not implemented in v1. |
+| Project create on offline host | Control-plane's NATS request to the controller times out (10s); HTTP returns 503 with `{"error": "host {hslug} unreachable"}`. SPA shows the host as offline; project creation queued for retry not implemented in v1. |
 | Force re-register: legacy creds in use | NATS auth rejects; client gets clear error message ("legacy credentials no longer valid; run `mclaude host register`"). |
 
 ## Security
 
 - Per-host NATS credentials limit blast radius: a leaked host JWT only allows access to that host's subjects.
-- Cluster controller credentials are admin-issued and rotate via re-registration. Stored on disk at `/etc/mclaude/cluster.creds` (cluster) or `~/.mclaude/hosts/{hslug}/creds.json` (BYOH machine), `0600` permissions.
+- Cluster controller credentials are admin-issued and rotate via re-registration. Stored on disk at `/etc/mclaude/cluster.creds` (cluster) or `~/.mclaude/hosts/{hslug}/nats.creds` (BYOH machine), `0600` permissions.
 - Operator + account keys are the bootstrap root. Stored only as a K8s Secret (`mclaude-system/operator-keys`) in the central `mclaude-cp` cluster, at `0600`. Access mediated by control-plane only — no other component reads them. BYOH machines never possess these keys; they hold only their per-host user JWT (signed by the account key remotely).
 - `$SYS.ACCOUNT.>` subscription on control-plane is read-only and account-scoped.
 - The 3-tier JWT chain provides crypto-verified isolation: even if a worker NATS is compromised, the operator key can revoke an account JWT and re-issue, invalidating all derived user JWTs.

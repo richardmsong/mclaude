@@ -74,7 +74,7 @@ A new screen reachable from the existing Settings overview (after the existing A
 - "+ Register a new host" launches the device-code flow:
   1. SPA calls `POST /api/users/{uslug}/hosts/code` to obtain `{code, expiresAt}`.
   2. Renders a modal with the 6-character code, a copy button, and the CLI hint: "Open a terminal on the new machine and run `mclaude host register` then enter this code." Reading the dashboard URL in the CLI is also supported.
-  3. Polls `GET /api/users/{uslug}/hosts` every 3 seconds (max 10 minutes); when a new host with `slug` not previously seen appears, dismiss the modal and reveal the new row.
+  3. Polls `GET /api/users/{uslug}/hosts` (the host-list endpoint) every 3 seconds (max 10 minutes); when a new host with `slug` not previously seen appears, dismiss the modal and reveal the new row. The SPA does **not** poll the code-status endpoint `GET /api/users/{uslug}/hosts/code/{code}` — that path is reserved for the CLI on the new machine, which polls it to receive the JWT once redemption completes. The two polling strategies are not interchangeable: the dashboard watches for host inventory changes, the CLI watches for credential issuance.
   4. On expiry, the modal collapses to "Code expired — Try again."
 
 ## Routes
@@ -105,6 +105,12 @@ For machine hosts there is no direct URL; the hub connection is used uniformly.
 
 JetStream domain qualification (`$JS.{jsDomain}.API.>`) is applied **only** when `jsDomain` is non-empty in the login response — i.e., for cluster-type hosts. Machine hosts use unqualified JetStream calls. This is what makes single-host BYOH deployments work without code paths checking deployment shape.
 
+#### Mid-session leaf-link drop (cluster hosts)
+
+If the worker NATS leaf-link to the hub drops while a session is open and the SPA is currently using the hub-via-leaf path, JetStream domain reads start failing (the hub can no longer route the domain query). The SessionStore detects the failure and probes `directNatsUrl` for that cluster — if reachable, it transparently swaps the active connection to the direct path and the session view recovers without user action. If the direct probe also fails, the cluster is marked offline (via the `mclaude-hosts` KV update from control-plane's `$SYS` subscriber) and the session view freezes in "stale" mode until either path comes back. On reconnect, the SessionStore re-issues domain-qualified KV watches and resync is automatic.
+
+This runtime fallback is distinct from the **initial** direct-vs-hub selection performed when a project is first opened — that one prefers direct, falls back to hub if direct is unreachable; the runtime fallback is the inverse, triggered by hub-via-leaf failure.
+
 ## Connection / liveness indicators
 
 - A small dot (8px) next to each host row indicates `online`: green / gray.
@@ -121,6 +127,7 @@ JetStream domain qualification (`$JS.{jsDomain}.API.>`) is applied **only** when
 | Device-code already redeemed (409) | Modal shows "This code was already used. Generate a new one." |
 | Host removal while it has active sessions | Confirm dialog: "{name} has N active sessions that will be stopped. Continue?" Destructive action calls `DELETE /api/users/{uslug}/hosts/{hslug}`. |
 | Cluster host shows offline mid-session | Toast: "us-east disconnected — reconnecting." Existing session views switch to a "stale" appearance (faded, no live updates) until reconnect. |
+| Per-host JWT signed for the wrong host | Hub NATS auth rejects the publish/subscribe; SPA receives a connection error. Host picker surfaces "credentials invalid for this host." Common cause: host removed and re-registered with the same slug after the SPA loaded — login again to refresh JWTs. |
 
 ## Dependencies
 

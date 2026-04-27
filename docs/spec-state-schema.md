@@ -285,7 +285,7 @@ Subscribers: session-agent (pull consumer for at-least-once delivery)
 ### `MCLAUDE_LIFECYCLE`
 
 Specified in: `docs/adr-0003-k8s-integration.md`
-Created by: not yet created in production code (test-only in `testutil/deps.go`)
+Created by: session-agent (`CreateOrUpdateStream` — idempotent; same pattern as MCLAUDE_EVENTS / MCLAUDE_API). Production-active stream.
 
 ```
 Name:      MCLAUDE_LIFECYCLE
@@ -598,14 +598,22 @@ Contents:
 - `nkey.seed` — NKey private seed (generated locally on host, never leaves machine; matches `hosts.public_key` in Postgres)
 - `nats.creds` — NATS credentials file (JWT + NKey seed, host-scoped permissions per ADR-0035)
 - `config.json` — host metadata (`{slug, hubUrl, userSlug}`)
-- `auth.json` — bearer token from `mclaude login`, mode 0600 (used for admin CLI calls)
 
-Writers: `mclaude host register` (on registration), daemon JWT refresh loop, `mclaude login` (auth.json).
-Readers: daemon (NATS connection), CLI (`mclaude cluster …`, `mclaude admin …`).
+Writers: `mclaude host register` (on registration), daemon JWT refresh loop.
+Readers: daemon (NATS connection).
 
 Active-host pointer: `~/.mclaude/active-host` is a symlink to the active `~/.mclaude/hosts/{hslug}/` directory. The daemon and the CLI consult this when `--host` is not provided.
 
 BYOH machines never receive operator or account NKeys; they hold only their per-host user JWT, which is sufficient to authenticate as a NATS client of the hub.
+
+### User-level credentials
+
+Path: `~/.mclaude/auth.json` (mode `0600`)
+
+Contents: bearer token from `mclaude login`, used for admin CLI HTTP calls (`mclaude cluster register`, `mclaude cluster grant`, `mclaude admin users …`). The CLI sends `Authorization: Bearer <token>` on every HTTP call. The token is user-scoped, not host-scoped — it lives outside the per-host directory because the same admin token is valid across all of the user's hosts.
+
+Writers: `mclaude login`.
+Readers: CLI (admin and cluster subcommands).
 
 ---
 

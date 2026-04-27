@@ -260,12 +260,6 @@ The shutdown sequence preserves in-progress work and enables zero-downtime upgra
 7. Publish `session_upgrading` lifecycle event per session.
 8. Exit.
 
-### Daemon: Child Process Supervision (legacy single-binary mode)
-
-In the legacy single-binary BYOH daemon (carryover behavior, used until `mclaude-controller-local` lands), the daemon spawns one child agent per project via `manageChild`, which restarts the child on crash with a 2-second delay. On daemon shutdown, all children receive SIGINT.
-
-Per ADR-0035 process supervision migrates out of the session-agent daemon into the new `mclaude-controller-local` binary; the session-agent daemon is then invoked as a child process **by** the local controller, not the other way around. See `docs/mclaude-controller/spec-controller.md`.
-
 ### Daemon: JWT Refresh
 
 The daemon checks its host JWT (`~/.mclaude/hosts/{hslug}/nats.creds`) TTL every 60 seconds. When remaining TTL falls below 15 minutes, it POSTs to the refresh URL with the current JWT and writes the new JWT back to the credentials file.

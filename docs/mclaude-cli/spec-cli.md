@@ -35,6 +35,19 @@ Flags:
 | `-u <uslug>` | User slug | Value from `~/.mclaude/context.json` |
 | `-p <pslug>` | Project slug (accepts `@pslug` short form) | Value from `~/.mclaude/context.json` |
 
+#### `mclaude login`
+
+Authenticates the user against the control-plane and persists a bearer token for subsequent admin / cluster CLI calls. Prompts for email + password (or opens an OAuth browser flow when the control-plane is configured for it), receives a token, and writes it to `~/.mclaude/auth.json` at mode `0600`. Subsequent `mclaude cluster …` and `mclaude admin …` commands read this file and send `Authorization: Bearer <token>` on every HTTP call.
+
+The token is user-scoped (not host-scoped): a single login covers admin operations across all of the user's hosts. Re-running `mclaude login` overwrites the file.
+
+Flags:
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--server <url>` | Control-plane base URL | Read from `~/.mclaude/context.json`'s `server` key, otherwise prompts |
+| `--email <email>` | Email (skips the prompt) | Prompts interactively |
+
 #### `mclaude host register [--name <name>]`
 
 Device-code registration flow for BYOH machines. Prompts for a hostname (default = `hostname` output, slugified). Generates an NKey pair locally — the private seed never leaves the machine, written to `~/.mclaude/hosts/{hslug}/nkey.seed` (mode 0600). Calls `POST /api/users/{uslug}/hosts/code` with `{publicKey}` to get a 6-character device code, then prints instructions for the user to open the dashboard and enter the code. Polls `GET /api/users/{uslug}/hosts/code/{code}` until the status changes from `pending` to `completed`. On completion, writes `~/.mclaude/hosts/{hslug}/{nats.creds, config.json}` from the returned JWT + the locally-stored seed, and symlinks `~/.mclaude/active-host → {hslug}`.

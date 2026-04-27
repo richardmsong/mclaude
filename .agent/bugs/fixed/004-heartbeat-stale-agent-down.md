@@ -1,6 +1,8 @@
 # BUG-004: "Agent down: mclaude -- heartbeat stale" despite running pod
 
 **Severity**: Medium — misleading UI state, user thinks system is broken  
+**Status**: fixed
+**Fixed**: 2026-04-27
 **Component**: spa (HeartbeatMonitor), session-agent (heartbeat publishing)  
 **Reported**: 2026-04-16  
 
