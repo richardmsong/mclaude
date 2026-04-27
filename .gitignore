@@ -63,3 +63,5 @@ worktrees/
 
 # SQLite databases (docs-mcp index)
 *.db
+*.db-shm
+*.db-wal
