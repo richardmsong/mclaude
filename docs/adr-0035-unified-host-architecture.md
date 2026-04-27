@@ -1,8 +1,9 @@
 # ADR: Unified Host Architecture — BYOH + Cluster Topology + Controller Separation
 
-**Status**: draft
+**Status**: accepted
 **Status history**:
 - 2026-04-26: draft
+- 2026-04-26: accepted — design-evaluator CLEAN (6 rounds), spec co-commit verified
 
 > Supersedes:
 > - `adr-0004-multi-laptop.md` (BYOH) — folded in: `hosts` table, host-scoped NATS credentials, `.hosts.{hslug}.` subject scheme, device-code + authed registration, $SYS-based liveness, force re-register migration.
