@@ -31,11 +31,13 @@ spec:
           {{- include "mclaude-cp.securityContext" . | nindent 10 }}
           command: ["dbmate", "--wait", "up"]
           env:
-            - name: DATABASE_URL
+            - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.controlPlane.existingSecret }}
-                  key: database-url
+                  name: mclaude-postgres
+                  key: postgres-password
+            - name: DATABASE_URL
+              value: "postgres://mclaude:$(POSTGRES_PASSWORD)@{{ include "mclaude-cp.fullname" . }}-postgres.{{ include "mclaude-cp.namespace" . }}.svc:5432/mclaude?sslmode=disable"
           resources:
             requests:
               cpu: 50m
@@ -83,11 +85,13 @@ spec:
             - name: NATS_WS_URL
               value: {{ .Values.controlPlane.config.natsWsUrl | quote }}
             {{- end }}
-            - name: DATABASE_URL
+            - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.controlPlane.existingSecret }}
-                  key: database-url
+                  name: mclaude-postgres
+                  key: postgres-password
+            - name: DATABASE_URL
+              value: "postgres://mclaude:$(POSTGRES_PASSWORD)@{{ include "mclaude-cp.fullname" . }}-postgres.{{ include "mclaude-cp.namespace" . }}.svc:5432/mclaude?sslmode=disable"
             {{- if .Values.controlPlane.config.devSeed }}
             - name: DEV_SEED
               value: "true"

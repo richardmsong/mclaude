@@ -44,7 +44,7 @@ data:
     operator: /etc/nats/operator-keys/operatorJwt
     resolver: MEMORY
     resolver_preload: {
-      include operator-keys/accountPublicKeyConf
+      include /etc/nats/operator-keys/resolverPreload
     }
 
     # Max message payload: 8MB for large tool results

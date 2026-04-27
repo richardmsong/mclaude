@@ -37,12 +37,13 @@ spec:
           {{- include "mclaude-cp.securityContext" . | nindent 10 }}
           command: ["control-plane", "init-keys"]
           env:
-            - name: DATABASE_URL
+            - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.postgres.auth.existingSecret | default "mclaude-postgres" }}
-                  key: database-url
-                  optional: true
+                  key: postgres-password
+            - name: DATABASE_URL
+              value: "postgres://mclaude:$(POSTGRES_PASSWORD)@{{ include "mclaude-cp.fullname" . }}-postgres.{{ include "mclaude-cp.namespace" . }}.svc:5432/mclaude?sslmode=disable"
             - name: OPERATOR_KEYS_SECRET
               value: "operator-keys"
             - name: NAMESPACE
