@@ -2,11 +2,11 @@
 
 **Status**: accepted
 **Status history**:
-- 2026-04-26: accepted
+- 2026-04-27: accepted
 
 ## Overview
 
-Fix three boot failures in the `mclaude-cp` Helm chart that prevent the control-plane, hub NATS, and Postgres from starting after the ADR-0035 chart split.
+Fix five boot failures in the `mclaude-cp` Helm chart that prevent the control-plane, hub NATS, and Postgres from starting after the ADR-0035 chart split.
 
 ## Motivation
 
@@ -24,6 +24,9 @@ After ADR-0035 and ADR-0037 landed, the deploy workflow triggers but all pods ex
 | NATS resolver_preload | Store a preformatted `resolverPreload` key in the operator-keys Secret containing `"<acctPub>": "<acctJWT>"`. NATS configmap uses `include` with absolute path `/etc/nats/operator-keys/resolverPreload`. | Avoids runtime construction of the preload line. The include path must be absolute because NATS resolves relative includes from the config file's directory. |
 | DATABASE_URL construction | Chart template constructs `DATABASE_URL` as an env var: `postgres://mclaude:$(POSTGRES_PASSWORD)@{release}-postgres.{namespace}.svc:5432/mclaude?sslmode=disable`. Password sourced from Secret `mclaude-postgres` key `postgres-password`. | Eliminates the need for a separate `database-url` key in the Secret. The service name is deterministic from the Helm release name. |
 | operator-keys Secret keys | Add `accountPublicKey` and `resolverPreload` to the Secret created by init-keys. Full key set: `operatorJwt`, `operatorSeed`, `accountJwt`, `accountSeed`, `accountPublicKey`, `resolverPreload`. | NATS needs the account public key for resolver_preload. Storing the preformatted line avoids shell/template gymnastics. |
+| Control-plane NATS auth | Helm template sets `NATS_ACCOUNT_SEED` from operator-keys Secret. Go code generates a user JWT signed by the account key and connects with `nats.UserJWT()` credentials. | With JWT auth on the server, all clients must present valid credentials. |
+| SQL backfill DO block | Alias `users` table as `usr` in the FOR...IN SELECT to avoid PL/pgSQL variable shadowing. | PL/pgSQL resolves `u.id` as the loop variable before assignment. |
+| NATS resolver_preload path | Relative path `operator-keys/resolverPreload`, not absolute. | Absolute path gets doubled: `/etc/nats/etc/nats/...`. |
 
 ## Impact
 
@@ -35,6 +38,8 @@ After ADR-0035 and ADR-0037 landed, the deploy workflow triggers but all pods ex
 - `charts/mclaude-cp/templates/nats-configmap.yaml` — fix resolver_preload include path, use absolute path
 - `charts/mclaude-cp/templates/control-plane-deployment.yaml` — construct DATABASE_URL from service name + password Secret
 - `charts/mclaude-cp/templates/init-keys-job.yaml` — same DATABASE_URL fix for the init-keys Job
+- `mclaude-control-plane/main.go` — NATS JWT auth connection
+- `charts/mclaude-cp/templates/control-plane-deployment.yaml` — NATS_ACCOUNT_SEED env
 
 ## Scope
 
