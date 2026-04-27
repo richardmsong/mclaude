@@ -8,21 +8,20 @@ import (
 )
 
 // OperatorAccount holds the bootstrap key material for the NATS 3-tier
-// trust chain (operator → account → user). Generated once by the
-// mclaude-cp init-keys Helm Job and persisted to a K8s Secret.
+// trust chain (operator → system account → application account → user).
+// Generated once by the mclaude-cp init-keys Helm Job and persisted to a K8s Secret.
 type OperatorAccount struct {
-	// OperatorSeed is the operator NKey seed (private key).
-	OperatorSeed []byte
-	// OperatorPublicKey is the operator NKey public key (O…).
+	OperatorSeed      []byte
 	OperatorPublicKey string
-	// AccountSeed is the account NKey seed (private key).
-	AccountSeed []byte
-	// AccountPublicKey is the account NKey public key (A…).
-	AccountPublicKey string
-	// OperatorJWT is the self-signed operator JWT.
-	OperatorJWT string
-	// AccountJWT is the account JWT signed by the operator.
-	AccountJWT string
+	AccountSeed       []byte
+	AccountPublicKey  string
+	OperatorJWT       string
+	AccountJWT        string
+	// SysAccountPublicKey and SysAccountJWT are for the NATS system account.
+	// NATS requires a dedicated system account for internal subscriptions;
+	// JetStream cannot be enabled on the system account.
+	SysAccountPublicKey string
+	SysAccountJWT       string
 }
 
 // GenerateOperatorAccount generates a fresh operator + account NKey pair
@@ -60,16 +59,34 @@ func GenerateOperatorAccount(operatorName, accountName string) (*OperatorAccount
 		return nil, fmt.Errorf("account seed: %w", err)
 	}
 
-	// 3. Issue self-signed operator JWT.
+	// 3. Generate system account NKey pair (dedicated, no JetStream).
+	sysKP, err := nkeys.CreateAccount()
+	if err != nil {
+		return nil, fmt.Errorf("create sys account nkey: %w", err)
+	}
+	sysPub, err := sysKP.PublicKey()
+	if err != nil {
+		return nil, fmt.Errorf("sys account public key: %w", err)
+	}
+
+	// 4. Issue self-signed operator JWT with system account.
 	opClaims := natsjwt.NewOperatorClaims(opPub)
 	opClaims.Name = operatorName
-	opClaims.SystemAccount = acctPub
+	opClaims.SystemAccount = sysPub
 	opJWT, err := opClaims.Encode(opKP)
 	if err != nil {
 		return nil, fmt.Errorf("encode operator jwt: %w", err)
 	}
 
-	// 4. Issue account JWT signed by the operator.
+	// 5. Issue system account JWT (no JetStream).
+	sysClaims := natsjwt.NewAccountClaims(sysPub)
+	sysClaims.Name = "SYS"
+	sysJWT, err := sysClaims.Encode(opKP)
+	if err != nil {
+		return nil, fmt.Errorf("encode sys account jwt: %w", err)
+	}
+
+	// 6. Issue application account JWT with JetStream enabled.
 	acctClaims := natsjwt.NewAccountClaims(acctPub)
 	acctClaims.Name = accountName
 	acctClaims.Limits.JetStreamLimits = natsjwt.JetStreamLimits{
@@ -84,11 +101,13 @@ func GenerateOperatorAccount(operatorName, accountName string) (*OperatorAccount
 	}
 
 	return &OperatorAccount{
-		OperatorSeed:      opSeed,
-		OperatorPublicKey: opPub,
-		AccountSeed:       acctSeed,
-		AccountPublicKey:  acctPub,
-		OperatorJWT:       opJWT,
-		AccountJWT:        acctJWT,
+		OperatorSeed:        opSeed,
+		OperatorPublicKey:   opPub,
+		AccountSeed:         acctSeed,
+		AccountPublicKey:    acctPub,
+		OperatorJWT:         opJWT,
+		AccountJWT:          acctJWT,
+		SysAccountPublicKey: sysPub,
+		SysAccountJWT:       sysJWT,
 	}, nil
 }

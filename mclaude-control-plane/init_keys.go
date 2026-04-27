@@ -82,12 +82,15 @@ func runInitKeys() {
 		},
 		Type: corev1.SecretTypeOpaque,
 		Data: map[string][]byte{
-			"operatorJwt":  []byte(oa.OperatorJWT),
-			"accountJwt":   []byte(oa.AccountJWT),
-			"accountSeed":  oa.AccountSeed,
-			"operatorSeed":         oa.OperatorSeed,
-			"accountPublicKey":     []byte(oa.AccountPublicKey),
-			"resolverPreload": []byte(`"` + oa.AccountPublicKey + `": ` + oa.AccountJWT),
+			"operatorJwt":      []byte(oa.OperatorJWT),
+			"accountJwt":       []byte(oa.AccountJWT),
+			"accountSeed":      oa.AccountSeed,
+			"operatorSeed":     oa.OperatorSeed,
+			"accountPublicKey": []byte(oa.AccountPublicKey),
+			"resolverPreload": []byte(
+				`"` + oa.SysAccountPublicKey + `": ` + oa.SysAccountJWT + "\n" +
+					`"` + oa.AccountPublicKey + `": ` + oa.AccountJWT,
+			),
 		},
 	}
 	_, err = clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})

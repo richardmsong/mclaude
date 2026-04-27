@@ -27,7 +27,8 @@ After ADR-0035 and ADR-0037 landed, the deploy workflow triggers but all pods ex
 | Control-plane NATS auth | Helm template sets `NATS_ACCOUNT_SEED` from operator-keys Secret. Go code generates a user JWT signed by the account key and connects with `nats.UserJWT()` credentials. | With JWT auth on the server, all clients must present valid credentials. |
 | SQL backfill DO block | Alias `users` table as `usr` in the FOR...IN SELECT to avoid PL/pgSQL variable shadowing. | PL/pgSQL resolves `u.id` as the loop variable before assignment. |
 | NATS resolver_preload path | Relative path `operator-keys/resolverPreload`, not absolute. | Absolute path gets doubled: `/etc/nats/etc/nats/...`. |
-| Account JetStream limits | Set `JetStreamLimits{MemoryStorage: -1, DiskStorage: -1, Streams: -1, Consumer: -1}` on the account claims before encoding the account JWT. | NATS disables JetStream for accounts that don't explicitly set JetStream limits. Without this, the control-plane gets `jetstream not enabled for account` when creating KV buckets. |
+| Account JetStream limits | Set `JetStreamLimits{MemoryStorage: -1, DiskStorage: -1, Streams: -1, Consumer: -1}` on the application account claims. | NATS disables JetStream for accounts that don't explicitly set JetStream limits. Without this, the control-plane gets `jetstream not enabled for account` when creating KV buckets. |
+| Separate system account | Generate a dedicated system account NKey pair (no JetStream). Set `opClaims.SystemAccount` to the system account's public key, not the application account. Both account JWTs are preloaded in `resolverPreload`. | NATS forbids JetStream on the system account (`Not allowed to enable JetStream on the system account`). The system account is used for internal NATS subscriptions ($SYS); the application account carries all mclaude traffic and JetStream state. |
 
 ## Impact
 
