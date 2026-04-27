@@ -19,8 +19,8 @@ jobs:
 
       - name: Helm uninstall preview
         run: |
-          RELEASE="mclaude-preview-${slug}"
-          echo "Uninstalling release: ${RELEASE}"
-          helm uninstall "${RELEASE}" -n mclaude-system 2>/dev/null || echo "Release ${RELEASE} not found — already cleaned up"
+          echo "Uninstalling preview releases for branch: ${slug}"
+          helm uninstall "mclaude-cp-preview-${slug}" -n mclaude-system 2>/dev/null || true
+          helm uninstall "mclaude-worker-preview-${slug}" -n mclaude-system 2>/dev/null || true
         env:
           slug: ${{ steps.slug.outputs.value }}

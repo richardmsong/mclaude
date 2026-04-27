@@ -21,6 +21,8 @@ jobs:
       control-plane: ${{ steps.filter.outputs.control-plane }}
       spa: ${{ steps.filter.outputs.spa }}
       session-agent: ${{ steps.filter.outputs.session-agent }}
+      cli: ${{ steps.filter.outputs.cli }}
+      controller-k8s: ${{ steps.filter.outputs.controller-k8s }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -38,6 +40,12 @@ jobs:
               - '.github/workflows/ci.yml'
             session-agent:
               - 'mclaude-session-agent/**'
+              - '.github/workflows/ci.yml'
+            cli:
+              - 'mclaude-cli/**'
+              - '.github/workflows/ci.yml'
+            controller-k8s:
+              - 'mclaude-controller-k8s/**'
               - '.github/workflows/ci.yml'
 
   test-relay:
@@ -96,3 +104,31 @@ jobs:
           cache-dependency-path: mclaude-session-agent/go.sum
       - run: go test -race ./...
         working-directory: mclaude-session-agent
+
+  test-cli:
+    name: Test cli
+    needs: changes
+    if: needs.changes.outputs.cli == 'true' || github.ref == 'refs/heads/main'
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mclaude-cli/go.mod
+          cache-dependency-path: mclaude-cli/go.sum
+      - run: go test -race ./...
+        working-directory: mclaude-cli
+
+  test-controller-k8s:
+    name: Test controller-k8s
+    needs: changes
+    if: needs.changes.outputs.controller-k8s == 'true' || github.ref == 'refs/heads/main'
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mclaude-controller-k8s/go.mod
+          cache-dependency-path: mclaude-controller-k8s/go.sum
+      - run: go test -race ./...
+        working-directory: mclaude-controller-k8s

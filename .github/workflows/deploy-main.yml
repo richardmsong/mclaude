@@ -131,25 +131,76 @@ jobs:
             ghcr.io/richardmsong/mclaude-session-agent:${{ needs.tag.outputs.image_tag }}
             ghcr.io/richardmsong/mclaude-session-agent:main
 
+  build-controller-k8s:
+    name: Build controller-k8s
+    needs: tag
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ needs.tag.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authenticate to GHCR
+        run: |
+          mkdir -p "$RUNNER_TEMP/docker"
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
+            "$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64)" \
+            > "$RUNNER_TEMP/docker/config.json"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mclaude-controller-k8s/go.mod
+          cache: false
+
+      - name: Build binary
+        working-directory: mclaude-controller-k8s
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o controller-k8s .
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./mclaude-controller-k8s
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ghcr.io/richardmsong/mclaude-controller-k8s:${{ needs.tag.outputs.image_tag }}
+            ghcr.io/richardmsong/mclaude-controller-k8s:main
+
   deploy:
     name: Deploy main
-    needs: [tag, build-control-plane, build-spa, build-session-agent]
+    needs: [tag, build-control-plane, build-spa, build-session-agent, build-controller-k8s]
     runs-on: [self-hosted, tailscale]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Helm deploy main
+      - name: Helm deploy control-plane
         env:
           IMAGE_TAG: ${{ needs.tag.outputs.image_tag }}
           DEV_OAUTH_TOKEN: ${{ secrets.DEV_OAUTH_TOKEN }}
         run: |
-          echo "Deploying all components at tag: ${IMAGE_TAG}"
-          helm upgrade --install "mclaude" ./charts/mclaude \
-            -f ./charts/mclaude/values-k3d-ghcr.yaml \
+          echo "Deploying control-plane at tag: ${IMAGE_TAG}"
+          helm upgrade --install "mclaude-cp" ./charts/mclaude-cp \
+            -f ./charts/mclaude-cp/values-k3d-ghcr.yaml \
             --set controlPlane.image.tag="${IMAGE_TAG}" \
             --set spa.image.tag="${IMAGE_TAG}" \
-            --set sessionAgent.image.tag="${IMAGE_TAG}" \
             --set controlPlane.devOAuthToken="${DEV_OAUTH_TOKEN}" \
-            --namespace "mclaude-system" \
-            --wait --timeout 5m \
-            --force-conflicts
+            --namespace mclaude-system \
+            --wait --timeout 5m
+
+      - name: Helm deploy worker
+        env:
+          IMAGE_TAG: ${{ needs.tag.outputs.image_tag }}
+        run: |
+          echo "Deploying worker at tag: ${IMAGE_TAG}"
+          helm upgrade --install "mclaude-worker" ./charts/mclaude-worker \
+            -f ./charts/mclaude-worker/values-k3d-ghcr.yaml \
+            --set controller.image.tag="${IMAGE_TAG}" \
+            --set sessionAgent.image.tag="${IMAGE_TAG}" \
+            --namespace mclaude-system \
+            --wait --timeout 5m

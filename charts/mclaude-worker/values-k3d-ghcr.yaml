@@ -1,0 +1,27 @@
+## k3d local-preview values for worker chart.
+## ghcr.io images; single-cluster degenerate install.
+
+clusterSlug: local
+jsDomain: local
+leafUrl: "nats://mclaude-cp-nats.mclaude-system.svc:7422"
+
+controller:
+  image:
+    registry: ghcr.io
+    repository: richardmsong/mclaude-controller-k8s
+    tag: "main"
+    pullPolicy: IfNotPresent
+
+sessionAgent:
+  image:
+    registry: ghcr.io
+    repository: richardmsong/mclaude-session-agent
+    tag: "main"
+    pullPolicy: IfNotPresent
+
+namespace:
+  name: mclaude-system
+
+global:
+  imagePullSecrets:
+    - name: ghcr-pull-secret

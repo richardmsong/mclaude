@@ -16,6 +16,7 @@ jobs:
       control-plane: ${{ steps.filter.outputs.control-plane }}
       spa: ${{ steps.filter.outputs.spa }}
       session-agent: ${{ steps.filter.outputs.session-agent }}
+      controller-k8s: ${{ steps.filter.outputs.controller-k8s }}
       branch_slug: ${{ steps.slug.outputs.value }}
       image_tag: ${{ steps.slug.outputs.image_tag }}
     steps:
@@ -42,6 +43,9 @@ jobs:
               - '.github/workflows/deploy-preview.yml'
             session-agent:
               - 'mclaude-session-agent/**'
+              - '.github/workflows/deploy-preview.yml'
+            controller-k8s:
+              - 'mclaude-controller-k8s/**'
               - '.github/workflows/deploy-preview.yml'
 
   build-control-plane:
@@ -153,9 +157,49 @@ jobs:
           push: true
           tags: ghcr.io/richardmsong/mclaude-session-agent:${{ needs.changes.outputs.image_tag }}
 
+  build-controller-k8s:
+    name: Build controller-k8s (branch)
+    needs: changes
+    if: needs.changes.outputs.controller-k8s == 'true'
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ needs.changes.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authenticate to GHCR
+        run: |
+          mkdir -p "$RUNNER_TEMP/docker"
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
+            "$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64)" \
+            > "$RUNNER_TEMP/docker/config.json"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mclaude-controller-k8s/go.mod
+          cache: false
+
+      - name: Build binary
+        working-directory: mclaude-controller-k8s
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o controller-k8s .
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./mclaude-controller-k8s
+          platforms: linux/arm64
+          push: true
+          tags: ghcr.io/richardmsong/mclaude-controller-k8s:${{ needs.changes.outputs.image_tag }}
+
   deploy:
     name: Deploy preview
-    needs: [changes, build-control-plane, build-spa, build-session-agent]
+    needs: [changes, build-control-plane, build-spa, build-session-agent, build-controller-k8s]
     # Run even if build jobs were skipped (nothing changed for that component)
     if: always() && !failure() && !cancelled()
     runs-on: [self-hosted, tailscale]
@@ -167,30 +211,34 @@ jobs:
       - name: Resolve image tags
         id: tags
         run: |
-          RELEASE="mclaude-preview-${BRANCH_SLUG}"
+          CP_RELEASE="mclaude-cp-preview-${BRANCH_SLUG}"
+          WORKER_RELEASE="mclaude-worker-preview-${BRANCH_SLUG}"
 
           resolve_tag() {
-            local component="$1" new_tag="$2"
+            local release="$1" key_path="$2" new_tag="$3"
             if [ -n "$new_tag" ]; then
               echo "$new_tag"
             else
-              helm get values "$RELEASE" -n mclaude-system -o json 2>/dev/null \
-                | jq -r ".${component}.image.tag // empty" || true
+              helm get values "$release" -n mclaude-system -o json 2>/dev/null \
+                | jq -r ".${key_path}.image.tag // empty" || true
             fi
           }
 
-          CP_TAG=$(resolve_tag "controlPlane" "${{ needs.build-control-plane.outputs.tag }}")
-          SPA_TAG=$(resolve_tag "spa" "${{ needs.build-spa.outputs.tag }}")
-          SA_TAG=$(resolve_tag "sessionAgent" "${{ needs.build-session-agent.outputs.tag }}")
+          CP_TAG=$(resolve_tag "$CP_RELEASE" "controlPlane" "${{ needs.build-control-plane.outputs.tag }}")
+          SPA_TAG=$(resolve_tag "$CP_RELEASE" "spa" "${{ needs.build-spa.outputs.tag }}")
+          SA_TAG=$(resolve_tag "$WORKER_RELEASE" "sessionAgent" "${{ needs.build-session-agent.outputs.tag }}")
+          CK_TAG=$(resolve_tag "$WORKER_RELEASE" "controller" "${{ needs.build-controller-k8s.outputs.tag }}")
 
           # Final fallback for first deploy: use slug-sha tag (forces build next time)
           CP_TAG="${CP_TAG:-${{ needs.changes.outputs.image_tag }}}"
           SPA_TAG="${SPA_TAG:-${{ needs.changes.outputs.image_tag }}}"
           SA_TAG="${SA_TAG:-${{ needs.changes.outputs.image_tag }}}"
+          CK_TAG="${CK_TAG:-${{ needs.changes.outputs.image_tag }}}"
 
           echo "cp=$CP_TAG" >> "$GITHUB_OUTPUT"
           echo "spa=$SPA_TAG" >> "$GITHUB_OUTPUT"
           echo "sa=$SA_TAG" >> "$GITHUB_OUTPUT"
+          echo "ck=$CK_TAG" >> "$GITHUB_OUTPUT"
 
           PREVIEW_HOST="preview-${BRANCH_SLUG}.mclaude.richardmcsong.com"
           PREVIEW_NATS_HOST="nats-preview-${BRANCH_SLUG}.mclaude.richardmcsong.com"
@@ -199,24 +247,23 @@ jobs:
           echo "nats_host=$PREVIEW_NATS_HOST" >> "$GITHUB_OUTPUT"
           echo "ts_ip=$TS_IP" >> "$GITHUB_OUTPUT"
 
-          echo "control-plane: ghcr.io/richardmsong/mclaude-control-plane:${CP_TAG}"
-          echo "spa:           ghcr.io/richardmsong/mclaude-spa:${SPA_TAG}"
-          echo "session-agent: ghcr.io/richardmsong/mclaude-session-agent:${SA_TAG}"
-          echo "preview URL:   https://${PREVIEW_HOST}"
+          echo "control-plane:   ghcr.io/richardmsong/mclaude-control-plane:${CP_TAG}"
+          echo "spa:             ghcr.io/richardmsong/mclaude-spa:${SPA_TAG}"
+          echo "session-agent:   ghcr.io/richardmsong/mclaude-session-agent:${SA_TAG}"
+          echo "controller-k8s:  ghcr.io/richardmsong/mclaude-controller-k8s:${CK_TAG}"
+          echo "preview URL:     https://${PREVIEW_HOST}"
 
-      - name: Helm deploy preview
+      - name: Helm deploy control-plane preview
         env:
           CP_TAG: ${{ steps.tags.outputs.cp }}
           SPA_TAG: ${{ steps.tags.outputs.spa }}
-          SA_TAG: ${{ steps.tags.outputs.sa }}
           PREVIEW_HOST: ${{ steps.tags.outputs.host }}
           PREVIEW_NATS_HOST: ${{ steps.tags.outputs.nats_host }}
           TS_IP: ${{ steps.tags.outputs.ts_ip }}
         run: |
-          helm upgrade --install "mclaude-preview-${BRANCH_SLUG}" ./charts/mclaude \
+          helm upgrade --install "mclaude-cp-preview-${BRANCH_SLUG}" ./charts/mclaude-cp \
             --set controlPlane.image.tag="${CP_TAG}" \
             --set spa.image.tag="${SPA_TAG}" \
-            --set sessionAgent.image.tag="${SA_TAG}" \
             --set namespace.create=false \
             --set "global.imagePullSecrets[0]=ghcr-pull-secret" \
             --set controlPlane.migrations.enabled=false \
@@ -231,8 +278,20 @@ jobs:
             --set "ingress.tls[0].hosts[1]=${PREVIEW_NATS_HOST}" \
             --set "ingress.externalDnsTarget=${TS_IP}" \
             --namespace "mclaude-system" \
-            --wait --timeout 5m \
-            --force-conflicts
+            --wait --timeout 5m
+
+      - name: Helm deploy worker preview
+        env:
+          SA_TAG: ${{ steps.tags.outputs.sa }}
+          CK_TAG: ${{ steps.tags.outputs.ck }}
+        run: |
+          helm upgrade --install "mclaude-worker-preview-${BRANCH_SLUG}" ./charts/mclaude-worker \
+            --set controller.image.tag="${CK_TAG}" \
+            --set sessionAgent.image.tag="${SA_TAG}" \
+            --set namespace.create=false \
+            --set "global.imagePullSecrets[0]=ghcr-pull-secret" \
+            --namespace "mclaude-system" \
+            --wait --timeout 5m
 
       - name: Preview URL
         run: echo "✓ Preview live at https://${{ steps.tags.outputs.host }}"
