@@ -87,7 +87,7 @@ func runInitKeys() {
 			"accountSeed":  oa.AccountSeed,
 			"operatorSeed":         oa.OperatorSeed,
 			"accountPublicKey":     []byte(oa.AccountPublicKey),
-			"accountPublicKeyConf": []byte(`"` + oa.AccountPublicKey + `": ` + oa.AccountJWT),
+			"resolverPreload": []byte(`"` + oa.AccountPublicKey + `": ` + oa.AccountJWT),
 		},
 	}
 	_, err = clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})

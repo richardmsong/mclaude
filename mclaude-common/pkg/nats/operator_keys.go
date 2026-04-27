@@ -63,6 +63,7 @@ func GenerateOperatorAccount(operatorName, accountName string) (*OperatorAccount
 	// 3. Issue self-signed operator JWT.
 	opClaims := natsjwt.NewOperatorClaims(opPub)
 	opClaims.Name = operatorName
+	opClaims.SystemAccount = acctPub
 	opJWT, err := opClaims.Encode(opKP)
 	if err != nil {
 		return nil, fmt.Errorf("encode operator jwt: %w", err)
