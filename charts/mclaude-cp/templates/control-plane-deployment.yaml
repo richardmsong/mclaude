@@ -85,6 +85,11 @@ spec:
             - name: NATS_WS_URL
               value: {{ .Values.controlPlane.config.natsWsUrl | quote }}
             {{- end }}
+            - name: NATS_ACCOUNT_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: operator-keys
+                  key: accountSeed
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:

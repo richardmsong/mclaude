@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	natsjwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"github.com/rs/zerolog"
@@ -93,7 +94,16 @@ func main() {
 	srv.providers = provReg
 
 	// NATS connection — used for project subscriptions, KV writes, and provisioning.
+	userJWT, userKP, err := generateNATSUserCreds(accountKP)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("generate NATS user credentials")
+	}
+
 	nc, err := nats.Connect(natsURL,
+		nats.UserJWT(
+			func() (string, error) { return userJWT, nil },
+			func(nonce []byte) ([]byte, error) { return userKP.Sign(nonce) },
+		),
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 	)
@@ -194,6 +204,28 @@ func seedDev(ctx context.Context, db *DB, nc *nats.Conn, logger zerolog.Logger) 
 	}
 
 	return nil
+}
+
+// generateNATSUserCreds creates an ephemeral user JWT signed by the account key,
+// allowing the control-plane to authenticate against a NATS server running
+// operator JWT auth.
+func generateNATSUserCreds(accountKP nkeys.KeyPair) (userJWT string, userKP nkeys.KeyPair, err error) {
+	userKP, err = nkeys.CreateUser()
+	if err != nil {
+		return "", nil, fmt.Errorf("create user nkey: %w", err)
+	}
+	userPub, err := userKP.PublicKey()
+	if err != nil {
+		return "", nil, fmt.Errorf("user public key: %w", err)
+	}
+	claims := natsjwt.NewUserClaims(userPub)
+	claims.Name = "control-plane"
+	claims.IssuerAccount, _ = accountKP.PublicKey()
+	jwt, err := claims.Encode(accountKP)
+	if err != nil {
+		return "", nil, fmt.Errorf("encode user jwt: %w", err)
+	}
+	return jwt, userKP, nil
 }
 
 // loadOrGenerateAccountKey loads the account NKey from NATS_ACCOUNT_SEED env,
