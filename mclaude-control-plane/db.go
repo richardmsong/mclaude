@@ -120,6 +120,12 @@ func (db *DB) CreateUser(ctx context.Context, id, email, name, passwordHash stri
 	return &User{ID: id, Email: email, Name: name, PasswordHash: passwordHash, CreatedAt: now}, nil
 }
 
+// SetUserAdmin sets or clears the is_admin flag on a user.
+func (db *DB) SetUserAdmin(ctx context.Context, id string, isAdmin bool) error {
+	_, err := db.pool.Exec(ctx, `UPDATE users SET is_admin = $1 WHERE id = $2`, isAdmin, id)
+	return err
+}
+
 // DeleteUser removes a user by ID.
 func (db *DB) DeleteUser(ctx context.Context, id string) error {
 	_, err := db.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)

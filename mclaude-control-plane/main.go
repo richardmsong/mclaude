@@ -1,9 +1,10 @@
 // mclaude-control-plane: Auth, SSO, SCIM, user/project provisioning,
 // NATS-based project lifecycle, host management.
 //
-// Per ADR-0035: zero K8s imports. Project provisioning is delegated to
-// mclaude-controller-k8s (cluster) or mclaude-controller-local (BYOH)
-// via NATS request/reply.
+// Per ADR-0035: the main server path has zero K8s imports. Project provisioning
+// is delegated to mclaude-controller-k8s (cluster) or mclaude-controller-local
+// (BYOH) via NATS request/reply. The "init-keys" subcommand (Helm pre-install
+// Job) is the only code path that uses client-go to write the operator-keys Secret.
 package main
 
 import (
@@ -21,6 +22,12 @@ import (
 )
 
 func main() {
+	// Subcommand routing: the Helm pre-install Job calls "control-plane init-keys".
+	if len(os.Args) > 1 && os.Args[1] == "init-keys" {
+		runInitKeys()
+		return
+	}
+
 	logger := zerolog.New(os.Stdout).With().
 		Str("component", "control-plane").
 		Timestamp().
