@@ -6,19 +6,25 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
+	natsjwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"github.com/rs/zerolog"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 func main() {
+	// controller-runtime v0.23+ requires SetLogger before NewManager.
+	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+
 	logger := zerolog.New(os.Stdout).With().
 		Str("component", "controller-k8s").
 		Timestamp().
@@ -78,8 +84,16 @@ func main() {
 		logger.Fatal().Err(err).Msg("setup MCProject reconciler")
 	}
 
-	// NATS connection — for receiving provisioning requests from control-plane.
+	// NATS connection — authenticate with user JWT signed by account key (ADR-0040).
+	userJWT, userKP, err := generateNATSUserCreds(accountKP)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("generate NATS user credentials")
+	}
 	nc, err := nats.Connect(natsURL,
+		nats.UserJWT(
+			func() (string, error) { return userJWT, nil },
+			func(nonce []byte) ([]byte, error) { return userKP.Sign(nonce) },
+		),
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 	)
@@ -114,6 +128,28 @@ func loadAccountKey() (nkeys.KeyPair, error) {
 		return nkeys.FromSeed([]byte(seed))
 	}
 	return nkeys.CreateAccount()
+}
+
+// generateNATSUserCreds creates an ephemeral user JWT signed by the account key,
+// allowing the controller-k8s to authenticate against a NATS server running
+// operator JWT auth.
+func generateNATSUserCreds(accountKP nkeys.KeyPair) (userJWT string, userKP nkeys.KeyPair, err error) {
+	userKP, err = nkeys.CreateUser()
+	if err != nil {
+		return "", nil, fmt.Errorf("create user nkey: %w", err)
+	}
+	userPub, err := userKP.PublicKey()
+	if err != nil {
+		return "", nil, fmt.Errorf("user public key: %w", err)
+	}
+	claims := natsjwt.NewUserClaims(userPub)
+	claims.Name = "controller-k8s"
+	claims.IssuerAccount, _ = accountKP.PublicKey()
+	jwt, err := claims.Encode(accountKP)
+	if err != nil {
+		return "", nil, fmt.Errorf("encode user jwt: %w", err)
+	}
+	return jwt, userKP, nil
 }
 
 // detectNamespace reads the pod namespace from the service account mount.

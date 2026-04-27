@@ -38,6 +38,11 @@ spec:
               value: {{ required "jsDomain is required" .Values.jsDomain | quote }}
             - name: NATS_URL
               value: "nats://{{ include "mclaude-worker.fullname" . }}-nats:{{ .Values.nats.service.clientPort }}"
+            - name: NATS_ACCOUNT_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: operator-keys
+                  key: accountSeed
             - name: NATS_CREDENTIALS_PATH
               value: /etc/nats/leaf-creds/leaf.creds
             - name: LOG_LEVEL
