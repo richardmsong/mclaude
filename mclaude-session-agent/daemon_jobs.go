@@ -251,7 +251,7 @@ func (d *Daemon) writeJobEntry(job *JobEntry) error {
 func (d *Daemon) runLifecycleSubscriber(ctx context.Context) {
 	// Subscribe to lifecycle events for all projects belonging to this user.
 	// New format: mclaude.users.{uslug}.projects.*.lifecycle.*
-	subject := "mclaude.users." + string(d.cfg.UserSlug) + ".projects.*.lifecycle.*"
+	subject := "mclaude.users." + string(d.cfg.UserSlug) + ".hosts.*.projects.*.lifecycle.*"
 	sub, err := d.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var ev map[string]string
 		if err := json.Unmarshal(msg.Data, &ev); err != nil {
@@ -339,7 +339,7 @@ func (d *Daemon) dispatchQueuedJob(job *JobEntry) error {
 	}
 
 	// Build the sessions.create request.
-	createSubject := subj.UserProjectAPISessionsCreate(d.cfg.UserSlug, slug.ProjectSlug(job.ProjectID))
+	createSubject := subj.UserHostProjectAPISessionsCreate(d.cfg.UserSlug, d.cfg.HostSlug, slug.ProjectSlug(job.ProjectID))
 	createPayload, _ := json.Marshal(map[string]any{
 		"branch":    branch,
 		"permPolicy": "strict-allowlist",
@@ -374,7 +374,7 @@ func (d *Daemon) dispatchQueuedJob(job *JobEntry) error {
 
 	// Poll sessKV for state=idle (up to 30s).
 	// Use slug-based KV key; sessionSlug falls back to sessionID (pre-migration entries).
-	kvKey := subj.SessionsKVKey(d.cfg.UserSlug, slug.ProjectSlug(job.ProjectID), slug.SessionSlug(sessionID))
+	kvKey := subj.SessionsKVKey(d.cfg.UserSlug, d.cfg.HostSlug, slug.ProjectSlug(job.ProjectID), slug.SessionSlug(sessionID))
 	deadline := time.Now().Add(jobDispatchPollTimeout)
 	for time.Now().Before(deadline) {
 		entry, err := d.sessKV.Get(context.Background(), kvKey)
@@ -435,7 +435,7 @@ func (d *Daemon) dispatchQueuedJob(job *JobEntry) error {
 
 	// Send the dev-harness prompt via sessions.input.
 	prompt := scheduledSessionPrompt(job.SpecPath, component, fmt.Sprintf("%d", job.Priority), branch, otherSpecs)
-	inputSubject := subj.UserProjectAPISessionsInput(d.cfg.UserSlug, slug.ProjectSlug(job.ProjectID))
+	inputSubject := subj.UserHostProjectAPISessionsInput(d.cfg.UserSlug, d.cfg.HostSlug, slug.ProjectSlug(job.ProjectID))
 	inputPayload, _ := json.Marshal(map[string]any{
 		"type": "user",
 		"message": map[string]any{
@@ -488,7 +488,7 @@ func (d *Daemon) startupRecovery() {
 		case "running":
 			// Check if the session still exists in sessKV.
 			if job.SessionID != "" {
-				kvKey := subj.SessionsKVKey(slug.UserSlug(job.UserID), slug.ProjectSlug(job.ProjectID), slug.SessionSlug(job.SessionID))
+				kvKey := subj.SessionsKVKey(slug.UserSlug(job.UserID), d.cfg.HostSlug, slug.ProjectSlug(job.ProjectID), slug.SessionSlug(job.SessionID))
 				_, err := d.sessKV.Get(context.Background(), kvKey)
 				if err != nil {
 					// Session gone — reset to queued.
@@ -632,7 +632,7 @@ func (d *Daemon) processDispatch(ctx context.Context, quota QuotaStatus, changed
 					break // this job's threshold not exceeded; higher-threshold jobs also safe
 				}
 				// Send graceful stop.
-				inputSubject := subj.UserProjectAPISessionsInput(d.cfg.UserSlug, slug.ProjectSlug(job.ProjectID))
+				inputSubject := subj.UserHostProjectAPISessionsInput(d.cfg.UserSlug, d.cfg.HostSlug, slug.ProjectSlug(job.ProjectID))
 				stopMsg, _ := json.Marshal(map[string]any{
 					"type": "user",
 					"message": map[string]any{
@@ -644,7 +644,7 @@ func (d *Daemon) processDispatch(ctx context.Context, quota QuotaStatus, changed
 				_ = d.nc.Publish(inputSubject, stopMsg)
 
 				// Publish session_job_paused lifecycle event.
-				lifecycleSubject := subj.UserProjectLifecycle(d.cfg.UserSlug, slug.ProjectSlug(job.ProjectID), slug.SessionSlug(job.SessionID))
+				lifecycleSubject := subj.UserHostProjectLifecycle(d.cfg.UserSlug, d.cfg.HostSlug, slug.ProjectSlug(job.ProjectID), slug.SessionSlug(job.SessionID))
 				pausedPayload, _ := json.Marshal(map[string]any{
 					"type":      "session_job_paused",
 					"sessionId": job.SessionID,
@@ -845,7 +845,7 @@ func (d *Daemon) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		}
 		// If running, stop the session first.
 		if job.Status == "running" && job.SessionID != "" {
-			deleteSubject := subj.UserProjectAPISessionsDelete(d.cfg.UserSlug, slug.ProjectSlug(job.ProjectID))
+			deleteSubject := subj.UserHostProjectAPISessionsDelete(d.cfg.UserSlug, d.cfg.HostSlug, slug.ProjectSlug(job.ProjectID))
 			payload, _ := json.Marshal(map[string]string{"sessionId": job.SessionID})
 			_ = d.nc.Publish(deleteSubject, payload)
 		}

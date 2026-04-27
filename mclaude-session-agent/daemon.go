@@ -19,7 +19,6 @@ import (
 	"github.com/rs/zerolog"
 
 	"mclaude.io/common/pkg/slug"
-	"mclaude.io/common/pkg/subj"
 )
 
 const (
@@ -27,8 +26,6 @@ const (
 	jwtRefreshCheckInterval = 60 * time.Second
 	// jwtRefreshThreshold is the minimum remaining TTL before refresh.
 	jwtRefreshThreshold = 15 * time.Minute
-	// laptopHeartbeatInterval is how often the daemon writes its laptop KV entry.
-	laptopHeartbeatInterval = 12 * time.Hour
 	// childRestartDelay is the wait between a child crash and restart.
 	childRestartDelay = 2 * time.Second
 )
@@ -39,6 +36,7 @@ type DaemonConfig struct {
 	RefreshURL      string // POST /auth/refresh endpoint
 	UserID          string
 	UserSlug        slug.UserSlug    // user slug per ADR-0024
+	HostSlug        slug.HostSlug    // host slug per ADR-0035
 	Hostname        string
 	MachineID       string
 	AgentBinary     string // path to this binary (os.Args[0])
@@ -54,7 +52,6 @@ type Daemon struct {
 	js         jetstream.JetStream
 	mu         sync.Mutex
 	children   map[string]*managedChild
-	laptopsKV  jetstream.KeyValue
 	sessKV     jetstream.KeyValue  // mclaude-sessions — read-only for startup recovery
 	jobQueueKV jetstream.KeyValue  // mclaude-job-queue — read/write for dispatcher
 	projectsKV jetstream.KeyValue  // mclaude-projects — read-only for GET /jobs/projects
@@ -68,12 +65,6 @@ type managedChild struct {
 	stopCh    chan struct{}
 }
 
-// laptopEntry is the value stored in mclaude-laptops KV.
-type laptopEntry struct {
-	MachineID string `json:"machineId"`
-	TS        string `json:"ts"`
-}
-
 // NewDaemon creates a Daemon connected to NATS.
 func NewDaemon(nc *nats.Conn, cfg DaemonConfig) (*Daemon, error) {
 	js, err := jetstream.New(nc)
@@ -82,10 +73,6 @@ func NewDaemon(nc *nats.Conn, cfg DaemonConfig) (*Daemon, error) {
 	}
 
 	ctx := context.Background()
-	laptopsKV, err := js.KeyValue(ctx, "mclaude-laptops")
-	if err != nil {
-		return nil, fmt.Errorf("mclaude-laptops KV not found (control-plane not started?): %w", err)
-	}
 	sessKV, err := js.KeyValue(ctx, "mclaude-sessions")
 	if err != nil {
 		return nil, fmt.Errorf("mclaude-sessions KV not found (control-plane not started?): %w", err)
@@ -104,7 +91,6 @@ func NewDaemon(nc *nats.Conn, cfg DaemonConfig) (*Daemon, error) {
 		nc:         nc,
 		js:         js,
 		children:   make(map[string]*managedChild),
-		laptopsKV:  laptopsKV,
 		sessKV:     sessKV,
 		jobQueueKV: jobQueueKV,
 		projectsKV: projectsKV,
@@ -115,23 +101,7 @@ func NewDaemon(nc *nats.Conn, cfg DaemonConfig) (*Daemon, error) {
 // Run starts the daemon: hostname check, subscription, JWT refresh loop.
 // Blocks until ctx is cancelled.
 func (d *Daemon) Run(ctx context.Context) error {
-	if err := d.checkHostnameCollision(ctx); err != nil {
-		return fmt.Errorf("hostname collision check: %w", err)
-	}
-
-	if err := d.writeLaptopKV(ctx); err != nil {
-		d.cfg.Log.Warn().Err(err).Msg("failed to write laptop KV entry on startup (non-fatal)")
-	}
-
-	createSubject := subj.UserAPIProjectsCreate(d.cfg.UserSlug)
-	sub, err := d.nc.Subscribe(createSubject, d.handleProjectCreate)
-	if err != nil {
-		return fmt.Errorf("subscribe %s: %w", createSubject, err)
-	}
-	defer sub.Drain()
-
 	go d.runJWTRefresh(ctx)
-	go d.runLaptopHeartbeat(ctx)
 	go d.runQuotaPublisher(ctx)
 	go d.runLifecycleSubscriber(ctx)
 	go d.runJobDispatcher(ctx)
@@ -140,57 +110,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 	<-ctx.Done()
 	d.shutdownChildren()
 	return nil
-}
-
-// checkHostnameCollision returns an error if another machine has registered
-// the same hostname with a different machineID.
-func (d *Daemon) checkHostnameCollision(ctx context.Context) error {
-	key := subj.LaptopsKVKey(d.cfg.UserSlug, d.cfg.Hostname)
-	entry, err := d.laptopsKV.Get(ctx, key)
-	if err != nil {
-		// Key absent or transient error — no collision.
-		return nil
-	}
-	var existing laptopEntry
-	if err := json.Unmarshal(entry.Value(), &existing); err != nil {
-		return nil
-	}
-	if existing.MachineID != "" && existing.MachineID != d.cfg.MachineID {
-		return fmt.Errorf(
-			"hostname %q is already registered to another machine (machineId=%s) — "+
-				"set a unique hostname with: mclaude config hostname <name>",
-			d.cfg.Hostname, existing.MachineID,
-		)
-	}
-	return nil
-}
-
-// writeLaptopKV writes or refreshes the laptop registration KV entry.
-func (d *Daemon) writeLaptopKV(ctx context.Context) error {
-	key := subj.LaptopsKVKey(d.cfg.UserSlug, d.cfg.Hostname)
-	entry := laptopEntry{
-		MachineID: d.cfg.MachineID,
-		TS:        time.Now().UTC().Format(time.RFC3339),
-	}
-	data, _ := json.Marshal(entry)
-	_, err := d.laptopsKV.Put(ctx, key, data)
-	return err
-}
-
-// runLaptopHeartbeat refreshes the laptop KV entry every 12h.
-func (d *Daemon) runLaptopHeartbeat(ctx context.Context) {
-	tick := time.NewTicker(laptopHeartbeatInterval)
-	defer tick.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-tick.C:
-			if err := d.writeLaptopKV(ctx); err != nil {
-				d.cfg.Log.Warn().Err(err).Msg("laptop KV refresh failed")
-			}
-		}
-	}
 }
 
 // handleProjectCreate spawns a child session-agent for the new project.

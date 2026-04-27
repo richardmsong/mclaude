@@ -65,6 +65,7 @@ func main() {
 		flagRefreshURL  = flag.String("refresh-url", os.Getenv("REFRESH_URL"), "POST /auth/refresh URL for JWT refresh (--daemon only)")
 		flagUserSlug    = flag.String("user-slug", os.Getenv("USER_SLUG"), "User slug (uslug) per ADR-0024 (required in standalone mode)")
 		flagProjectSlug = flag.String("project-slug", os.Getenv("PROJECT_SLUG"), "Project slug (pslug) per ADR-0024 (required in standalone mode)")
+		flagHostSlug    = flag.String("host-slug", os.Getenv("HOST_SLUG"), "Host slug (hslug) per ADR-0035 (required)")
 	)
 	flag.Parse()
 
@@ -93,6 +94,18 @@ func main() {
 		projectSlugStr = "p-" + projectID[:8]
 	}
 	projectSlug := slug.ProjectSlug(projectSlugStr)
+	hostSlugStr := *flagHostSlug
+	if slug.Validate(hostSlugStr) != nil {
+		hostSlugStr = slug.Slugify(*flagHostname)
+	}
+	if hostSlugStr == "" {
+		h, _ := os.Hostname()
+		hostSlugStr = slug.Slugify(h)
+	}
+	if hostSlugStr == "" {
+		hostSlugStr = "h-unknown"
+	}
+	hostSlug := slug.HostSlug(hostSlugStr)
 	claudePath := *flagClaudePath
 	if claudePath == "" {
 		claudePath = "claude"
@@ -138,6 +151,7 @@ func main() {
 			RefreshURL:    *flagRefreshURL,
 			UserID:        userID,
 			UserSlug:      userSlug,
+			HostSlug:      hostSlug,
 			Hostname:      hostname,
 			MachineID:     machineID,
 			AgentBinary:   os.Args[0],
@@ -149,6 +163,7 @@ func main() {
 				"--claude-path", claudePath,
 				"--data-dir", dataDir,
 				"--user-slug", string(userSlug),
+				"--host-slug", string(hostSlug),
 			},
 			Log: log.Logger,
 		}
@@ -197,7 +212,7 @@ func main() {
 				// Auth error during clone → publish session_failed with provider_auth_failed.
 				// We don't have a session ID yet (no sessions created), so publish on the
 				// project lifecycle subject with a synthetic session ID.
-				subject := fmt.Sprintf("mclaude.users.%s.projects.%s.lifecycle._init", string(userSlug), string(projectSlug))
+				subject := fmt.Sprintf("mclaude.users.%s.hosts.%s.projects.%s.lifecycle._init", string(userSlug), string(hostSlug), string(projectSlug))
 				payload, _ := json.Marshal(map[string]string{
 					"type":      "session_failed",
 					"sessionId": "_init",
@@ -212,7 +227,7 @@ func main() {
 		}
 	}
 
-	agent, err := NewAgent(nc, userID, userSlug, projectID, projectSlug, claudePath, dataDir, log.Logger, m, credMgr, gitIdentityID)
+	agent, err := NewAgent(nc, userID, userSlug, hostSlug, projectID, projectSlug, claudePath, dataDir, log.Logger, m, credMgr, gitIdentityID)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create agent")
 	}

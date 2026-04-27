@@ -30,6 +30,7 @@ type SessionState struct {
 	ID          string            `json:"id"`
 	Slug        string            `json:"slug,omitempty"`       // session slug (sslug) per ADR-0024
 	UserSlug    string            `json:"userSlug,omitempty"`   // user slug (uslug) per ADR-0024
+	HostSlug    string            `json:"hostSlug,omitempty"`   // host slug (hslug) per ADR-0035
 	ProjectSlug string            `json:"projectSlug,omitempty"` // project slug (pslug) per ADR-0024
 	ProjectID   string            `json:"projectId"`
 	Branch      string            `json:"branch"`
@@ -64,16 +65,10 @@ type UsageStats struct {
 	CostUSD          float64 `json:"costUsd"`
 }
 
-// sessionKVKey returns the NATS KV key for a session per ADR-0024.
-// Format: {uslug}.{pslug}.{sslug} — dot-separated typed slug tokens.
-func sessionKVKey(userSlug slug.UserSlug, projectSlug slug.ProjectSlug, sessionSlug slug.SessionSlug) string {
-	return subj.SessionsKVKey(userSlug, projectSlug, sessionSlug)
-}
-
-// heartbeatKVKey returns the NATS KV key for a project heartbeat per ADR-0024.
-// Format: {uslug}.{pslug}
-func heartbeatKVKey(userSlug slug.UserSlug, projectSlug slug.ProjectSlug) string {
-	return subj.ProjectsKVKey(userSlug, projectSlug)
+// sessionKVKey returns the NATS KV key for a session per ADR-0024/ADR-0035.
+// Format: {uslug}.{hslug}.{pslug}.{sslug} — dot-separated typed slug tokens.
+func sessionKVKey(userSlug slug.UserSlug, hostSlug slug.HostSlug, projectSlug slug.ProjectSlug, sessionSlug slug.SessionSlug) string {
+	return subj.SessionsKVKey(userSlug, hostSlug, projectSlug, sessionSlug)
 }
 
 // addPendingControl adds a control request to the session's pending map.
@@ -142,6 +137,7 @@ type JobEntry struct {
 	ID           string     `json:"id"`
 	UserID       string     `json:"userId"`
 	UserSlug     string     `json:"userSlug,omitempty"`     // user slug (uslug) per ADR-0024
+	HostSlug     string     `json:"hostSlug,omitempty"`     // host slug (hslug) per ADR-0035
 	ProjectID    string     `json:"projectId"`
 	ProjectSlug  string     `json:"projectSlug,omitempty"`  // project slug (pslug) per ADR-0024
 	SessionID    string     `json:"sessionId"`
