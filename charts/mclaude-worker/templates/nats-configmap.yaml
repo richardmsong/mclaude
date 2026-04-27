@@ -36,6 +36,9 @@ data:
       remotes: [
         {
           url: "{{ required "leafUrl is required" .Values.leafUrl }}"
+          {{- if .Values.trustChain.accountPublicKey }}
+          account: "{{ .Values.trustChain.accountPublicKey }}"
+          {{- end }}
           {{- if or .Values.leafCreds.existingSecret .Values.leafCreds.jwt }}
           credentials: "/etc/nats/leaf-creds/leaf.creds"
           {{- end }}
