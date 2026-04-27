@@ -416,8 +416,8 @@ DECLARE
     u RECORD;
     hid TEXT;
 BEGIN
-    FOR u IN SELECT id FROM users WHERE NOT EXISTS (
-        SELECT 1 FROM hosts WHERE hosts.user_id = u.id AND hosts.slug = 'local'
+    FOR u IN SELECT usr.id FROM users usr WHERE NOT EXISTS (
+        SELECT 1 FROM hosts WHERE hosts.user_id = usr.id AND hosts.slug = 'local'
     ) LOOP
         hid := gen_random_uuid()::text;
         INSERT INTO hosts (id, user_id, slug, name, type, role)
