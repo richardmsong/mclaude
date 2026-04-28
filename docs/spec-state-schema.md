@@ -185,7 +185,7 @@ Value:
 }
 ```
 
-Writers: control-plane only — single writer. Updates triggered by `$SYS.ACCOUNT.*.CONNECT` (sets `online=true`, refreshes `lastSeenAt`) and `$SYS.ACCOUNT.*.DISCONNECT` (sets `online=false`) on hub NATS.
+Writers: control-plane only — single writer. Primary path: `$SYS.ACCOUNT.*.CONNECT` (sets `online=true`, refreshes `lastSeenAt`) and `$SYS.ACCOUNT.*.DISCONNECT` (sets `online=false`) on hub NATS. Secondary path (dev only): on `DEV_SEED=true` startup, control-plane writes the bootstrap user's `local` machine host entry with `online=true` because the auto-created `local` host has no NKey and will never trigger a `$SYS` CONNECT event.
 Readers: SPA (KV watch for host list + status).
 History: 1
 

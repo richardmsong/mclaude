@@ -113,7 +113,7 @@ There is no `mclaude.*.api.projects.create` subscriber on control-plane any more
 The control plane ensures these KV buckets exist on startup and writes to them:
 
 - **`mclaude-projects`** -- created by `ensureProjectsKV`; writes on project creation and updates (see `spec-state-schema.md` -- NATS KV Buckets)
-- **`mclaude-hosts`** -- created by `ensureHostsKV`; control-plane is the sole writer (driven by `$SYS.ACCOUNT.*.CONNECT/DISCONNECT`).
+- **`mclaude-hosts`** -- created by `ensureHostsKV`; control-plane is the sole writer. Production writes driven by `$SYS.ACCOUNT.*.CONNECT/DISCONNECT`. Dev-seed path: on `DEV_SEED=true`, `seedDev` writes the bootstrap user's `local` host entry with `online=true` (the auto-created `local` host has no NKey and never triggers `$SYS`).
 - **`mclaude-sessions`** -- created by `ensureSessionsKV`; bucket creation only, writes are handled by `mclaude-session-agent`.
 - **`mclaude-job-queue`** -- created by `ensureJobQueueKV`; bucket creation only, writes are handled by the daemon.
 
@@ -142,7 +142,7 @@ The control-plane does, however, mount one K8s Secret as a file:
 6. Subscribes to `$SYS.ACCOUNT.*.CONNECT` and `$SYS.ACCOUNT.*.DISCONNECT` for host liveness.
 7. Ensures KV buckets exist (`mclaude-projects`, `mclaude-hosts`, `mclaude-sessions`, `mclaude-job-queue`).
 8. Starts the GitLab token refresh goroutine (every 15 minutes).
-9. Optionally seeds a dev user, a default `local` machine host for that user, and a default project on the `local` host when `DEV_SEED=true`.
+9. Optionally seeds a dev user, a default `local` machine host for that user, and a default project on the `local` host when `DEV_SEED=true`. Also writes the `local` host's `mclaude-hosts` KV entry with `online=true` (dev-only path — the auto-created `local` host has no NKey, so no `$SYS` CONNECT event fires for it).
 10. Starts the main HTTP listener and the loopback metrics listener.
 
 If `BOOTSTRAP_ADMIN_EMAIL` is set on first boot, control-plane upserts a `users` row with that email, `is_admin=true`, `oauth_id=NULL`. The first OAuth login matching that email links the OAuth identity to the bootstrap row.
