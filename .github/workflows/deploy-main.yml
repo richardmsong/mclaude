@@ -185,11 +185,13 @@ jobs:
           DEV_OAUTH_TOKEN: ${{ secrets.DEV_OAUTH_TOKEN }}
         run: |
           echo "Deploying control-plane at tag: ${IMAGE_TAG}"
+          TS_IP=$(tailscale ip -4)
           helm upgrade --install "mclaude-cp" ./charts/mclaude-cp \
             -f ./charts/mclaude-cp/values-k3d-ghcr.yaml \
             --set controlPlane.image.tag="${IMAGE_TAG}" \
             --set spa.image.tag="${IMAGE_TAG}" \
             --set controlPlane.devOAuthToken="${DEV_OAUTH_TOKEN}" \
+            --set "ingress.externalDnsTarget=${TS_IP}" \
             --namespace mclaude-system \
             --wait --timeout 5m
 
