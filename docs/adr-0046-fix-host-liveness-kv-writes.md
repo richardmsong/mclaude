@@ -24,7 +24,7 @@ User `dev@mclaude.local` reports "default project heartbeat stale" banner on eve
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | `users.slug` migration | Add `ALTER TABLE users ADD COLUMN IF NOT EXISTS slug TEXT UNIQUE NOT NULL DEFAULT '';` and backfill `UPDATE users SET slug = lower(regexp_replace(split_part(email, '@', 1), '[^a-zA-Z0-9]+', '-', 'g')) WHERE slug = '';` after the column add. Apply the same `slugify(email_local_part)` rule used by ADR-0024. | `users.slug` is in the spec but absent from the code. Without it the KV key prefix is the UUID instead of the slug, breaking the `{uslug}.{hslug}` scheme. The backfill uses `email` local-part as the canonical derivation (consistent with ADR-0024's slug charset). |
-| JWT slug claim | Update `IssueUserJWT` to put the user slug (not the user UUID) in `claims.Name`. Update login / refresh handlers to look up `users.slug` and include it in `LoginResponse.UserSlug`. | The JWT `Name` field is the `uslug` the SPA reads to construct KV key patterns. Using the slug here closes the loop between DB, JWT, and SPA. |
+| JWT `claims.Name` stays as UUID | `IssueUserJWT` keeps `claims.Name = userID` (UUID). `LoginResponse` gains `UserSlug string \`json:"userSlug"\`` populated directly from `user.Slug`. `handleRefresh` looks up the user by UUID (from `claims.Name`) and returns `UserSlug: user.Slug`. | `authMiddleware` injects `claims.Name` as `contextKeyUserID` for all DB lookups (`GetUserByID`). Changing `claims.Name` to a slug would break every authenticated handler — they all call `db.GetUserByID(userID)`. The SPA already gets the slug via `tokens.userSlug`; it no longer needs to parse the JWT. |
 | `ensureHostsKV` placement | Add to `StartProjectsSubscriber` alongside existing `ensureProjectsKV` / `ensureJobQueueKV` calls; store the returned `nats.KeyValue` as `Server.hostsKV`. | Consistent with existing bucket-creation pattern; guarantees bucket exists before `$SYS` events fire or `seedDev` runs. |
 | KV write key format | `{uslug}.{hslug}` — where `uslug` is looked up from `users.slug` (via JOIN) for each affected row. | Matches spec-state-schema.md `mclaude-hosts` Key format. |
 | KV write in `handleSysEvent` — machine | On CONNECT: `SELECT h.slug AS hslug, h.name, h.type, h.role, u.slug AS uslug FROM hosts h JOIN users u ON h.user_id = u.id WHERE h.public_key = $1 AND h.type = 'machine'`; upsert `{uslug}.{hslug}` with `{slug:hslug, type, name, role, online:true, lastSeenAt:RFC3339}`. On DISCONNECT: same lookup; write `online:false`, no `lastSeenAt` field. | Per spec-state-schema.md `$SYS` event table: CONNECT → `online=true`; DISCONNECT → `online=false`, `last_seen_at` not rewritten. |
@@ -37,11 +37,11 @@ User `dev@mclaude.local` reports "default project heartbeat stale" banner on eve
 ## Impact
 
 **Specs updated in this commit:**
-- `docs/spec-state-schema.md` — `users` table: add missing `slug` column; `mclaude-hosts` Writers: note dev-seed write path.
+- `docs/spec-state-schema.md` — `users` table: add missing `slug` column; `mclaude-hosts` Writers: note dev-seed write path and DISCONNECT read-modify-write; `mclaude-sessions` History: change from "all versions" to `History: 64` (NATS KV maximum).
 - `docs/mclaude-control-plane/spec-control-plane.md` — startup step 9: note KV write; NATS KV Buckets `mclaude-hosts`: note dev-seed as secondary write trigger.
 
 **Components implementing the change**:
-- `mclaude-control-plane`: `db.go` (add `users.slug` migration + backfill), `auth.go` (`IssueUserJWT` uses slug, `LoginResponse` gains `UserSlug`), `projects.go` (add `ensureHostsKV`, `Server.hostsKV` field), `sys_subscriber.go` (KV writes on CONNECT/DISCONNECT with user slug JOIN), `main.go` (`seedDev` writes local host KV with user slug)
+- `mclaude-control-plane`: `db.go` (add `users.slug` migration + backfill), `auth.go` (`LoginResponse` gains `UserSlug` from `user.Slug`; `handleRefresh` looks up user by UUID to populate `UserSlug`; `IssueUserJWT` keeps `claims.Name = userID`), `projects.go` (add `ensureHostsKV` + `ensureSessionsKV`, `Server.hostsKV` field), `sys_subscriber.go` (KV writes on CONNECT/DISCONNECT with user slug JOIN), `main.go` (`seedDev` writes local host KV with user slug)
 - `mclaude-web`: `stores/heartbeat-monitor.ts` (format + key type fix), `viewmodels/session-list-vm.ts` (host slug lookup)
 
 ## Scope

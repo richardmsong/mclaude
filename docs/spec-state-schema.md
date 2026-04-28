@@ -39,6 +39,7 @@ Slug charset: `[a-z0-9][a-z0-9-]{0,62}`, excluding leading `_` and the reserved-
 | `git_url` | TEXT | NOT NULL DEFAULT '' | Optional git remote |
 | `status` | TEXT | NOT NULL DEFAULT 'active' | active, pending, archived |
 | `host_id` | TEXT | NOT NULL FK→hosts ON DELETE CASCADE | Host the project is provisioned on (machine or cluster host) |
+| `git_identity_id` | TEXT | NULL FK→oauth_connections ON DELETE SET NULL | Optional link to an OAuth connection providing git credentials for this project's repo |
 | `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
 
 Index: `UNIQUE (user_id, host_id, slug)` — projects are unique-by-slug per user per host.
@@ -117,6 +118,7 @@ Value: `SessionState`
   "stateSince": "RFC3339",
   "createdAt": "RFC3339",
   "model": "string",
+  "extraFlags": "string (optional — additional CLI flags persisted across restarts, e.g. --disallowedTools, --model)",
   "capabilities": {
     "skills": ["string"],
     "tools": ["string"],
@@ -137,7 +139,7 @@ Value: `SessionState`
 
 Writers: session-agent (on init, every state change, usage accumulation)
 Readers: SPA (KV watch for real-time state), session-agent (recovery on resume)
-History: all versions (for resume tracking)
+History: 64 (maximum supported by NATS KV; sufficient for resume tracking)
 
 ### `mclaude-projects`
 
@@ -277,7 +279,7 @@ Storage:   FileStorage
 Discard:   DiscardOld
 ```
 
-Subject pattern: `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.{create|input|resume|delete|control}`
+Subject pattern: `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.{create|input|restart|delete|control}`
 
 Publishers: SPA (session commands), daemon (job dispatch)
 Subscribers: session-agent (pull consumer for at-least-once delivery)
@@ -291,7 +293,7 @@ Created by: session-agent (`CreateOrUpdateStream` — idempotent; same pattern a
 Name:      MCLAUDE_LIFECYCLE
 Subjects:  mclaude.users.*.hosts.*.projects.*.lifecycle.*
 Retention: LimitsPolicy
-MaxAge:    TBD
+MaxAge:    30 days
 Storage:   FileStorage
 Discard:   DiscardOld
 ```
