@@ -32,13 +32,18 @@ func UserSubjectPermissions(userID string, userSlug string) NATSPermissions {
 }
 
 // SessionAgentSubjectPermissions returns permissions for a session agent.
-// Session agents only need access to their user's namespace (no _INBOX since
-// they don't use request/reply).
-func SessionAgentSubjectPermissions(userID string) NATSPermissions {
-	prefix := fmt.Sprintf("mclaude.%s.>", userID)
+// Per ADR-0050 Decision 5: both UUID-prefixed and host-scoped slug subjects,
+// plus _INBOX.> (request/reply) and $JS.*.API.> (JetStream KV + streams).
+func SessionAgentSubjectPermissions(userID string, userSlug string) NATSPermissions {
+	perms := []string{
+		fmt.Sprintf("mclaude.%s.>", userID),
+		fmt.Sprintf("mclaude.users.%s.hosts.*.>", userSlug),
+		"_INBOX.>",
+		"$JS.*.API.>",
+	}
 	return NATSPermissions{
-		PubAllow: []string{prefix},
-		SubAllow: []string{prefix},
+		PubAllow: perms,
+		SubAllow: perms,
 	}
 }
 
@@ -165,19 +170,20 @@ func IssueHostJWT(uslug, hslug string, accountKP nkeys.KeyPair) (jwt string, see
 	return encoded, userSeed, nil
 }
 
-// IssueSessionAgentJWT issues a long-lived NATS user JWT for a session-agent,
-// scoped to mclaude.{userID}.> with no _INBOX.> (session-agents don't use
-// request/reply). No expiry — these are service credentials.
+// IssueSessionAgentJWT issues a long-lived NATS user JWT for a session-agent.
+// Per ADR-0050 Decision 5: scoped to both mclaude.{userID}.> (UUID prefix) and
+// mclaude.users.{userSlug}.hosts.*.> (host-scoped), plus _INBOX.> and $JS.*.API.>.
+// No expiry — these are service credentials.
 //
 // Returns the encoded JWT string and the NKey seed. Both are written into the
 // K8s user-secrets Secret as a NATS credentials file.
-func IssueSessionAgentJWT(userID string, accountKP nkeys.KeyPair) (jwt string, seed []byte, err error) {
+func IssueSessionAgentJWT(userID string, userSlug string, accountKP nkeys.KeyPair) (jwt string, seed []byte, err error) {
 	userKP, userSeed, err := GenerateUserNKey()
 	if err != nil {
 		return "", nil, fmt.Errorf("generate session-agent nkey: %w", err)
 	}
 
-	perms := SessionAgentSubjectPermissions(userID)
+	perms := SessionAgentSubjectPermissions(userID, userSlug)
 
 	claims := natsjwt.NewUserClaims(userKP.PublicKey)
 	claims.Name = "session-agent-" + userID

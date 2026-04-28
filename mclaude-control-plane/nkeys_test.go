@@ -49,15 +49,43 @@ func TestUserSubjectPermissions_SpecialChars(t *testing.T) {
 }
 
 func TestSessionAgentSubjectPermissions(t *testing.T) {
-	perm := SessionAgentSubjectPermissions("bob456")
-	// Session agents don't get _INBOX.> — they don't do request/reply.
-	for _, s := range append(perm.PubAllow, perm.SubAllow...) {
+	perm := SessionAgentSubjectPermissions("bob456", "bob-slug")
+	// Per ADR-0050 Decision 5: session agents must have _INBOX.>, $JS.*.API.>,
+	// the UUID-prefixed subject, and the host-scoped slug subject.
+	allSubjects := append(perm.PubAllow, perm.SubAllow...)
+	hasInbox := false
+	hasJS := false
+	hasUUID := false
+	hasHostScoped := false
+	for _, s := range allSubjects {
 		if s == "_INBOX.>" {
-			t.Errorf("session agent should not have _INBOX.>: got %q", s)
+			hasInbox = true
 		}
-		if !strings.HasPrefix(s, "mclaude.bob456.") {
-			t.Errorf("unexpected subject %q for user bob456", s)
+		if s == "$JS.*.API.>" {
+			hasJS = true
 		}
+		if s == "mclaude.bob456.>" {
+			hasUUID = true
+		}
+		if s == "mclaude.users.bob-slug.hosts.*.>" {
+			hasHostScoped = true
+		}
+	}
+	if !hasInbox {
+		t.Error("session agent should have _INBOX.>")
+	}
+	if !hasJS {
+		t.Error("session agent should have $JS.*.API.>")
+	}
+	if !hasUUID {
+		t.Error("session agent should have mclaude.bob456.>")
+	}
+	if !hasHostScoped {
+		t.Error("session agent should have mclaude.users.bob-slug.hosts.*.>")
+	}
+	// PubAllow and SubAllow must be identical per ADR-0050 Decision 5.
+	if len(perm.PubAllow) != len(perm.SubAllow) {
+		t.Errorf("PubAllow and SubAllow should have same length: pub=%d sub=%d", len(perm.PubAllow), len(perm.SubAllow))
 	}
 }
 
@@ -329,7 +357,8 @@ func TestIssueSessionAgentJWT_SubjectScopes(t *testing.T) {
 	accountPub, _ := accountKP.PublicKey()
 
 	userID := "agent-user-001"
-	jwtStr, seed, err := IssueSessionAgentJWT(userID, accountKP)
+	userSlug := "agent-user-slug"
+	jwtStr, seed, err := IssueSessionAgentJWT(userID, userSlug, accountKP)
 	if err != nil {
 		t.Fatalf("IssueSessionAgentJWT: %v", err)
 	}
@@ -345,20 +374,37 @@ func TestIssueSessionAgentJWT_SubjectScopes(t *testing.T) {
 		t.Fatalf("DecodeUserJWT: %v", err)
 	}
 
-	expectedSubject := fmt.Sprintf("mclaude.%s.>", userID)
-	if !containsStr(claims.Permissions.Pub.Allow, expectedSubject) {
-		t.Errorf("pub allow missing %q, got %v", expectedSubject, claims.Permissions.Pub.Allow)
+	// Per ADR-0050 Decision 5: UUID prefix, host-scoped prefix, _INBOX.>, $JS.*.API.>
+	uuidSubject := fmt.Sprintf("mclaude.%s.>", userID)
+	if !containsStr(claims.Permissions.Pub.Allow, uuidSubject) {
+		t.Errorf("pub allow missing %q, got %v", uuidSubject, claims.Permissions.Pub.Allow)
 	}
-	if !containsStr(claims.Permissions.Sub.Allow, expectedSubject) {
-		t.Errorf("sub allow missing %q, got %v", expectedSubject, claims.Permissions.Sub.Allow)
+	if !containsStr(claims.Permissions.Sub.Allow, uuidSubject) {
+		t.Errorf("sub allow missing %q, got %v", uuidSubject, claims.Permissions.Sub.Allow)
 	}
 
-	// Session-agent must NOT have _INBOX.>
-	if containsStr(claims.Permissions.Pub.Allow, "_INBOX.>") {
-		t.Error("session-agent pub should not have _INBOX.>")
+	hostScopedSubject := fmt.Sprintf("mclaude.users.%s.hosts.*.>", userSlug)
+	if !containsStr(claims.Permissions.Pub.Allow, hostScopedSubject) {
+		t.Errorf("pub allow missing %q, got %v", hostScopedSubject, claims.Permissions.Pub.Allow)
 	}
-	if containsStr(claims.Permissions.Sub.Allow, "_INBOX.>") {
-		t.Error("session-agent sub should not have _INBOX.>")
+	if !containsStr(claims.Permissions.Sub.Allow, hostScopedSubject) {
+		t.Errorf("sub allow missing %q, got %v", hostScopedSubject, claims.Permissions.Sub.Allow)
+	}
+
+	// Session-agent must have _INBOX.> (ADR-0050 Decision 5)
+	if !containsStr(claims.Permissions.Pub.Allow, "_INBOX.>") {
+		t.Error("session-agent pub should have _INBOX.>")
+	}
+	if !containsStr(claims.Permissions.Sub.Allow, "_INBOX.>") {
+		t.Error("session-agent sub should have _INBOX.>")
+	}
+
+	// Session-agent must have $JS.*.API.> (ADR-0050 Decision 5)
+	if !containsStr(claims.Permissions.Pub.Allow, "$JS.*.API.>") {
+		t.Error("session-agent pub should have $JS.*.API.>")
+	}
+	if !containsStr(claims.Permissions.Sub.Allow, "$JS.*.API.>") {
+		t.Error("session-agent sub should have $JS.*.API.>")
 	}
 }
 
@@ -366,7 +412,7 @@ func TestIssueSessionAgentJWT_NoExpiry(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
 	accountPub, _ := accountKP.PublicKey()
 
-	jwtStr, _, err := IssueSessionAgentJWT("sa-user", accountKP)
+	jwtStr, _, err := IssueSessionAgentJWT("sa-user", "sa-user-slug", accountKP)
 	if err != nil {
 		t.Fatalf("IssueSessionAgentJWT: %v", err)
 	}
@@ -385,7 +431,7 @@ func TestIssueSessionAgentJWT_NoExpiry(t *testing.T) {
 func TestFormatNATSCredentials_Format(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
 
-	jwtStr, seed, err := IssueSessionAgentJWT("format-user", accountKP)
+	jwtStr, seed, err := IssueSessionAgentJWT("format-user", "format-user-slug", accountKP)
 	if err != nil {
 		t.Fatalf("IssueSessionAgentJWT: %v", err)
 	}
@@ -416,7 +462,7 @@ func TestFormatNATSCredentials_Format(t *testing.T) {
 func TestFormatNATSCredentials_SeedInBody(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
 
-	jwtStr, seed, _ := IssueSessionAgentJWT("seed-check-user", accountKP)
+	jwtStr, seed, _ := IssueSessionAgentJWT("seed-check-user", "seed-check-user-slug", accountKP)
 	creds := mclnats.FormatNATSCredentials(jwtStr, seed)
 	credsStr := string(creds)
 
