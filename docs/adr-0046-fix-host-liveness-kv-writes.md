@@ -1,8 +1,9 @@
 # ADR: Fix Host Liveness KV Writes
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-04-28: accepted
+- 2026-04-28: implemented — all scope CLEAN
 
 ## Overview
 
