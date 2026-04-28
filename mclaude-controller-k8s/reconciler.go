@@ -43,6 +43,7 @@ type MCProjectReconciler struct {
 	sessionAgentNATSURL string
 	accountKP           nkeys.KeyPair
 	devOAuthToken       string
+	clusterSlug         string
 	logger              zerolog.Logger
 }
 
@@ -489,7 +490,9 @@ func (r *MCProjectReconciler) loadTemplate(ctx context.Context) (*sessionAgentTp
 	cm := &corev1.ConfigMap{}
 	if err := r.client.Get(ctx, types.NamespacedName{Name: cmName, Namespace: r.controlPlaneNs}, cm); err != nil {
 		if k8serrors.IsNotFound(err) {
-			return defaultTemplate(), nil
+			tpl := defaultTemplate()
+			tpl.hostSlug = r.clusterSlug
+			return tpl, nil
 		}
 		return nil, fmt.Errorf("get configmap %s: %w", cmName, err)
 	}
@@ -526,6 +529,7 @@ func (r *MCProjectReconciler) loadTemplate(ctx context.Context) (*sessionAgentTp
 		_ = json.Unmarshal([]byte(v), &tpl.resources)
 	}
 	applyDefaultResources(tpl)
+	tpl.hostSlug = r.clusterSlug
 	return tpl, nil
 }
 

@@ -86,6 +86,7 @@ func main() {
 		sessionAgentNATSURL: saURL,
 		accountKP:           accountKP,
 		devOAuthToken:       devOAuthToken,
+		clusterSlug:         clusterSlug,
 		logger:              logger.With().Str("reconciler", "mcproject").Logger(),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
