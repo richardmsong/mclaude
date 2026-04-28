@@ -165,9 +165,9 @@ Login validates email and bcrypt password hash (or OAuth identity) against Postg
 
 1. Loads the calling user's hosts (`SELECT … FROM hosts WHERE user_id = ?`).
 2. Selects the host the SPA is requesting access to (defaults to the user's `local` machine host).
-3. Generates a fresh NKey user pair and issues a per-host user JWT signed by the account signing key from `OPERATOR_KEYS_PATH`. Permissions per ADR-0035:
-   - publish: `mclaude.users.{uslug}.hosts.{hslug}.>, _INBOX.>, $JS.*.API.>, $SYS.ACCOUNT.*.CONNECT, $SYS.ACCOUNT.*.DISCONNECT`
-   - subscribe: `mclaude.users.{uslug}.hosts.{hslug}.>, _INBOX.>, $JS.*.API.>`
+3. Generates a fresh NKey user pair and issues a user JWT (`IssueUserJWT(userID, userSlug, accountKP, expirySecs)`) signed by the account signing key from `OPERATOR_KEYS_PATH`. `claims.Name = userID` (UUID, used by `authMiddleware` for DB lookups). Permissions:
+   - publish: `mclaude.{userID}.>, _INBOX.>, $JS.API.>`
+   - subscribe: `mclaude.{userID}.>, _INBOX.>, $JS.API.>, $JS.API.DIRECT.GET.>, $KV.mclaude-projects.{userID}.>, $KV.mclaude-sessions.{userID}.>, $KV.mclaude-hosts.{userSlug}.>`
 4. JWT lifetime is `JWT_EXPIRY_SECONDS` (default 8h). The NKey seed is returned alongside the JWT so the client can sign NATS connection nonces.
 5. The full Login Response payload (`spec-state-schema.md#login-response-shape`) is returned: `{user, jwt, nkeySeed, hubUrl, hosts[], projects[]}`.
 
