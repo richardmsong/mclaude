@@ -23,8 +23,8 @@ func UserSubjectPermissions(userID string) NATSPermissions {
 	kvProjects := fmt.Sprintf("$KV.mclaude-projects.%s.>", userID)
 	kvSessions := fmt.Sprintf("$KV.mclaude-sessions.%s.>", userID)
 	return NATSPermissions{
-		PubAllow: []string{prefix, "_INBOX.>"},
-		SubAllow: []string{prefix, "_INBOX.>", kvProjects, kvSessions},
+		PubAllow: []string{prefix, "_INBOX.>", "$JS.API.>"},
+		SubAllow: []string{prefix, "_INBOX.>", kvProjects, kvSessions, "$JS.API.>"},
 	}
 }
 

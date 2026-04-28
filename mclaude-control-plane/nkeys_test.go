@@ -16,13 +16,14 @@ import (
 
 func TestUserSubjectPermissions(t *testing.T) {
 	perm := UserSubjectPermissions("alice123")
-	wantPub := []string{"mclaude.alice123.>", "_INBOX.>"}
-	// SubAllow includes KV bucket subjects so the SPA can watch projects and sessions.
+	wantPub := []string{"mclaude.alice123.>", "_INBOX.>", "$JS.API.>"}
+	// SubAllow includes KV bucket subjects and JetStream API so the SPA can watch projects and sessions.
 	wantSub := []string{
 		"mclaude.alice123.>",
 		"_INBOX.>",
 		"$KV.mclaude-projects.alice123.>",
 		"$KV.mclaude-sessions.alice123.>",
+		"$JS.API.>",
 	}
 
 	if !slicesEqual(perm.PubAllow, wantPub) {
@@ -37,7 +38,7 @@ func TestUserSubjectPermissions_SpecialChars(t *testing.T) {
 	// User IDs are UUIDs — no special chars — but confirm format is stable.
 	perm := UserSubjectPermissions("550e8400-e29b-41d4-a716-446655440000")
 	for _, s := range append(perm.PubAllow, perm.SubAllow...) {
-		if !strings.HasPrefix(s, "mclaude.") && s != "_INBOX.>" && !strings.HasPrefix(s, "$KV.") {
+		if !strings.HasPrefix(s, "mclaude.") && s != "_INBOX.>" && !strings.HasPrefix(s, "$KV.") && !strings.HasPrefix(s, "$JS.") {
 			t.Errorf("unexpected subject: %q", s)
 		}
 	}
@@ -60,7 +61,7 @@ func TestSubjectIsolation(t *testing.T) {
 	// Permissions for alice must not match bob's namespace.
 	alice := UserSubjectPermissions("alice")
 	for _, s := range append(alice.PubAllow, alice.SubAllow...) {
-		if s == "_INBOX.>" {
+		if s == "_INBOX.>" || s == "$JS.API.>" {
 			continue
 		}
 		// KV subjects are scoped to alice's user ID — they must not reference bob.
