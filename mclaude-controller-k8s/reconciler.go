@@ -206,7 +206,7 @@ func (r *MCProjectReconciler) reconcileSecrets(ctx context.Context, mcp *MCProje
 			existingSecret.Data = make(map[string][]byte)
 		}
 		if len(existingSecret.Data["nats-creds"]) == 0 {
-			jwtStr, seed, issueErr := IssueSessionAgentJWT(mcp.Spec.UserID, r.accountKP)
+			jwtStr, seed, issueErr := IssueSessionAgentJWT(mcp.Spec.UserID, mcp.Spec.UserSlug, r.accountKP)
 			if issueErr != nil {
 				return fmt.Errorf("issue session-agent jwt: %w", issueErr)
 			}
@@ -223,7 +223,7 @@ func (r *MCProjectReconciler) reconcileSecrets(ctx context.Context, mcp *MCProje
 			}
 		}
 	} else if k8serrors.IsNotFound(err) {
-		jwtStr, seed, issueErr := IssueSessionAgentJWT(mcp.Spec.UserID, r.accountKP)
+		jwtStr, seed, issueErr := IssueSessionAgentJWT(mcp.Spec.UserID, mcp.Spec.UserSlug, r.accountKP)
 		if issueErr != nil {
 			return fmt.Errorf("issue session-agent jwt: %w", issueErr)
 		}
@@ -294,10 +294,10 @@ func (r *MCProjectReconciler) buildPodTemplate(ctx context.Context, mcp *MCProje
 		{Name: "USER_ID", Value: userID},
 		{Name: "PROJECT_ID", Value: projectID},
 		{Name: "NATS_URL", Value: r.sessionAgentNATSURL},
-		// ADR-0035: slug-based env vars for host-scoped subject construction.
-		{Name: "USER_SLUG", Value: userID},       // TODO: resolve slug from userID
-		{Name: "HOST_SLUG", Value: tpl.hostSlug},  // Cluster slug, configured at deploy time
-		{Name: "PROJECT_SLUG", Value: projectID},   // TODO: resolve slug from projectID
+		// ADR-0035/ADR-0050: slug-based env vars for host-scoped subject construction.
+		{Name: "USER_SLUG", Value: mcp.Spec.UserSlug},
+		{Name: "HOST_SLUG", Value: tpl.hostSlug},
+		{Name: "PROJECT_SLUG", Value: mcp.Spec.ProjectSlug},
 	}
 	if gitURL != "" {
 		env = append(env, corev1.EnvVar{Name: "GIT_URL", Value: gitURL})

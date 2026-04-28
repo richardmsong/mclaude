@@ -8,13 +8,19 @@ import (
 )
 
 // SessionAgentSubjectPermissions returns permissions for a session agent.
-func SessionAgentSubjectPermissions(userID string) (pubAllow, subAllow []string) {
-	prefix := fmt.Sprintf("mclaude.%s.>", userID)
-	return []string{prefix}, []string{prefix}
+// Per ADR-0050: both UUID-prefixed and host-scoped slug subjects, plus JetStream and inbox.
+func SessionAgentSubjectPermissions(userID, userSlug string) (pubAllow, subAllow []string) {
+	perms := []string{
+		fmt.Sprintf("mclaude.%s.>", userID),
+		fmt.Sprintf("mclaude.users.%s.hosts.*.>", userSlug),
+		"_INBOX.>",
+		"$JS.*.API.>",
+	}
+	return perms, perms
 }
 
 // IssueSessionAgentJWT issues a long-lived NATS user JWT for a session-agent.
-func IssueSessionAgentJWT(userID string, accountKP nkeys.KeyPair) (jwt string, seed []byte, err error) {
+func IssueSessionAgentJWT(userID, userSlug string, accountKP nkeys.KeyPair) (jwt string, seed []byte, err error) {
 	userKP, err := nkeys.CreateUser()
 	if err != nil {
 		return "", nil, fmt.Errorf("create user nkey: %w", err)
@@ -28,7 +34,7 @@ func IssueSessionAgentJWT(userID string, accountKP nkeys.KeyPair) (jwt string, s
 		return "", nil, fmt.Errorf("user seed: %w", err)
 	}
 
-	pubAllow, subAllow := SessionAgentSubjectPermissions(userID)
+	pubAllow, subAllow := SessionAgentSubjectPermissions(userID, userSlug)
 
 	claims := natsjwt.NewUserClaims(pub)
 	claims.Name = "session-agent-" + userID

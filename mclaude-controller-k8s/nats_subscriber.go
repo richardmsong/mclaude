@@ -15,8 +15,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ProvisionRequest is the NATS request payload from control-plane (ADR-0035).
+// ProvisionRequest is the NATS request payload from control-plane (ADR-0035, ADR-0050).
 type ProvisionRequest struct {
+	UserID        string `json:"userId"`
+	ProjectID     string `json:"projectId"`
 	UserSlug      string `json:"userSlug"`
 	HostSlug      string `json:"hostSlug"`
 	ProjectSlug   string `json:"projectSlug"`
@@ -117,8 +119,10 @@ func (p *NATSProvisioner) handleCreate(ctx context.Context, req ProvisionRequest
 			Namespace: p.controlPlaneNs,
 		},
 		Spec: MCProjectSpec{
-			UserID:        req.UserSlug,
-			ProjectID:     req.ProjectSlug,
+			UserID:        req.UserID,
+			ProjectID:     req.ProjectID,
+			UserSlug:      req.UserSlug,
+			ProjectSlug:   req.ProjectSlug,
 			GitURL:        req.GitURL,
 			GitIdentityID: req.GitIdentityID,
 		},

@@ -33,10 +33,14 @@ func AddToScheme(s *runtime.Scheme) error {
 
 // MCProjectSpec defines the desired state of an MCProject.
 type MCProjectSpec struct {
-	// UserID is the mclaude user ID that owns this project.
+	// UserID is the mclaude user ID (UUID) that owns this project.
 	UserID string `json:"userId"`
-	// ProjectID is the stable project identifier (matches the Postgres row).
+	// ProjectID is the stable project identifier UUID (matches the Postgres row).
 	ProjectID string `json:"projectId"`
+	// UserSlug is the human-readable slug for the user (used in NATS subjects).
+	UserSlug string `json:"userSlug"`
+	// ProjectSlug is the human-readable slug for the project (used in NATS subjects).
+	ProjectSlug string `json:"projectSlug"`
 	// GitURL is an optional git remote for the project repository.
 	GitURL string `json:"gitUrl,omitempty"`
 	// GitIdentityID is the optional oauth_connections.id to use for git operations.
