@@ -91,11 +91,11 @@ func StartDeps(t *testing.T) *Deps {
 	for _, cfg := range []jetstream.StreamConfig{
 		{
 			Name:     "MCLAUDE_EVENTS",
-			Subjects: []string{"mclaude.*.*.events.*"},
+			Subjects: []string{"mclaude.users.*.hosts.*.projects.*.events.*"},
 		},
 		{
 			Name:     "MCLAUDE_LIFECYCLE",
-			Subjects: []string{"mclaude.*.*.lifecycle.*"},
+			Subjects: []string{"mclaude.users.*.hosts.*.projects.*.lifecycle.*"},
 		},
 	} {
 		if _, err := js.CreateOrUpdateStream(ctx, cfg); err != nil {

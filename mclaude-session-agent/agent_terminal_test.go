@@ -72,7 +72,7 @@ func buildMinimalAgent(t *testing.T) *Agent {
 func injectTerminal(t *testing.T, a *Agent, termID string) *TerminalSession {
 	t.Helper()
 	mock := newMockTermPubSub()
-	ts, err := startTerminal(termID, "/bin/sh", mock.transport(), a.userID, a.projectID)
+	ts, err := startTerminal(termID, "/bin/sh", mock.transport(), a.userID, string(a.hostSlug), a.projectID)
 	if err != nil {
 		t.Fatalf("startTerminal(%q): %v", termID, err)
 	}
@@ -170,7 +170,7 @@ func TestTerminalCreateAddsToMap(t *testing.T) {
 
 	a := buildMinimalAgent(t)
 	mock := newMockTermPubSub()
-	ts, err := startTerminal("term-new-1", "/bin/sh", mock.transport(), a.userID, a.projectID)
+	ts, err := startTerminal("term-new-1", "/bin/sh", mock.transport(), a.userID, string(a.hostSlug), a.projectID)
 	if err != nil {
 		t.Fatalf("startTerminal: %v", err)
 	}

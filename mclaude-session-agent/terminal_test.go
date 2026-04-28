@@ -99,14 +99,14 @@ func TestPTYStartsShell(t *testing.T) {
 		}
 	}
 
-	ts, err := startTerminal("term-1", "/bin/sh", mock.transport(), "user-1", "proj-1")
+	ts, err := startTerminal("term-1", "/bin/sh", mock.transport(), "user-1", "host-1", "proj-1")
 	if err != nil {
 		t.Fatalf("startTerminal: %v", err)
 	}
 	t.Cleanup(ts.stop)
 
 	// Deliver input via the mock (simulates a NATS publisher).
-	inputSubject := "mclaude.users.user-1.projects.proj-1.api.terminal.term-1.input"
+	inputSubject := "mclaude.users.user-1.hosts.host-1.projects.proj-1.api.terminal.term-1.input"
 	mock.deliver(inputSubject, []byte("echo hello-pty-test\n"))
 
 	if !cap.waitFor("hello-pty-test", 5*time.Second) {
@@ -117,7 +117,7 @@ func TestPTYStartsShell(t *testing.T) {
 // TestPTYResize verifies that resize() sets the PTY window size without error.
 func TestPTYResize(t *testing.T) {
 	mock := newMockTermPubSub()
-	ts, err := startTerminal("term-2", "/bin/sh", mock.transport(), "user-1", "proj-1")
+	ts, err := startTerminal("term-2", "/bin/sh", mock.transport(), "user-1", "host-1", "proj-1")
 	if err != nil {
 		t.Fatalf("startTerminal: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestPTYResize(t *testing.T) {
 // TestPTYStop verifies that stop() terminates the shell and doneCh closes.
 func TestPTYStop(t *testing.T) {
 	mock := newMockTermPubSub()
-	ts, err := startTerminal("term-3", "/bin/sh", mock.transport(), "user-1", "proj-1")
+	ts, err := startTerminal("term-3", "/bin/sh", mock.transport(), "user-1", "host-1", "proj-1")
 	if err != nil {
 		t.Fatalf("startTerminal: %v", err)
 	}
@@ -156,19 +156,19 @@ func TestPTYMultipleSessions(t *testing.T) {
 	mockA.onPublish = func(_ string, data []byte) { capA.write(data) }
 	mockB.onPublish = func(_ string, data []byte) { capB.write(data) }
 
-	tsA, err := startTerminal("term-a", "/bin/sh", mockA.transport(), "user-1", "proj-1")
+	tsA, err := startTerminal("term-a", "/bin/sh", mockA.transport(), "user-1", "host-1", "proj-1")
 	if err != nil {
 		t.Fatalf("start tsA: %v", err)
 	}
-	tsB, err := startTerminal("term-b", "/bin/sh", mockB.transport(), "user-1", "proj-1")
+	tsB, err := startTerminal("term-b", "/bin/sh", mockB.transport(), "user-1", "host-1", "proj-1")
 	if err != nil {
 		t.Fatalf("start tsB: %v", err)
 	}
 	t.Cleanup(tsA.stop)
 	t.Cleanup(tsB.stop)
 
-	mockA.deliver("mclaude.users.user-1.projects.proj-1.api.terminal.term-a.input", []byte("echo session-A\n"))
-	mockB.deliver("mclaude.users.user-1.projects.proj-1.api.terminal.term-b.input", []byte("echo session-B\n"))
+	mockA.deliver("mclaude.users.user-1.hosts.host-1.projects.proj-1.api.terminal.term-a.input", []byte("echo session-A\n"))
+	mockB.deliver("mclaude.users.user-1.hosts.host-1.projects.proj-1.api.terminal.term-b.input", []byte("echo session-B\n"))
 
 	if !capA.waitFor("session-A", 5*time.Second) {
 		t.Errorf("term-a output missing; got: %q", capA.string())
@@ -201,17 +201,17 @@ func TestPTYOutputSubjectFormat(t *testing.T) {
 		subjectMu.Unlock()
 	}
 
-	ts, err := startTerminal("my-term", "/bin/sh", mock.transport(), "alice", "myproject")
+	ts, err := startTerminal("my-term", "/bin/sh", mock.transport(), "alice", "myhost", "myproject")
 	if err != nil {
 		t.Fatalf("startTerminal: %v", err)
 	}
 	t.Cleanup(ts.stop)
 
 	// Trigger output.
-	mock.deliver("mclaude.users.alice.projects.myproject.api.terminal.my-term.input", []byte("echo x\n"))
+	mock.deliver("mclaude.users.alice.hosts.myhost.projects.myproject.api.terminal.my-term.input", []byte("echo x\n"))
 	time.Sleep(500 * time.Millisecond)
 
-	want := "mclaude.users.alice.projects.myproject.api.terminal.my-term.output"
+	want := "mclaude.users.alice.hosts.myhost.projects.myproject.api.terminal.my-term.output"
 	subjectMu.Lock()
 	got := capturedSubject
 	subjectMu.Unlock()

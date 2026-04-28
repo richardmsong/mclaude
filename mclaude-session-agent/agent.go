@@ -1318,7 +1318,7 @@ func (a *Agent) handleTerminalCreate(msg *nats.Msg) {
 	a.mu.Unlock()
 
 	tr := NATSTermPubSub(a.nc)
-	ts, err := startTerminal(req.TermID, req.Shell, tr, string(a.userSlug), string(a.projectSlug))
+	ts, err := startTerminal(req.TermID, req.Shell, tr, string(a.userSlug), string(a.hostSlug), string(a.projectSlug))
 	if err != nil {
 		a.log.Error().Err(err).Str("termId", req.TermID).Msg("failed to start terminal")
 		a.reply(msg, nil, "start terminal: "+err.Error())

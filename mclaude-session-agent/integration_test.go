@@ -156,7 +156,7 @@ func TestLifecycleEventPubSub(t *testing.T) {
 	ctx := context.Background()
 	js := deps.JetStream
 
-	subject := "mclaude.integ-user.integ-proj.lifecycle.integ-sess"
+	subject := "mclaude.users.integ-user.hosts.local.projects.integ-proj.lifecycle.integ-sess"
 
 	// Subscribe before publishing so we don't miss the message.
 	cons, err := js.CreateOrUpdateConsumer(ctx, "MCLAUDE_LIFECYCLE", jetstream.ConsumerConfig{
@@ -270,12 +270,12 @@ func TestNewAgentCreatesEventStream(t *testing.T) {
 	}
 	found := false
 	for _, subj := range info.Config.Subjects {
-		if subj == "mclaude.users.*.projects.*.events.*" {
+		if subj == "mclaude.users.*.hosts.*.projects.*.events.*" {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("subjects: %v does not include mclaude.users.*.projects.*.events.*", info.Config.Subjects)
+		t.Errorf("subjects: %v does not include mclaude.users.*.hosts.*.projects.*.events.*", info.Config.Subjects)
 	}
 }
 

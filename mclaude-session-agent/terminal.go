@@ -51,7 +51,7 @@ func NATSTermPubSub(nc *nats.Conn) termPubSub {
 
 // startTerminal spawns a shell in a PTY and bridges it to NATS.
 // shell is typically "/bin/bash" or "/bin/sh".
-func startTerminal(id, shell string, tr termPubSub, userID, projectID string) (*TerminalSession, error) {
+func startTerminal(id, shell string, tr termPubSub, userID, hostID, projectID string) (*TerminalSession, error) {
 	cmd := exec.Command(shell)
 
 	ptmx, err := pty.Start(cmd)
@@ -66,8 +66,8 @@ func startTerminal(id, shell string, tr termPubSub, userID, projectID string) (*
 		doneCh: make(chan struct{}),
 	}
 
-	outputSubject := fmt.Sprintf("mclaude.users.%s.projects.%s.api.terminal.%s.output", userID, projectID, id)
-	inputSubject := fmt.Sprintf("mclaude.users.%s.projects.%s.api.terminal.%s.input", userID, projectID, id)
+	outputSubject := fmt.Sprintf("mclaude.users.%s.hosts.%s.projects.%s.api.terminal.%s.output", userID, hostID, projectID, id)
+	inputSubject := fmt.Sprintf("mclaude.users.%s.hosts.%s.projects.%s.api.terminal.%s.input", userID, hostID, projectID, id)
 
 	// PTY output → NATS
 	go func() {

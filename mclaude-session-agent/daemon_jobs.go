@@ -250,7 +250,7 @@ func (d *Daemon) writeJobEntry(job *JobEntry) error {
 // updates jobQueueKV on terminal job lifecycle events.
 func (d *Daemon) runLifecycleSubscriber(ctx context.Context) {
 	// Subscribe to lifecycle events for all projects belonging to this user.
-	// New format: mclaude.users.{uslug}.projects.*.lifecycle.*
+	// New format: mclaude.users.{uslug}.hosts.*.projects.*.lifecycle.* (ADR-0035)
 	subject := "mclaude.users." + string(d.cfg.UserSlug) + ".hosts.*.projects.*.lifecycle.*"
 	sub, err := d.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var ev map[string]string
