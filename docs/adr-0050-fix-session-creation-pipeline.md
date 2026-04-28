@@ -38,6 +38,13 @@ Root causes (all must be fixed together):
 | 5 | Fix session-agent JWT permissions | `IssueSessionAgentJWT` gains `userSlug string` param. `SessionAgentSubjectPermissions(userID, userSlug)` returns: PubAllow = `[mclaude.{UUID}.>, mclaude.users.{uslug}.hosts.*.>, _INBOX.>, $JS.*.API.>]`, SubAllow = same. | Same pattern as user JWT (ADR-0049) — both old UUID prefix and new host-scoped prefix, plus JetStream and inbox. |
 | 6 | `seedDev` publishes provisioning request | After creating the default project, `seedDev` publishes a NATS request to `mclaude.users.{userSlug}.hosts.local.api.projects.create` with the full `ProvisionRequest` payload. Uses `nc.Request` with 30s timeout. Logs result. Non-fatal on failure (controller may not be running yet during startup race). | Triggers the K8s controller to create the MCProject CR and session-agent pod. |
 | 7 | `seedDev` resolves host slug from DB | `seedDev` queries the `local` host's ID to populate `ProvisionRequest.HostSlug` and to set `ProjectKVState.HostSlug`. | The host row already exists from the migration backfill. |
+| 8 | MCProject CRD schema includes slug fields | `charts/mclaude-worker/templates/mcproject-crd.yaml` adds `userSlug` and `projectSlug` to the OpenAPI v3 schema `spec.properties`. | Without these, Kubernetes structural schema validation prunes the fields on write, and the reconciler reads empty strings for `Spec.UserSlug`/`Spec.ProjectSlug`. |
+| 9 | Reconciler reads `SESSION_AGENT_TEMPLATE_CM` env var | `loadTemplate()` uses `r.sessionAgentTemplateCM` (from `SESSION_AGENT_TEMPLATE_CM` env var, falling back to `releaseName + "-session-agent-template"`). | The Helm release name for the worker chart is `mclaude-worker`, but the reconciler's `HELM_RELEASE_NAME` env var was never set, causing fallback to `"mclaude"` and a ConfigMap-not-found → default template → wrong image. |
+| 10 | Session-agent JWT includes `$JS.API.>` for direct connections | `SessionAgentSubjectPermissions` returns both `$JS.API.>` (direct worker NATS) and `$JS.*.API.>` (domain-qualified through hub). | Session-agents connect directly to worker NATS (or hub NATS), so they need the non-domain-qualified JetStream API prefix. `$JS.*.API.>` alone requires a domain token that isn't present on direct connections. |
+| 11 | Session-agent JWT includes KV + ACK permissions | `SessionAgentSubjectPermissions` adds `$KV.mclaude-sessions.>`, `$KV.mclaude-projects.>`, `$KV.mclaude-hosts.>`, `$KV.mclaude-job-queue.>`, `$JS.ACK.>`, `$JS.FC.>`, `$JS.API.DIRECT.GET.>` to both PubAllow and SubAllow. | Session-agent writes to `mclaude-sessions` KV, reads projects/hosts/job-queue KV, and must acknowledge JetStream messages. NATS KV writes use `$KV.{bucket}.{key}` subjects. JetStream ACKs use `$JS.ACK.{stream}.{consumer}.>`. |
+| 12 | Session-agent NATS URL points at hub NATS | Helm chart gains `sessionAgentNatsUrl` value. Controller reads `SESSION_AGENT_NATS_URL` env var (falling back to worker NATS URL). Reconciler injects this as the session-agent pod's `NATS_URL`. | KV buckets (`mclaude-sessions`, `mclaude-projects`) are created on hub NATS. Session-agents connecting to worker NATS can't find them without domain-qualified JetStream. Pointing directly at hub NATS is the simplest correct path for single-cluster and works for multi-cluster when the hub is reachable. |
+| 13 | SessionStore uses split KV prefixes | `SessionStore` watches `mclaude-sessions` with `userSlug` prefix (slug-based keys written by session-agent) and `mclaude-projects` with `userId` prefix (UUID-based keys written by control-plane). `App.tsx` passes `authState.userSlug ?? authState.userId` as the `userSlug` constructor param. | Session KV keys are slug-based (`dev.local.default-project.{sslug}`), project KV keys are still UUID-based (`{userId}.{projectId}`). A single prefix can't match both; the store needs separate prefixes until the project KV key migration lands. |
+| 14 | Session-agent event subjects include `.hosts.{hslug}.` | All project-scoped NATS subjects in `mclaude-session-agent` (events, lifecycle, terminal, API sessions) include `.hosts.{hslug}.` between the user and project segments per ADR-0035. | The session-agent predates ADR-0035 and constructed subjects without the host segment, causing NATS permission violations on every publish. |
 
 ## Impact
 
@@ -46,8 +53,11 @@ Root causes (all must be fixed together):
 - `docs/mclaude-control-plane/spec-control-plane.md` — `seedDev` provisioning step, `writeProjectKV` signature, `ProvisionRequest` schema, session-agent JWT permissions.
 
 **Components implementing the change:**
-- `mclaude-control-plane`: `projects.go` (`ProjectKVState`, `writeProjectKV`, project-create handler), `main.go` (`seedDev`), `nkeys.go` (`IssueSessionAgentJWT` in control-plane copy if exists).
-- `mclaude-controller-k8s`: `nats_subscriber.go` (`handleCreate` — populate MCProject slug fields), `mcproject_types.go` (`MCProjectSpec` new fields), `reconciler.go` (`buildPodTemplate` env vars), `nkeys.go` (`IssueSessionAgentJWT`, `SessionAgentSubjectPermissions`).
+- `mclaude-control-plane`: `projects.go` (`ProjectKVState`, `writeProjectKV`, project-create handler), `main.go` (`seedDev`), `nkeys.go` (`IssueSessionAgentJWT`, `SessionAgentSubjectPermissions`).
+- `mclaude-controller-k8s`: `nats_subscriber.go` (`handleCreate` — populate MCProject slug fields), `mcproject_types.go` (`MCProjectSpec` new fields), `reconciler.go` (`buildPodTemplate` env vars, `loadTemplate` ConfigMap lookup, `SESSION_AGENT_NATS_URL`), `nkeys.go` (`IssueSessionAgentJWT`, `SessionAgentSubjectPermissions`), `main.go` (`SESSION_AGENT_NATS_URL`, `SESSION_AGENT_TEMPLATE_CM`).
+- `mclaude-session-agent`: `session.go`, `terminal.go`, `agent.go` (host-scoped subject construction per ADR-0035).
+- `mclaude-web`: `session-store.ts` (split KV watch prefixes), `App.tsx` (pass `userSlug` to SessionStore).
+- `charts/mclaude-worker`: `mcproject-crd.yaml` (slug fields in CRD schema), `controller-deployment.yaml` (`SESSION_AGENT_NATS_URL`), `values.yaml`/`values-dev.yaml`/`values-k3d-ghcr.yaml` (`sessionAgentNatsUrl`).
 
 ## Scope
 
@@ -55,11 +65,16 @@ Root causes (all must be fixed together):
 - ProjectKVState slug fields in value (not key migration)
 - ProvisionRequest + MCProjectSpec slug fields
 - Reconciler env var fix
-- Session-agent JWT host-scoped permissions
+- Session-agent JWT: host-scoped permissions, JetStream API, KV write/read, ACK
 - seedDev provisioning request
-- All six bugs fixed; session creation works end-to-end
+- MCProject CRD schema updated with slug fields
+- Reconciler template ConfigMap lookup via `SESSION_AGENT_TEMPLATE_CM`
+- Session-agent NATS URL points at hub NATS (where KV buckets live)
+- SessionStore split KV prefixes (slug for sessions, UUID for projects)
+- Session-agent event/lifecycle/terminal subjects include `.hosts.{hslug}.` per ADR-0035
+- All fourteen decisions implemented; session creation works end-to-end
 
 **Explicitly deferred:**
-- KV key format migration from `{UUID}.{UUID}` to `{uslug}.{hslug}.{pslug}` (separate ADR — affects SessionStore watch prefix, HeartbeatMonitor, all KV readers)
+- KV key format migration from `{UUID}.{UUID}` to `{uslug}.{hslug}.{pslug}` for project KV (separate ADR — affects SessionStore project watch prefix, HeartbeatMonitor, all KV readers)
 - Default onboarding session (separate ADR)
 - Error surfacing in DashboardScreen (the `catch {}` swallowing errors)
