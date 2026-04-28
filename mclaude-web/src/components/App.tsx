@@ -448,7 +448,8 @@ export function App() {
     // Start from replayFromSeq in KV — skips events before last clear/compaction (spec: plan-client-architecture.md)
     const replayFromSeq = session?.replayFromSeq ?? undefined
     store.start(replayFromSeq)
-    const vm = new ConversationVM(store, sessionStore, natsClient, authState.userId, resolvedProjectId, route.sessionId, resolvedUserSlug, resolvedHostSlug, resolvedProjectSlug ?? resolvedProjectId)
+    const resolvedSessionId = session?.id ?? route.sessionId
+    const vm = new ConversationVM(store, sessionStore, natsClient, authState.userId, resolvedProjectId, resolvedSessionId, resolvedUserSlug, resolvedHostSlug, resolvedProjectSlug ?? resolvedProjectId)
     const lifecycle = new LifecycleStore(natsClient, authState.userId, resolvedProjectId, resolvedUserSlug, resolvedHostSlug, resolvedProjectSlug ?? resolvedProjectId)
     lifecycle.start()
     const tvm = new TerminalVM(natsClient, authState.userId, resolvedProjectId, resolvedUserSlug, resolvedHostSlug, resolvedProjectSlug ?? resolvedProjectId)
