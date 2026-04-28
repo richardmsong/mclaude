@@ -68,6 +68,12 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 	}
 	s.hostsKV = hostsKV
 
+	// Spec startup step 7: ensure mclaude-sessions KV bucket exists.
+	// Control-plane doesn't write to it — bucket creation only.
+	if _, err := ensureSessionsKV(js); err != nil {
+		return err
+	}
+
 	// subject pattern: mclaude.{userID}.api.projects.create
 	_, err = nc.Subscribe("mclaude.*.api.projects.create", func(msg *nats.Msg) {
 		// Extract userID from subject token index 1
@@ -231,6 +237,20 @@ func ensureHostsKV(js nats.JetStreamContext) (nats.KeyValue, error) {
 	}
 	return js.CreateKeyValue(&nats.KeyValueConfig{
 		Bucket:  "mclaude-hosts",
+		History: 1,
+	})
+}
+
+// ensureSessionsKV creates the mclaude-sessions KV bucket if it doesn't exist.
+// Per spec startup step 7, the control-plane ensures this bucket exists but
+// does not write to it (session-agents own session state).
+func ensureSessionsKV(js nats.JetStreamContext) (nats.KeyValue, error) {
+	kv, err := js.KeyValue("mclaude-sessions")
+	if err == nil {
+		return kv, nil
+	}
+	return js.CreateKeyValue(&nats.KeyValueConfig{
+		Bucket:  "mclaude-sessions",
 		History: 1,
 	})
 }

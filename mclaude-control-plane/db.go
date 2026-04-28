@@ -367,6 +367,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL DEFAULT '',
     oauth_id      TEXT,
     is_admin      BOOLEAN NOT NULL DEFAULT FALSE,
+    slug          TEXT UNIQUE NOT NULL DEFAULT '',
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -423,6 +424,10 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS slug TEXT NOT NULL DEFAULT '';
 
 -- Backfill slug from email local-part for any existing rows where slug is empty.
 UPDATE users SET slug = lower(regexp_replace(split_part(email, '@', 1), '[^a-zA-Z0-9]+', '-', 'g')) WHERE slug = '';
+
+-- Ensure slug uniqueness (idempotent; covers both fresh installs and upgrades
+-- where the column was added without the UNIQUE constraint).
+CREATE UNIQUE INDEX IF NOT EXISTS users_slug_uniq ON users (slug);
 
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS slug TEXT NOT NULL DEFAULT '';
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS host_id TEXT REFERENCES hosts(id) ON DELETE CASCADE;

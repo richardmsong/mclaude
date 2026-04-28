@@ -5,6 +5,29 @@ import (
 	"testing"
 )
 
+// ---- computeUserSlug ----
+
+func TestComputeUserSlug_BasicEmail(t *testing.T) {
+	cases := []struct {
+		email string
+		want  string
+	}{
+		{"alice@example.com", "alice"},
+		{"bob.smith@example.com", "bob-smith"},
+		{"jane_doe@example.com", "jane-doe"},
+		{"user+tag@example.com", "user-tag"},
+		{"ALICE@EXAMPLE.COM", "alice"},
+		{"mixed.CASE.User@domain.io", "mixed-case-user"},
+		{"multi--dash@example.com", "multi-dash"},
+	}
+	for _, tc := range cases {
+		got := computeUserSlug(tc.email)
+		if got != tc.want {
+			t.Errorf("computeUserSlug(%q) = %q; want %q", tc.email, got, tc.want)
+		}
+	}
+}
+
 // TestSchema_ContainsRequiredTables verifies the embedded DDL schema defines
 // the tables and columns the application expects. This is the pure-logic
 // counterpart to the integration test that actually applies the schema to Postgres.
@@ -85,4 +108,23 @@ func TestSchema_BackfillLocalHost(t *testing.T) {
 	if !strings.Contains(schema, "'local'") {
 		t.Error("schema missing backfill for default 'local' machine host")
 	}
+}
+
+func TestSchema_UsersSlugColumn(t *testing.T) {
+	if !strings.Contains(schema, "slug") {
+		t.Error("schema users table missing slug column (ADR-0046)")
+	}
+}
+
+func TestSchema_UsersSlugUniqueIndex(t *testing.T) {
+	if !strings.Contains(schema, "users_slug_uniq") {
+		t.Error("schema missing users_slug_uniq unique index (ADR-0046)")
+	}
+}
+
+func TestSchema_SessionsKVEnsured(t *testing.T) {
+	// Verify ensureSessionsKV is referenced — checked via function existence rather
+	// than schema (KV bucket creation happens at runtime, not in DDL).
+	// This test guards against the function being removed.
+	_ = ensureSessionsKV // compile-time check: function must exist
 }

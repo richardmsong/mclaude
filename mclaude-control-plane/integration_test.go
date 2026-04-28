@@ -224,8 +224,9 @@ func mustConnectDB(t *testing.T, ctx context.Context) *DB {
 }
 
 // TestIntegration_StartProjectsSubscriberCreatesKVBuckets verifies that
-// StartProjectsSubscriber creates both the mclaude-projects and
-// mclaude-job-queue KV buckets on startup.
+// StartProjectsSubscriber creates all required KV buckets on startup:
+// mclaude-projects, mclaude-job-queue, mclaude-hosts, mclaude-sessions.
+// Per spec startup step 7 and ADR-0046.
 func TestIntegration_StartProjectsSubscriberCreatesKVBuckets(t *testing.T) {
 	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
 	if err != nil {
@@ -243,7 +244,7 @@ func TestIntegration_StartProjectsSubscriberCreatesKVBuckets(t *testing.T) {
 		t.Fatalf("JetStream: %v", err)
 	}
 
-	for _, bucket := range []string{"mclaude-projects", "mclaude-job-queue"} {
+	for _, bucket := range []string{"mclaude-projects", "mclaude-job-queue", "mclaude-hosts", "mclaude-sessions"} {
 		kv, err := js.KeyValue(bucket)
 		if err != nil {
 			t.Errorf("KeyValue(%q): %v — bucket should have been created by StartProjectsSubscriber", bucket, err)
@@ -253,7 +254,7 @@ func TestIntegration_StartProjectsSubscriberCreatesKVBuckets(t *testing.T) {
 			t.Errorf("bucket name = %q; want %q", kv.Bucket(), bucket)
 		}
 
-		// Spec requires History:1 for both buckets.
+		// Spec requires History:1 for all buckets.
 		status, err := kv.Status()
 		if err != nil {
 			t.Errorf("KeyValue(%q).Status(): %v", bucket, err)
@@ -262,5 +263,230 @@ func TestIntegration_StartProjectsSubscriberCreatesKVBuckets(t *testing.T) {
 		if history := status.History(); history != 1 {
 			t.Errorf("bucket %q: History() = %d, want 1", bucket, history)
 		}
+	}
+}
+
+// TestIntegration_UserSlug_PopulatedOnCreate verifies that CreateUser derives
+// the slug from the email local-part (ADR-0046).
+func TestIntegration_UserSlug_PopulatedOnCreate(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	user, err := db.CreateUser(ctx, "slug-test-001", "alice.smith@example.com", "Alice Smith", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if user.Slug != "alice-smith" {
+		t.Errorf("Slug = %q; want %q", user.Slug, "alice-smith")
+	}
+
+	// Verify the slug persists through a DB round-trip.
+	fetched, err := db.GetUserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("GetUserByID: %v", err)
+	}
+	if fetched.Slug != "alice-smith" {
+		t.Errorf("fetched Slug = %q; want %q", fetched.Slug, "alice-smith")
+	}
+}
+
+// TestIntegration_UserSlug_Unique verifies that duplicate slugs are rejected (ADR-0046).
+func TestIntegration_UserSlug_Unique(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	// Two users with different emails that produce the same slug.
+	_, err := db.CreateUser(ctx, "slug-uniq-u1", "alice@example.com", "Alice1", "")
+	if err != nil {
+		t.Fatalf("CreateUser first: %v", err)
+	}
+	_, err = db.CreateUser(ctx, "slug-uniq-u2", "alice@other.com", "Alice2", "")
+	if err == nil {
+		t.Error("expected error for duplicate slug; got nil")
+	}
+}
+
+// TestIntegration_HandleLogin_UserSlugInResponse verifies that POST /auth/login
+// returns the userSlug field populated from users.slug (ADR-0046).
+func TestIntegration_HandleLogin_UserSlugInResponse(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	hash, err := HashPassword("secret-pw")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	_, err = db.CreateUser(ctx, "login-slug-u1", "bob.jones@example.com", "Bob Jones", hash)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	accountKP, _ := nkeys.CreateAccount()
+	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour, "admin")
+
+	body := `{"email":"bob.jones@example.com","password":"secret-pw"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp LoginResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.UserSlug != "bob-jones" {
+		t.Errorf("userSlug = %q; want %q", resp.UserSlug, "bob-jones")
+	}
+	if resp.UserID == "" {
+		t.Error("userId missing from response")
+	}
+}
+
+// TestIntegration_HandleSysEvent_MachineConnect verifies that handleSysEvent
+// writes a {uslug}.{hslug} entry with online=true to the mclaude-hosts KV
+// when a machine host connects (ADR-0046).
+func TestIntegration_HandleSysEvent_MachineConnect(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	// Create user + machine host with a known public_key.
+	_, err := db.CreateUser(ctx, "sys-evt-u1", "sysevt@example.com", "SysEvt", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	_, err = db.pool.Exec(ctx, `
+		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key)
+		VALUES ('sys-evt-h1', 'sys-evt-u1', 'myhost', 'My Host', 'machine', 'owner', 'UTEST_PUBKEY_SYSEVT')`,
+	)
+	if err != nil {
+		t.Fatalf("insert host: %v", err)
+	}
+	t.Cleanup(func() {
+		db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = 'sys-evt-h1'`)  //nolint:errcheck
+		db.pool.Exec(ctx, `DELETE FROM users WHERE id = 'sys-evt-u1'`)  //nolint:errcheck
+	})
+
+	// Set up hostsKV via a fresh NATS connection.
+	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
+	if err != nil {
+		t.Fatalf("NATS connect: %v", err)
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+	hostsKV, err := ensureHostsKV(js)
+	if err != nil {
+		t.Fatalf("ensureHostsKV: %v", err)
+	}
+
+	srv := &Server{db: db, hostsKV: hostsKV}
+
+	// Simulate a $SYS CONNECT event from a machine host.
+	payload := `{"server":{"name":"hub"},"client":{"kind":"Client","name":"myhost","nkey":"UTEST_PUBKEY_SYSEVT"}}`
+	fakeMsg := &nats.Msg{Data: []byte(payload)}
+	srv.handleSysEvent(fakeMsg, true /* isConnect */)
+
+	// Verify mclaude-hosts KV was written with online=true.
+	entry, err := hostsKV.Get("sysevt.myhost")
+	if err != nil {
+		t.Fatalf("hostsKV.Get(sysevt.myhost): %v", err)
+	}
+
+	var state HostKVState
+	if err := json.Unmarshal(entry.Value(), &state); err != nil {
+		t.Fatalf("unmarshal HostKVState: %v", err)
+	}
+	if !state.Online {
+		t.Errorf("online = %v; want true after CONNECT", state.Online)
+	}
+	if state.Slug != "myhost" {
+		t.Errorf("slug = %q; want %q", state.Slug, "myhost")
+	}
+	if state.LastSeenAt == nil {
+		t.Error("lastSeenAt should be set after CONNECT")
+	}
+}
+
+// TestIntegration_HandleSysEvent_MachineDisconnect verifies that handleSysEvent
+// sets online=false in the mclaude-hosts KV on machine disconnect (ADR-0046).
+// It preserves the existing lastSeenAt from a prior CONNECT.
+func TestIntegration_HandleSysEvent_MachineDisconnect(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	_, err := db.CreateUser(ctx, "sys-disc-u1", "sysdisc@example.com", "SysDisc", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	_, err = db.pool.Exec(ctx, `
+		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key)
+		VALUES ('sys-disc-h1', 'sys-disc-u1', 'dischost', 'Disc Host', 'machine', 'owner', 'UTEST_PUBKEY_SYSDISC')`,
+	)
+	if err != nil {
+		t.Fatalf("insert host: %v", err)
+	}
+	t.Cleanup(func() {
+		db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = 'sys-disc-h1'`)  //nolint:errcheck
+		db.pool.Exec(ctx, `DELETE FROM users WHERE id = 'sys-disc-u1'`)  //nolint:errcheck
+	})
+
+	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
+	if err != nil {
+		t.Fatalf("NATS connect: %v", err)
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+	hostsKV, err := ensureHostsKV(js)
+	if err != nil {
+		t.Fatalf("ensureHostsKV: %v", err)
+	}
+
+	srv := &Server{db: db, hostsKV: hostsKV}
+
+	connectPayload := `{"server":{"name":"hub"},"client":{"kind":"Client","name":"dischost","nkey":"UTEST_PUBKEY_SYSDISC"}}`
+	srv.handleSysEvent(&nats.Msg{Data: []byte(connectPayload)}, true)
+
+	// Verify online=true after CONNECT.
+	entry, err := hostsKV.Get("sysdisc.dischost")
+	if err != nil {
+		t.Fatalf("hostsKV.Get after CONNECT: %v", err)
+	}
+	var stateAfterConnect HostKVState
+	json.Unmarshal(entry.Value(), &stateAfterConnect) //nolint:errcheck
+	if !stateAfterConnect.Online {
+		t.Error("online should be true after CONNECT")
+	}
+	savedLastSeenAt := stateAfterConnect.LastSeenAt
+
+	// Now disconnect.
+	disconnectPayload := `{"server":{"name":"hub"},"client":{"kind":"Client","name":"dischost","nkey":"UTEST_PUBKEY_SYSDISC"}}`
+	srv.handleSysEvent(&nats.Msg{Data: []byte(disconnectPayload)}, false)
+
+	entry, err = hostsKV.Get("sysdisc.dischost")
+	if err != nil {
+		t.Fatalf("hostsKV.Get after DISCONNECT: %v", err)
+	}
+	var stateAfterDisconnect HostKVState
+	if err := json.Unmarshal(entry.Value(), &stateAfterDisconnect); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if stateAfterDisconnect.Online {
+		t.Error("online should be false after DISCONNECT")
+	}
+	// lastSeenAt must be preserved (ADR-0046: DISCONNECT writes online=false only).
+	if stateAfterDisconnect.LastSeenAt == nil || *stateAfterDisconnect.LastSeenAt != *savedLastSeenAt {
+		t.Errorf("lastSeenAt changed on DISCONNECT: got %v, want %v",
+			stateAfterDisconnect.LastSeenAt, savedLastSeenAt)
 	}
 }

@@ -215,6 +215,39 @@ func TestDecodeUserJWT_Malformed(t *testing.T) {
 	}
 }
 
+func TestIssueUserJWT_SlugInClaimsName(t *testing.T) {
+	// ADR-0046: IssueUserJWT receives a URL-safe slug and stores it in claims.Name
+	// so the SPA can construct KV key prefixes (e.g. mclaude-hosts.{slug}.*).
+	accountKP, _ := nkeys.CreateAccount()
+	accountPub, _ := accountKP.PublicKey()
+
+	slug := "alice-smith" // URL-safe slug derived from alice.smith@example.com
+	expiry := time.Now().Add(8 * time.Hour).Unix()
+
+	jwt, _, err := IssueUserJWT(slug, accountKP, expiry)
+	if err != nil {
+		t.Fatalf("IssueUserJWT: %v", err)
+	}
+
+	claims, err := DecodeUserJWT(jwt, accountPub)
+	if err != nil {
+		t.Fatalf("DecodeUserJWT: %v", err)
+	}
+
+	if claims.Name != slug {
+		t.Errorf("claims.Name = %q; want slug %q (ADR-0046)", claims.Name, slug)
+	}
+
+	// The subject permissions must reference the slug, not a UUID.
+	expectedSubject := fmt.Sprintf("mclaude.%s.>", slug)
+	if !containsStr(claims.Permissions.Pub.Allow, expectedSubject) {
+		t.Errorf("pub allow missing %q (slug-scoped subject)", expectedSubject)
+	}
+	if !containsStr(claims.Permissions.Sub.Allow, expectedSubject) {
+		t.Errorf("sub allow missing %q (slug-scoped subject)", expectedSubject)
+	}
+}
+
 func TestIssueUserJWT_EachCallUniqueKeys(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
 	expiry := time.Now().Add(time.Hour).Unix()
