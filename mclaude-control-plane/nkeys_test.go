@@ -16,8 +16,9 @@ import (
 
 func TestUserSubjectPermissions(t *testing.T) {
 	perm := UserSubjectPermissions("alice123", "alice-slug")
-	wantPub := []string{"mclaude.alice123.>", "_INBOX.>", "$JS.API.>"}
-	// SubAllow includes KV bucket subjects and JetStream API so the SPA can watch projects, sessions, and hosts.
+	// PubAllow includes the host-scoped prefix per ADR-0049.
+	wantPub := []string{"mclaude.alice123.>", "_INBOX.>", "$JS.API.>", "mclaude.users.alice-slug.hosts.*.>"}
+	// SubAllow includes KV bucket subjects, JetStream API, and host-scoped prefix (ADR-0049).
 	wantSub := []string{
 		"mclaude.alice123.>",
 		"_INBOX.>",
@@ -26,6 +27,7 @@ func TestUserSubjectPermissions(t *testing.T) {
 		"$KV.mclaude-hosts.alice-slug.>",
 		"$JS.API.>",
 		"$JS.API.DIRECT.GET.>",
+		"mclaude.users.alice-slug.hosts.*.>",
 	}
 
 	if !slicesEqual(perm.PubAllow, wantPub) {
@@ -73,6 +75,16 @@ func TestSubjectIsolation(t *testing.T) {
 			}
 			if !strings.Contains(s, "alice") {
 				t.Errorf("alice KV permission doesn't contain alice ID: %q", s)
+			}
+			continue
+		}
+		// Host-scoped subjects use the slug (ADR-0049) — they start with mclaude.users.{slug}.
+		if strings.HasPrefix(s, "mclaude.users.") {
+			if strings.Contains(s, "bob") {
+				t.Errorf("alice permission contains bob subject: %q", s)
+			}
+			if !strings.Contains(s, "alice") {
+				t.Errorf("alice host-scoped permission doesn't contain alice slug: %q", s)
 			}
 			continue
 		}
@@ -253,6 +265,14 @@ func TestIssueUserJWT_UUIDInClaimsName(t *testing.T) {
 	expectedHostsKV := "$KV.mclaude-hosts.dev.local.>"
 	if !containsStr(claims.Permissions.Sub.Allow, expectedHostsKV) {
 		t.Errorf("sub allow missing %q (slug-scoped hosts KV subject)", expectedHostsKV)
+	}
+	// ADR-0049: host-scoped subject prefix must appear in both pub and sub allow lists.
+	expectedHostsPrefix := "mclaude.users.dev.local.hosts.*.>"
+	if !containsStr(claims.Permissions.Pub.Allow, expectedHostsPrefix) {
+		t.Errorf("pub allow missing %q (ADR-0049 host-scoped prefix)", expectedHostsPrefix)
+	}
+	if !containsStr(claims.Permissions.Sub.Allow, expectedHostsPrefix) {
+		t.Errorf("sub allow missing %q (ADR-0049 host-scoped prefix)", expectedHostsPrefix)
 	}
 }
 
