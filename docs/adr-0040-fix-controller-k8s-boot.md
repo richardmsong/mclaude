@@ -1,8 +1,9 @@
 # ADR: Fix mclaude-controller-k8s Boot
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-04-27: accepted
+- 2026-04-27: implemented — all pods Running 1/1, zero restarts
 
 ## Overview
 
