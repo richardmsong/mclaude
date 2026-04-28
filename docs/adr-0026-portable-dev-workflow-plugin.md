@@ -1,9 +1,10 @@
 # ADR: Portable Dev Workflow Plugin
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-04-20: draft
 - 2026-04-21: accepted
+- 2026-04-28: implemented — plugin extracted to agent-plugins repo, ADR-0062 adds integration test enforcement
 
 ## Overview
 
