@@ -126,6 +126,8 @@ controller:
     metricsPort: 9091
   config:
     logLevel: info
+    ## Claude API OAuth token for dev environments (injected into per-user secrets).
+    devOAuthToken: ""
 
 ## ---------------------------------------------------------------------------
 ## Session Agent pod template (controller instantiates per project)

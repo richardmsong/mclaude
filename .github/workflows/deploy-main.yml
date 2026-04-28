@@ -198,6 +198,7 @@ jobs:
       - name: Helm deploy worker
         env:
           IMAGE_TAG: ${{ needs.tag.outputs.image_tag }}
+          DEV_OAUTH_TOKEN: ${{ secrets.DEV_OAUTH_TOKEN }}
         run: |
           echo "Deploying worker at tag: ${IMAGE_TAG}"
 
@@ -213,6 +214,7 @@ jobs:
             --set controlPlane.image.tag="${IMAGE_TAG}" \
             --set controller.image.tag="${IMAGE_TAG}" \
             --set sessionAgent.image.tag="${IMAGE_TAG}" \
+            --set controller.config.devOAuthToken="${DEV_OAUTH_TOKEN}" \
             --set trustChain.operatorJwt="${OPERATOR_JWT}" \
             --set trustChain.accountJwt="${ACCOUNT_JWT}" \
             --set trustChain.accountPublicKey="${ACCOUNT_PUBLIC_KEY}" \
