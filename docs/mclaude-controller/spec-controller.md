@@ -28,6 +28,9 @@ The cluster's slug is configured at deploy time via the Helm value `clusterSlug`
 | `NATS_CREDS_FILE` | Yes | Path to the per-cluster controller JWT + NKey seed (provisioned by `helm install mclaude-worker` from the cluster register response). |
 | `JS_DOMAIN` | Yes | JetStream domain for this worker (matches `hosts.js_domain` for cluster-type rows that point here). |
 | `HELM_RELEASE_NAME` | No | Used to locate the session-agent-template ConfigMap (default `mclaude-worker`). |
+| `SESSION_AGENT_TEMPLATE_CM` | No | Explicit name of the session-agent-template ConfigMap. Overrides the `HELM_RELEASE_NAME`-derived name. Set by Helm (`{{ .Release.Name }}-session-agent-template`). |
+| `SESSION_AGENT_NATS_URL` | No | NATS URL injected into session-agent pods as `NATS_URL`. Defaults to the FQDN-qualified worker NATS URL. For single-cluster deployments where KV buckets live on hub NATS, set to the hub NATS URL (e.g. `nats://mclaude-cp-nats.mclaude-system.svc.cluster.local:4222`). |
+| `DEV_OAUTH_TOKEN` | No | Claude API OAuth token for dev environments. When set, the reconciler injects it as `oauth-token` in per-user `user-secrets` Secret. Session-agent entrypoint reads this and exports `CLAUDE_CODE_OAUTH_TOKEN`. |
 | `LEADER_ELECTION_NAMESPACE` | No | Defaults to `mclaude-system`. |
 
 ### Interfaces
@@ -136,8 +139,10 @@ When the local controller connects to hub NATS, hub publishes `$SYS.ACCOUNT.{acc
 
 ```json
 {
+  "userID":      "uuid-v4",
   "userSlug":    "alice-gmail",
   "hostSlug":    "us-east",
+  "projectID":   "uuid-v4",
   "projectSlug": "billing",
   "gitUrl":      "https://github.com/alice/billing.git",
   "gitIdentityId": "uuid"

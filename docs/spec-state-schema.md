@@ -586,11 +586,20 @@ The wildcard at the user level lets the controller receive provisioning requests
 Issued by `mclaude-controller-k8s` (`IssueSessionAgentJWT(userID, userSlug, accountKP)`), signed by the account signing key. Stored in the per-user `user-secrets` Secret in the user namespace. The session-agent uses this JWT to connect to worker NATS (or hub NATS in the degenerate single-cluster case).
 
 ```
-publish:   mclaude.{userID}.>, mclaude.users.{userSlug}.hosts.*.>, _INBOX.>, $JS.*.API.>
-subscribe: mclaude.{userID}.>, mclaude.users.{userSlug}.hosts.*.>, _INBOX.>, $JS.*.API.>
+publish:   mclaude.{userID}.>, mclaude.users.{userSlug}.hosts.*.>, _INBOX.>, $JS.API.>, $JS.*.API.>, $KV.mclaude-sessions.>, $KV.mclaude-projects.>, $KV.mclaude-hosts.>, $KV.mclaude-job-queue.>, $JS.ACK.>, $JS.FC.>, $JS.API.DIRECT.GET.>
+subscribe: mclaude.{userID}.>, mclaude.users.{userSlug}.hosts.*.>, _INBOX.>, $JS.API.>, $JS.*.API.>, $KV.mclaude-sessions.>, $KV.mclaude-projects.>, $KV.mclaude-hosts.>, $KV.mclaude-job-queue.>, $JS.ACK.>, $JS.FC.>, $JS.API.DIRECT.GET.>
 ```
 
-The `mclaude.{userID}.>` prefix is retained for backward compatibility with UUID-format KV keys (see ADR-0050 — key format migration deferred). `mclaude.users.{userSlug}.hosts.*.>` enables ADR-0035 host-scoped subjects. `$JS.*.API.>` is required for JetStream stream/consumer/KV operations. `_INBOX.>` is required for NATS request/reply patterns.
+Permission breakdown:
+- `mclaude.{userID}.>` — backward compatibility with UUID-format KV keys (ADR-0050 — key format migration deferred).
+- `mclaude.users.{userSlug}.hosts.*.>` — ADR-0035 host-scoped subjects (events, lifecycle, API sessions, terminal).
+- `_INBOX.>` — NATS request/reply patterns.
+- `$JS.API.>` — JetStream API for direct connections (no domain prefix).
+- `$JS.*.API.>` — JetStream API with domain qualification (through hub leaf-link).
+- `$KV.mclaude-sessions.>`, `$KV.mclaude-projects.>`, `$KV.mclaude-hosts.>`, `$KV.mclaude-job-queue.>` — KV bucket read/write via NATS KV internal subjects.
+- `$JS.ACK.>` — JetStream message acknowledgements.
+- `$JS.FC.>` — JetStream flow control.
+- `$JS.API.DIRECT.GET.>` — Direct KV get operations.
 
 ### Single-cluster degenerate case
 

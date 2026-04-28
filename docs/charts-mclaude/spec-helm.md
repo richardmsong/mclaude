@@ -183,6 +183,8 @@ For full NATS server config see `docs/spec-state-schema.md` — NATS Server Conf
 | `sessionAgent.corporateCA.bundleName` | `""` | trust-manager Bundle CR name. |
 | `sessionAgent.corporateCA.configMapName` | `""` | ConfigMap name synced by trust-manager. |
 | `sessionAgent.corporateCA.configMapKey` | `ca-certificates.crt` | Key in the ConfigMap containing PEM certs. |
+| `sessionAgentNatsUrl` | `""` | NATS URL injected into session-agent pods (overrides the worker NATS default). For single-cluster deployments where KV buckets live on hub NATS, set to the hub NATS URL (e.g. `nats://mclaude-cp-nats.mclaude-system.svc.cluster.local:4222`). Exposed to the controller as `SESSION_AGENT_NATS_URL`. |
+| `controller.config.devOAuthToken` | `""` | Claude API OAuth token for dev/CI environments. When set, the controller injects it as `oauth-token` in per-user `user-secrets` Secret. Exposed to the controller as `DEV_OAUTH_TOKEN`. |
 
 ### Single-cluster degenerate install
 

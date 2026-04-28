@@ -112,6 +112,19 @@ onSessionAdded(projectId: string, callback: (session: Session) => void): () => v
 
 Registers a one-shot listener that fires when a new session belonging to `projectId` appears in the KV watcher snapshot. Filters on `session.projectId === projectId` so that concurrent creates in other projects do not resolve the wrong promise. Returns an unsubscribe function. Used by `createSession()` to detect when the session-agent has written the new session entry to KV.
 
+### SessionStore KV Watch Prefixes
+
+`SessionStore` watches two KV buckets with different key prefixes (ADR-0050 D13):
+
+- **`mclaude-sessions`**: watched with `userSlug` prefix (`kvKeySessionsForUser(userSlug)`). Session KV keys are slug-based (`{uslug}.{hslug}.{pslug}.{sslug}`), written by the session-agent.
+- **`mclaude-projects`**: watched with `userId` prefix (`kvKeyProjectsForUser(userId)`). Project KV keys are still UUID-based (`{userId}.{projectId}`), written by the control-plane. The project KV key format has not been migrated to slugs yet.
+
+`App.tsx` passes `authState.userSlug ?? authState.userId` as the `userSlug` constructor param and `authState.userId` as the `userId` param.
+
+### ConversationVM Session ID Resolution
+
+`ConversationVM` includes `session_id` (the session's UUID) in every `sessions.input` NATS payload. The session-agent looks up sessions by UUID, not by slug. `App.tsx` resolves the UUID from the session store via `session?.id ?? route.sessionId` before constructing the ConversationVM, so that slug-format route URLs (e.g. `#u/dev/h/local/p/default-project/s/new-session`) produce the correct UUID in NATS messages (ADR-0050 D15).
+
 ### KV Watch DEL/PURGE Handling
 
 `KVEntry.operation` may be `'PUT' | 'DEL' | 'PURGE'`. The session store's `kvWatch` callback must handle `DEL` (and `PURGE`) by removing the corresponding entry from the `_sessions` map, not inserting it. Failure to handle `DEL` causes ghost sessions to appear in the UI after deletion.
