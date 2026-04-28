@@ -17,14 +17,16 @@ type NATSPermissions struct {
 // Clients may operate on their own mclaude.{userId}.> namespace, the
 // _INBOX.> namespace (required for request/reply), and the KV buckets
 // scoped to their user ID ($KV.mclaude-projects.{userId}.> and
-// $KV.mclaude-sessions.{userId}.>).
-func UserSubjectPermissions(userID string) NATSPermissions {
+// $KV.mclaude-sessions.{userId}.>) and their slug
+// ($KV.mclaude-hosts.{userSlug}.> per ADR-0004).
+func UserSubjectPermissions(userID string, userSlug string) NATSPermissions {
 	prefix := fmt.Sprintf("mclaude.%s.>", userID)
 	kvProjects := fmt.Sprintf("$KV.mclaude-projects.%s.>", userID)
 	kvSessions := fmt.Sprintf("$KV.mclaude-sessions.%s.>", userID)
+	kvHosts := fmt.Sprintf("$KV.mclaude-hosts.%s.>", userSlug)
 	return NATSPermissions{
 		PubAllow: []string{prefix, "_INBOX.>", "$JS.API.>"},
-		SubAllow: []string{prefix, "_INBOX.>", kvProjects, kvSessions, "$JS.API.>"},
+		SubAllow: []string{prefix, "_INBOX.>", kvProjects, kvSessions, kvHosts, "$JS.API.>", "$JS.API.DIRECT.GET.>"},
 	}
 }
 
@@ -105,18 +107,19 @@ func GenerateUserNKey() (*NKeyPair, []byte, error) {
 //
 // userID is the user's UUID; it is stored in claims.Name so that
 // authMiddleware can pass it to db.GetUserByID for authenticated API calls.
-// LoginResponse carries UserSlug separately (ADR-0046).
+// userSlug is the user's URL-safe slug used to scope $KV.mclaude-hosts.{userSlug}.>
+// per ADR-0004. LoginResponse carries UserSlug separately (ADR-0046).
 //
 // Returns the encoded JWT string and the user's NKey seed.
 // The seed must be returned to the client alongside the JWT — the client
 // needs the seed to sign NATS connection nonce challenges.
-func IssueUserJWT(userID string, accountKP nkeys.KeyPair, expirySecs int64) (jwt string, seed []byte, err error) {
+func IssueUserJWT(userID string, userSlug string, accountKP nkeys.KeyPair, expirySecs int64) (jwt string, seed []byte, err error) {
 	userKP, userSeed, err := GenerateUserNKey()
 	if err != nil {
 		return "", nil, fmt.Errorf("generate user nkey: %w", err)
 	}
 
-	perms := UserSubjectPermissions(userID)
+	perms := UserSubjectPermissions(userID, userSlug)
 
 	claims := natsjwt.NewUserClaims(userKP.PublicKey)
 	claims.Name = userID

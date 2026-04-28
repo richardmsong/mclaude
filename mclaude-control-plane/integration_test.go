@@ -149,7 +149,7 @@ func TestIntegration_NATSSubjectPermissions(t *testing.T) {
 	}
 
 	expiresAt := time.Now().Add(time.Hour).Unix()
-	aliceJWT, aliceSeed, err := IssueUserJWT("alice", accountKP, expiresAt)
+	aliceJWT, aliceSeed, err := IssueUserJWT("alice", "alice-slug", accountKP, expiresAt)
 	if err != nil {
 		t.Fatalf("IssueUserJWT: %v", err)
 	}

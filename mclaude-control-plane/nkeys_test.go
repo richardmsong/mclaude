@@ -15,15 +15,17 @@ import (
 // ---- Subject permission construction ----
 
 func TestUserSubjectPermissions(t *testing.T) {
-	perm := UserSubjectPermissions("alice123")
+	perm := UserSubjectPermissions("alice123", "alice-slug")
 	wantPub := []string{"mclaude.alice123.>", "_INBOX.>", "$JS.API.>"}
-	// SubAllow includes KV bucket subjects and JetStream API so the SPA can watch projects and sessions.
+	// SubAllow includes KV bucket subjects and JetStream API so the SPA can watch projects, sessions, and hosts.
 	wantSub := []string{
 		"mclaude.alice123.>",
 		"_INBOX.>",
 		"$KV.mclaude-projects.alice123.>",
 		"$KV.mclaude-sessions.alice123.>",
+		"$KV.mclaude-hosts.alice-slug.>",
 		"$JS.API.>",
+		"$JS.API.DIRECT.GET.>",
 	}
 
 	if !slicesEqual(perm.PubAllow, wantPub) {
@@ -36,7 +38,7 @@ func TestUserSubjectPermissions(t *testing.T) {
 
 func TestUserSubjectPermissions_SpecialChars(t *testing.T) {
 	// User IDs are UUIDs — no special chars — but confirm format is stable.
-	perm := UserSubjectPermissions("550e8400-e29b-41d4-a716-446655440000")
+	perm := UserSubjectPermissions("550e8400-e29b-41d4-a716-446655440000", "dev.local")
 	for _, s := range append(perm.PubAllow, perm.SubAllow...) {
 		if !strings.HasPrefix(s, "mclaude.") && s != "_INBOX.>" && !strings.HasPrefix(s, "$KV.") && !strings.HasPrefix(s, "$JS.") {
 			t.Errorf("unexpected subject: %q", s)
@@ -59,9 +61,9 @@ func TestSessionAgentSubjectPermissions(t *testing.T) {
 
 func TestSubjectIsolation(t *testing.T) {
 	// Permissions for alice must not match bob's namespace.
-	alice := UserSubjectPermissions("alice")
+	alice := UserSubjectPermissions("alice", "alice-slug")
 	for _, s := range append(alice.PubAllow, alice.SubAllow...) {
-		if s == "_INBOX.>" || s == "$JS.API.>" {
+		if s == "_INBOX.>" || s == "$JS.API.>" || s == "$JS.API.DIRECT.GET.>" {
 			continue
 		}
 		// KV subjects are scoped to alice's user ID — they must not reference bob.
@@ -147,7 +149,7 @@ func TestIssueUserJWT_ClaimsRoundTrip(t *testing.T) {
 	userID := "test-user-001"
 	expiry := time.Now().Add(8 * time.Hour).Unix()
 
-	jwt, seed, err := IssueUserJWT(userID, accountKP, expiry)
+	jwt, seed, err := IssueUserJWT(userID, "test-slug", accountKP, expiry)
 	if err != nil {
 		t.Fatalf("IssueUserJWT: %v", err)
 	}
@@ -173,7 +175,7 @@ func TestIssueUserJWT_SubjectScopes(t *testing.T) {
 
 	userID := "scoped-user"
 	expiry := time.Now().Add(8 * time.Hour).Unix()
-	jwt, _, err := IssueUserJWT(userID, accountKP, expiry)
+	jwt, _, err := IssueUserJWT(userID, "scoped-slug", accountKP, expiry)
 	if err != nil {
 		t.Fatalf("IssueUserJWT: %v", err)
 	}
@@ -201,7 +203,7 @@ func TestDecodeUserJWT_InvalidSignature(t *testing.T) {
 	accountB, _ := nkeys.CreateAccount()
 	accountBPub, _ := accountB.PublicKey()
 
-	jwt, _, _ := IssueUserJWT("user", accountA, time.Now().Add(time.Hour).Unix())
+	jwt, _, _ := IssueUserJWT("user", "user-slug", accountA, time.Now().Add(time.Hour).Unix())
 	_, err := DecodeUserJWT(jwt, accountBPub)
 	if err == nil {
 		t.Error("expected error validating JWT signed by different key; got nil")
@@ -225,7 +227,7 @@ func TestIssueUserJWT_UUIDInClaimsName(t *testing.T) {
 	userID := "550e8400-e29b-41d4-a716-446655440000" // UUID
 	expiry := time.Now().Add(8 * time.Hour).Unix()
 
-	jwt, _, err := IssueUserJWT(userID, accountKP, expiry)
+	jwt, _, err := IssueUserJWT(userID, "dev.local", accountKP, expiry)
 	if err != nil {
 		t.Fatalf("IssueUserJWT: %v", err)
 	}
@@ -247,14 +249,19 @@ func TestIssueUserJWT_UUIDInClaimsName(t *testing.T) {
 	if !containsStr(claims.Permissions.Sub.Allow, expectedSubject) {
 		t.Errorf("sub allow missing %q (UUID-scoped subject)", expectedSubject)
 	}
+	// The hosts KV permission must use the slug, not the UUID.
+	expectedHostsKV := "$KV.mclaude-hosts.dev.local.>"
+	if !containsStr(claims.Permissions.Sub.Allow, expectedHostsKV) {
+		t.Errorf("sub allow missing %q (slug-scoped hosts KV subject)", expectedHostsKV)
+	}
 }
 
 func TestIssueUserJWT_EachCallUniqueKeys(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
 	expiry := time.Now().Add(time.Hour).Unix()
 
-	jwt1, seed1, _ := IssueUserJWT("user", accountKP, expiry)
-	jwt2, seed2, _ := IssueUserJWT("user", accountKP, expiry)
+	jwt1, seed1, _ := IssueUserJWT("user", "user-slug", accountKP, expiry)
+	jwt2, seed2, _ := IssueUserJWT("user", "user-slug", accountKP, expiry)
 
 	if jwt1 == jwt2 {
 		t.Error("two IssueUserJWT calls produced identical JWTs (should use fresh user NKeys)")

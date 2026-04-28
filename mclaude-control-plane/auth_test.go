@@ -136,7 +136,7 @@ func TestHandleRefresh_NilDB(t *testing.T) {
 	srv := NewServer(nil, accountKP, "nats://localhost:4222", "", 8*time.Hour, "admin")
 
 	expiresAt := time.Now().Add(8 * time.Hour).Unix()
-	jwt, _, err := IssueUserJWT("refresh-user-uuid", accountKP, expiresAt)
+	jwt, _, err := IssueUserJWT("refresh-user-uuid", "refresh-user-slug", accountKP, expiresAt)
 	if err != nil {
 		t.Fatalf("IssueUserJWT: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestHandleRefresh_WrongAccountKey(t *testing.T) {
 	srv := NewServer(nil, accountB, "nats://localhost:4222", "", time.Hour, "admin")
 
 	expiresAt := time.Now().Add(time.Hour).Unix()
-	jwt, _, _ := IssueUserJWT("user", accountA, expiresAt)
+	jwt, _, _ := IssueUserJWT("user", "user-slug", accountA, expiresAt)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
@@ -196,7 +196,7 @@ func TestAuthMiddleware_ValidToken_InjectsUserID(t *testing.T) {
 	srv := NewServer(nil, accountKP, "nats://test", "", time.Hour, "admin")
 
 	expiresAt := time.Now().Add(time.Hour).Unix()
-	jwt, _, _ := IssueUserJWT("middleware-user", accountKP, expiresAt)
+	jwt, _, _ := IssueUserJWT("middleware-user", "middleware-slug", accountKP, expiresAt)
 
 	var gotUserID string
 	handler := srv.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
