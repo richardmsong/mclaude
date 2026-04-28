@@ -4,6 +4,7 @@
 clusterSlug: "local"
 jsDomain: "local"
 leafUrl: "nats-leaf://mclaude-cp-nats.mclaude-system.svc:7422"
+sessionAgentNatsUrl: "nats://mclaude-cp-nats.mclaude-system.svc.cluster.local:4222"
 
 nats:
   persistence:

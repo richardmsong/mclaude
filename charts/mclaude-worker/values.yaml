@@ -33,6 +33,10 @@ leafUrl: ""
 ## Hub URL for SPA direct connections (informational, used for reference).
 hubUrl: ""
 
+## NATS URL for session-agent pods (hub NATS, not worker NATS).
+## If empty, derived from leafUrl by replacing scheme and port.
+sessionAgentNatsUrl: ""
+
 ## ---------------------------------------------------------------------------
 ## Leaf-node credentials (from `mclaude cluster register`)
 ## ---------------------------------------------------------------------------

@@ -76,8 +76,8 @@ func main() {
 	// Determine control-plane namespace.
 	controlPlaneNs := detectNamespace()
 
-	// sessionAgentNATSURL: FQDN NATS URL for pods in other namespaces.
-	saURL := sessionAgentNATSURL(natsURL, controlPlaneNs)
+	// sessionAgentNATSURL: prefer explicit env var (hub NATS), fall back to deriving from worker NATS URL.
+	saURL := envOr("SESSION_AGENT_NATS_URL", sessionAgentNATSURL(natsURL, controlPlaneNs))
 
 	reconciler := &MCProjectReconciler{
 		client:                 mgr.GetClient(),

@@ -55,6 +55,8 @@ spec:
               value: "true"
             - name: SESSION_AGENT_TEMPLATE_CM
               value: {{ include "mclaude-worker.fullname" . }}-session-agent-template
+            - name: SESSION_AGENT_NATS_URL
+              value: {{ .Values.sessionAgentNatsUrl | default (printf "nats://%s:4222" (trimPrefix "nats-leaf://" .Values.leafUrl | regexReplaceAll ":.*" "")) | quote }}
           volumeMounts:
             - name: leaf-creds
               mountPath: /etc/nats/leaf-creds
