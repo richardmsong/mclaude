@@ -1,8 +1,8 @@
 # ADR: Graceful Session-Agent Upgrades
 
-**Status**: draft
+**Status**: accepted
 **Status history**:
-- 2026-04-28: draft
+- 2026-04-28: draft → accepted
 
 > Supersedes:
 > - `adr-0008-graceful-upgrades.md` — folded in: SIGTERM drain flow, JetStream migration for session API subjects, durable consumers (cmd + ctl), KV-based reply mechanism, Recreate deployment strategy, SPA "Updating..." banner, startup recovery sequence
@@ -46,8 +46,11 @@ A graceful upgrade flow addresses all four: JetStream durability for messages, s
 | Shell notification transport | Publish onto `api.sessions.input` subject in JetStream | Reuses existing durable path. No new storage, no authz to bypass. |
 | Shell output file persistence | Set `CLAUDE_CODE_TMPDIR` → PVC subPath `/data/claude-tmp` | Scopes persistence to Claude-owned temp files, reuses existing session PVC, no new volume. |
 | Shell tracking structure | `map[toolUseId]*inFlightShell` per session | Need to iterate in-flight shells at drain time; a count alone isn't enough — need toolUseId, command, outputFilePath for the synthetic notification. |
-| Shell tracking trigger | Stream-json parse: `Bash` tool_use with `run_in_background: true` | Same pattern as the in-flight agent counter. |
+| Shell tracking trigger | Two-phase: (1) `assistant` message with `tool_use` name=Bash + `input.run_in_background:true` → record pending entry; (2) `user` message with matching `tool_result` → extract `backgroundTaskId` from result text, compute `outputFilePath`, promote to `inFlightShells` | `taskId` (e.g. "b3f7x2a9") is Claude Code's internal random ID — NOT `tool_use.id`. It appears in the tool_result text: "Command was manually backgrounded with ID: {backgroundTaskId}". |
 | Shell tracking removal | User message with `origin.kind == "task-notification"` referencing the shell's tool-use-id | Real task-notification arrived (shell completed naturally). |
+| Shell output path formula | `{CLAUDE_CODE_TMPDIR}/claude-{uid}/{sanitizePath(cwd)}/{sessionId}/tasks/{taskId}.output` | `getClaudeTempDir()` always appends `claude-{uid}` via `getClaudeTempDirName()` (filesystem.ts:345), even when `CLAUDE_CODE_TMPDIR` is set. |
+| `sanitizePath` determinism | Deterministic for paths ≤ 200 chars (pure regex replace); for paths > 200 chars appends a wyhash (`Bun.hash()`) or djb2 fallback — consistent within the same Claude Code binary (Bun) | Consistent across pod restarts provided same cwd and same Claude Code binary version. CWD in normal operation is well under 200 chars so the hash branch is not exercised. |
+| `<output-file>` in synthetic notification | Informational — Claude Code does NOT auto-read it; the LLM sees the XML and may call Read/Bash tool to inspect the file | No special session-agent handling needed beyond including the path in the XML |
 
 ## Upgrade Flow
 
@@ -99,7 +102,7 @@ New stream created by session-agent on startup (idempotent, same pattern as `MCL
 
 ```
 Name:      MCLAUDE_API
-Subjects:  ["mclaude.*.*.api.sessions.>"]
+Subjects:  ["mclaude.users.*.hosts.*.projects.*.api.sessions.>"]
 Retention: LimitsPolicy
 MaxAge:    1h
 Storage:   FileStorage
@@ -117,12 +120,12 @@ Two durable pull consumers per session-agent, created on startup:
 **Command consumer** — handles new work (sessions.create, sessions.delete, sessions.input, sessions.restart):
 
 ```
-Name:           sa-cmd-{userId}-{projectId}
+Name:           sa-cmd-{uslug}-{pslug}
 FilterSubjects: [
-  "mclaude.{userId}.{projectId}.api.sessions.create",
-  "mclaude.{userId}.{projectId}.api.sessions.delete",
-  "mclaude.{userId}.{projectId}.api.sessions.input",
-  "mclaude.{userId}.{projectId}.api.sessions.restart"
+  "mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.create",
+  "mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.delete",
+  "mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.input",
+  "mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.restart"
 ]
 AckPolicy:      Explicit
 AckWait:        60s
@@ -132,8 +135,8 @@ MaxDeliver:     5
 **Control consumer** — handles interrupts and permission responses (must stay active during drain):
 
 ```
-Name:           sa-ctl-{userId}-{projectId}
-FilterSubjects: ["mclaude.{userId}.{projectId}.api.sessions.control"]
+Name:           sa-ctl-{uslug}-{pslug}
+FilterSubjects: ["mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.control"]
 AckPolicy:      Explicit
 AckWait:        60s
 MaxDeliver:     5
@@ -179,10 +182,10 @@ The dispatch function routes by subject suffix:
 func (a *Agent) dispatchCmd(jm jetstream.Msg) {
     msg := jsToNatsMsg(jm)
     switch {
-    case strings.HasSuffix(jm.Subject(), ".create"):  a.handleCreate(msg)
-    case strings.HasSuffix(jm.Subject(), ".delete"):  a.handleDelete(msg)
-    case strings.HasSuffix(jm.Subject(), ".input"):   a.handleInput(msg)
-    case strings.HasSuffix(jm.Subject(), ".restart"): a.handleRestart(msg)
+    case strings.HasSuffix(jm.Subject(), ".sessions.create"):  a.handleCreate(msg)
+    case strings.HasSuffix(jm.Subject(), ".sessions.delete"):  a.handleDelete(msg)
+    case strings.HasSuffix(jm.Subject(), ".sessions.input"):   a.handleInput(msg)
+    case strings.HasSuffix(jm.Subject(), ".sessions.restart"): a.handleRestart(msg)
     }
 }
 ```
@@ -201,20 +204,42 @@ Two tracking structures per session, both guarded by `sess.mu`:
 
 The counter is best-effort — if the session-agent was killed mid-flight and relaunched, the counter starts at 0. The new pod's drain logic only protects agents launched after its own startup.
 
-**Background shell map** — `inFlightShells map[string]*inFlightShell`:
+**Background shell map** — `inFlightShells map[string]*inFlightShell` (keyed by toolUseId):
 
 ```go
 type inFlightShell struct {
-    toolUseId      string    // "toolu_..."
-    shellId        string    // Claude's internal shell-id (if surfaced in tool_use)
+    toolUseId      string    // "toolu_..." — Claude API tool_use.id
+    taskId         string    // "b3f7x2a9" — Claude Code internal random ID
     command        string    // for the killed-notification summary
     outputFilePath string    // absolute path on the PVC
     startedAt      time.Time
 }
 ```
 
-- **Add:** On `assistant` message with a `tool_use` block where `name == "Bash"` AND `input.run_in_background == true`. The `outputFilePath` is constructed from `CLAUDE_CODE_TMPDIR`, uid, sanitized CWD, sessionId, and taskId.
-- **Remove:** On `user` message with `origin.kind == "task-notification"` referencing the shell's tool-use-id.
+Shell tracking uses two maps per session:
+
+```go
+pendingShells  map[string]pendingShell   // keyed by toolUseId; awaiting tool_result
+inFlightShells map[string]*inFlightShell // keyed by toolUseId; fully promoted entries
+```
+
+```go
+type pendingShell struct {
+    toolUseId string
+    command   string
+    startedAt time.Time
+}
+```
+
+Shell tracking is **two-phase**:
+
+1. **Phase 1 — Pending**: On `assistant` message with a `tool_use` block where `name == "Bash"` AND `input.run_in_background == true`: record a pending entry (keyed by toolUseId) with `command` captured from `input.command`. The `taskId` and `outputFilePath` are not yet known.
+
+2. **Phase 2 — Promoted**: On `user` message with a `tool_result` block where `tool_use_id` matches a pending entry: parse the result text to extract `backgroundTaskId` (pattern: `"Command was manually backgrounded with ID: (\S+)"`). Construct `outputFilePath` as `filepath.Join(os.Getenv("CLAUDE_CODE_TMPDIR"), fmt.Sprintf("claude-%d", os.Getuid()), sanitizePath(session.cwd), session.id, "tasks", taskId+".output")`. Promote the entry to `inFlightShells`.
+
+**Pending entries that never produce a matching tool_result** (e.g. the Bash tool_use was cancelled before execution) are simply discarded — they never enter `inFlightShells` and won't produce synthetic notifications.
+
+- **Remove from `inFlightShells`:** On `user` message with `origin.kind == "task-notification"` referencing the shell's tool-use-id (real task-notification arrived — shell completed naturally).
 
 ### Session-Agent: SIGTERM Handler
 
@@ -236,9 +261,10 @@ On SIGTERM / context cancellation:
     - For sessions in StateRequiresAction: send synthetic interrupt (pending-control interrupt).
     - If ALL sessions satisfy the predicate → break.
 6. For each session, for each entry in sess.inFlightShells:
-    - Construct <task-notification> XML with status=killed.
-    - Publish as session-input message onto mclaude.{userId}.{projectId}.api.sessions.input.
-    - JetStream persists it in MCLAUDE_API.
+    - Construct <task-notification> XML with status=killed (see Synthetic Task-Notification Format below).
+    - Wrap in a full session-input payload: `{"session_id": "{sess.id}", "type": "user", "message": {"role": "user", "content": "{xml}"}}`.
+    - Publish onto `subj.UserHostProjectAPISessionsInput(a.userSlug, a.hostSlug, a.projectSlug)`.
+    - JetStream persists it in MCLAUDE_API. On the new pod, `handleInput` routes by `session_id` and forwards to Claude's stdin.
 7. Cancel control consumer context (stops ctl fetch loop).
 8. Publish lifecycle event "session_upgrading" for each session.
 9. Exit(0).
@@ -258,6 +284,7 @@ The synthetic notification follows Claude Code's native `<task-notification>` XM
 
 ```xml
 <task-notification>
+  <task-id>{entry.taskId}</task-id>
   <tool-use-id>{entry.toolUseId}</tool-use-id>
   <output-file>{entry.outputFilePath}</output-file>
   <status>killed</status>
@@ -301,7 +328,7 @@ Handlers switch from `msg.Respond()` (request-reply) to writing results via exis
 | `handleInput` | (none — fire-and-forget) | No change. |
 | `handleControl` | (none — fire-and-forget) | No change. |
 
-**Error event subject:** `mclaude.{userId}.{projectId}.events._api`
+**Error event subject:** `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.events._api`
 
 Project-level subject (no sessionId) because some errors (e.g., create failures) occur before a session exists. The `_api` suffix distinguishes it from session event subjects. The `MCLAUDE_EVENTS` stream captures it via the existing wildcard filter.
 
@@ -323,14 +350,33 @@ Project-level subject (no sessionId) because some errors (e.g., create failures)
 The synthetic notification needs to reference the same output path Claude used. Helper:
 
 ```go
+func sanitizePath(p string) string {
+    // Matches Claude Code's TypeScript sanitizePath (sessionStoragePortable.ts).
+    // Replace any char that is not [a-zA-Z0-9] with '-'.
+    // For paths > 200 chars, append a Bun.hash() suffix — but this branch is never
+    // reached in practice (typical CWDs are well under 200 chars).
+    result := []byte(p)
+    for i, c := range result {
+        if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+            result[i] = '-'
+        }
+    }
+    return string(result)
+}
+
 func shellOutputPath(tmpDir, sanitizedCwd, sessionId, taskId string) string {
     uid := os.Getuid()
     return filepath.Join(tmpDir, fmt.Sprintf("claude-%d", uid),
         sanitizedCwd, sessionId, "tasks", taskId+".output")
 }
+// Called as: shellOutputPath(os.Getenv("CLAUDE_CODE_TMPDIR"), sanitizePath(cwd), sessionId, taskId)
 ```
 
 Path expansion: `CLAUDE_CODE_TMPDIR=/data/claude-tmp` → `/data/claude-tmp/claude-{uid}/{sanitized-cwd}/{sessionId}/tasks/{taskId}.output`
+
+**Note:** `getClaudeTempDir()` in Claude Code (`filesystem.ts:345`) always appends `claude-{uid}` (via `getClaudeTempDirName()`) to the base temp directory, even when `CLAUDE_CODE_TMPDIR` is set. So the full path always includes the `claude-{uid}` component regardless of whether the env var is set.
+
+**BYOH/daemon mode:** When `CLAUDE_CODE_TMPDIR` is not set (e.g. BYOH mode, local controller-local sessions), `os.Getenv("CLAUDE_CODE_TMPDIR")` returns `""` and `filepath.Join("", ...)` produces a relative path that does not match Claude Code's actual temp dir. Shell tracking (pending and promoted phases) and the synthetic notification publish are **disabled** when `CLAUDE_CODE_TMPDIR` is empty — the SIGTERM drain loop skips step 6 and session-agent exits without publishing shell notifications. This is a K8s-only feature.
 
 ### Session State Constants
 
@@ -355,10 +401,7 @@ Uses `handler.EnqueueRequestsFromMapFunc` with a predicate filtered by name and 
 
 ### Control-Plane: Deployment Strategy
 
-Both provisioning paths set the Deployment strategy to `Recreate`:
-
-1. **`reconciler.go` — `MCProjectReconciler.reconcileDeployment`** (controller-runtime, declarative). The primary path.
-2. **`provision.go` — `K8sProvisioner.ensureDeployment`** (raw `kubernetes.Interface`, imperative). Fallback path used by `seedDev` and the NATS `projects.create` handler.
+The Deployment strategy is set to `Recreate` in `reconciler.go` — `MCProjectReconciler.reconcileDeployment` (controller-runtime). This is the sole Deployment provisioning path.
 
 Both create and update branches set:
 
@@ -381,19 +424,17 @@ sessionAgent:
 
 The template at `session-agent-pod-template.yaml` already renders this value — no template change needed.
 
-**PVC mount for Claude temp dir** — in the session-agent pod template:
+**PVC mount for Claude temp dir** — implemented in `buildPodTemplate()` in `mclaude-controller-k8s/reconciler.go` (the pod spec is built in Go, not in the Helm template YAML):
 
-```yaml
-env:
-  - name: CLAUDE_CODE_TMPDIR
-    value: /data/claude-tmp
-volumeMounts:
-  - name: session-data      # existing PVC
-    mountPath: /data/claude-tmp
-    subPath: claude-tmp     # scopes to a subdirectory of the shared PVC
+```go
+// Env var
+corev1.EnvVar{Name: "CLAUDE_CODE_TMPDIR", Value: "/data/claude-tmp"}
+
+// VolumeMount — reuses the existing `project-data` volume (already mounted at /data)
+corev1.VolumeMount{Name: "project-data", MountPath: "/data/claude-tmp", SubPath: "claude-tmp"}
 ```
 
-Reuses the existing session PVC via `subPath`. No new volume declaration. This path survives pod restart — when the new pod mounts the same subPath, Claude resumes with `--resume` and can read old output files when processing synthetic task-notifications.
+Reuses the existing `project-data` PVC volume via `SubPath`. No new volume declaration. This path survives pod restart — when the new pod mounts the same subPath, Claude resumes with `--resume` and can read old output files when processing synthetic task-notifications.
 
 ### SPA: Session Store — `onSessionAdded` Method
 
@@ -429,12 +470,13 @@ The KV watch callback calls `_notifyAddListeners(id, state)` on every PUT event,
 Instead, `createSession()` in `SessionListVM` creates a temporary core NATS subscription:
 
 ```typescript
-const apiSubject = `mclaude.${this.userId}.${projectId}.events._api`
+// hslug, pslug resolved from project store (same as in createSession)
+const apiSubject = subjEventsApi(this.userSlug as UserSlug, hslug, pslug)
 const unsubErr = this.natsClient.subscribe(apiSubject, (msg) => {
-  const event = JSON.parse(new TextDecoder().decode(msg.data))
+  const event = JSON.parse(new TextDecoder().decode(msg.data)) as { type?: string; request_id?: string; error?: string }
   if (event.type === 'api_error' && event.request_id === requestId) {
     cleanup()
-    reject(new Error(event.error))
+    reject(new Error(event.error ?? 'api_error'))
   }
 })
 ```
@@ -448,21 +490,24 @@ Cleaned up when the promise resolves (success, error, or 30s timeout).
 ```typescript
 async createSession(projectId: string, branch: string, name: string): Promise<string> {
   const requestId = crypto.randomUUID()
-  const subject = `mclaude.${this.userId}.${projectId}.api.sessions.create`
+  const project = this.sessionStore.projects.get(projectId)
+  const pslug = (project?.slug ?? projectId) as ProjectSlug
+  const hslug = (project?.hostSlug ?? 'local') as HostSlug
+  const subject = subjSessionsCreate(this.userSlug as UserSlug, hslug, pslug)
   const payload = { projectId, branch, name, requestId }
-  this.natsClient.publish(subject, encode(JSON.stringify(payload)))
+  this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
 
   return new Promise((resolve, reject) => {
-    const cleanup = () => { clearTimeout(timer); unsubKV(); unsubErr() }
+    const cleanup = () => { clearTimeout(timer); unsubKV?.(); unsubErr?.() }
     const timer = setTimeout(() => { cleanup(); reject(new Error('Create session timed out')) }, 30_000)
     const unsubKV = this.sessionStore.onSessionAdded(projectId, (session) => {
       cleanup(); resolve(session.id)
     })
     const unsubErr = this.natsClient.subscribe(
-      `mclaude.${this.userId}.${projectId}.events._api`, (msg) => {
-        const event = JSON.parse(new TextDecoder().decode(msg.data))
+      subjEventsApi(this.userSlug as UserSlug, hslug, pslug), (msg) => {
+        const event = JSON.parse(new TextDecoder().decode(msg.data)) as { type?: string; request_id?: string; error?: string }
         if (event.type === 'api_error' && event.request_id === requestId) {
-          cleanup(); reject(new Error(event.error))
+          cleanup(); reject(new Error(event.error ?? 'api_error'))
         }
       }
     )
@@ -476,8 +521,11 @@ async createSession(projectId: string, branch: string, name: string): Promise<st
 async deleteSession(sessionId: string): Promise<void> {
   const session = this.sessionStore.sessions.get(sessionId)
   if (!session) return
-  const subject = `mclaude.${this.userId}.${session.projectId}.api.sessions.delete`
-  this.natsClient.publish(subject, encode(JSON.stringify({ sessionId })))
+  const project = this.sessionStore.projects.get(session.projectId)
+  const pslug = (project?.slug ?? session.projectId) as ProjectSlug
+  const hslug = (project?.hostSlug ?? session.hostSlug ?? 'local') as HostSlug
+  const subject = subjSessionsDelete(this.userSlug as UserSlug, hslug, pslug)
+  this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify({ sessionId })))
 }
 ```
 
@@ -522,6 +570,19 @@ Blue pulsing dot — distinct from orange/running and red/error.
 
 Add `'updating'` to the `SessionState` union and `'session_upgrading'` to the `LifecycleEvent.type` union in `types.ts`.
 
+## Impact
+
+**Specs updated in this commit:**
+- `docs/spec-state-schema.md` — fix `MCLAUDE_API` subject pattern (`resume` → `restart`); update `sessions.input` payload (`{type, message, sessionSlug}` → `{session_id, type, message}`); update `sessions.create` row (request/reply → publish+KV-watch, add `requestId`); add `requestId` to `sessions.delete` and `sessions.restart` payloads; update `sessions.control` JetStream delivery note; add `StateUpdating` constant
+- `docs/mclaude-session-agent/spec-session-agent.md` — MCLAUDE_API stream, durable consumers, SIGTERM drain flow, shell tracking (two-phase pending/inFlight), startup recovery, reply mechanism changes, `api_error` payload schema, `CLAUDE_CODE_TMPDIR` config entry, pod-crash error entry
+- `docs/mclaude-web/spec-web.md` — Session Management section: `createSession()` publish+KV-watch, `deleteSession()` fire-and-forget, `SessionStore.onSessionAdded()`, KV DEL/PURGE handling, `updating` session state visual treatment
+
+**Components implementing the change:**
+- `mclaude-session-agent` — primary; JetStream consumers, SIGTERM handler, shell tracking, startup recovery
+- `mclaude-controller-k8s` — ConfigMap watch, Recreate strategy
+- `mclaude-web` — SPA session store, session-list VM, StatusDot, Dashboard/Detail screens, types
+- `charts/mclaude-worker` — `terminationGracePeriodSeconds`, `CLAUDE_CODE_TMPDIR` PVC mount
+
 ## Error Handling
 
 | Scenario | Behavior |
@@ -545,11 +606,7 @@ Add `'updating'` to the `SessionState` union and `'session_upgrading'` to the `L
 
 ## Open Questions
 
-1. **Where does the shell `{taskId}` come from?** Claude Code's `BashTool` assigns a task-id that becomes part of the output file path. Investigation needed: run a live Claude with `Bash(run_in_background=true)` and inspect stream-json events to determine if the taskId is surfaced in the `tool_use` block, in a `tool_result`, or in a separate event.
-
-2. **Does Claude Code read `<output-file>` from an injected task-notification?** The XML is part of Claude's own prompt format. The LLM sees it as context regardless of who injected it — likely reads the file if it decides the content helps. Confirm by test.
-
-3. **Does `sanitizePath` differ between pods?** The sanitization algorithm must be deterministic on the same CWD across pods. Since Claude's CWD is set by session-agent (same for both pods for the same session), this should be stable. Confirm by reading `src/utils/permissions/filesystem.ts sanitizePath`.
+(None — all questions resolved. See Decisions table.)
 
 ## Scope
 
@@ -564,15 +621,15 @@ Add `'updating'` to the `SessionState` union and `'session_upgrading'` to the `L
 - `CLAUDE_CODE_TMPDIR=/data/claude-tmp` env var; PVC subPath mount for output file persistence
 - KV write suppression in `SubtypeSessionStateChanged` handler while `shutdownPending` is set
 - Reconciler watches ConfigMap (filtered by name + namespace), re-enqueues MCProject CRs on image change
-- `Recreate` deployment strategy for session-agent pods (both create and update paths, both provisioning paths)
+- `Recreate` deployment strategy for session-agent pods (both create and update paths in `reconcileDeployment`)
 - `terminationGracePeriodSeconds: 86400` (values.yaml)
 - SPA: create/delete switch from request-reply to publish + KV watch
 - SPA: `SessionStore.onSessionAdded()` method; kvWatch DEL fix; temporary NATS sub for `api_error`
 - SPA: `SessionState` type union and `LifecycleEvent.type` union updated
 - SPA: "Updating..." banner, blue pulsing StatusDot, Dashboard/Detail screen updates
-- `api_error` events on `mclaude.{userId}.{projectId}.events._api` for failed create/delete/restart
+- `api_error` events on `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.events._api` for failed create/delete/restart
 - `StateUpdating` constant in `events.go`
-- Resolve open question #1 (taskId source) before shell-tracking implementation
+- Two-phase shell tracking: pending entry on tool_use, promoted on tool_result with backgroundTaskId
 
 **Deferred:**
 - Version pinning per project (`spec.imageOverride` on MCProject CRD)
