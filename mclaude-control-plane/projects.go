@@ -13,8 +13,14 @@ import (
 
 // ProjectKVState is the value written to the mclaude-projects JetStream KV bucket.
 // Must match the TypeScript ProjectKVState in mclaude-web/src/types.ts.
+// ADR-0050 adds Slug, UserSlug, HostSlug so the SPA can construct correct
+// host-scoped NATS subjects. Key format migration ({uslug}.{hslug}.{pslug}) is
+// deferred to a separate ADR — the key currently stays {userID}.{projectID}.
 type ProjectKVState struct {
 	ID            string  `json:"id"`
+	Slug          string  `json:"slug"`
+	UserSlug      string  `json:"userSlug"`
+	HostSlug      string  `json:"hostSlug"`
 	Name          string  `json:"name"`
 	GitURL        string  `json:"gitUrl"`
 	Status        string  `json:"status"`
@@ -24,9 +30,13 @@ type ProjectKVState struct {
 
 // ProvisionRequest is the NATS request payload sent from control-plane
 // to the appropriate controller (K8s or local) per ADR-0035.
+// ADR-0050 adds UserID and ProjectID (UUIDs) so the controller has both
+// UUIDs (for K8s resource naming) and slugs (for NATS subjects + env vars).
 type ProvisionRequest struct {
+	UserID        string `json:"userId"`
 	UserSlug      string `json:"userSlug"`
 	HostSlug      string `json:"hostSlug"`
+	ProjectID     string `json:"projectId"`
 	ProjectSlug   string `json:"projectSlug"`
 	GitURL        string `json:"gitUrl,omitempty"`
 	GitIdentityID string `json:"gitIdentityId,omitempty"`
@@ -45,7 +55,7 @@ const ProvisionTimeoutSeconds = 10
 
 // StartProjectsSubscriber connects to NATS, ensures the mclaude-projects,
 // mclaude-job-queue, and mclaude-hosts KV buckets exist, and subscribes to
-// mclaude.*.api.projects.create.
+// mclaude.users.*.api.projects.create (ADR-0050: slug-based subject).
 // The caller owns the *nats.Conn lifetime — Close() it on shutdown.
 func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 	js, err := nc.JetStream()
@@ -53,8 +63,8 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 		return err
 	}
 
-	kv, err := ensureProjectsKV(js)
-	if err != nil {
+	// Ensure buckets exist at startup so they're ready before subscriptions fire.
+	if _, err := ensureProjectsKV(js); err != nil {
 		return err
 	}
 
@@ -74,15 +84,35 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 		return err
 	}
 
-	// subject pattern: mclaude.{userID}.api.projects.create
-	_, err = nc.Subscribe("mclaude.*.api.projects.create", func(msg *nats.Msg) {
-		// Extract userID from subject token index 1
+	// subject pattern: mclaude.users.{userSlug}.api.projects.create
+	// SPA publishes to this subject (subjProjectsCreate in mclaude-web).
+	// ADR-0050: subject updated from old "mclaude.{UUID}.api.projects.create"
+	// to match SPA's new user-scoped slug-based format.
+	_, err = nc.Subscribe("mclaude.users.*.api.projects.create", func(msg *nats.Msg) {
+		// Extract userSlug from subject: mclaude.users.{userSlug}.api.projects.create
 		parts := strings.Split(msg.Subject, ".")
-		if len(parts) < 2 {
+		if len(parts) < 3 {
 			replyError(msg, "malformed subject")
 			return
 		}
-		userID := parts[1]
+		userSlug := parts[2]
+
+		if s.db == nil {
+			replyError(msg, "service unavailable")
+			return
+		}
+
+		// Resolve user by slug to get UUID (needed for DB writes and ProvisionRequest.UserID).
+		user, err := s.db.GetUserBySlug(context.Background(), userSlug)
+		if err != nil {
+			replyError(msg, "internal error")
+			return
+		}
+		if user == nil {
+			replyError(msg, "user not found")
+			return
+		}
+		userID := user.ID
 
 		var req struct {
 			Name          string  `json:"name"`
@@ -92,11 +122,6 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 		}
 		if err := json.Unmarshal(msg.Data, &req); err != nil || req.Name == "" {
 			replyError(msg, "name required")
-			return
-		}
-
-		if s.db == nil {
-			replyError(msg, "service unavailable")
 			return
 		}
 
@@ -125,54 +150,50 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 			return
 		}
 
-		// ADR-0035: publish provisioning request to the host-scoped subject
+		// ADR-0035 + ADR-0050: publish provisioning request to the host-scoped subject
 		// so the appropriate controller (K8s or local) can provision resources.
+		// ProvisionRequest includes both UUIDs (K8s naming) and slugs (NATS subjects/env vars).
 		if req.HostSlug != "" {
 			gitIdentityIDStr := ""
 			if req.GitIdentityID != nil {
 				gitIdentityIDStr = *req.GitIdentityID
 			}
 			provReq := ProvisionRequest{
-				UserSlug:      userID,
+				UserID:        userID,
+				UserSlug:      userSlug,
 				HostSlug:      req.HostSlug,
+				ProjectID:     proj.ID,
 				ProjectSlug:   proj.Slug,
 				GitURL:        req.GitURL,
 				GitIdentityID: gitIdentityIDStr,
 			}
 			provData, _ := json.Marshal(provReq)
-			provSubject := "mclaude.users." + userID + ".hosts." + req.HostSlug + ".api.projects.create"
-			reply, err := nc.Request(provSubject, provData, ProvisionTimeoutSeconds*time.Second)
+			provSubject := "mclaude.users." + userSlug + ".hosts." + req.HostSlug + ".api.projects.create"
+			provReply, err := nc.Request(provSubject, provData, ProvisionTimeoutSeconds*time.Second)
 			if err != nil {
 				log.Error().Err(err).
-					Str("userId", userID).
+					Str("userSlug", userSlug).
 					Str("hostSlug", req.HostSlug).
 					Str("projectId", id).
 					Msg("provisioning request timed out — host unreachable")
 			} else {
-				var provReply ProvisionReply
-				if jsonErr := json.Unmarshal(reply.Data, &provReply); jsonErr == nil && !provReply.OK {
+				var reply ProvisionReply
+				if jsonErr := json.Unmarshal(provReply.Data, &reply); jsonErr == nil && !reply.OK {
 					log.Error().
-						Str("userId", userID).
+						Str("userSlug", userSlug).
 						Str("projectId", id).
-						Str("error", provReply.Error).
+						Str("error", reply.Error).
 						Msg("provisioning failed")
 				}
 			}
 		}
 
 		// Write to KV so session-store watchers pick it up immediately.
-		state := ProjectKVState{
-			ID:            proj.ID,
-			Name:          proj.Name,
-			GitURL:        proj.GitURL,
-			Status:        proj.Status,
-			CreatedAt:     proj.CreatedAt.UTC().Format(time.RFC3339),
-			GitIdentityID: proj.GitIdentityID,
-		}
-		val, _ := json.Marshal(state)
-		if _, err := kv.Put(userID+"."+id, val); err != nil {
+		// ADR-0050: pass userSlug and hostSlug so value includes slug fields.
+		hostSlug := req.HostSlug // may be empty if no host was specified
+		if kvErr := writeProjectKV(nc, userID, userSlug, hostSlug, proj); kvErr != nil {
 			// Non-fatal: DB row was created; KV is best-effort.
-			_ = err
+			log.Warn().Err(kvErr).Str("projectId", id).Msg("project create: write KV failed (non-fatal)")
 		}
 
 		reply, _ := json.Marshal(map[string]string{"id": id})
@@ -182,7 +203,10 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 }
 
 // writeProjectKV writes a Project to the mclaude-projects JetStream KV bucket.
-func writeProjectKV(nc *nats.Conn, userID string, proj *Project) error {
+// userSlug and hostSlug are included in the value (ADR-0050) so the SPA can
+// construct host-scoped NATS subjects. The key format ({userID}.{projectID})
+// is unchanged — key migration to {uslug}.{hslug}.{pslug} is a separate ADR.
+func writeProjectKV(nc *nats.Conn, userID, userSlug, hostSlug string, proj *Project) error {
 	js, err := nc.JetStream()
 	if err != nil {
 		return err
@@ -193,6 +217,9 @@ func writeProjectKV(nc *nats.Conn, userID string, proj *Project) error {
 	}
 	state := ProjectKVState{
 		ID:            proj.ID,
+		Slug:          proj.Slug,
+		UserSlug:      userSlug,
+		HostSlug:      hostSlug,
 		Name:          proj.Name,
 		GitURL:        proj.GitURL,
 		Status:        proj.Status,

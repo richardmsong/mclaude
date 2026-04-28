@@ -122,6 +122,22 @@ func (db *DB) GetUserByID(ctx context.Context, id string) (*User, error) {
 	return u, nil
 }
 
+// GetUserBySlug looks up a user by slug. Returns nil, nil if not found.
+func (db *DB) GetUserBySlug(ctx context.Context, slug string) (*User, error) {
+	row := db.pool.QueryRow(ctx,
+		`SELECT id, email, name, password_hash, oauth_id, is_admin, slug, created_at FROM users WHERE slug = $1`,
+		slug)
+	u := &User{}
+	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.OAuthID, &u.IsAdmin, &u.Slug, &u.CreatedAt)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get user by slug: %w", err)
+	}
+	return u, nil
+}
+
 // CreateUser inserts a new user row. id must be a pre-generated UUID.
 func (db *DB) CreateUser(ctx context.Context, id, email, name, passwordHash string) (*User, error) {
 	slug := computeUserSlug(email)
@@ -156,6 +172,7 @@ type Project struct {
 	GitURL        string
 	Status        string
 	HostID        *string // nullable during migration; NOT NULL for new installs
+	HostSlug      string  // slug of the host this project is provisioned on; joined from hosts table
 	GitIdentityID *string
 	CreatedAt     time.Time
 }
@@ -177,10 +194,14 @@ func (db *DB) CreateProjectWithIdentity(ctx context.Context, id, userID, name, g
 	return &Project{ID: id, UserID: userID, Name: name, GitURL: gitURL, Status: "active", GitIdentityID: gitIdentityID, CreatedAt: now}, nil
 }
 
-// GetProjectsByUser returns all projects owned by a user.
+// GetProjectsByUser returns all projects owned by a user, with host slug joined.
 func (db *DB) GetProjectsByUser(ctx context.Context, userID string) ([]*Project, error) {
 	rows, err := db.pool.Query(ctx,
-		`SELECT id, user_id, name, slug, git_url, status, host_id, created_at, git_identity_id FROM projects WHERE user_id = $1 ORDER BY created_at`,
+		`SELECT p.id, p.user_id, p.name, p.slug, p.git_url, p.status, p.host_id,
+		        COALESCE(h.slug, ''), p.created_at, p.git_identity_id
+		 FROM projects p
+		 LEFT JOIN hosts h ON h.id = p.host_id
+		 WHERE p.user_id = $1 ORDER BY p.created_at`,
 		userID)
 	if err != nil {
 		return nil, fmt.Errorf("get projects: %w", err)
@@ -189,7 +210,7 @@ func (db *DB) GetProjectsByUser(ctx context.Context, userID string) ([]*Project,
 	var projects []*Project
 	for rows.Next() {
 		p := &Project{}
-		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Slug, &p.GitURL, &p.Status, &p.HostID, &p.CreatedAt, &p.GitIdentityID); err != nil {
+		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Slug, &p.GitURL, &p.Status, &p.HostID, &p.HostSlug, &p.CreatedAt, &p.GitIdentityID); err != nil {
 			return nil, err
 		}
 		projects = append(projects, p)
@@ -197,12 +218,16 @@ func (db *DB) GetProjectsByUser(ctx context.Context, userID string) ([]*Project,
 	return projects, rows.Err()
 }
 
-// GetProjectByID returns a project by ID, or nil if not found.
+// GetProjectByID returns a project by ID with host slug joined, or nil if not found.
 func (db *DB) GetProjectByID(ctx context.Context, id string) (*Project, error) {
 	row := db.pool.QueryRow(ctx,
-		`SELECT id, user_id, name, slug, git_url, status, host_id, created_at, git_identity_id FROM projects WHERE id = $1`, id)
+		`SELECT p.id, p.user_id, p.name, p.slug, p.git_url, p.status, p.host_id,
+		        COALESCE(h.slug, ''), p.created_at, p.git_identity_id
+		 FROM projects p
+		 LEFT JOIN hosts h ON h.id = p.host_id
+		 WHERE p.id = $1`, id)
 	p := &Project{}
-	err := row.Scan(&p.ID, &p.UserID, &p.Name, &p.Slug, &p.GitURL, &p.Status, &p.HostID, &p.CreatedAt, &p.GitIdentityID)
+	err := row.Scan(&p.ID, &p.UserID, &p.Name, &p.Slug, &p.GitURL, &p.Status, &p.HostID, &p.HostSlug, &p.CreatedAt, &p.GitIdentityID)
 	if err != nil {
 		if err.Error() == "no rows in result set" {
 			return nil, nil

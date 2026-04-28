@@ -570,12 +570,14 @@ func (s *Server) handleDeleteConnection(w http.ResponseWriter, r *http.Request) 
 	// Update NATS KV for all projects that were linked to this connection,
 	// so the SPA reflects the cleared git identity in real-time.
 	if s.nc != nil && s.db != nil {
-		if affectedProjects, err := s.db.GetProjectsByUser(r.Context(), userID); err == nil {
+		// Look up user slug once for all KV writes (ADR-0050: writeProjectKV needs userSlug).
+		kvUser, kvUserErr := s.db.GetUserByID(r.Context(), userID)
+		if affectedProjects, err := s.db.GetProjectsByUser(r.Context(), userID); err == nil && kvUserErr == nil && kvUser != nil {
 			for _, proj := range affectedProjects {
 				// Only write KV for projects that were affected (git_identity_id now NULL).
 				// After the DB cascade, these will have nil GitIdentityID.
 				if proj.GitIdentityID == nil {
-					if kvErr := writeProjectKV(s.nc, userID, proj); kvErr != nil {
+					if kvErr := writeProjectKV(s.nc, userID, kvUser.Slug, proj.HostSlug, proj); kvErr != nil {
 						log.Warn().Err(kvErr).Str("projectId", proj.ID).Msg("disconnect: write KV for affected project failed (non-fatal)")
 					}
 				}
@@ -719,9 +721,11 @@ func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 	// Write updated ProjectKVState to NATS KV so the SPA sees the change in real-time.
 	if s.nc != nil {
 		// Re-fetch the updated project so KV state is authoritative.
+		// Look up user slug for KV value (ADR-0050: writeProjectKV needs userSlug + hostSlug).
 		updatedProj, fetchErr := s.db.GetProjectByID(r.Context(), projectID)
-		if fetchErr == nil && updatedProj != nil {
-			if kvErr := writeProjectKV(s.nc, userID, updatedProj); kvErr != nil {
+		kvUser, kvUserErr := s.db.GetUserByID(r.Context(), userID)
+		if fetchErr == nil && updatedProj != nil && kvUserErr == nil && kvUser != nil {
+			if kvErr := writeProjectKV(s.nc, userID, kvUser.Slug, updatedProj.HostSlug, updatedProj); kvErr != nil {
 				log.Warn().Err(kvErr).Str("projectId", projectID).Msg("PATCH project: write KV failed (non-fatal)")
 			}
 		}

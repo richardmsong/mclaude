@@ -202,8 +202,13 @@ func seedDev(ctx context.Context, db *DB, nc *nats.Conn, logger zerolog.Logger) 
 		logger.Warn().Str("userId", user.ID).Str("projectId", proj.ID).Msg("DEV_SEED: created default project")
 	}
 	// Always rewrite KV entries.
+	// ADR-0050: pass userSlug ("local" host known for dev seed) so value includes slug fields.
 	for _, proj := range projects {
-		if err := writeProjectKV(nc, user.ID, proj); err != nil {
+		hostSlug := "local" // dev projects are always on the local machine host
+		if proj.HostSlug != "" {
+			hostSlug = proj.HostSlug
+		}
+		if err := writeProjectKV(nc, user.ID, user.Slug, hostSlug, proj); err != nil {
 			logger.Error().Err(err).Str("projectId", proj.ID).Msg("DEV_SEED: write project KV failed (non-fatal)")
 		}
 	}
@@ -236,6 +241,41 @@ func seedDev(ctx context.Context, db *DB, nc *nats.Conn, logger zerolog.Logger) 
 							logger.Error().Err(perr).Str("key", key).Msg("DEV_SEED: write local host KV failed (non-fatal)")
 						} else {
 							logger.Info().Str("key", key).Msg("DEV_SEED: wrote local host to mclaude-hosts KV")
+						}
+					}
+				}
+			}
+
+			// ADR-0050: publish NATS provisioning request for each dev project so the
+			// K8s controller creates the MCProject CR and session-agent pod.
+			// Non-fatal on failure — controller may not be running yet during startup race.
+			for _, proj := range projects {
+				provReq := ProvisionRequest{
+					UserID:      user.ID,
+					UserSlug:    user.Slug,
+					HostSlug:    localHostSlug,
+					ProjectID:   proj.ID,
+					ProjectSlug: proj.Slug,
+				}
+				provData, merr := json.Marshal(provReq)
+				if merr != nil {
+					logger.Error().Err(merr).Str("projectId", proj.ID).Msg("DEV_SEED: marshal provision request failed (non-fatal)")
+					continue
+				}
+				provSubject := "mclaude.users." + user.Slug + ".hosts." + localHostSlug + ".api.projects.create"
+				provReply, reqErr := nc.Request(provSubject, provData, 30*time.Second)
+				if reqErr != nil {
+					logger.Warn().Err(reqErr).
+						Str("projectId", proj.ID).
+						Str("subject", provSubject).
+						Msg("DEV_SEED: provisioning request failed (non-fatal — controller may not be up yet)")
+				} else {
+					var reply ProvisionReply
+					if jsonErr := json.Unmarshal(provReply.Data, &reply); jsonErr == nil {
+						if reply.OK {
+							logger.Info().Str("projectId", proj.ID).Msg("DEV_SEED: provisioning request accepted by controller")
+						} else {
+							logger.Warn().Str("projectId", proj.ID).Str("error", reply.Error).Msg("DEV_SEED: controller returned provisioning error (non-fatal)")
 						}
 					}
 				}
