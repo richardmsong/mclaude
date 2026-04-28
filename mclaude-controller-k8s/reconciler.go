@@ -36,15 +36,16 @@ import (
 
 // MCProjectReconciler reconciles MCProject CRs.
 type MCProjectReconciler struct {
-	client              client.Client
-	scheme              *runtime.Scheme
-	controlPlaneNs      string
-	releaseName         string
-	sessionAgentNATSURL string
-	accountKP           nkeys.KeyPair
-	devOAuthToken       string
-	clusterSlug         string
-	logger              zerolog.Logger
+	client                 client.Client
+	scheme                 *runtime.Scheme
+	controlPlaneNs         string
+	releaseName            string
+	sessionAgentTemplateCM string
+	sessionAgentNATSURL    string
+	accountKP              nkeys.KeyPair
+	devOAuthToken          string
+	clusterSlug            string
+	logger                 zerolog.Logger
 }
 
 // Reconcile is called whenever an MCProject CR changes.
@@ -486,7 +487,7 @@ func (r *MCProjectReconciler) ensureOwned(ctx context.Context, mcp *MCProject, o
 }
 
 func (r *MCProjectReconciler) loadTemplate(ctx context.Context) (*sessionAgentTpl, error) {
-	cmName := r.releaseName + "-session-agent-template"
+	cmName := r.sessionAgentTemplateCM
 	cm := &corev1.ConfigMap{}
 	if err := r.client.Get(ctx, types.NamespacedName{Name: cmName, Namespace: r.controlPlaneNs}, cm); err != nil {
 		if k8serrors.IsNotFound(err) {
@@ -564,7 +565,7 @@ func (r *MCProjectReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	enqueueForOwner := handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), &MCProject{})
 
 	templateNs := r.controlPlaneNs
-	templateCMName := r.releaseName + "-session-agent-template"
+	templateCMName := r.sessionAgentTemplateCM
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&MCProject{}).

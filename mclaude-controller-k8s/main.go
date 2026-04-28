@@ -37,6 +37,7 @@ func main() {
 		logger.Fatal().Msg("CLUSTER_SLUG is required — set to this cluster's host slug (e.g. us-east)")
 	}
 	helmReleaseName := envOr("HELM_RELEASE_NAME", "mclaude")
+	sessionAgentTemplateCM := envOr("SESSION_AGENT_TEMPLATE_CM", helmReleaseName+"-session-agent-template")
 	devOAuthToken := os.Getenv("DEV_OAUTH_TOKEN")
 
 	// Account NKey — loaded from NATS_ACCOUNT_SEED env (required in production).
@@ -79,15 +80,16 @@ func main() {
 	saURL := sessionAgentNATSURL(natsURL, controlPlaneNs)
 
 	reconciler := &MCProjectReconciler{
-		client:              mgr.GetClient(),
-		scheme:              mgr.GetScheme(),
-		controlPlaneNs:      controlPlaneNs,
-		releaseName:         helmReleaseName,
-		sessionAgentNATSURL: saURL,
-		accountKP:           accountKP,
-		devOAuthToken:       devOAuthToken,
-		clusterSlug:         clusterSlug,
-		logger:              logger.With().Str("reconciler", "mcproject").Logger(),
+		client:                 mgr.GetClient(),
+		scheme:                 mgr.GetScheme(),
+		controlPlaneNs:         controlPlaneNs,
+		releaseName:            helmReleaseName,
+		sessionAgentTemplateCM: sessionAgentTemplateCM,
+		sessionAgentNATSURL:    saURL,
+		accountKP:              accountKP,
+		devOAuthToken:          devOAuthToken,
+		clusterSlug:            clusterSlug,
+		logger:                 logger.With().Str("reconciler", "mcproject").Logger(),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Fatal().Err(err).Msg("setup MCProject reconciler")
