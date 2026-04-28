@@ -50,19 +50,23 @@ func TestUserSubjectPermissions_SpecialChars(t *testing.T) {
 
 func TestSessionAgentSubjectPermissions(t *testing.T) {
 	perm := SessionAgentSubjectPermissions("bob456", "bob-slug")
-	// Per ADR-0050 Decision 5: session agents must have _INBOX.>, $JS.*.API.>,
-	// the UUID-prefixed subject, and the host-scoped slug subject.
+	// Per ADR-0050 Decision 5: session agents must have _INBOX.>, $JS.API.>,
+	// $JS.*.API.>, the UUID-prefixed subject, and the host-scoped slug subject.
 	allSubjects := append(perm.PubAllow, perm.SubAllow...)
 	hasInbox := false
-	hasJS := false
+	hasJSDirect := false
+	hasJSDomain := false
 	hasUUID := false
 	hasHostScoped := false
 	for _, s := range allSubjects {
 		if s == "_INBOX.>" {
 			hasInbox = true
 		}
+		if s == "$JS.API.>" {
+			hasJSDirect = true
+		}
 		if s == "$JS.*.API.>" {
-			hasJS = true
+			hasJSDomain = true
 		}
 		if s == "mclaude.bob456.>" {
 			hasUUID = true
@@ -74,8 +78,11 @@ func TestSessionAgentSubjectPermissions(t *testing.T) {
 	if !hasInbox {
 		t.Error("session agent should have _INBOX.>")
 	}
-	if !hasJS {
-		t.Error("session agent should have $JS.*.API.>")
+	if !hasJSDirect {
+		t.Error("session agent should have $JS.API.> (direct worker NATS)")
+	}
+	if !hasJSDomain {
+		t.Error("session agent should have $JS.*.API.> (hub domain-prefixed)")
 	}
 	if !hasUUID {
 		t.Error("session agent should have mclaude.bob456.>")
@@ -374,7 +381,7 @@ func TestIssueSessionAgentJWT_SubjectScopes(t *testing.T) {
 		t.Fatalf("DecodeUserJWT: %v", err)
 	}
 
-	// Per ADR-0050 Decision 5: UUID prefix, host-scoped prefix, _INBOX.>, $JS.*.API.>
+	// Per ADR-0050 Decision 5: UUID prefix, host-scoped prefix, _INBOX.>, $JS.API.>, $JS.*.API.>
 	uuidSubject := fmt.Sprintf("mclaude.%s.>", userID)
 	if !containsStr(claims.Permissions.Pub.Allow, uuidSubject) {
 		t.Errorf("pub allow missing %q, got %v", uuidSubject, claims.Permissions.Pub.Allow)
@@ -399,12 +406,18 @@ func TestIssueSessionAgentJWT_SubjectScopes(t *testing.T) {
 		t.Error("session-agent sub should have _INBOX.>")
 	}
 
-	// Session-agent must have $JS.*.API.> (ADR-0050 Decision 5)
+	// Session-agent must have $JS.API.> and $JS.*.API.> (ADR-0050 Decision 5)
+	if !containsStr(claims.Permissions.Pub.Allow, "$JS.API.>") {
+		t.Error("session-agent pub should have $JS.API.> (direct worker NATS)")
+	}
+	if !containsStr(claims.Permissions.Sub.Allow, "$JS.API.>") {
+		t.Error("session-agent sub should have $JS.API.> (direct worker NATS)")
+	}
 	if !containsStr(claims.Permissions.Pub.Allow, "$JS.*.API.>") {
-		t.Error("session-agent pub should have $JS.*.API.>")
+		t.Error("session-agent pub should have $JS.*.API.> (hub domain-prefixed)")
 	}
 	if !containsStr(claims.Permissions.Sub.Allow, "$JS.*.API.>") {
-		t.Error("session-agent sub should have $JS.*.API.>")
+		t.Error("session-agent sub should have $JS.*.API.> (hub domain-prefixed)")
 	}
 }
 

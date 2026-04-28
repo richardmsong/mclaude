@@ -33,12 +33,13 @@ func UserSubjectPermissions(userID string, userSlug string) NATSPermissions {
 
 // SessionAgentSubjectPermissions returns permissions for a session agent.
 // Per ADR-0050 Decision 5: both UUID-prefixed and host-scoped slug subjects,
-// plus _INBOX.> (request/reply) and $JS.*.API.> (JetStream KV + streams).
+// plus _INBOX.> (request/reply), $JS.API.> (direct worker NATS) and $JS.*.API.> (hub domain-prefixed JetStream).
 func SessionAgentSubjectPermissions(userID string, userSlug string) NATSPermissions {
 	perms := []string{
 		fmt.Sprintf("mclaude.%s.>", userID),
 		fmt.Sprintf("mclaude.users.%s.hosts.*.>", userSlug),
 		"_INBOX.>",
+		"$JS.API.>",
 		"$JS.*.API.>",
 	}
 	return NATSPermissions{

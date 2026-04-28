@@ -14,6 +14,7 @@ func SessionAgentSubjectPermissions(userID, userSlug string) (pubAllow, subAllow
 		fmt.Sprintf("mclaude.%s.>", userID),
 		fmt.Sprintf("mclaude.users.%s.hosts.*.>", userSlug),
 		"_INBOX.>",
+		"$JS.API.>",
 		"$JS.*.API.>",
 	}
 	return perms, perms
