@@ -78,6 +78,44 @@ React Router v6 with parametric segments: `/api/users/{uslug}/projects/{pslug}/s
 - `src/lib/slug.ts` — mirrors `mclaude-common/pkg/slug` (Slugify + Validate + Fallback) for display consistency.
 - `src/lib/subj.ts` — mirrors `mclaude-common/pkg/subj`. Publishes via typed helpers only. Runtime assertion in dev builds.
 
+## Session Management
+
+### TypeScript Types
+
+- `SessionState.state` union gains `"updating"`.
+- `LifecycleEvent.type` union gains `"session_upgrading"`.
+
+### Session State
+
+The `SessionState.state` union includes `"updating"` (set by the session-agent on SIGTERM). When a session enters `"updating"` state:
+
+- `DashboardScreen` `STATE_LABELS` gains `updating: 'Updating...'`.
+- Session Detail Screen shows a persistent blue "Updating..." banner above the conversation while `state === 'updating'`.
+- The `StatusDot` renders as a blue pulsing indicator (`var(--blue)`, added to `PULSE_STATES`).
+- The message input box remains enabled (user can queue messages; they will be delivered to the new pod).
+
+### createSession()
+
+`SessionListVM.createSession()` publishes to `subjSessionsCreate(uslug, hslug, pslug)` and waits for the new session to appear in the `mclaude-sessions` KV watcher (via `SessionStore.onSessionAdded()`). Timeout: 30 seconds. On error the session-agent publishes an `api_error` event on `subjEventsApi(uslug, hslug, pslug)`; the SPA subscribes and surfaces the error to the user.
+
+No request-reply: JetStream `api.sessions.create` messages have no Reply field. Success is signalled by the session key appearing in KV.
+
+### deleteSession()
+
+`SessionListVM.deleteSession()` publishes a fire-and-forget message to `subjSessionsDelete(uslug, hslug, pslug)`. The SPA does not wait for an acknowledgement. Session removal is detected via the KV watcher receiving a `DEL` operation for the session key.
+
+### SessionStore.onSessionAdded()
+
+```ts
+onSessionAdded(projectId: string, callback: (session: Session) => void): () => void
+```
+
+Registers a one-shot listener that fires when a new session belonging to `projectId` appears in the KV watcher snapshot. Filters on `session.projectId === projectId` so that concurrent creates in other projects do not resolve the wrong promise. Returns an unsubscribe function. Used by `createSession()` to detect when the session-agent has written the new session entry to KV.
+
+### KV Watch DEL/PURGE Handling
+
+`KVEntry.operation` may be `'PUT' | 'DEL' | 'PURGE'`. The session store's `kvWatch` callback must handle `DEL` (and `PURGE`) by removing the corresponding entry from the `_sessions` map, not inserting it. Failure to handle `DEL` causes ghost sessions to appear in the UI after deletion.
+
 ## Dependencies
 
 | Dependency | Purpose |

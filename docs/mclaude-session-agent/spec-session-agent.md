@@ -106,8 +106,10 @@ The agent idempotently creates or updates two JetStream streams on startup:
 
 The agent creates two durable pull consumers on MCLAUDE_API:
 
-- **Command consumer** (`sa-cmd-{uslug}-{pslug}`) -- Filters `create`, `delete`, `input`, and `restart` subjects. Explicit ack, 60s ack wait, max 5 deliveries.
-- **Control consumer** (`sa-ctl-{uslug}-{pslug}`) -- Filters `control` subject. Same ack policy.
+- **Command consumer** (`sa-cmd-{uslug}-{pslug}`) -- Filters `create`, `delete`, `input`, and `restart` subjects. Explicit ack, 60s ack wait, max 5 deliveries. Fetch loop: batch 10, FetchMaxWait 5s.
+- **Control consumer** (`sa-ctl-{uslug}-{pslug}`) -- Filters `control` subject. Same ack policy and fetch parameters.
+
+The fetch loop delivers `jetstream.Msg`, not `*nats.Msg`. A `jsToNatsMsg` adapter wraps the JetStream message before dispatching to handlers (which accept `*nats.Msg`). After a successful handler return, the message is acked; on handler error or after MaxDeliver exhaustion the message is dropped (indicates a handler bug — not retried by the application layer).
 
 ### NATS KV Buckets (Read/Write)
 
@@ -127,7 +129,7 @@ All publishes use the host-scoped pattern per ADR-0035: `mclaude.users.{uslug}.h
 
 - **Lifecycle events** to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{sslug}` -- Published on session creation, stop, resume, restart, upgrade, failure, permission denial, quota interruption, and job completion. See `spec-state-schema.md` section "Lifecycle Event Payloads".
 - **Stream-json events** to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.events.{sslug}` -- Raw Claude Code stdout lines, forwarded to the MCLAUDE_EVENTS stream.
-- **API error events** to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.events._api` -- Published when a create/delete/restart handler encounters an error.
+- **API error events** to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.events._api` -- Published when a create/delete/restart handler encounters an error. Payload: `{type: "api_error", request_id: string, operation: "create" | "delete" | "restart", error: string}`.
 - **Quota status** to `mclaude.users.{uslug}.quota` (daemon only) -- Published every 60 seconds from Anthropic API polling. The quota subject is user-scoped (no host segment) because quota is an account-wide signal. See `spec-state-schema.md` section "Quota Status".
 
 ### NATS Subjects (Subscribe)
@@ -243,7 +245,7 @@ The stdout router goroutine reads NDJSON lines from Claude Code's stdout (using 
 1. **In-flight background agent tracking:** Increments `inFlightBackgroundAgents` on `assistant` events with an `Agent` tool_use where `input.run_in_background == true`. Decrements (floored at 0) on top-level `user` events with `origin.kind == "task-notification"`. Used by the drain predicate in graceful shutdown.
 2. **In-flight background shell tracking (K8s mode; two-phase):**
    - **Phase 1 — Pending:** On `assistant` event with a `Bash` tool_use where `input.run_in_background == true`, adds a `pendingShell{toolUseId, command, startedAt}` entry to `sess.pendingShells` (keyed by `tool_use.id`).
-   - **Phase 2 — Promoted:** On `user` event with a `tool_result` whose `tool_use_id` matches a pending entry, extracts `backgroundTaskId` from the result text (pattern: `"Command was manually backgrounded with ID: (\S+)"`), constructs `outputFilePath` as `{CLAUDE_CODE_TMPDIR}/claude-{uid}/{sanitizePath(cwd)}/{sessionId}/tasks/{taskId}.output`, and promotes the entry to `sess.inFlightShells map[string]*inFlightShell` (keyed by toolUseId). Fields: `{toolUseId, taskId, command, outputFilePath, startedAt}`.
+   - **Phase 2 — Promoted:** On `user` event with a `tool_result` whose `tool_use_id` matches a pending entry, extracts `backgroundTaskId` from the result text (pattern: `"Command was manually backgrounded with ID: (\S+)"`), constructs `outputFilePath` as `{CLAUDE_CODE_TMPDIR}/claude-{uid}/{sanitizePath(cwd)}/{sessionId}/tasks/{taskId}.output`, and promotes the entry to `sess.inFlightShells map[string]*inFlightShell` (keyed by toolUseId). Fields: `{toolUseId, taskId, command, outputFilePath, startedAt}`. `sanitizePath` replaces every character outside `[a-zA-Z0-9]` with `-`; for paths > 200 chars appends a wyhash/djb2 suffix (in practice CWDs are under 200 chars so the hash branch is never reached).
    - **Removal:** On `user` event with `origin.kind == "task-notification"` referencing the shell's toolUseId (shell completed naturally).
    - Shell tracking is disabled when `CLAUDE_CODE_TMPDIR` is not set (daemon/BYOH mode).
 3. Truncates events exceeding the 8 MB NATS payload limit (removes `content` field, adds `truncated: true`).
@@ -312,7 +314,7 @@ The shutdown sequence preserves in-progress work and enables zero-downtime upgra
 3. Drain core NATS subscriptions (terminal API).
 4. Keep the control consumer running (interrupts and permission responses still work).
 5. Poll every 1 second (no wall-clock timeout — indefinite wait; `terminationGracePeriodSeconds: 86400` from values.yaml is K8s's last-resort backstop, not a policy limit): wait for all sessions to reach `idle` state with zero in-flight background agents. Auto-interrupt sessions stuck in `requires_action`.
-6. Shell-killed notifications (K8s mode only, when `CLAUDE_CODE_TMPDIR` is set): for each session, for each entry in `inFlightShells`, construct a `<task-notification status=killed>` XML message and publish it as a session-input payload `{"session_id": "<id>", "type": "user", "message": {"role": "user", "content": "<xml>"}}` to the JetStream `api.sessions.input` subject. Messages queue in the durable cmd consumer for the replacement pod.
+6. Shell-killed notifications (K8s mode only, when `CLAUDE_CODE_TMPDIR` is set): for each session, for each entry in `inFlightShells`, construct a `<task-notification>` XML message with child elements `<task-id>`, `<tool-use-id>`, `<output-file>`, `<status>killed</status>`, and `<summary>` populated from the `inFlightShell` entry. Publish it as a session-input payload `{"session_id": "<id>", "type": "user", "message": {"role": "user", "content": "<xml>"}}` to the JetStream `api.sessions.input` subject. Messages queue in the durable cmd consumer for the replacement pod. (If the pod crashes before publishing, those notifications are lost — tolerated; Claude will notice unresolved shell tool_uses on the next BashOutput call.)
 7. Cancel the control consumer.
 8. Publish `session_upgrading` lifecycle event per session.
 9. Exit.
@@ -344,14 +346,17 @@ Terminal sessions spawn a PTY shell and bridge I/O through core NATS subjects. T
 |---------|----------|
 | NATS connection lost | NATS client auto-reconnects; state changes buffered in memory during outage and flushed on reconnect. Claude processes continue running. Reconnection counter incremented. |
 | KV bucket not found on startup | Fatal: session agent exits (control-plane not started) |
-| Session create — worktree collision | Error returned via NATS reply and published as `api_error` event |
-| Session create — git worktree add fails | Error returned via NATS reply and published as `api_error` event |
-| Session create — Claude process fails to start | `session_failed` lifecycle event published; error returned via NATS reply |
+| Session create — worktree collision | `api_error` event published to `events._api` (no NATS reply — JetStream messages have no Reply field) |
+| Session create — git worktree add fails | `api_error` event published to `events._api` (no NATS reply — JetStream messages have no Reply field) |
+| Session create — Claude process fails to start | `session_failed` lifecycle event published to `lifecycle.{sslug}` |
+| Session delete — handler error | `api_error` event published to `events._api` with `operation: "delete"` |
+| Session restart — handler error | `api_error` event published to `events._api` with `operation: "restart"` |
 | Claude process crash (unexpected exit) | Session agent detects exit, publishes `session_failed` lifecycle event, auto-restarts with `--resume {sessionId}`. Increments `mclaude_claude_restarts_total` counter. |
 | Git auth error during initial clone (K8s) | `session_failed` lifecycle event with `provider_auth_failed` reason published; agent exits |
 | Credential helper setup fails | Logged as warning; continues (non-fatal, SSH key auth may still work) |
 | Session delete — process does not stop within 10s | Process is SIGKILLed; deletion proceeds |
 | Graceful shutdown — session stuck in requires_action | Auto-interrupted so the turn aborts to idle |
+| JetStream message exhausts MaxDeliver (5 deliveries) | Message dropped. Indicates a persistent handler bug — not retried by the application. |
 | Pod crash (no SIGTERM — SIGKILL, OOM, node failure) | In-flight shell tracking (`inFlightShells`, `pendingShells`) is lost with the process. Durable JetStream consumers redeliver unacked messages. Sessions resume from KV. Dangling background-shell tool_uses remain in the transcript — Claude notices the unknown shell-id when it attempts `BashOutput` and can adjust. |
 | JetStream fetch error | Exponential backoff (100ms to 5s) with retry |
 | Event exceeds 8 MB NATS payload | Content field stripped; `truncated: true` added |
