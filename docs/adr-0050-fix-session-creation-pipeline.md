@@ -45,6 +45,8 @@ Root causes (all must be fixed together):
 | 12 | Session-agent NATS URL points at hub NATS | Helm chart gains `sessionAgentNatsUrl` value. Controller reads `SESSION_AGENT_NATS_URL` env var (falling back to worker NATS URL). Reconciler injects this as the session-agent pod's `NATS_URL`. | KV buckets (`mclaude-sessions`, `mclaude-projects`) are created on hub NATS. Session-agents connecting to worker NATS can't find them without domain-qualified JetStream. Pointing directly at hub NATS is the simplest correct path for single-cluster and works for multi-cluster when the hub is reachable. |
 | 13 | SessionStore uses split KV prefixes | `SessionStore` watches `mclaude-sessions` with `userSlug` prefix (slug-based keys written by session-agent) and `mclaude-projects` with `userId` prefix (UUID-based keys written by control-plane). `App.tsx` passes `authState.userSlug ?? authState.userId` as the `userSlug` constructor param. | Session KV keys are slug-based (`dev.local.default-project.{sslug}`), project KV keys are still UUID-based (`{userId}.{projectId}`). A single prefix can't match both; the store needs separate prefixes until the project KV key migration lands. |
 | 14 | Session-agent event subjects include `.hosts.{hslug}.` | All project-scoped NATS subjects in `mclaude-session-agent` (events, lifecycle, terminal, API sessions) include `.hosts.{hslug}.` between the user and project segments per ADR-0035. | The session-agent predates ADR-0035 and constructed subjects without the host segment, causing NATS permission violations on every publish. |
+| 15 | ConversationVM uses resolved session UUID | `App.tsx` resolves the session UUID via `session?.id ?? route.sessionId` and passes the UUID (not the route slug) to `ConversationVM`. The VM includes `session_id` in every NATS `sessions.input` payload. | The session-agent stores sessions in a `map[string]*Session` keyed by UUID. Sending the slug as `session_id` caused "session not found" errors on every input message. |
+| 16 | `DEV_OAUTH_TOKEN` passed to worker controller | `charts/mclaude-worker/templates/controller-deployment.yaml` conditionally injects `DEV_OAUTH_TOKEN` env var from `controller.config.devOAuthToken` Helm value. `.github/workflows/deploy-main.yml` passes the GitHub secret to the worker Helm install. The controller writes it as `oauth-token` in per-user `user-secrets` Secret. | Without the OAuth token, Claude Code in session-agent pods has no API credentials and silently produces no output. The entrypoint reads `/home/node/.user-secrets/oauth-token` and exports `CLAUDE_CODE_OAUTH_TOKEN`. |
 
 ## Impact
 
@@ -56,8 +58,9 @@ Root causes (all must be fixed together):
 - `mclaude-control-plane`: `projects.go` (`ProjectKVState`, `writeProjectKV`, project-create handler), `main.go` (`seedDev`), `nkeys.go` (`IssueSessionAgentJWT`, `SessionAgentSubjectPermissions`).
 - `mclaude-controller-k8s`: `nats_subscriber.go` (`handleCreate` — populate MCProject slug fields), `mcproject_types.go` (`MCProjectSpec` new fields), `reconciler.go` (`buildPodTemplate` env vars, `loadTemplate` ConfigMap lookup, `SESSION_AGENT_NATS_URL`), `nkeys.go` (`IssueSessionAgentJWT`, `SessionAgentSubjectPermissions`), `main.go` (`SESSION_AGENT_NATS_URL`, `SESSION_AGENT_TEMPLATE_CM`).
 - `mclaude-session-agent`: `session.go`, `terminal.go`, `agent.go` (host-scoped subject construction per ADR-0035).
-- `mclaude-web`: `session-store.ts` (split KV watch prefixes), `App.tsx` (pass `userSlug` to SessionStore).
-- `charts/mclaude-worker`: `mcproject-crd.yaml` (slug fields in CRD schema), `controller-deployment.yaml` (`SESSION_AGENT_NATS_URL`), `values.yaml`/`values-dev.yaml`/`values-k3d-ghcr.yaml` (`sessionAgentNatsUrl`).
+- `mclaude-web`: `session-store.ts` (split KV watch prefixes), `App.tsx` (pass `userSlug` to SessionStore, resolve session UUID for ConversationVM).
+- `charts/mclaude-worker`: `mcproject-crd.yaml` (slug fields in CRD schema), `controller-deployment.yaml` (`SESSION_AGENT_NATS_URL`, `DEV_OAUTH_TOKEN`), `values.yaml`/`values-dev.yaml`/`values-k3d-ghcr.yaml` (`sessionAgentNatsUrl`, `devOAuthToken`).
+- `.github/workflows/deploy-main.yml`: passes `DEV_OAUTH_TOKEN` secret to worker Helm install.
 
 ## Scope
 
@@ -72,7 +75,9 @@ Root causes (all must be fixed together):
 - Session-agent NATS URL points at hub NATS (where KV buckets live)
 - SessionStore split KV prefixes (slug for sessions, UUID for projects)
 - Session-agent event/lifecycle/terminal subjects include `.hosts.{hslug}.` per ADR-0035
-- All fourteen decisions implemented; session creation works end-to-end
+- ConversationVM resolves session UUID before sending input
+- `DEV_OAUTH_TOKEN` plumbed through worker Helm chart + CI to session-agent pods
+- All sixteen decisions implemented; session creation works end-to-end
 
 **Explicitly deferred:**
 - KV key format migration from `{UUID}.{UUID}` to `{uslug}.{hslug}.{pslug}` for project KV (separate ADR — affects SessionStore project watch prefix, HeartbeatMonitor, all KV readers)
