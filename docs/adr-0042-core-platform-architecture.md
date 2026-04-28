@@ -1,8 +1,10 @@
 # ADR: Core Platform Architecture
 
-**Status**: draft
+**Status**: implemented
 **Status history**:
 - 2026-04-28: draft
+- 2026-04-28: accepted — design audit CLEAN (R4), spec-evaluator identified 18 spec-debt items (not ADR issues)
+- 2026-04-28: implemented — consolidation of existing architecture (ADR-0002, ADR-0003, ADR-0024)
 
 > Supersedes:
 > - `adr-0002-core-containers.md` — folded in: session image structure (entrypoint, config seeding, managed CLAUDE.md, guard hooks, Nix package management, registry mirrors), pod storage model, config-sync sidecar, CLAUDE.md three-tier system, auto-memory sharing across worktrees
@@ -36,12 +38,12 @@ Reading the platform architecture requires synthesizing all three documents and 
 | Claude Code integration | Headless via `--print --verbose --output-format stream-json --input-format stream-json --include-partial-messages` | Eliminates tmux, JSONL tailing, and screen scraping. Stream-json is the same protocol used by IDE extensions — stable, well-maintained. |
 | Event bus | NATS JetStream | Append-only event streams, KV state store, subject-based routing, WebSocket proxy for browsers. Replaces Postgres LISTEN/NOTIFY. |
 | Event schema | Raw Claude Code stream-json — no envelope, no protobuf translation | Subject encodes routing metadata (user/project/session). Events flow unchanged from Claude stdout to client. |
-| State store | NATS KV (sessions, projects) + Postgres (users only) | KV gives real-time watches for client state. Postgres for durable user identity. |
+| State store | NATS KV (sessions, projects, hosts, job-queue) + Postgres (users, hosts, projects, oauth_connections) | KV gives real-time watches for client state. Postgres for durable identity, host management, and project records. |
 | Session management | Single Go binary (`mclaude-session-agent`) per project pod | Same binary on K8s and laptop. Spawns Claude as child processes, routes stdin/stdout via NATS. No HTTP server. |
-| Control plane | Go service with kubebuilder reconciliation controller (`mclaude-control-plane`) | Owns user identity, NATS credential management, K8s resource provisioning via MCProject CRD. Replaces imperative provisioning with continuous reconciliation. |
+| Control plane | Go service (`mclaude-control-plane`), K8s-free per ADR-0035 | Owns user identity, host management, NATS JWT issuance, project provisioning via NATS request/reply to controllers (`mclaude-controller-k8s`, `mclaude-controller-local`). No kubebuilder, no K8s client. |
 | Web client | React 18 SPA, mobile browser first | Enterprise constraint: must work in mobile browser (native apps can't reach VPN). Connects to NATS directly via WebSocket proxy. |
 | Ingress | nginx reverse proxy — no auth logic, no routing decisions | `/nats` → NATS WebSocket, `/auth` `/api` `/scim` → control-plane, `/*` → SPA static files. |
-| Addressing scheme | Typed literals between every slug: `mclaude.users.{uslug}.projects.{pslug}.sessions.{sslug}` | Self-describing subjects. Every slug preceded by a word saying what it is. No positional ambiguity. |
+| Addressing scheme | Typed literals between every slug: `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.sessions.{sslug}` (host-scoped per ADR-0035) | Self-describing subjects. Every slug preceded by a word saying what it is. No positional ambiguity. |
 | Slug charset | `[a-z0-9][a-z0-9-]{0,62}` — lowercase alphanumerics + hyphen, max 63 chars | Compatible with DNS labels, NATS tokens, URL segments, K8s names. No dot/slash/wildcard. |
 | Reserved literals | Blocklist of 10 words: `users, hosts, projects, sessions, clusters, api, events, lifecycle, quota, terminal` | Prevents slug-literal collision. Leading `_` reserved for internal expansion. Append-only. |
 | Slug ownership | All slugs system-computed from display names, never user-picked. Immutable after creation. | Users provide display names; system derives slugs silently. No rename API. |
@@ -65,12 +67,12 @@ Reading the platform architecture requires synthesizing all three documents and 
 | Component | Language | Role |
 |-----------|----------|------|
 | `mclaude-session-agent` | Go | Spawns headless Claude Code processes, routes stream-json events to/from NATS. Same binary on laptop and in K8s pod. |
-| `mclaude-control-plane` | Go | Platform control plane. Auth, SSO, SCIM, user/project provisioning, K8s namespace + Deployment management, NATS JWT issuance. |
+| `mclaude-control-plane` | Go | Platform control plane. Auth, SSO, SCIM, user/project/host management, NATS JWT issuance. K8s-free per ADR-0035 — all K8s mutation delegated to `mclaude-controller-k8s` via NATS request/reply. |
 | `mclaude-cli` | Go | Debug attach tool. Thin text REPL over unix socket to session agent. |
 | `mclaude-common` | Go | Shared module: slug/subject helpers, typed slug types. |
 | `mclaude-web` | TypeScript (React 18) | Web SPA. Mobile browser first. |
 | NATS JetStream | — | Event bus, state (KV), routing between all components and clients. |
-| Postgres | — | Users table only. Lives in `mclaude-system`. |
+| Postgres | — | Users, hosts, projects, oauth_connections tables. Lives in `mclaude-system`. |
 | nginx ingress | — | Dumb reverse proxy. No routing logic, no auth. |
 
 **Note**: the `mclaude-relay/` directory contains a standalone Go tunnel binary deployed to user VMs via the `deploy-relay` skill; only the in-cluster proxy role was replaced by nginx ingress. The binary is not published as a container image.
@@ -82,13 +84,13 @@ Reading the platform architecture requires synthesizing all three documents and 
 ```
 1. User types message in browser SPA
 2. SPA publishes user message to NATS subject:
-   mclaude.users.{uslug}.projects.{pslug}.api.sessions.input
+   mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.input
 3. Session agent receives via NATS subscription
 4. Session agent writes stream-json user message to Claude Code stdin pipe
 5. Claude Code processes message, calls Anthropic API
 6. Claude Code emits stream-json events on stdout (token-by-token streaming)
 7. Session agent publishes each event to NATS JetStream:
-   mclaude.users.{uslug}.projects.{pslug}.events.{sslug}
+   mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.events.{sslug}
 8. SPA receives events via NATS subscription
 9. SPA renders streaming response in real-time
 ```
@@ -169,40 +171,45 @@ All subjects use the typed-slug addressing scheme. Every slug token is preceded 
 
 > **NATS security**: ADR-0016 defines the authentication model, signing-key hierarchy, JWT issuance, and per-identity permission grants. See `adr-0016-nats-security.md`.
 
-### API (request/reply)
+### API — Session Commands (JetStream via MCLAUDE_API stream)
 
 ```
-mclaude.users.{uslug}.projects.{pslug}.api.sessions.create
-mclaude.users.{uslug}.projects.{pslug}.api.sessions.delete
-mclaude.users.{uslug}.projects.{pslug}.api.sessions.input
-mclaude.users.{uslug}.projects.{pslug}.api.sessions.control    → permission responses, interrupts
-mclaude.users.{uslug}.projects.{pslug}.api.sessions.restart    → accepts optional extraFlags
-mclaude.users.{uslug}.api.projects.create    → control-plane (global, not location-scoped)
-mclaude.users.{uslug}.api.projects.update    → control-plane
-mclaude.users.{uslug}.api.projects.delete    → control-plane
-mclaude.users.{uslug}.api.projects.list      → control-plane
+mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.create     → captured by MCLAUDE_API, consumed by session-agent pull consumer
+mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.delete
+mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.input
+mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.control    → permission responses, interrupts
+mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.restart    → accepts optional extraFlags
+```
+
+### API — Project Management (request/reply via core NATS)
+
+```
+mclaude.users.{uslug}.hosts.{hslug}.api.projects.provision     → control-plane → controller (request/reply)
+mclaude.users.{uslug}.hosts.{hslug}.api.projects.create        → control-plane → controller
+mclaude.users.{uslug}.hosts.{hslug}.api.projects.update        → control-plane → controller
+mclaude.users.{uslug}.hosts.{hslug}.api.projects.delete        → control-plane → controller
 mclaude.users.{uslug}.api.projects.updated   → control-plane broadcasts (project state changed)
 ```
 
 ### Events (JetStream, append-only)
 
 ```
-mclaude.users.{uslug}.projects.{pslug}.events.{sslug}       → Claude Code stream-json events
-mclaude.users.{uslug}.projects.{pslug}.lifecycle.{sslug}     → session agent lifecycle events
+mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.events.{sslug}       → Claude Code stream-json events
+mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{sslug}     → session agent lifecycle events
 ```
 
 `events` carries raw stream-json objects from Claude Code stdout — no envelope, the subject encodes the routing metadata. The session agent also publishes user input messages to the events stream. `lifecycle` carries session agent's own events (created, stopped, resumed, debug attached/detached).
 
-Stream `MCLAUDE_EVENTS` captures `mclaude.users.*.projects.*.events.*`. Retained 30 days.
-Stream `MCLAUDE_LIFECYCLE` captures `mclaude.users.*.projects.*.lifecycle.*`. Retained 30 days.
+Stream `MCLAUDE_EVENTS` captures `mclaude.users.*.hosts.*.projects.*.events.*`. Retained 30 days.
+Stream `MCLAUDE_LIFECYCLE` captures `mclaude.users.*.hosts.*.projects.*.lifecycle.*`. Retained 30 days.
 
 **NATS message size**: `max_payload: 8388608` (8MB) in NATS server config. If a single event exceeds 8MB, the session agent truncates the `content` field and sets `truncated: true`.
 
 ### Terminal I/O (core NATS, ephemeral)
 
 ```
-mclaude.users.{uslug}.projects.{pslug}.terminal.{termId}.output    → raw PTY output bytes
-mclaude.users.{uslug}.projects.{pslug}.terminal.{termId}.input     → raw keyboard input bytes
+mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.{termId}.output    → raw PTY output bytes
+mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.{termId}.input     → raw keyboard input bytes
 ```
 
 Not JetStream — raw terminal I/O is ephemeral, no replay needed. Use core NATS pub/sub for low latency.
@@ -210,9 +217,9 @@ Not JetStream — raw terminal I/O is ephemeral, no replay needed. Use core NATS
 ### Terminal API
 
 ```
-mclaude.users.{uslug}.projects.{pslug}.api.terminal.create    → spawn shell
-mclaude.users.{uslug}.projects.{pslug}.api.terminal.delete     → kill terminal
-mclaude.users.{uslug}.projects.{pslug}.api.terminal.resize     → resize PTY
+mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.create    → spawn shell
+mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.delete     → kill terminal
+mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.resize     → resize PTY
 ```
 
 ### Quota
@@ -221,19 +228,15 @@ mclaude.users.{uslug}.projects.{pslug}.api.terminal.resize     → resize PTY
 mclaude.users.{uslug}.quota    → broadcast signal, not request/reply
 ```
 
-### Cluster-scoped
-
-```
-mclaude.clusters.{cslug}.api.projects.provision
-mclaude.clusters.{cslug}.api.status
-```
-
 ### JetStream Stream Filters
 
-| Stream | Filter |
-|--------|--------|
-| `MCLAUDE_EVENTS` | `mclaude.users.*.projects.*.events.*` |
-| `MCLAUDE_LIFECYCLE` | `mclaude.users.*.projects.*.lifecycle.*` |
+| Stream | Filter | Retention |
+|--------|--------|-----------|
+| `MCLAUDE_EVENTS` | `mclaude.users.*.hosts.*.projects.*.events.*` | 30 days |
+| `MCLAUDE_LIFECYCLE` | `mclaude.users.*.hosts.*.projects.*.lifecycle.*` | 30 days |
+| `MCLAUDE_API` | `mclaude.users.*.hosts.*.projects.*.api.sessions.>` | 1 hour (stale commands discarded) |
+
+`MCLAUDE_API` captures session API commands (create, delete, input, restart, control) for at-least-once delivery. The session-agent consumes via durable pull consumers, not core NATS subscriptions.
 
 ---
 
@@ -241,16 +244,16 @@ mclaude.clusters.{cslug}.api.status
 
 ```
 KV bucket: mclaude-sessions
-  key: {uslug}.{pslug}.{sslug}  → Session JSON
+  key: {uslug}.{hslug}.{pslug}.{sslug}  → Session JSON
 
 KV bucket: mclaude-projects
-  key: {uslug}.{pslug}          → Project JSON
+  key: {uslug}.{hslug}.{pslug}          → Project JSON
 
-KV bucket: mclaude-clusters
-  key: {uslug}                  → Cluster JSON
+KV bucket: mclaude-hosts
+  key: {uslug}.{hslug}                  → Host JSON (online status, type, role)
 
 KV bucket: mclaude-job-queue
-  key: {uslug}.{jobId}          → Job JSON
+  key: {uslug}.{jobId}                  → Job JSON
 ```
 
 **Bucket initialization**: control-plane creates all buckets idempotently on startup (`nats.KeyValueStoreOrCreate`). Session agents and launchers do not create buckets — they fail fast if a bucket doesn't exist.
@@ -275,6 +278,7 @@ KV bucket: mclaude-job-queue
   "model": "claude-sonnet-4-6",
   "extraFlags": "--disallowedTools \"Edit(src/**)\"",
   "userSlug": "alice-gmail",
+  "hostSlug": "local",
   "projectSlug": "mclaude",
   "slug": "fix-auth-bug",
   "capabilities": {
@@ -307,8 +311,12 @@ KV bucket: mclaude-job-queue
 ```json
 {
   "id": "proj-1",
+  "slug": "mclaude",
+  "userSlug": "alice-gmail",
+  "hostSlug": "local",
   "name": "mclaude",
   "gitUrl": "git@github.com:org/mclaude.git",
+  "gitIdentityId": null,
   "status": "running",
   "sessionCount": 2,
   "worktrees": ["main", "feature-auth"],
@@ -319,7 +327,7 @@ KV bucket: mclaude-job-queue
 
 ### Session Agent Lifecycle Events
 
-Published on `mclaude.users.{uslug}.projects.{pslug}.lifecycle.{sslug}`:
+Published on `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{sslug}`:
 
 ```json
 {"type": "session_created", "sessionId": "abc-123", "ts": "..."}
@@ -355,14 +363,14 @@ Layout:
 
 ```
 mclaude-common/
-├── go.mod                           (module mclaude-common)
+├── go.mod                           (module mclaude.io/common)
 └── pkg/
     ├── slug/                        (Slugify, Validate, ValidateOrFallback)
     └── subj/                        (typed subject-construction helpers)
 ```
 
 - `pkg/slug`: `Slugify(displayName string) string`, `Validate(slug string) error`, `ValidateOrFallback(candidate string, kind Kind) string` where `kind ∈ {User, Project, Host, Cluster, Session}`. Reserved-word list is a typed constant.
-- `pkg/subj`: typed subject-construction helpers keyed on named types (`type UserSlug string`, `type ProjectSlug string`, etc.). Helpers accept only typed wrappers — passing a raw string is a compile-time error. Example: `subj.UserProjectAPI(u UserSlug, p ProjectSlug, tail ...Literal) string` returns `mclaude.users.{u}.projects.{p}.api.{tail...}`.
+- `pkg/subj`: typed subject-construction helpers keyed on named types (`type UserSlug string`, `type HostSlug string`, `type ProjectSlug string`, etc.). Helpers accept only typed wrappers — passing a raw string is a compile-time error. All project-scoped helpers include `HostSlug` per ADR-0035. Examples: `subj.UserHostProjectAPISessionsCreate(u UserSlug, h HostSlug, p ProjectSlug) string` returns `mclaude.users.{u}.hosts.{h}.projects.{p}.api.sessions.create`; `subj.UserHostProjectEvents(u UserSlug, h HostSlug, p ProjectSlug, s SessionSlug) string` returns `mclaude.users.{u}.hosts.{h}.projects.{p}.events.{s}`. KV key helpers: `subj.SessionsKVKey(u, h, p, s)` → `{u}.{h}.{p}.{s}`; `subj.ProjectsKVKey(u, h, p)` → `{u}.{h}.{p}`; `subj.HostsKVKey(u, h)` → `{u}.{h}`.
 
 ### TypeScript Mirrors
 
@@ -375,15 +383,17 @@ mclaude-common/
 -- users: slug is globally unique
 ALTER TABLE users ADD COLUMN slug TEXT NOT NULL UNIQUE;
 
--- projects: slug is unique per user
-ALTER TABLE projects ADD COLUMN slug TEXT NOT NULL;
-CREATE UNIQUE INDEX idx_projects_user_slug ON projects (user_id, slug);
+-- hosts: slug is unique per user (per ADR-0035)
+-- For cluster hosts, all users granted to the same cluster share the same slug.
+ALTER TABLE hosts ADD COLUMN slug TEXT NOT NULL;
+-- UNIQUE (user_id, slug) enforced via table constraint
 
--- clusters: slug is globally unique
-ALTER TABLE clusters ADD COLUMN slug TEXT NOT NULL UNIQUE;
+-- projects: slug is unique per user per host (per ADR-0035)
+ALTER TABLE projects ADD COLUMN slug TEXT NOT NULL;
+CREATE UNIQUE INDEX projects_user_id_host_id_slug_uniq ON projects (user_id, host_id, slug);
 ```
 
-`users.id`, `projects.id`, `clusters.id` UUID PKs stay. All foreign keys reference `id`, not `slug`.
+`users.id`, `projects.id`, `hosts.id` UUID PKs stay. All foreign keys reference `id`, not `slug`.
 
 ### Error Handling
 
@@ -401,7 +411,7 @@ Single Go binary. Runs as a container inside each K8s project pod, or as a stand
 
 ### What It Does
 
-- Subscribes to `mclaude.users.{uslug}.projects.{pslug}.api.>` — handles session CRUD, input, and control messages
+- Subscribes to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.>` — handles session CRUD, input, and control messages
 - Spawns Claude Code as child processes with `--print --verbose --output-format stream-json --input-format stream-json`
 - Routes stdout JSON events → NATS JetStream (raw, no envelope)
 - Routes NATS input/control messages → Claude stdin
@@ -435,13 +445,14 @@ go func() {
     }
 }()
 
-// stdout → NATS
+// stdout → NATS (host-scoped subject per ADR-0035)
+eventSubj := subj.UserHostProjectEvents(userSlug, hostSlug, projectSlug, sessionSlug)
 go func() {
     scanner := bufio.NewScanner(stdout)
     scanner.Buffer(make([]byte, 0), 16*1024*1024) // 16MB buffer for large events
     for scanner.Scan() {
         line := scanner.Bytes()
-        nats.Publish("session."+id+".events", line)
+        nats.Publish(eventSubj, line)
         if eventType := parseEventType(line); eventType != "" {
             switch eventType {
             case "session_state_changed": updateKV(line)
@@ -453,11 +464,17 @@ go func() {
     }
 }()
 
-// NATS → stdin (via serialization channel)
+// NATS → stdin via MCLAUDE_API JetStream pull consumer (at-least-once delivery)
+// Session-agent creates durable pull consumers on MCLAUDE_API stream:
+//   - Command consumer (sa-cmd-{uslug}-{pslug}): create, delete, input, restart
+//   - Control consumer (sa-ctl-{uslug}-{pslug}): control responses
 go func() {
-    sub := nats.Subscribe("session."+id+".input")
-    for msg := range sub.Chan() {
-        stdinCh <- msg.Data
+    for {
+        msgs, _ := cmdConsumer.Fetch(10, nats.MaxWait(30*time.Second))
+        for _, msg := range msgs {
+            stdinCh <- msg.Data()
+            msg.Ack()
+        }
     }
 }()
 ```
@@ -546,60 +563,36 @@ For K8s: `kubectl exec -it pod -- mclaude-cli attach {sessionId}`
 
 ### Laptop Mode
 
-On a laptop, **one session-agent per project** — same scoping as K8s. A lightweight launcher manages per-project agents:
+On a laptop, **one session-agent per project** — same scoping as K8s. The `mclaude-controller-local` (BYOH process supervisor per ADR-0035) manages per-project agents:
 
-- `mclaude-launcher` runs as a launchd/systemd daemon
-- On `projects.create` NATS message, launcher spawns a session-agent
+- `mclaude-controller-local` runs as a launchd/systemd daemon with `--host {hslug}`
+- Subscribes to `mclaude.users.{uslug}.hosts.{hslug}.api.projects.>` and manages session-agent processes
+- Session-agent runs with `--daemon --host {hslug}` mode
 - Each session-agent connects to NATS via `wss://mclaude.example.com/nats` (outbound, works behind NAT/firewall)
-- NATS JWT stored in `~/.config/mclaude/creds`
-- Launcher monitors child agents, restarts on crash
+- NATS JWT stored in `~/.mclaude/hosts/{hslug}/nats.creds`
+- Controller monitors child agents, restarts on crash
 - JWT refresh: background goroutine checks `exp` every 60s, calls `POST /auth/refresh` when TTL < 15 minutes
 
 ---
 
 ## mclaude-control-plane
 
-Single Go service in `mclaude-system`. Owns user identity, NATS credential management, and K8s resource provisioning via a kubebuilder reconciliation controller. ClusterRole for cross-namespace operations. Owns Postgres (users only). Issues NATS JWTs.
+Single Go service in `mclaude-system`. Owns user identity, host management, NATS credential management (per-host JWT issuance), and project provisioning via NATS request/reply to controllers. K8s-free per ADR-0035 — no kubebuilder, no K8s client, no MCProject CRD reconciler. All K8s mutation is delegated to `mclaude-controller-k8s` via NATS. Owns Postgres (users, hosts, projects, oauth_connections). Issues per-host NATS JWTs signed by the deployment-level account key.
 
-### Reconciliation Controller
+### Project Provisioning (NATS request/reply)
 
-CRD: `MCProject` (`mclaude.io/v1alpha1`)
+The control-plane does not touch K8s directly. On project creation, it publishes a NATS request to the host-scoped provisioning subject and waits for the controller's reply:
 
-```yaml
-apiVersion: mclaude.io/v1alpha1
-kind: MCProject
-metadata:
-  name: {projectId}
-  namespace: mclaude-system
-spec:
-  userId: "user-abc"
-  projectId: "proj-1"
-  gitUrl: "git@github.com:org/repo.git"
-status:
-  phase: "Ready"           # Pending | Provisioning | Ready | Failed
-  userNamespace: "mclaude-user-abc"
-  conditions:
-    - type: NamespaceReady
-    - type: RBACReady
-    - type: SecretsReady
-    - type: DeploymentReady
-  lastReconciledAt: "2026-04-13T10:00:00Z"
+```
+Subject: mclaude.users.{uslug}.hosts.{hslug}.api.projects.provision
+Timeout: 10s (PROVISION_TIMEOUT_SECONDS)
 ```
 
-**Reconcile loop** — on any MCProject create/update/delete, or on any owned resource change:
+The relevant controller handles the request:
+- **`mclaude-controller-k8s`** (cluster hosts): subscribes to `mclaude.users.*.hosts.{cluster-slug}.api.projects.>` — reconciles `MCProject` CRs, provisions namespace/RBAC/PVCs/Secrets/Deployment.
+- **`mclaude-controller-local`** (BYOH machines): subscribes to `mclaude.users.{uslug}.hosts.{hslug}.api.projects.>` — manages session-agent processes and local worktree directories.
 
-1. Ensure user namespace `mclaude-{userId}` exists with labels
-2. Ensure ServiceAccount, Role, RoleBinding in user namespace
-3. Ensure user-config ConfigMap in user namespace
-4. Ensure user-secrets Secret with NATS creds in user namespace
-5. Ensure imagePullSecrets copied from control-plane namespace
-6. Ensure project PVC (`project-{projectId}`) in user namespace
-7. Ensure nix PVC (`nix-store`) in user namespace (shared across all projects)
-8. Ensure project-config ConfigMap with GIT_URL from spec.gitUrl
-9. Ensure Deployment (`project-{projectId}`) in user namespace with correct spec
-10. Update MCProject status conditions and phase
-
-Each step is idempotent. The reconciler owns all created resources via `controllerutil.SetControllerReference` — MCProject deletion garbage-collects owned resources (except PVCs, which require `?purge=true`).
+If the controller times out or replies with an error, control-plane returns 503 with `{error: "host {hslug} unreachable"}`.
 
 ### Endpoints
 
@@ -616,18 +609,38 @@ Each step is idempotent. The reconciler owns all created resources via `controll
 
 | Method | Path | Action |
 |--------|------|--------|
-| `POST` | `/users` | create user + provision K8s namespace |
-| `GET` | `/users` | list users |
-| `DELETE` | `/users/{id}` | deprovision user + delete namespace |
+| `POST` | `/admin/users` | create user |
+| `GET` | `/admin/users` | list users |
+| `DELETE` | `/admin/users/{id}` | deprovision user + delete namespace |
 
 **Projects (user-scoped)**
 
 | Method | Path | Action |
 |--------|------|--------|
-| `POST` | `/api/users/{uslug}/projects` | create project Deployment + PVC |
+| `POST` | `/api/users/{uslug}/projects` | create project (delegates K8s resources to controller via NATS) |
 | `GET` | `/api/users/{uslug}/projects` | list projects (reads NATS KV) |
 | `GET` | `/api/users/{uslug}/projects/{pslug}` | get project status |
 | `DELETE` | `/api/users/{uslug}/projects/{pslug}` | delete project (PVC retained unless `?purge=true`) |
+
+**Host management (user-scoped)**
+
+| Method | Path | Action |
+|--------|------|--------|
+| `GET` | `/api/users/{uslug}/hosts` | list hosts owned by or granted to user |
+| `POST` | `/api/users/{uslug}/hosts/code` | generate 6-char device code for BYOH host registration (accepts `{publicKey}`) |
+| `GET` | `/api/users/{uslug}/hosts/code/{code}` | poll device-code status (`pending` → `completed`) |
+| `POST` | `/api/hosts/register` | redeem device code from dashboard with `{code, name}` |
+| `PUT` | `/api/users/{uslug}/hosts/{hslug}` | update host display name |
+| `DELETE` | `/api/users/{uslug}/hosts/{hslug}` | remove a host (cascades to projects + sessions) |
+
+**Cluster admin (admin-only, bearer token + `is_admin` check)**
+
+| Method | Path | Action |
+|--------|------|--------|
+| `POST` | `/admin/clusters` | register a new cluster (`{slug, name, jsDomain, leafUrl, directNatsUrl?}`) |
+| `GET` | `/admin/clusters` | list registered clusters |
+| `POST` | `/admin/clusters/{cslug}/grants` | grant user access to cluster (`{userSlug}`) |
+| `DELETE` | `/admin/clusters/{cslug}` | remove cluster (deletes all host rows for that cluster slug) |
 
 **SCIM 2.0**
 
@@ -638,25 +651,13 @@ Each step is idempotent. The reconciler owns all created resources via `controll
 | `DELETE` | `/scim/v2/Users/{id}` | IdP deprovisions user |
 | `GET` | `/scim/v2/Users` | IdP syncs user list |
 
-**Break-glass admin** (port `:9090`, never exposed via nginx)
+**Break-glass admin** (port `:9091`, loopback-only, never exposed via nginx)
 
 ```
-POST   /admin/projects           create project
-DELETE /admin/projects/{id}      delete project
-GET    /admin/projects           list projects (reads Postgres, not NATS KV)
-POST   /admin/sessions/{id}/stop kill session
+GET    /metrics                  Prometheus metrics
 ```
 
-Authenticated via static bearer token in K8s Secret (`mclaude-admin-token`).
-
-**Cluster admin**
-
-| Old | New |
-|-----|-----|
-| `POST /admin/clusters` | `POST /admin/clusters` |
-| `GET /admin/clusters/{id}` | `GET /admin/clusters/{cslug}` |
-| `POST /admin/clusters/{id}/members` | `POST /admin/clusters/{cslug}/members` |
-| `DELETE /admin/clusters/{id}/members/{userId}` | `DELETE /admin/clusters/{cslug}/members/{uslug}` |
+The `/admin/*` routes (cluster register, grant, user management, session stop) are served on the **main** port (8080) and protected by per-user `Authorization: Bearer <token>` plus a server-side `users.is_admin` check — see "Users (admin)" and "Cluster admin" sections above.
 
 ### Postgres Schema
 
@@ -664,46 +665,89 @@ Authenticated via static bearer token in K8s Secret (`mclaude-admin-token`).
 CREATE TABLE users (
     id            TEXT PRIMARY KEY,
     slug          TEXT NOT NULL UNIQUE,
-    display_name  TEXT NOT NULL,
-    email         TEXT UNIQUE,
-    password_hash TEXT,              -- null for SSO-only users
-    google_id     TEXT UNIQUE,
-    created_at    TIMESTAMPTZ DEFAULT now(),
-    last_login_at TIMESTAMPTZ
+    email         TEXT UNIQUE NOT NULL,
+    name          TEXT NOT NULL,
+    password_hash TEXT NOT NULL DEFAULT '',
+    oauth_id      TEXT,
+    is_admin      BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE nats_credentials (
-    user_id    TEXT REFERENCES users(id) ON DELETE CASCADE,
-    nkey_seed  TEXT NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT now()
+CREATE TABLE hosts (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    slug            TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    type            TEXT NOT NULL CHECK (type IN ('machine', 'cluster')),
+    role            TEXT NOT NULL DEFAULT 'owner' CHECK (role IN ('owner', 'user')),
+    js_domain       TEXT,
+    leaf_url        TEXT,
+    account_jwt     TEXT,
+    direct_nats_url TEXT,
+    public_key      TEXT,
+    user_jwt        TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_seen_at    TIMESTAMPTZ,
+    UNIQUE (user_id, slug),
+    CHECK (type = 'machine' OR (js_domain IS NOT NULL AND leaf_url IS NOT NULL AND account_jwt IS NOT NULL))
+);
+
+CREATE TABLE projects (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL,
+    slug            TEXT NOT NULL DEFAULT '',
+    git_url         TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'active',
+    host_id         TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    git_identity_id TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX projects_user_id_host_id_slug_uniq ON projects (user_id, host_id, slug);
+
+CREATE TABLE oauth_connections (
+    id               TEXT PRIMARY KEY,
+    user_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider_id      TEXT NOT NULL,
+    provider_type    TEXT NOT NULL,
+    auth_type        TEXT NOT NULL DEFAULT 'oauth',
+    base_url         TEXT NOT NULL,
+    display_name     TEXT NOT NULL DEFAULT '',
+    provider_user_id TEXT NOT NULL,
+    username         TEXT NOT NULL,
+    scopes           TEXT NOT NULL DEFAULT '',
+    token_expires_at TIMESTAMPTZ,
+    connected_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(user_id, base_url, provider_user_id)
 );
 ```
 
-Schema migrations managed by dbmate init container on control-plane Deployment.
+Schema applied on startup via idempotent DDL (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`). NATS credentials are not stored in Postgres — per-host user JWTs are signed by the account key from the `mclaude-system/operator-keys` K8s Secret and stored in `hosts.user_jwt`; BYOH machine NKey seeds live on disk at `~/.mclaude/hosts/{hslug}/nkey.seed`.
 
 ### User Provisioning Flow
 
-1. User created (local POST /users, SSO first login, or SCIM push)
-2. INSERT into Postgres users table (slug auto-derived from display name/email)
-3. User namespace and RBAC created by reconciler when first MCProject CR is created
+1. User created (local POST /admin/users, SSO first login, or SCIM push)
+2. INSERT into Postgres users table (slug auto-derived from name/email)
+3. Default `local` machine host created for the user in the `hosts` table
+4. K8s namespace and RBAC created by `mclaude-controller-k8s` when first project is provisioned on a cluster host
 
 ### User Deprovision Flow
 
 1. DELETE /users/{id} (or SCIM DELETE)
 2. Revoke user's NATS JWT via account JWT revocations
 3. NATS broker terminates all active connections immediately
-4. DELETE from Postgres (cascades to nats_credentials)
-5. Delete all MCProject CRs → reconciler garbage-collects owned resources
-6. `kubectl delete namespace mclaude-{userId}` — catches anything the reconciler didn't own
+4. DELETE from Postgres (cascades to hosts, projects, oauth_connections)
+5. Publish NATS delete requests to affected controllers for resource cleanup
+6. Controllers tear down owned resources (K8s namespaces for cluster hosts, local worktrees for machine hosts)
 
 ### Project Provisioning Flow
 
-1. Client publishes `mclaude.users.{uslug}.api.projects.create`
-2. Control-plane creates MCProject CR in mclaude-system namespace
-3. Writes Project JSON to NATS KV `mclaude-projects/{uslug}.{pslug}`
-4. Replies with projectId immediately (don't wait for provisioning)
-5. Reconciler provisions namespace, RBAC, secrets, PVCs, Deployment
-6. Pod starts, session-agent connects to NATS
+1. SPA calls `POST /api/users/{uslug}/projects` with `{name, hostSlug, gitUrl?}`
+2. Control-plane writes Postgres `projects` row (with `host_id` resolved from `(user_id, hostSlug)`)
+3. Control-plane writes Project JSON to NATS KV `mclaude-projects` at key `{uslug}.{hslug}.{pslug}`
+4. Control-plane publishes NATS request to `mclaude.users.{uslug}.hosts.{hslug}.api.projects.provision`
+5. Controller (k8s or local) provisions resources and replies with success/failure
+6. Control-plane returns result to SPA
 
 ---
 
@@ -970,6 +1014,7 @@ exec session-agent \
     --nats-creds  "/home/node/.user-secrets/nats-creds" \
     --user-id     "${USER_ID}" \
     --user-slug   "${USER_SLUG}" \
+    --host        "${HOST_SLUG}" \
     --project-id  "${PROJECT_ID}" \
     --project-slug "${PROJECT_SLUG}" \
     --data-dir    /data \
@@ -983,6 +1028,7 @@ exec session-agent \
 | `GIT_URL` | Deployment env (from project-config ConfigMap) | Git repo URL |
 | `USER_ID` | Deployment env | User UUID |
 | `USER_SLUG` | Deployment env | User typed slug |
+| `HOST_SLUG` | Deployment env | Host typed slug (injected by mclaude-controller-k8s) |
 | `PROJECT_ID` | Deployment env | Project UUID |
 | `PROJECT_SLUG` | Deployment env | Project typed slug |
 | `NATS_URL` | Deployment env | NATS connection URL |
@@ -1007,18 +1053,20 @@ cmd.Dir = "/data/worktrees/" + branch
 cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 ptmx, _ := pty.Start(cmd)
 
-// PTY output → NATS (raw bytes, max 4KB per message)
+// PTY output → NATS (raw bytes, max 4KB per message, host-scoped subject)
+termOutSubj := subj.UserHostProjectAPITerminal(userSlug, hostSlug, projectSlug, termId+".output")
 go func() {
     buf := make([]byte, 4096)
     for {
         n, _ := ptmx.Read(buf)
-        nats.Publish("terminal."+id+".output", buf[:n])
+        nats.Publish(termOutSubj, buf[:n])
     }
 }()
 
 // NATS → PTY input
+termInSubj := subj.UserHostProjectAPITerminal(userSlug, hostSlug, projectSlug, termId+".input")
 go func() {
-    sub := nats.Subscribe("terminal."+id+".input")
+    sub := nats.Subscribe(termInSubj)
     for msg := range sub.Chan() {
         ptmx.Write(msg.Data)
     }
@@ -1051,7 +1099,7 @@ Mobile browser first — enterprise constraint.
 - **Desktop browser** — same SPA
 - **Framework**: React 18
 
-**Real-time events**: client connects to NATS via `/nats` WebSocket proxy. Subscribes to `mclaude.users.{uslug}.*.projects.{pslug}.events.>` (wildcard on host). Events are raw stream-json.
+**Real-time events**: client connects to NATS via `/nats` WebSocket proxy. Subscribes to `mclaude.users.{uslug}.hosts.*.projects.{pslug}.events.>` (wildcard on host). Events are raw stream-json.
 
 **Rendering**: the SPA consumes stream-json event types:
 - `stream_event` → live streaming text token-by-token
