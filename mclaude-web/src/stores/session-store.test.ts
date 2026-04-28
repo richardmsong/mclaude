@@ -224,4 +224,64 @@ describe('SessionStore', () => {
     })
   })
 
+  // ── ADR-0048 regression ───────────────────────────────────────────────────
+  // App.tsx passes authState.userId (UUID) — not authState.userSlug — as the
+  // userSlug argument to SessionStore so that KV watches match existing
+  // UUID-prefixed keys in mclaude-sessions and mclaude-projects.
+  describe('ADR-0048 regression — SessionStore must use userId (UUID) for KV prefix', () => {
+    const userId = '550e8400-e29b-41d4-a716-446655440000'
+    const userSlug = 'dev'
+
+    it('receives UUID-prefixed session data when constructed with UUID as userSlug', () => {
+      const nats = new MockNATSClient()
+      // App.tsx passes userId as the userSlug argument to SessionStore (ADR-0048 fix)
+      const s = new SessionStore(nats, userId, userId)
+      s.startWatching()
+
+      const session = makeSessionKVState({ id: 'session-uuid', projectId: 'proj-1' })
+      nats.kvSet('mclaude-sessions', `${userId}.local.proj-1.session-uuid`, session)
+      expect(s.sessions.get('session-uuid')).toBeDefined()
+
+      s.stopWatching()
+    })
+
+    it('does NOT receive slug-prefixed session data when constructed with UUID as userSlug', () => {
+      const nats = new MockNATSClient()
+      // If App.tsx mistakenly passed userSlug='dev' instead of userId (UUID),
+      // SessionStore would watch 'dev.>' and miss all UUID-keyed entries.
+      // This test documents the correct behavior: UUID-constructed store must
+      // ignore slug-prefixed entries.
+      const s = new SessionStore(nats, userId, userId)
+      s.startWatching()
+
+      const session = makeSessionKVState({ id: 'session-slug', projectId: 'proj-1' })
+      nats.kvSet('mclaude-sessions', `${userSlug}.local.proj-1.session-slug`, session)
+      expect(s.sessions.get('session-slug')).toBeUndefined()
+
+      s.stopWatching()
+    })
+
+    it('receives UUID-prefixed project data when constructed with UUID as userSlug', () => {
+      const nats = new MockNATSClient()
+      const s = new SessionStore(nats, userId, userId)
+      s.startWatching()
+
+      nats.kvSet('mclaude-projects', `${userId}.proj-1`, makeProjectKVState({ id: 'proj-1', name: 'Test' }))
+      expect(s.projects.get('proj-1')).toBeDefined()
+
+      s.stopWatching()
+    })
+
+    it('does NOT receive slug-prefixed project data when constructed with UUID as userSlug', () => {
+      const nats = new MockNATSClient()
+      const s = new SessionStore(nats, userId, userId)
+      s.startWatching()
+
+      nats.kvSet('mclaude-projects', `${userSlug}.proj-1`, makeProjectKVState({ id: 'proj-1' }))
+      expect(s.projects.get('proj-1')).toBeUndefined()
+
+      s.stopWatching()
+    })
+  })
+
 })

@@ -100,4 +100,51 @@ describe('HeartbeatMonitor', () => {
       expect(changes.every(c => c.online === true)).toBe(true)
     })
   })
+
+  // ── ADR-0048 regression ───────────────────────────────────────────────────
+  // App.tsx passes authState.userSlug ?? authState.userId to HeartbeatMonitor
+  // so that it watches slug-keyed mclaude-hosts entries (e.g. "dev.local")
+  // written by the control-plane per ADR-0046.
+  describe('ADR-0048 regression — HeartbeatMonitor uses userSlug (not userId) for mclaude-hosts KV prefix', () => {
+    const userId = '550e8400-e29b-41d4-a716-446655440000'
+    const userSlug = 'dev'
+
+    it('watches with slug prefix when userSlug differs from userId', () => {
+      const nats = new MockNATSClient()
+      // App.tsx passes userSlug ?? userId as the third argument (ADR-0048)
+      const hb = new HeartbeatMonitor(nats, userId, userSlug)
+      hb.start()
+
+      // Slug-prefixed key — must be received
+      nats.kvSet('mclaude-hosts', `${userSlug}.host-1`, { online: true })
+      expect(hb.isHealthy('host-1')).toBe(true)
+
+      hb.stop()
+    })
+
+    it('does NOT receive UUID-prefixed host data when constructed with slug', () => {
+      const nats = new MockNATSClient()
+      // When userSlug='dev' is passed, mclaude-hosts watch pattern is 'dev.*'.
+      // A UUID-prefixed entry like '550e8400-….host-1' must NOT match.
+      const hb = new HeartbeatMonitor(nats, userId, userSlug)
+      hb.start()
+
+      nats.kvSet('mclaude-hosts', `${userId}.host-1`, { online: true })
+      expect(hb.isHealthy('host-1')).toBe(false)
+
+      hb.stop()
+    })
+
+    it('falls back to userId prefix when userSlug is not provided', () => {
+      const nats = new MockNATSClient()
+      // When no third arg is given, userSlug defaults to userId (UUID).
+      const hb = new HeartbeatMonitor(nats, userId)
+      hb.start()
+
+      nats.kvSet('mclaude-hosts', `${userId}.host-1`, { online: true })
+      expect(hb.isHealthy('host-1')).toBe(true)
+
+      hb.stop()
+    })
+  })
 })
