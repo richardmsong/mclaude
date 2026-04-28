@@ -315,7 +315,7 @@ export function App() {
   useEffect(() => {
     if (authState.status === 'authenticated' && authState.userId) {
       const uslug = authState.userSlug ?? authState.userId
-      const store = new SessionStore(natsClient, authState.userId, authState.userId)
+      const store = new SessionStore(natsClient, authState.userId, authState.userSlug ?? authState.userId)
       const hb = new HeartbeatMonitor(natsClient, authState.userId, uslug)
       store.startWatching()
       hb.start()

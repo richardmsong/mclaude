@@ -62,8 +62,8 @@ export class SessionStore {
     })
     this._unwatchers.push(unwatch1)
 
-    // Watch projects — key format: "{uslug}.{pslug}" (ADR-0024 typed-slug scheme)
-    const projectKey = kvKeyProjectsForUser(this.userSlug as UserSlug)
+    // Watch projects — key format: "{userId}.{projectId}" (UUID-based keys)
+    const projectKey = kvKeyProjectsForUser(this.userId as UserSlug)
     const unwatch2 = this.natsClient.kvWatch('mclaude-projects', projectKey, (entry) => {
       try {
         const state = JSON.parse(new TextDecoder().decode(entry.value)) as ProjectKVState
