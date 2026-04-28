@@ -1,8 +1,9 @@
 # Quota-Aware Session Scheduling
 
-**Status**: accepted
+**Status**: superseded
 **Status history**:
 - 2026-04-14: accepted
+- 2026-04-28: superseded by adr-0044-scheduling-and-quota.md
 
 
 > **Note:** The `scheduledSessionPrompt` template, the `specPath → component`

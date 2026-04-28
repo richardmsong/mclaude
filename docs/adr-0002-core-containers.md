@@ -1,8 +1,9 @@
 # Core Containers Plan
 
-**Status**: accepted
+**Status**: superseded
 **Status history**:
 - 2026-04-10: accepted
+- 2026-04-28: superseded by adr-0042-core-platform-architecture.md
 
 
 Development of the mclaude container images and application logic. Cloud-agnostic — no deployment-specific details. This plan contains enough architectural context for an agent or developer to build the full system without access to any deployment-specific documentation.

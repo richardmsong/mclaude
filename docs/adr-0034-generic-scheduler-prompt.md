@@ -1,9 +1,10 @@
 # ADR: Generic Scheduler Primitive — Decouple Scheduling from SDD
 
-**Status**: accepted
+**Status**: superseded
 **Status history**:
 - 2026-04-24: draft
 - 2026-04-26: accepted — paired with `docs/spec-state-schema.md` updates (JobEntry schema, lifecycle event payloads) and supersession note prepended to `docs/adr-0009-quota-aware-scheduling.md`
+- 2026-04-28: superseded by adr-0044-scheduling-and-quota.md
 
 > Supersedes the `scheduledSessionPrompt` template, the `specPath → component`
 > mapping, the `SESSION_JOB_COMPLETE:` completion marker, the

@@ -1,8 +1,9 @@
 # Replay User Messages
 
-**Status**: accepted
+**Status**: superseded
 **Status history**:
 - 2026-04-15: accepted
+- 2026-04-28: superseded by adr-0045-client-architecture.md
 
 
 ## Overview

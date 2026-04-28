@@ -1,9 +1,10 @@
 # mclaude Platform Architecture
 
-**Status**: draft
+**Status**: superseded
 **Status history**:
 - 2026-04-10: accepted
 - 2026-04-19: reverted to draft — retroactive accepted tag incorrect; implementation not confirmed, needs per-ADR review
+- 2026-04-28: superseded by adr-0042-core-platform-architecture.md
 
 
 ## Overview

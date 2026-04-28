@@ -1,9 +1,10 @@
 # Backgrounded Shell Survival Across Pod Restarts
 
-**Status**: draft
+**Status**: superseded
 **Status history**:
 - 2026-04-19: accepted
 - 2026-04-19: reverted to draft — retroactive accepted tag incorrect; implementation not confirmed, needs per-ADR review
+- 2026-04-28: superseded by adr-0043-graceful-upgrades.md
 
 
 ## Overview
