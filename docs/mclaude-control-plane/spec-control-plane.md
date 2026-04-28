@@ -107,7 +107,7 @@ Per ADR-0035 the control-plane communicates with controllers over host-scoped NA
 
 | Subject | Trigger | Description |
 |---------|---------|-------------|
-| `mclaude.users.{uslug}.hosts.{hslug}.api.projects.provision` | `POST /api/users/{uslug}/projects` | Asks the host's controller to create the per-project resources (K8s Deployment + PVCs + Secrets for cluster hosts; `~/.mclaude/projects/{pslug}/worktree/` for machine hosts). |
+| `mclaude.users.{uslug}.hosts.{hslug}.api.projects.provision` | `POST /api/users/{uslug}/projects` | Asks the host's controller to create the per-project resources. Payload: `{userID, userSlug, hostSlug, projectID, projectSlug, gitUrl, gitIdentityId}` — includes both UUIDs (for K8s resource naming) and slugs (for NATS subjects + env vars). K8s Deployment + PVCs + Secrets for cluster hosts; `~/.mclaude/projects/{pslug}/worktree/` for machine hosts. |
 | `mclaude.users.{uslug}.hosts.{hslug}.api.projects.update` | `PATCH /api/projects/{id}` | Asks the controller to apply project metadata changes. |
 | `mclaude.users.{uslug}.hosts.{hslug}.api.projects.delete` | Project delete | Asks the controller to tear down per-project resources. |
 
@@ -154,7 +154,7 @@ The control-plane does, however, mount one K8s Secret as a file:
 6. Ensures KV buckets exist (`mclaude-projects`, `mclaude-hosts`, `mclaude-sessions`, `mclaude-job-queue`) — `mclaude-hosts` must exist before the `$SYS` subscriber starts so CONNECT events can write to it immediately.
 7. Subscribes to `$SYS.ACCOUNT.*.CONNECT` and `$SYS.ACCOUNT.*.DISCONNECT` for host liveness.
 8. Starts the GitLab token refresh goroutine (every 15 minutes).
-9. Optionally seeds a dev user, a default `local` machine host for that user, and a default project on the `local` host when `DEV_SEED=true`. Also writes the `local` host's `mclaude-hosts` KV entry with `online=true` (dev-only path — the auto-created `local` host has no NKey, so no `$SYS` CONNECT event fires for it).
+9. Optionally seeds a dev user, a default `local` machine host for that user, and a default project on the `local` host when `DEV_SEED=true`. Also writes the `local` host's `mclaude-hosts` KV entry with `online=true` (dev-only path — the auto-created `local` host has no NKey, so no `$SYS` CONNECT event fires for it). After writing KV entries, publishes a NATS provisioning request (`mclaude.users.{uslug}.hosts.local.api.projects.create`) for the default project so the K8s controller creates the MCProject CR and session-agent pod (ADR-0050). Non-fatal on failure (controller may not be running yet during startup race — controller will process the project when the admin triggers provisioning).
 10. Starts the main HTTP listener and the loopback metrics listener.
 
 If `BOOTSTRAP_ADMIN_EMAIL` is set on first boot, control-plane upserts a `users` row with that email, `is_admin=true`, `oauth_id=NULL`. The first OAuth login matching that email links the OAuth identity to the bootstrap row.
@@ -195,7 +195,7 @@ A background goroutine runs every 15 minutes, querying `oauth_connections` for G
 3. Resolves `host_id` from `(user_id, hostSlug)`.
 4. Creates a Postgres `projects` row (`host_id`, `slug`, `name`, `git_url`, optional `git_identity_id`).
 5. Writes the project to the `mclaude-projects` KV bucket (key `{uslug}.{hslug}.{pslug}`).
-6. Publishes a NATS request on `mclaude.users.{uslug}.hosts.{hslug}.api.projects.provision` with `{userSlug, hostSlug, projectSlug, gitUrl, gitIdentityId}`. Awaits the controller's reply (`PROVISION_TIMEOUT_SECONDS`).
+6. Publishes a NATS request on `mclaude.users.{uslug}.hosts.{hslug}.api.projects.provision` with `{userID, userSlug, hostSlug, projectID, projectSlug, gitUrl, gitIdentityId}`. Awaits the controller's reply (`PROVISION_TIMEOUT_SECONDS`).
    - For cluster hosts: `mclaude-controller-k8s` (subscribed to `mclaude.users.*.hosts.{cslug}.api.projects.>`) creates the `MCProject` CR in `mclaude-system` and reconciles namespace/RBAC/PVCs/Secrets/Deployment.
    - For machine hosts: `mclaude-controller-local` (subscribed to its own user/host's wildcard) materializes `~/.mclaude/projects/{pslug}/worktree/` and starts a session-agent subprocess.
 7. Replies to the SPA with `{projectId, slug, hostSlug, status}`.

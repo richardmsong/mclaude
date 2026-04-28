@@ -320,8 +320,8 @@ These are fire-and-forget messages on core NATS (not JetStream). No persistence.
 
 | Subject Pattern | Publisher | Subscriber | Payload |
 |----------------|-----------|------------|---------|
-| `mclaude.users.{uslug}.hosts.{hslug}.api.projects.provision` | control-plane | controller (request/reply, 10s timeout) | `{userSlug, hostSlug, projectSlug, gitUrl, gitIdentityId}` |
-| `mclaude.users.{uslug}.hosts.{hslug}.api.projects.create` | SPA, control-plane | controller (request/reply) | `{userSlug, hostSlug, projectSlug, gitUrl}` |
+| `mclaude.users.{uslug}.hosts.{hslug}.api.projects.provision` | control-plane | controller (request/reply, 10s timeout) | `{userID, userSlug, hostSlug, projectID, projectSlug, gitUrl, gitIdentityId}` |
+| `mclaude.users.{uslug}.hosts.{hslug}.api.projects.create` | SPA, control-plane | controller (request/reply) | `{userID, userSlug, hostSlug, projectID, projectSlug, gitUrl}` |
 | `mclaude.users.{uslug}.hosts.{hslug}.api.projects.update` | control-plane | controller (request/reply) | `{userSlug, hostSlug, projectSlug, …}` |
 | `mclaude.users.{uslug}.hosts.{hslug}.api.projects.delete` | control-plane | controller (request/reply) | `{userSlug, hostSlug, projectSlug}` |
 | `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.input` | SPA, daemon | session-agent (JetStream, cmd consumer) | `{session_id, type, message}` — `session_id` is the mclaude UUID from sessions.create |
@@ -380,8 +380,10 @@ Name: `{projectId}`
 
 ```yaml
 spec:
-  userId: string         # required
-  projectId: string      # required
+  userId: string         # required — UUID v4
+  projectId: string      # required — UUID v4
+  userSlug: string       # required — typed slug (ADR-0050)
+  projectSlug: string    # required — typed slug (ADR-0050)
   gitUrl: string         # optional
   gitIdentityId: string  # optional — oauth_connections.id for git credential resolution
 status:
@@ -462,7 +464,7 @@ Readers: reconciler — watches this ConfigMap (filtered by name + namespace) in
 - Contents: shared Nix store (cached tools)
 - Mounted at: `/nix` in session-agent pod
 
-### Deployment: `mclaude-session-agent-{projectId}` (in `mclaude-{userId}`)
+### Deployment: `mclaude-session-agent-{projectId}` (in `mclaude-{userID}`)
 
 - Replicas: 1
 - Strategy: `Recreate` — old pod must exit before new pod starts; prevents two pods consuming the same durable JetStream consumers simultaneously (ADR-0043)
@@ -578,6 +580,17 @@ subscribe: mclaude.users.*.hosts.{cluster-slug}.>, _INBOX.>, $JS.*.API.>
 ```
 
 The wildcard at the user level lets the controller receive provisioning requests from every user granted access to its cluster.
+
+### Per-session-agent JWT permissions
+
+Issued by `mclaude-controller-k8s` (`IssueSessionAgentJWT(userID, userSlug, accountKP)`), signed by the account signing key. Stored in the per-user `user-secrets` Secret in the user namespace. The session-agent uses this JWT to connect to worker NATS (or hub NATS in the degenerate single-cluster case).
+
+```
+publish:   mclaude.{userID}.>, mclaude.users.{userSlug}.hosts.*.>, _INBOX.>, $JS.*.API.>
+subscribe: mclaude.{userID}.>, mclaude.users.{userSlug}.hosts.*.>, _INBOX.>, $JS.*.API.>
+```
+
+The `mclaude.{userID}.>` prefix is retained for backward compatibility with UUID-format KV keys (see ADR-0050 — key format migration deferred). `mclaude.users.{userSlug}.hosts.*.>` enables ADR-0035 host-scoped subjects. `$JS.*.API.>` is required for JetStream stream/consumer/KV operations. `_INBOX.>` is required for NATS request/reply patterns.
 
 ### Single-cluster degenerate case
 
