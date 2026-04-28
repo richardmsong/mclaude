@@ -151,8 +151,8 @@ The control-plane does, however, mount one K8s Secret as a file:
 3. Loads operator + account NKeys from `OPERATOR_KEYS_PATH` (the mounted Secret produced by the `init-keys` Helm pre-install Job). Fatal exit if missing — control-plane cannot mint JWTs without them.
 4. Creates the HTTP server with all route handlers.
 5. Connects to hub NATS (retry on failure, unlimited reconnects).
-6. Subscribes to `$SYS.ACCOUNT.*.CONNECT` and `$SYS.ACCOUNT.*.DISCONNECT` for host liveness.
-7. Ensures KV buckets exist (`mclaude-projects`, `mclaude-hosts`, `mclaude-sessions`, `mclaude-job-queue`).
+6. Ensures KV buckets exist (`mclaude-projects`, `mclaude-hosts`, `mclaude-sessions`, `mclaude-job-queue`) — `mclaude-hosts` must exist before the `$SYS` subscriber starts so CONNECT events can write to it immediately.
+7. Subscribes to `$SYS.ACCOUNT.*.CONNECT` and `$SYS.ACCOUNT.*.DISCONNECT` for host liveness.
 8. Starts the GitLab token refresh goroutine (every 15 minutes).
 9. Optionally seeds a dev user, a default `local` machine host for that user, and a default project on the `local` host when `DEV_SEED=true`. Also writes the `local` host's `mclaude-hosts` KV entry with `online=true` (dev-only path — the auto-created `local` host has no NKey, so no `$SYS` CONNECT event fires for it).
 10. Starts the main HTTP listener and the loopback metrics listener.

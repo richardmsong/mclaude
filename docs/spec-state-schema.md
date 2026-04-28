@@ -15,7 +15,7 @@ Single PostgreSQL instance in the control-plane cluster. Managed by `mclaude-con
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
 | `id` | TEXT | PRIMARY KEY | UUID v4 |
-| `slug` | TEXT | UNIQUE NOT NULL | Typed-slug identifier used in subjects, URLs, and KV keys. Derived at user creation as `{slugify(name or email_local_part)}-{domain_first_segment}` with numeric suffix on collision. Immutable after creation; email changes do not rewrite the slug. |
+| `slug` | TEXT | UNIQUE NOT NULL | Typed-slug identifier used in subjects, URLs, and KV keys. Derived at user creation as `lower(regexp_replace(split_part(email, '@', 1), '[^a-zA-Z0-9]+', '-', 'g'))` (email local-part only, slugified) with numeric suffix on collision. Immutable after creation; email changes do not rewrite the slug. |
 | `email` | TEXT | UNIQUE NOT NULL | Login email |
 | `name` | TEXT | NOT NULL | Display name (free-form UTF-8, max 128 chars, mutable) |
 | `password_hash` | TEXT | NOT NULL DEFAULT '' | bcrypt hash (legacy / dev-seed; production users authenticate via OAuth) |
@@ -327,8 +327,8 @@ These are fire-and-forget messages on core NATS (not JetStream). No persistence.
 | `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.input` | SPA, daemon | session-agent (JetStream, cmd consumer) | `{session_id, type, message}` — `session_id` is the mclaude UUID from sessions.create |
 | `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.control` | SPA | session-agent (JetStream, ctl consumer) | `{type, sessionSlug, request}` |
 | `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.create` | SPA, daemon | session-agent (JetStream, cmd consumer; publish + KV-watch, no reply) | `{name, branch, cwd, joinWorktree, extraFlags, permPolicy, quotaMonitor, requestId}` — success: session appears in KV; error: `api_error` event on `events._api` |
-| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.delete` | SPA, daemon | session-agent | `{sessionSlug}` |
-| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.restart` | SPA | session-agent (JetStream, cmd consumer) | `{sessionSlug, extraFlags?}` — kills process, optionally updates extraFlags in KV, relaunches with `--resume` |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.delete` | SPA, daemon | session-agent | `{sessionSlug, requestId}` |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.restart` | SPA | session-agent (JetStream, cmd consumer) | `{sessionSlug, extraFlags?, requestId}` — kills process, optionally updates extraFlags in KV, relaunches with `--resume` |
 | `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.create` | SPA | session-agent | Spawn shell |
 | `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.delete` | SPA | session-agent | Kill terminal |
 | `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.resize` | SPA | session-agent | Resize PTY |
@@ -444,7 +444,7 @@ Static Helm-templated ConfigMap containing session-agent pod spec values:
 | `nixPvcStorageClass` | Nix PVC storage class |
 
 Writers: Helm install/upgrade
-Readers: reconciler (reads on startup to template Deployments)
+Readers: reconciler — watches this ConfigMap (filtered by name + namespace) in addition to reading it on startup; on change, re-enqueues all `MCProject` CRs so updated pod specs (e.g. new image) are applied without a manual `helm upgrade` (ADR-0043)
 
 ### PVC: `project-{projectId}` (in `mclaude-{userId}`)
 
@@ -465,8 +465,10 @@ Readers: reconciler (reads on startup to template Deployments)
 ### Deployment: `mclaude-session-agent-{projectId}` (in `mclaude-{userId}`)
 
 - Replicas: 1
+- Strategy: `Recreate` — old pod must exit before new pod starts; prevents two pods consuming the same durable JetStream consumers simultaneously (ADR-0043)
 - Volumes: project PVC, nix PVC, user-config ConfigMap, user-secrets Secret
 - Container: session-agent image with env vars `USER_ID`, `PROJECT_ID` (UUIDs for FK joins), `USER_SLUG`, `PROJECT_SLUG`, `HOST_SLUG` (slugs for NATS subject and KV key construction per ADR-0024 + ADR-0035)
+- `CLAUDE_CODE_TMPDIR`: set to `/data/claude-tmp` (PVC subPath `claude-tmp` on the `project-data` volume) so shell output files persist across pod restarts
 - Restart policy: Always (pod restarts trigger `--resume` recovery)
 
 `mclaude-controller-k8s` resolves `USER_SLUG`, `HOST_SLUG`, and `PROJECT_SLUG` directly from the host-scoped NATS subject of the provision request (`mclaude.users.{uslug}.hosts.{hslug}.api.projects.provision`) plus the request payload. The controller does not read Postgres — control-plane owns Postgres. Session slugs are per-session and flow through NATS messages / KV state; they are not pod env vars.
