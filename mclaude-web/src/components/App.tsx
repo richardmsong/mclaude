@@ -316,7 +316,7 @@ export function App() {
     if (authState.status === 'authenticated' && authState.userId) {
       const uslug = authState.userSlug ?? authState.userId
       const store = new SessionStore(natsClient, authState.userId, uslug)
-      const hb = new HeartbeatMonitor(natsClient, authState.userId, 60_000, uslug)
+      const hb = new HeartbeatMonitor(natsClient, authState.userId, uslug)
       store.startWatching()
       hb.start()
       const unsub = store.onSessionChanged(() => setSessionVersion(v => v + 1))

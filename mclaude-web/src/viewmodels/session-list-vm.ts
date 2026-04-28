@@ -83,7 +83,7 @@ export class SessionListVM {
       id: p.id,
       name: p.name,
       status: p.status,
-      healthy: this.heartbeatMonitor.isHealthy(p.id),
+      healthy: this.heartbeatMonitor.isHealthy(p.hostSlug ?? 'local'),
       hostSlug: p.hostSlug ?? 'local',
       sessions: this.sessionStore.getSessionsForProject(p.id).map(s => ({
         id: s.id,

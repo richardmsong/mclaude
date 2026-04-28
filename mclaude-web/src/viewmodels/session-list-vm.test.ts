@@ -99,11 +99,10 @@ describe('SessionListVM', () => {
       expect(project.healthy).toBe(false)
     })
 
-    it('P6: healthy is true after recent heartbeat arrives', () => {
-      mockNats.kvSet('mclaude-projects', 'user-1.project-1', makeProjectKVState({ id: 'project-1', name: 'Alpha' }))
+    it('P6: healthy is true after online:true heartbeat arrives for the host slug', () => {
+      mockNats.kvSet('mclaude-projects', 'user-1.project-1', makeProjectKVState({ id: 'project-1', name: 'Alpha', hostSlug: 'host-1' }))
       heartbeat.start()
-      const now = new Date().toISOString()
-      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', { ts: now })
+      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: true })
       expect(vm.projects[0]!.healthy).toBe(true)
     })
   })

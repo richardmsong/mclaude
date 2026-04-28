@@ -1,93 +1,75 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { HeartbeatMonitor } from './heartbeat-monitor'
 import { MockNATSClient } from '../testutil/mock-nats'
-
-function makeHeartbeat(ts: string): object {
-  return { ts }
-}
 
 describe('HeartbeatMonitor', () => {
   let mockNats: MockNATSClient
   let monitor: HeartbeatMonitor
 
   beforeEach(() => {
-    vi.useFakeTimers()
     mockNats = new MockNATSClient()
-    // Use a 60s threshold (default)
-    monitor = new HeartbeatMonitor(mockNats, 'user-1', 60_000)
+    monitor = new HeartbeatMonitor(mockNats, 'user-1')
   })
 
   afterEach(() => {
     monitor.stop()
-    vi.useRealTimers()
   })
 
   describe('isHealthy', () => {
     it('returns false when no heartbeat seen', () => {
       monitor.start()
-      expect(monitor.isHealthy('project-1')).toBe(false)
+      expect(monitor.isHealthy('host-1')).toBe(false)
     })
 
-    it('returns true immediately after a recent heartbeat', () => {
+    it('returns true after online:true KV entry arrives', () => {
       monitor.start()
-      const now = new Date().toISOString()
-      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', makeHeartbeat(now))
-      expect(monitor.isHealthy('project-1')).toBe(true)
+      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: true })
+      expect(monitor.isHealthy('host-1')).toBe(true)
     })
 
-    it('returns false when heartbeat is older than threshold', () => {
+    it('returns false after online:false KV entry arrives', () => {
       monitor.start()
-      // Timestamp 90s in the past
-      const old = new Date(Date.now() - 90_000).toISOString()
-      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', makeHeartbeat(old))
-      expect(monitor.isHealthy('project-1')).toBe(false)
+      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: false })
+      expect(monitor.isHealthy('host-1')).toBe(false)
     })
   })
 
   describe('onHealthChanged', () => {
-    it('fires when a project transitions from unknown to healthy', () => {
+    it('fires when a host transitions from unknown to online', () => {
       monitor.start()
-      const changes: Array<{ projectId: string; healthy: boolean }> = []
-      monitor.onHealthChanged((pid, h) => changes.push({ projectId: pid, healthy: h }))
+      const changes: Array<{ hostSlug: string; online: boolean }> = []
+      monitor.onHealthChanged((hslug, online) => changes.push({ hostSlug: hslug, online }))
 
-      const now = new Date().toISOString()
-      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', makeHeartbeat(now))
+      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: true })
 
       expect(changes).toHaveLength(1)
-      expect(changes[0]!.projectId).toBe('project-1')
-      expect(changes[0]!.healthy).toBe(true)
+      expect(changes[0]!.hostSlug).toBe('host-1')
+      expect(changes[0]!.online).toBe(true)
     })
 
-    it('fires when a healthy project transitions to unhealthy on check interval', async () => {
-      monitor.start(1000) // 1s check interval
-      const changes: Array<{ projectId: string; healthy: boolean }> = []
-      monitor.onHealthChanged((pid, h) => changes.push({ projectId: pid, healthy: h }))
+    it('fires when a host transitions from online to offline', () => {
+      monitor.start()
+      const changes: Array<{ hostSlug: string; online: boolean }> = []
+      monitor.onHealthChanged((hslug, online) => changes.push({ hostSlug: hslug, online }))
 
-      // Start with a recent heartbeat — healthy
-      const now = new Date().toISOString()
-      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', makeHeartbeat(now))
-      expect(changes.find(c => c.healthy === true)).toBeDefined()
+      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: true })
+      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: false })
 
-      // Advance time past threshold (60s) + check interval (1s)
-      await vi.advanceTimersByTimeAsync(61_000 + 1_100)
-
-      const unhealthyChange = changes.find(c => c.healthy === false)
-      expect(unhealthyChange).toBeDefined()
-      expect(unhealthyChange?.projectId).toBe('project-1')
+      expect(changes).toHaveLength(2)
+      expect(changes[1]!.hostSlug).toBe('host-1')
+      expect(changes[1]!.online).toBe(false)
     })
 
-    it('does not fire when health does not change', () => {
-      monitor.start(1000)
-      const changes: Array<{ healthy: boolean }> = []
-      monitor.onHealthChanged((_, h) => changes.push({ healthy: h }))
+    it('does not fire when online value does not change', () => {
+      monitor.start()
+      const changes: Array<{ online: boolean }> = []
+      monitor.onHealthChanged((_, online) => changes.push({ online }))
 
-      const now = new Date().toISOString()
-      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', makeHeartbeat(now))
+      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: true })
       const countAfterFirst = changes.length
 
-      // Same timestamp — health should stay the same
-      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', makeHeartbeat(now))
-      // No new change event since health didn't change (still healthy)
+      // Same online value — no change event should fire
+      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: true })
       expect(changes.length).toBe(countAfterFirst)
     })
 
@@ -98,26 +80,24 @@ describe('HeartbeatMonitor', () => {
 
       unsub()
 
-      const now = new Date().toISOString()
-      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', makeHeartbeat(now))
+      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: true })
       expect(changes).toHaveLength(0)
     })
   })
 
   describe('stop', () => {
-    it('stop() cancels the check interval — no further transitions', async () => {
-      monitor.start(1000)
-      const changes: Array<{ healthy: boolean }> = []
-      monitor.onHealthChanged((_, h) => changes.push({ healthy: h }))
+    it('stop() cancels the KV watcher — no further transitions', () => {
+      monitor.start()
+      const changes: Array<{ online: boolean }> = []
+      monitor.onHealthChanged((_, online) => changes.push({ online }))
 
-      const now = new Date().toISOString()
-      mockNats.kvSet('mclaude-hosts', 'user-1.project-1', makeHeartbeat(now))
+      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: true })
 
       monitor.stop()
 
-      // Advance past threshold — check timer is cancelled so no unhealthy event
-      await vi.advanceTimersByTimeAsync(120_000)
-      expect(changes.every(c => c.healthy === true)).toBe(true)
+      // Further KV updates should not trigger listeners after stop
+      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: false })
+      expect(changes.every(c => c.online === true)).toBe(true)
     })
   })
 })
