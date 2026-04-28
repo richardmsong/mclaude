@@ -52,44 +52,40 @@ func TestSessionAgentSubjectPermissions(t *testing.T) {
 	perm := SessionAgentSubjectPermissions("bob456", "bob-slug")
 	// Per ADR-0050 Decision 5: session agents must have _INBOX.>, $JS.API.>,
 	// $JS.*.API.>, the UUID-prefixed subject, and the host-scoped slug subject.
+	// Additionally: KV bucket permissions, JetStream ACK/FC, and direct KV gets.
 	allSubjects := append(perm.PubAllow, perm.SubAllow...)
-	hasInbox := false
-	hasJSDirect := false
-	hasJSDomain := false
-	hasUUID := false
-	hasHostScoped := false
-	for _, s := range allSubjects {
-		if s == "_INBOX.>" {
-			hasInbox = true
+
+	required := []struct {
+		subject string
+		desc    string
+	}{
+		{"_INBOX.>", "_INBOX.>"},
+		{"$JS.API.>", "$JS.API.> (direct worker NATS)"},
+		{"$JS.*.API.>", "$JS.*.API.> (hub domain-prefixed)"},
+		{"mclaude.bob456.>", "mclaude.bob456.> (UUID prefix)"},
+		{"mclaude.users.bob-slug.hosts.*.>", "mclaude.users.bob-slug.hosts.*.> (host-scoped slug)"},
+		{"$KV.mclaude-sessions.>", "$KV.mclaude-sessions.> (session KV)"},
+		{"$KV.mclaude-projects.>", "$KV.mclaude-projects.> (project KV)"},
+		{"$KV.mclaude-hosts.>", "$KV.mclaude-hosts.> (host KV)"},
+		{"$KV.mclaude-job-queue.>", "$KV.mclaude-job-queue.> (job queue KV)"},
+		{"$JS.ACK.>", "$JS.ACK.> (JetStream message acknowledgements)"},
+		{"$JS.FC.>", "$JS.FC.> (JetStream flow control)"},
+		{"$JS.API.DIRECT.GET.>", "$JS.API.DIRECT.GET.> (direct KV gets)"},
+	}
+
+	for _, r := range required {
+		found := false
+		for _, s := range allSubjects {
+			if s == r.subject {
+				found = true
+				break
+			}
 		}
-		if s == "$JS.API.>" {
-			hasJSDirect = true
-		}
-		if s == "$JS.*.API.>" {
-			hasJSDomain = true
-		}
-		if s == "mclaude.bob456.>" {
-			hasUUID = true
-		}
-		if s == "mclaude.users.bob-slug.hosts.*.>" {
-			hasHostScoped = true
+		if !found {
+			t.Errorf("session agent should have %s", r.desc)
 		}
 	}
-	if !hasInbox {
-		t.Error("session agent should have _INBOX.>")
-	}
-	if !hasJSDirect {
-		t.Error("session agent should have $JS.API.> (direct worker NATS)")
-	}
-	if !hasJSDomain {
-		t.Error("session agent should have $JS.*.API.> (hub domain-prefixed)")
-	}
-	if !hasUUID {
-		t.Error("session agent should have mclaude.bob456.>")
-	}
-	if !hasHostScoped {
-		t.Error("session agent should have mclaude.users.bob-slug.hosts.*.>")
-	}
+
 	// PubAllow and SubAllow must be identical per ADR-0050 Decision 5.
 	if len(perm.PubAllow) != len(perm.SubAllow) {
 		t.Errorf("PubAllow and SubAllow should have same length: pub=%d sub=%d", len(perm.PubAllow), len(perm.SubAllow))
@@ -418,6 +414,33 @@ func TestIssueSessionAgentJWT_SubjectScopes(t *testing.T) {
 	}
 	if !containsStr(claims.Permissions.Sub.Allow, "$JS.*.API.>") {
 		t.Error("session-agent sub should have $JS.*.API.> (hub domain-prefixed)")
+	}
+
+	// Session-agent must have KV bucket permissions for session data read/write
+	kvSubjects := []string{
+		"$KV.mclaude-sessions.>",
+		"$KV.mclaude-projects.>",
+		"$KV.mclaude-hosts.>",
+		"$KV.mclaude-job-queue.>",
+	}
+	for _, kv := range kvSubjects {
+		if !containsStr(claims.Permissions.Pub.Allow, kv) {
+			t.Errorf("session-agent pub should have %s", kv)
+		}
+		if !containsStr(claims.Permissions.Sub.Allow, kv) {
+			t.Errorf("session-agent sub should have %s", kv)
+		}
+	}
+
+	// Session-agent must have JetStream ACK, flow control, and direct KV gets
+	jsSubjects := []string{"$JS.ACK.>", "$JS.FC.>", "$JS.API.DIRECT.GET.>"}
+	for _, js := range jsSubjects {
+		if !containsStr(claims.Permissions.Pub.Allow, js) {
+			t.Errorf("session-agent pub should have %s", js)
+		}
+		if !containsStr(claims.Permissions.Sub.Allow, js) {
+			t.Errorf("session-agent sub should have %s", js)
+		}
 	}
 }
 

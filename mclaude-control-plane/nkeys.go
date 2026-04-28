@@ -41,6 +41,13 @@ func SessionAgentSubjectPermissions(userID string, userSlug string) NATSPermissi
 		"_INBOX.>",
 		"$JS.API.>",
 		"$JS.*.API.>",
+		"$KV.mclaude-sessions.>",
+		"$KV.mclaude-projects.>",
+		"$KV.mclaude-hosts.>",
+		"$KV.mclaude-job-queue.>",
+		"$JS.ACK.>",
+		"$JS.FC.>",
+		"$JS.API.DIRECT.GET.>",
 	}
 	return NATSPermissions{
 		PubAllow: perms,
