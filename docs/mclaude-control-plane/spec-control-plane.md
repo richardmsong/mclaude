@@ -41,9 +41,9 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 | `POST` | `/auth/login` | Authenticate with email+password; returns the [Login Response](../spec-state-schema.md#login-response-shape) — per-host user JWT, NKey seed, hub URL, host inventory, and projects |
 | `POST` | `/auth/refresh` | Exchange a valid per-host JWT from the Authorization header for a new JWT (same host scope) |
 | `GET` | `/version` | Returns `minClientVersion` and `serverVersion` |
-| `GET` | `/health` | Returns 200 OK |
-| `GET` | `/healthz` | Kubernetes liveness probe |
-| `GET` | `/readyz` | Kubernetes readiness probe |
+| `GET` | `/health` | Returns 200 OK (process alive check — never checks NATS, so pod stays alive for break-glass admin port) |
+| `GET` | `/healthz` | Kubernetes liveness probe (same as `/health` — never checks NATS) |
+| `GET` | `/readyz` | Kubernetes readiness probe (checks Postgres connectivity only — NATS outage must not mark pod unready) |
 | `GET` | `/auth/providers/{id}/callback` | OAuth callback -- exchanges code for token, stores connection, redirects browser |
 
 **Protected (per-host NATS JWT or admin bearer token in Authorization header):**
@@ -58,6 +58,9 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 | `DELETE` | `/api/connections/{id}` | Disconnects a provider (revokes token, removes secrets, deletes DB row) |
 | `PATCH` | `/api/projects/{id}` | Updates a project's `gitIdentityId` |
 | `POST` | `/api/users/{uslug}/projects` | Creates a project on a specified host (`{name, hostSlug, gitUrl?}`). Writes Postgres `projects` row + `mclaude-projects` KV, then publishes NATS request to `mclaude.users.{uslug}.hosts.{hslug}.api.projects.provision` and waits for the controller's reply. |
+| `GET` | `/api/users/{uslug}/projects` | Lists all projects for the user (reads Postgres) |
+| `GET` | `/api/users/{uslug}/projects/{pslug}` | Gets a single project by slug |
+| `DELETE` | `/api/users/{uslug}/projects/{pslug}` | Deletes a project — removes Postgres row, deletes `mclaude-projects` KV entry, publishes NATS delete request to controller. PVC retained unless `?purge=true`. |
 | `GET` | `/api/users/{uslug}/hosts` | Lists hosts owned by or granted to the user. |
 | `POST` | `/api/users/{uslug}/hosts/code` | Generates a 6-character device code for BYOH host registration. Accepts `{publicKey}` — the host's NKey public key, generated locally by the CLI. The server stores the public key with the code record. Returns `{code, expiresAt}` (10-minute TTL). |
 | `GET` | `/api/users/{uslug}/hosts/code/{code}` | Polls device-code status. Returns `{status: "pending", expiresAt}` while waiting for dashboard redemption, or `{status: "completed", slug, jwt, hubUrl}` once redeemed. Returns 410 Gone if expired, 404 if not found. The CLI polls this endpoint after generating the code. |
@@ -76,8 +79,17 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 | `POST` | `/admin/users` | Creates a user (id, email, name, optional password, optional `isAdmin`). |
 | `POST` | `/admin/users/{uslug}/promote` | Sets `users.is_admin = true`. |
 | `GET` | `/admin/users` | Lists all users. |
-| `DELETE` | `/admin/users/{id}` | Deletes a user (cascades to hosts, projects, connections). |
+| `DELETE` | `/admin/users/{id}` | Deletes a user: revokes NATS JWT (NATS broker terminates active connections immediately), DELETEs from Postgres (cascades to hosts, projects, oauth_connections), publishes NATS delete requests to controllers for resource cleanup. |
 | `POST` | `/admin/sessions/stop` | Break-glass session stop (records intent in DB). |
+
+**SCIM 2.0 (IdP user provisioning):**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/scim/v2/Users` | IdP provisions user |
+| `PUT` | `/scim/v2/Users/{id}` | IdP updates user |
+| `DELETE` | `/scim/v2/Users/{id}` | IdP deprovisions user |
+| `GET` | `/scim/v2/Users` | IdP syncs user list |
 
 ### HTTP Endpoints -- Loopback Port (9091)
 
@@ -161,7 +173,7 @@ Login validates email and bcrypt password hash (or OAuth identity) against Postg
 
 Per-host user JWTs for daemons are minted at `mclaude host register` time (device-code flow) and refreshed via `POST /auth/refresh`.
 
-The auth middleware on protected routes decodes and validates the JWT against the account public key, extracts the user slug + host slug, and rejects requests targeting a different host than the JWT was issued for. Admin routes additionally require `users.is_admin = true`.
+The auth middleware on protected routes decodes and validates the JWT against the account public key, extracts the user slug + host slug, and enforces two access boundaries: (1) rejects with 403 when the JWT's `sub` user slug does not match the URL's `{uslug}` (cross-user access), and (2) rejects with 403 when the request targets a different host than the JWT was issued for. Admin routes additionally require `users.is_admin = true`.
 
 ### OAuth Provider Integration
 
@@ -207,6 +219,8 @@ If the controller times out or replies with an error, control-plane returns `503
 - **`EXTERNAL_URL` not set**: fatal exit on startup.
 - **Duplicate user email**: admin create returns 409 Conflict.
 - **Duplicate cluster slug** (admin tries to register a slug already in use): returns 409 Conflict.
+- **Slug validation failure at ingress**: returns HTTP 400 with `{code: "invalid_slug", reason: "reserved_word|charset|length", field: "slug"}`.
+- **Reserved-word match in slugify**: fallback kicks in automatically (deterministic `{prefix}-{6 base32}`).
 
 ## Dependencies
 

@@ -128,12 +128,15 @@ func TestHandleRefresh_MalformedToken(t *testing.T) {
 	}
 }
 
-func TestHandleRefresh_ValidJWT(t *testing.T) {
+// TestHandleRefresh_NilDB verifies that handleRefresh returns 503 when the
+// database is not configured. Full refresh happy-path (with real DB) is covered
+// by TestIntegration_HandleRefresh_ReturnsSlug in integration_test.go.
+func TestHandleRefresh_NilDB(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
 	srv := NewServer(nil, accountKP, "nats://localhost:4222", "", 8*time.Hour, "admin")
 
 	expiresAt := time.Now().Add(8 * time.Hour).Unix()
-	jwt, _, err := IssueUserJWT("refresh-user", accountKP, expiresAt)
+	jwt, _, err := IssueUserJWT("refresh-user-uuid", accountKP, expiresAt)
 	if err != nil {
 		t.Fatalf("IssueUserJWT: %v", err)
 	}
@@ -143,26 +146,9 @@ func TestHandleRefresh_ValidJWT(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+jwt)
 	srv.handleRefresh(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d; want 200; body: %s", rec.Code, rec.Body.String())
-	}
-
-	var resp LoginResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.JWT == "" {
-		t.Error("response missing JWT")
-	}
-	if resp.NKeySeed == "" {
-		t.Error("response missing NKeySeed")
-	}
-	if resp.UserID != "refresh-user" {
-		t.Errorf("userID = %q; want refresh-user", resp.UserID)
-	}
-	// New JWT must differ from old one (fresh NKey per issuance).
-	if resp.JWT == jwt {
-		t.Error("refreshed JWT should differ from original")
+	// db=nil → service unavailable
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d; want 503 when db=nil", rec.Code)
 	}
 }
 

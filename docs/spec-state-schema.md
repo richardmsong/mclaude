@@ -314,6 +314,7 @@ These are fire-and-forget messages on core NATS (not JetStream). No persistence.
 | Subject Pattern | Publisher | Subscriber | Payload |
 |----------------|-----------|------------|---------|
 | `mclaude.users.{uslug}.quota` | daemon (`runQuotaPublisher`) | `QuotaMonitor` (per-session) | `QuotaStatus` JSON — leaf under user scope (not under `.api.`, since quota is a broadcast signal, not a request/reply endpoint) |
+| `mclaude.users.{uslug}.api.projects.updated` | control-plane | SPA | Broadcast notification that project state has changed (project created, updated, or deleted). SPA invalidates its project list cache on receipt. |
 
 **Host-scoped subjects** (per ADR-0035 — `.hosts.{hslug}.` inserted between user and project; the only project-scoped subject family):
 
@@ -323,11 +324,16 @@ These are fire-and-forget messages on core NATS (not JetStream). No persistence.
 | `mclaude.users.{uslug}.hosts.{hslug}.api.projects.create` | SPA, control-plane | controller (request/reply) | `{userSlug, hostSlug, projectSlug, gitUrl}` |
 | `mclaude.users.{uslug}.hosts.{hslug}.api.projects.update` | control-plane | controller (request/reply) | `{userSlug, hostSlug, projectSlug, …}` |
 | `mclaude.users.{uslug}.hosts.{hslug}.api.projects.delete` | control-plane | controller (request/reply) | `{userSlug, hostSlug, projectSlug}` |
-| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.input` | SPA, daemon | session-agent | `{type, message, sessionSlug}` |
-| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.control` | SPA | session-agent | `{type, sessionSlug, request}` |
-| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.create` | SPA, daemon | session-agent (request/reply) | `{branch, permPolicy, quotaMonitor}` |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.input` | SPA, daemon | session-agent (JetStream, cmd consumer) | `{session_id, type, message}` — `session_id` is the mclaude UUID from sessions.create |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.control` | SPA | session-agent (JetStream, ctl consumer) | `{type, sessionSlug, request}` |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.create` | SPA, daemon | session-agent (JetStream, cmd consumer; publish + KV-watch, no reply) | `{name, branch, cwd, joinWorktree, extraFlags, permPolicy, quotaMonitor, requestId}` — success: session appears in KV; error: `api_error` event on `events._api` |
 | `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.delete` | SPA, daemon | session-agent | `{sessionSlug}` |
-| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.*` | SPA | session-agent | terminal I/O |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.restart` | SPA | session-agent (JetStream, cmd consumer) | `{sessionSlug, extraFlags?}` — kills process, optionally updates extraFlags in KV, relaunches with `--resume` |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.create` | SPA | session-agent | Spawn shell |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.delete` | SPA | session-agent | Kill terminal |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.resize` | SPA | session-agent | Resize PTY |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.{termId}.output` | session-agent | SPA | Raw PTY output bytes (ephemeral, core NATS, max 4KB per message) |
+| `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.terminal.{termId}.input` | SPA | session-agent | Raw keyboard input bytes (ephemeral, core NATS) |
 | `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.events.{sslug}` | session-agent | SPA (via MCLAUDE_EVENTS stream) | raw stream-json |
 | `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{sslug}` | session-agent, daemon | SPA, daemon (via MCLAUDE_LIFECYCLE stream) | lifecycle event JSON |
 
@@ -669,8 +675,39 @@ Published to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{ss
 
 ### `session_stopped`
 ```json
-{ "type": "session_stopped", "sessionId": "...", "ts": "RFC3339" }
+{ "type": "session_stopped", "sessionId": "...", "exitCode": 0, "ts": "RFC3339" }
 ```
+
+### `session_restarting`
+```json
+{ "type": "session_restarting", "sessionId": "...", "ts": "RFC3339" }
+```
+
+### `session_resumed`
+```json
+{ "type": "session_resumed", "sessionId": "...", "ts": "RFC3339" }
+```
+
+### `session_failed`
+```json
+{ "type": "session_failed", "sessionId": "...", "error": "...", "ts": "RFC3339" }
+```
+
+### `debug_attached`
+```json
+{ "type": "debug_attached", "sessionId": "...", "ts": "RFC3339" }
+```
+
+### `debug_detached`
+```json
+{ "type": "debug_detached", "sessionId": "...", "ts": "RFC3339" }
+```
+
+### `session_upgrading`
+```json
+{ "type": "session_upgrading", "sessionId": "...", "ts": "RFC3339" }
+```
+Published during graceful shutdown (zero-downtime upgrade) after all sessions reach idle.
 
 ### `session_permission_denied`
 ```json

@@ -16,6 +16,50 @@ The container image is Alpine-based with Node.js 22, Claude Code (native binary)
 
 The Go binary runs credential helper setup and initial repo clone/init before entering the NATS session lifecycle.
 
+### Pod Structure (Multi-Container)
+
+Each project pod contains:
+
+| Container | Image | Role |
+|-----------|-------|------|
+| `session-agent` | `mclaude-session-agent` | Primary — Claude process supervisor |
+| `config-sync` | `mclaude-config-sync` | Sidecar — watches `~/.claude/settings.json` and `CLAUDE.md` via inotify, patches `user-config` ConfigMap on change. Image includes inotify-tools, kubectl, jq. |
+| `dockerd-rootless` (optional) | `docker:dind-rootless` | Sidecar — per-project Docker daemon, enabled via project flag. Socket at `/var/run/docker.sock`. |
+
+### Auto-Memory Sharing
+
+Claude Code stores auto-memories per working directory at `~/.claude/projects/{encoded-cwd}/memory/`. Different worktrees have different cwds, creating separate memories by default. The entrypoint runs a background loop (every 5s) that symlinks each worktree's memory directory to a single shared location on the PVC (`/data/shared-memory/`), ensuring memories (feedback, project context) are shared across all branches.
+
+### Managed Platform Config
+
+**CLAUDE.md three-tier system:**
+
+| Tier | Location | Controlled by | User override? |
+|------|----------|--------------|----------------|
+| Global (managed policy) | `/etc/claude-code/CLAUDE.md` | Platform (baked into session image) | No |
+| User | `~/.claude/CLAUDE.md` | User (synced via ConfigMap + config-sync sidecar) | Yes |
+| Project | `{worktree}/CLAUDE.md` | Repo (committed to git) | Yes |
+
+**Guard hooks** at `/etc/claude-code/hooks/guard.sh` enforce platform constraints at the Bash tool execution level:
+- Block `git checkout` / `git switch` (platform manages worktrees)
+- Block `apt install` / `apt-get install` (use `pkg` shim instead)
+- Block modification of `/etc/claude-code/` (managed platform config)
+- Block `rm -rf` on critical paths (`/data/repo`, `/nix`, `/etc`)
+
+### Registry Mirror System
+
+Enterprise deployments configure package managers to pull from internal mirrors. The session image includes platform hooks that read from a `mirrors.json` file (mounted from a ConfigMap). If the file doesn't exist (personal laptop), hooks skip — tools use public defaults.
+
+Supported mirror types: `npm` (→ `.npmrc`), `pypi` (→ `pip.conf`), `go` (→ `GOPROXY`), `nix` (→ `nix.conf`). Each entry supports `auth` (K8s Secret ref) and `tls` (corporate CA bundle).
+
+### JSONL Cleanup Job
+
+A daily cleanup job (cron or entrypoint background goroutine) deletes JSONL files older than 90 days from `/data/projects/` and purges session files for sessions not present in `mclaude-sessions` KV.
+
+### `/upgrade-claude` Skill
+
+Manages Claude Code version upgrades. Fetches changelog between current and target version, analyzes for breaking changes (stream-json events, CLI flags, control protocol, hooks), proposes patches if breaking changes found, and updates the pinned version in Dockerfile on an `upgrade/claude-{version}` branch with a PR.
+
 ### Daemon Mode (BYOH machine)
 
 Runs as a long-lived process on the user's machine (laptop, desktop, VM) with `--daemon --host <hslug>`. The daemon spawns one supervised child agent per project, manages JWT credential refresh, publishes quota status, dispatches scheduled jobs, and exposes a local HTTP API for job management.
@@ -42,10 +86,13 @@ Liveness is reported by the hub NATS via `$SYS.ACCOUNT.*.CONNECT/DISCONNECT` eve
 | `METRICS_ADDR` | Env | Prometheus metrics listen address (default: `:9091`) |
 | `GIT_URL` | Env | Git remote URL for initial clone (K8s mode) |
 | `GIT_IDENTITY_ID` | Env | OAuth connection ID for credential identity selection (K8s mode) |
+| `CLAUDE_CODE_TMPDIR` | Env | Base directory for Claude Code temp files (K8s mode). Set to `/data/claude-tmp` and backed by the `project-data` PVC (`SubPath: claude-tmp`). Enables shell output files to survive pod restarts. When unset (BYOH/daemon mode), in-flight shell tracking is disabled. |
 
 ### Health and Readiness
 
-The binary supports `--health` (immediate exit 0) and `--ready` (attempts a NATS connection, exits 0 on success) for K8s probe integration.
+The binary supports two probe commands for K8s integration:
+- `--health` — checks process alive and NATS connection status. Exits 0 if both OK.
+- `--ready` — attempts a NATS connection and verifies Claude Code can be spawned. Exits 0 on success.
 
 ## Interfaces
 
@@ -168,9 +215,13 @@ State transitions flow from Claude Code's `session_state_changed` system events.
 
 **Resumption (on pod restart):**
 1. Watch all keys in `mclaude-sessions` KV for initial values.
-2. For each session belonging to this project: clear pending controls, resume the Claude process with `--resume {id}`.
-3. Sessions in `updating` state are resumed but their KV entry stays as `updating` until all JetStream consumers are attached, then cleared to `idle`.
-4. Publish `session_resumed` lifecycle event per session.
+2. Set all matching session KV entries to `state: "restarting"`, clear `pendingControls`.
+3. Publish `session_restarting` lifecycle event per session.
+4. For each session belonging to this project: resume the Claude process with `--resume {id}`.
+5. On `init` event: update KV with fresh state.
+6. Sessions in `updating` state are resumed but their KV entry stays as `updating` until all JetStream consumers are attached, then cleared to `idle`.
+7. Publish `session_resumed` lifecycle event per session.
+8. Sessions that fail to start within 30s: mark `state: "failed"`, publish `session_failed` lifecycle event.
 
 **Deletion:**
 1. Remove session from in-memory map.
@@ -188,14 +239,19 @@ State transitions flow from Claude Code's `session_state_changed` system events.
 
 ### Event Routing
 
-The stdout router goroutine reads NDJSON lines from Claude Code's stdout and for each line:
-1. Tracks in-flight background agents (increments on `Agent(run_in_background=true)` tool use, decrements on `task-notification` user events).
-2. Truncates events exceeding the 8 MB NATS payload limit (removes `content` field, adds `truncated: true`).
-3. Publishes to the session's NATS events subject.
-4. Notifies the compact-boundary callback to update `replayFromSeq`.
-5. Notifies the quota monitor raw output callback.
-6. Broadcasts to connected debug clients.
-7. Processes side effects (state changes, init, permission requests, usage accumulation).
+The stdout router goroutine reads NDJSON lines from Claude Code's stdout (using a 16 MB scanner buffer to handle large events before NATS-level truncation) and for each line:
+1. **In-flight background agent tracking:** Increments `inFlightBackgroundAgents` on `assistant` events with an `Agent` tool_use where `input.run_in_background == true`. Decrements (floored at 0) on top-level `user` events with `origin.kind == "task-notification"`. Used by the drain predicate in graceful shutdown.
+2. **In-flight background shell tracking (K8s mode; two-phase):**
+   - **Phase 1 — Pending:** On `assistant` event with a `Bash` tool_use where `input.run_in_background == true`, adds a `pendingShell{toolUseId, command, startedAt}` entry to `sess.pendingShells` (keyed by `tool_use.id`).
+   - **Phase 2 — Promoted:** On `user` event with a `tool_result` whose `tool_use_id` matches a pending entry, extracts `backgroundTaskId` from the result text (pattern: `"Command was manually backgrounded with ID: (\S+)"`), constructs `outputFilePath` as `{CLAUDE_CODE_TMPDIR}/claude-{uid}/{sanitizePath(cwd)}/{sessionId}/tasks/{taskId}.output`, and promotes the entry to `sess.inFlightShells map[string]*inFlightShell` (keyed by toolUseId). Fields: `{toolUseId, taskId, command, outputFilePath, startedAt}`.
+   - **Removal:** On `user` event with `origin.kind == "task-notification"` referencing the shell's toolUseId (shell completed naturally).
+   - Shell tracking is disabled when `CLAUDE_CODE_TMPDIR` is not set (daemon/BYOH mode).
+3. Truncates events exceeding the 8 MB NATS payload limit (removes `content` field, adds `truncated: true`).
+4. Publishes to the session's NATS events subject. User input messages are also published to the events stream so that replaying clients see the full conversation.
+5. Notifies the compact-boundary callback to update `replayFromSeq`.
+6. Notifies the quota monitor raw output callback.
+7. Broadcasts to connected debug clients.
+8. Processes side effects (state changes, init, permission requests, usage accumulation).
 
 The stdin serializer goroutine drains the stdin channel sequentially to prevent NDJSON line interleaving.
 
@@ -255,10 +311,11 @@ The shutdown sequence preserves in-progress work and enables zero-downtime upgra
 2. Cancel the command consumer (new commands queue in JetStream for the replacement pod).
 3. Drain core NATS subscriptions (terminal API).
 4. Keep the control consumer running (interrupts and permission responses still work).
-5. Poll every 1 second: wait for all sessions to reach `idle` state with zero in-flight background agents. Auto-interrupt sessions stuck in `requires_action`.
-6. Cancel the control consumer.
-7. Publish `session_upgrading` lifecycle event per session.
-8. Exit.
+5. Poll every 1 second (no wall-clock timeout — indefinite wait; `terminationGracePeriodSeconds: 86400` from values.yaml is K8s's last-resort backstop, not a policy limit): wait for all sessions to reach `idle` state with zero in-flight background agents. Auto-interrupt sessions stuck in `requires_action`.
+6. Shell-killed notifications (K8s mode only, when `CLAUDE_CODE_TMPDIR` is set): for each session, for each entry in `inFlightShells`, construct a `<task-notification status=killed>` XML message and publish it as a session-input payload `{"session_id": "<id>", "type": "user", "message": {"role": "user", "content": "<xml>"}}` to the JetStream `api.sessions.input` subject. Messages queue in the durable cmd consumer for the replacement pod.
+7. Cancel the control consumer.
+8. Publish `session_upgrading` lifecycle event per session.
+9. Exit.
 
 ### Daemon: JWT Refresh
 
@@ -285,15 +342,17 @@ Terminal sessions spawn a PTY shell and bridge I/O through core NATS subjects. T
 
 | Failure | Behavior |
 |---------|----------|
-| NATS connection lost | NATS client auto-reconnects; reconnection counter incremented |
+| NATS connection lost | NATS client auto-reconnects; state changes buffered in memory during outage and flushed on reconnect. Claude processes continue running. Reconnection counter incremented. |
 | KV bucket not found on startup | Fatal: session agent exits (control-plane not started) |
 | Session create — worktree collision | Error returned via NATS reply and published as `api_error` event |
 | Session create — git worktree add fails | Error returned via NATS reply and published as `api_error` event |
 | Session create — Claude process fails to start | `session_failed` lifecycle event published; error returned via NATS reply |
+| Claude process crash (unexpected exit) | Session agent detects exit, publishes `session_failed` lifecycle event, auto-restarts with `--resume {sessionId}`. Increments `mclaude_claude_restarts_total` counter. |
 | Git auth error during initial clone (K8s) | `session_failed` lifecycle event with `provider_auth_failed` reason published; agent exits |
 | Credential helper setup fails | Logged as warning; continues (non-fatal, SSH key auth may still work) |
 | Session delete — process does not stop within 10s | Process is SIGKILLed; deletion proceeds |
 | Graceful shutdown — session stuck in requires_action | Auto-interrupted so the turn aborts to idle |
+| Pod crash (no SIGTERM — SIGKILL, OOM, node failure) | In-flight shell tracking (`inFlightShells`, `pendingShells`) is lost with the process. Durable JetStream consumers redeliver unacked messages. Sessions resume from KV. Dangling background-shell tool_uses remain in the transcript — Claude notices the unknown shell-id when it attempts `BashOutput` and can adjust. |
 | JetStream fetch error | Exponential backoff (100ms to 5s) with retry |
 | Event exceeds 8 MB NATS payload | Content field stripped; `truncated: true` added |
 | JWT refresh fails (daemon) | Logged as warning; children use current JWT until expiry |

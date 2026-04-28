@@ -109,7 +109,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	expirySecs := int64(s.jwtExpiry.Seconds())
 	expiresAt := time.Now().Add(s.jwtExpiry).Unix()
 
-	jwt, seed, err := IssueUserJWT(user.Slug, s.accountKP, expiresAt+expirySecs)
+	jwt, seed, err := IssueUserJWT(user.ID, s.accountKP, expiresAt+expirySecs)
 	if err != nil {
 		http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
 		return
@@ -147,10 +147,25 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// claims.Name is the user UUID (ADR-0046). Look up the user to get their slug.
+	if s.db == nil {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	user, err := s.db.GetUserByID(r.Context(), claims.Name)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if user == nil {
+		http.Error(w, "user not found", http.StatusUnauthorized)
+		return
+	}
+
 	expirySecs := int64(s.jwtExpiry.Seconds())
 	expiresAt := time.Now().Add(s.jwtExpiry).Unix()
 
-	newJWT, seed, err := IssueUserJWT(claims.Name, s.accountKP, expiresAt+expirySecs)
+	newJWT, seed, err := IssueUserJWT(user.ID, s.accountKP, expiresAt+expirySecs)
 	if err != nil {
 		http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
 		return
@@ -161,8 +176,8 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		NATSUrl:   s.natsURL,
 		JWT:       newJWT,
 		NKeySeed:  string(seed),
-		UserID:    claims.Name,
-		UserSlug:  claims.Name, // claims.Name is now the user slug (ADR-0046)
+		UserID:    user.ID,
+		UserSlug:  user.Slug,
 		ExpiresAt: expiresAt,
 	})
 }

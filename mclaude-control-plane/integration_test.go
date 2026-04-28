@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/rs/zerolog"
 	"github.com/nats-io/nkeys"
 )
 
@@ -244,7 +245,14 @@ func TestIntegration_StartProjectsSubscriberCreatesKVBuckets(t *testing.T) {
 		t.Fatalf("JetStream: %v", err)
 	}
 
-	for _, bucket := range []string{"mclaude-projects", "mclaude-job-queue", "mclaude-hosts", "mclaude-sessions"} {
+	// Expected history per bucket: mclaude-sessions uses 64, others use 1 (ADR-0046).
+	bucketHistory := map[string]int64{
+		"mclaude-projects":  1,
+		"mclaude-job-queue": 1,
+		"mclaude-hosts":     1,
+		"mclaude-sessions":  64,
+	}
+	for bucket, wantHistory := range bucketHistory {
 		kv, err := js.KeyValue(bucket)
 		if err != nil {
 			t.Errorf("KeyValue(%q): %v — bucket should have been created by StartProjectsSubscriber", bucket, err)
@@ -254,14 +262,13 @@ func TestIntegration_StartProjectsSubscriberCreatesKVBuckets(t *testing.T) {
 			t.Errorf("bucket name = %q; want %q", kv.Bucket(), bucket)
 		}
 
-		// Spec requires History:1 for all buckets.
 		status, err := kv.Status()
 		if err != nil {
 			t.Errorf("KeyValue(%q).Status(): %v", bucket, err)
 			continue
 		}
-		if history := status.History(); history != 1 {
-			t.Errorf("bucket %q: History() = %d, want 1", bucket, history)
+		if history := status.History(); history != wantHistory {
+			t.Errorf("bucket %q: History() = %d, want %d", bucket, history, wantHistory)
 		}
 	}
 }
@@ -296,11 +303,13 @@ func TestIntegration_UserSlug_Unique(t *testing.T) {
 	db := mustConnectDB(t, ctx)
 
 	// Two users with different emails that produce the same slug.
-	_, err := db.CreateUser(ctx, "slug-uniq-u1", "alice@example.com", "Alice1", "")
+	// Use test-specific prefix to avoid conflict with TestIntegration_UserCreateAndFetch
+	// which also creates an "alice" user.
+	_, err := db.CreateUser(ctx, "slug-uniq-u1", "alice.slugtest@example.com", "Alice1", "")
 	if err != nil {
 		t.Fatalf("CreateUser first: %v", err)
 	}
-	_, err = db.CreateUser(ctx, "slug-uniq-u2", "alice@other.com", "Alice2", "")
+	_, err = db.CreateUser(ctx, "slug-uniq-u2", "alice.slugtest@other.com", "Alice2", "")
 	if err == nil {
 		t.Error("expected error for duplicate slug; got nil")
 	}
@@ -343,6 +352,68 @@ func TestIntegration_HandleLogin_UserSlugInResponse(t *testing.T) {
 	}
 	if resp.UserID == "" {
 		t.Error("userId missing from response")
+	}
+}
+
+// TestIntegration_HandleRefresh_ReturnsSlug verifies that POST /auth/refresh
+// returns a fresh JWT along with both userId (UUID) and userSlug (ADR-0046).
+func TestIntegration_HandleRefresh_ReturnsSlug(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	hash, err := HashPassword("refresh-pw")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	_, err = db.CreateUser(ctx, "refresh-slug-u1", "refresh.slug@example.com", "Refresh Slug", hash)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	accountKP, _ := nkeys.CreateAccount()
+	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour, "admin")
+
+	// Log in to get an initial JWT.
+	loginBody := `{"email":"refresh.slug@example.com","password":"refresh-pw"}`
+	loginRec := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(loginBody))
+	loginReq.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d; body: %s", loginRec.Code, loginRec.Body.String())
+	}
+	var loginResp LoginResponse
+	json.NewDecoder(loginRec.Body).Decode(&loginResp) //nolint:errcheck
+
+	// Now refresh the JWT.
+	refreshRec := httptest.NewRecorder()
+	refreshReq := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	refreshReq.Header.Set("Authorization", "Bearer "+loginResp.JWT)
+	srv.handleRefresh(refreshRec, refreshReq)
+
+	if refreshRec.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d; body: %s", refreshRec.Code, refreshRec.Body.String())
+	}
+
+	var resp LoginResponse
+	if err := json.NewDecoder(refreshRec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode refresh response: %v", err)
+	}
+	if resp.JWT == "" {
+		t.Error("refreshed response missing JWT")
+	}
+	if resp.NKeySeed == "" {
+		t.Error("refreshed response missing NKeySeed")
+	}
+	if resp.UserID != "refresh-slug-u1" {
+		t.Errorf("userID = %q; want refresh-slug-u1", resp.UserID)
+	}
+	if resp.UserSlug != "refresh-slug" {
+		t.Errorf("userSlug = %q; want refresh-slug", resp.UserSlug)
+	}
+	// New JWT must differ from original.
+	if resp.JWT == loginResp.JWT {
+		t.Error("refreshed JWT should differ from original")
 	}
 }
 
@@ -488,5 +559,259 @@ func TestIntegration_HandleSysEvent_MachineDisconnect(t *testing.T) {
 	if stateAfterDisconnect.LastSeenAt == nil || *stateAfterDisconnect.LastSeenAt != *savedLastSeenAt {
 		t.Errorf("lastSeenAt changed on DISCONNECT: got %v, want %v",
 			stateAfterDisconnect.LastSeenAt, savedLastSeenAt)
+	}
+}
+
+// TestIntegration_HandleSysEvent_ClusterConnect verifies that a Leafnode CONNECT
+// event for a cluster host writes online=true to mclaude-hosts KV for all
+// matching user rows (ADR-0046).
+func TestIntegration_HandleSysEvent_ClusterConnect(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	// Create two users who each have a cluster host with the same slug
+	// (simulating a shared cluster granted to multiple users).
+	_, err := db.CreateUser(ctx, "clconn-u1", "clconn1@example.com", "ClConn1", "")
+	if err != nil {
+		t.Fatalf("CreateUser u1: %v", err)
+	}
+	_, err = db.CreateUser(ctx, "clconn-u2", "clconn2@example.com", "ClConn2", "")
+	if err != nil {
+		t.Fatalf("CreateUser u2: %v", err)
+	}
+	// Cluster hosts require js_domain, leaf_url, account_jwt per the hosts_check constraint.
+	_, err = db.pool.Exec(ctx, `
+		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key, js_domain, leaf_url, account_jwt)
+		VALUES ('clconn-h1', 'clconn-u1', 'mycluster', 'My Cluster', 'cluster', 'owner', 'UTEST_CL_CONNECT_KEY', 'hub', 'nats://hub:7422', 'fake-account-jwt-1')`,
+	)
+	if err != nil {
+		t.Fatalf("insert cluster host u1: %v", err)
+	}
+	_, err = db.pool.Exec(ctx, `
+		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key, js_domain, leaf_url, account_jwt)
+		VALUES ('clconn-h2', 'clconn-u2', 'mycluster', 'My Cluster', 'cluster', 'user', 'UTEST_CL_CONNECT_KEY', 'hub', 'nats://hub:7422', 'fake-account-jwt-2')`,
+	)
+	if err != nil {
+		t.Fatalf("insert cluster host u2: %v", err)
+	}
+	t.Cleanup(func() {
+		db.pool.Exec(ctx, `DELETE FROM hosts WHERE id IN ('clconn-h1','clconn-h2')`)  //nolint:errcheck
+		db.pool.Exec(ctx, `DELETE FROM users WHERE id IN ('clconn-u1','clconn-u2')`)  //nolint:errcheck
+	})
+
+	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
+	if err != nil {
+		t.Fatalf("NATS connect: %v", err)
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+	hostsKV, err := ensureHostsKV(js)
+	if err != nil {
+		t.Fatalf("ensureHostsKV: %v", err)
+	}
+
+	srv := &Server{db: db, hostsKV: hostsKV}
+
+	// Simulate a $SYS Leafnode CONNECT event.
+	payload := `{"server":{"name":"hub"},"client":{"kind":"Leafnode","name":"mycluster","nkey":"UTEST_CL_CONNECT_KEY"}}`
+	srv.handleSysEvent(&nats.Msg{Data: []byte(payload)}, true /* isConnect */)
+
+	// Both user rows should have online=true written to mclaude-hosts KV.
+	for _, userSlug := range []string{"clconn1", "clconn2"} {
+		key := userSlug + ".mycluster"
+		entry, err := hostsKV.Get(key)
+		if err != nil {
+			t.Errorf("hostsKV.Get(%q): %v — expected entry after cluster CONNECT", key, err)
+			continue
+		}
+		var state HostKVState
+		if err := json.Unmarshal(entry.Value(), &state); err != nil {
+			t.Fatalf("unmarshal HostKVState for %q: %v", key, err)
+		}
+		if !state.Online {
+			t.Errorf("key %q: online = %v; want true after cluster CONNECT", key, state.Online)
+		}
+		if state.Slug != "mycluster" {
+			t.Errorf("key %q: slug = %q; want %q", key, state.Slug, "mycluster")
+		}
+		if state.LastSeenAt == nil {
+			t.Errorf("key %q: lastSeenAt should be set after cluster CONNECT", key)
+		}
+	}
+}
+
+// TestIntegration_HandleSysEvent_ClusterDisconnect verifies that a Leafnode
+// DISCONNECT event sets online=false in mclaude-hosts KV for all matching
+// user rows, without modifying lastSeenAt (ADR-0046).
+func TestIntegration_HandleSysEvent_ClusterDisconnect(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	_, err := db.CreateUser(ctx, "cldisc-u1", "cldisc1@example.com", "ClDisc1", "")
+	if err != nil {
+		t.Fatalf("CreateUser u1: %v", err)
+	}
+	_, err = db.CreateUser(ctx, "cldisc-u2", "cldisc2@example.com", "ClDisc2", "")
+	if err != nil {
+		t.Fatalf("CreateUser u2: %v", err)
+	}
+	// Cluster hosts require js_domain, leaf_url, account_jwt per the hosts_check constraint.
+	_, err = db.pool.Exec(ctx, `
+		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key, js_domain, leaf_url, account_jwt)
+		VALUES ('cldisc-h1', 'cldisc-u1', 'disccluster', 'Disc Cluster', 'cluster', 'owner', 'UTEST_CL_DISC_KEY', 'hub', 'nats://hub:7422', 'fake-account-jwt-disc-1')`,
+	)
+	if err != nil {
+		t.Fatalf("insert cluster host u1: %v", err)
+	}
+	_, err = db.pool.Exec(ctx, `
+		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key, js_domain, leaf_url, account_jwt)
+		VALUES ('cldisc-h2', 'cldisc-u2', 'disccluster', 'Disc Cluster', 'cluster', 'user', 'UTEST_CL_DISC_KEY', 'hub', 'nats://hub:7422', 'fake-account-jwt-disc-2')`,
+	)
+	if err != nil {
+		t.Fatalf("insert cluster host u2: %v", err)
+	}
+	t.Cleanup(func() {
+		db.pool.Exec(ctx, `DELETE FROM hosts WHERE id IN ('cldisc-h1','cldisc-h2')`)  //nolint:errcheck
+		db.pool.Exec(ctx, `DELETE FROM users WHERE id IN ('cldisc-u1','cldisc-u2')`)  //nolint:errcheck
+	})
+
+	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
+	if err != nil {
+		t.Fatalf("NATS connect: %v", err)
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+	hostsKV, err := ensureHostsKV(js)
+	if err != nil {
+		t.Fatalf("ensureHostsKV: %v", err)
+	}
+
+	srv := &Server{db: db, hostsKV: hostsKV}
+
+	connectPayload := `{"server":{"name":"hub"},"client":{"kind":"Leafnode","name":"disccluster","nkey":"UTEST_CL_DISC_KEY"}}`
+	srv.handleSysEvent(&nats.Msg{Data: []byte(connectPayload)}, true)
+
+	// Capture lastSeenAt values before disconnect.
+	savedLastSeen := map[string]*string{}
+	for _, userSlug := range []string{"cldisc1", "cldisc2"} {
+		key := userSlug + ".disccluster"
+		entry, err := hostsKV.Get(key)
+		if err != nil {
+			t.Fatalf("hostsKV.Get(%q) after CONNECT: %v", key, err)
+		}
+		var state HostKVState
+		json.Unmarshal(entry.Value(), &state) //nolint:errcheck
+		savedLastSeen[userSlug] = state.LastSeenAt
+	}
+
+	// Now disconnect.
+	disconnectPayload := `{"server":{"name":"hub"},"client":{"kind":"Leafnode","name":"disccluster","nkey":"UTEST_CL_DISC_KEY"}}`
+	srv.handleSysEvent(&nats.Msg{Data: []byte(disconnectPayload)}, false)
+
+	// Verify online=false and lastSeenAt unchanged.
+	for _, userSlug := range []string{"cldisc1", "cldisc2"} {
+		key := userSlug + ".disccluster"
+		entry, err := hostsKV.Get(key)
+		if err != nil {
+			t.Errorf("hostsKV.Get(%q) after DISCONNECT: %v", key, err)
+			continue
+		}
+		var state HostKVState
+		if err := json.Unmarshal(entry.Value(), &state); err != nil {
+			t.Fatalf("unmarshal HostKVState for %q: %v", key, err)
+		}
+		if state.Online {
+			t.Errorf("key %q: online should be false after DISCONNECT", key)
+		}
+		saved := savedLastSeen[userSlug]
+		if state.LastSeenAt == nil || saved == nil || *state.LastSeenAt != *saved {
+			t.Errorf("key %q: lastSeenAt changed on DISCONNECT: got %v, want %v",
+				key, state.LastSeenAt, saved)
+		}
+	}
+}
+
+// TestIntegration_SeedDev_WritesLocalHostKV verifies that seedDev writes
+// the 'local' host with online=true to mclaude-hosts KV (ADR-0046).
+// seedDev uses the hardcoded dev@mclaude.local account.
+func TestIntegration_SeedDev_WritesLocalHostKV(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	// Ensure the dev user exists before seedDev runs, so the schema migration
+	// can create their 'local' host in the DO block on the next Migrate call.
+	// If the user already exists from a previous test, this is a no-op.
+	devUser, err := db.GetUserByEmail(ctx, "dev@mclaude.local")
+	if err != nil {
+		t.Fatalf("GetUserByEmail: %v", err)
+	}
+	if devUser == nil {
+		hash, herr := HashPassword("dev")
+		if herr != nil {
+			t.Fatalf("HashPassword: %v", herr)
+		}
+		devUser, err = db.CreateUser(ctx, "seedkv-dev-u1", "dev@mclaude.local", "Dev User", hash)
+		if err != nil {
+			t.Fatalf("CreateUser dev user: %v", err)
+		}
+		// Re-run Migrate so the DO block creates the 'local' host for this user.
+		if err := db.Migrate(ctx); err != nil {
+			t.Fatalf("Migrate after user create: %v", err)
+		}
+	}
+
+	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
+	if err != nil {
+		t.Fatalf("NATS connect: %v", err)
+	}
+	defer nc.Close()
+
+	// Ensure the hosts KV bucket exists before seedDev runs.
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+	hostsKV, err := ensureHostsKV(js)
+	if err != nil {
+		t.Fatalf("ensureHostsKV: %v", err)
+	}
+
+	// Run seedDev — it idempotently uses dev@mclaude.local and writes
+	// the local host KV entry.
+	nopLogger := zerolog.Nop()
+	if err := seedDev(ctx, db, nc, nopLogger); err != nil {
+		t.Fatalf("seedDev: %v", err)
+	}
+
+	if devUser.Slug == "" {
+		t.Fatal("dev user has empty slug")
+	}
+
+	// Verify mclaude-hosts KV has {devSlug}.local = online=true.
+	key := devUser.Slug + ".local"
+	entry, err := hostsKV.Get(key)
+	if err != nil {
+		t.Fatalf("hostsKV.Get(%q): %v — seedDev should have written this key", key, err)
+	}
+	var state HostKVState
+	if err := json.Unmarshal(entry.Value(), &state); err != nil {
+		t.Fatalf("unmarshal HostKVState: %v", err)
+	}
+	if !state.Online {
+		t.Errorf("online = %v; want true after seedDev", state.Online)
+	}
+	if state.Slug != "local" {
+		t.Errorf("slug = %q; want %q", state.Slug, "local")
+	}
+	if state.LastSeenAt == nil {
+		t.Error("lastSeenAt should be set after seedDev")
 	}
 }

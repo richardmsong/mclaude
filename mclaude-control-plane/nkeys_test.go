@@ -215,16 +215,17 @@ func TestDecodeUserJWT_Malformed(t *testing.T) {
 	}
 }
 
-func TestIssueUserJWT_SlugInClaimsName(t *testing.T) {
-	// ADR-0046: IssueUserJWT receives a URL-safe slug and stores it in claims.Name
-	// so the SPA can construct KV key prefixes (e.g. mclaude-hosts.{slug}.*).
+func TestIssueUserJWT_UUIDInClaimsName(t *testing.T) {
+	// ADR-0046 (updated): IssueUserJWT receives a UUID and stores it in claims.Name
+	// so authMiddleware can pass it to db.GetUserByID. LoginResponse carries
+	// UserSlug separately.
 	accountKP, _ := nkeys.CreateAccount()
 	accountPub, _ := accountKP.PublicKey()
 
-	slug := "alice-smith" // URL-safe slug derived from alice.smith@example.com
+	userID := "550e8400-e29b-41d4-a716-446655440000" // UUID
 	expiry := time.Now().Add(8 * time.Hour).Unix()
 
-	jwt, _, err := IssueUserJWT(slug, accountKP, expiry)
+	jwt, _, err := IssueUserJWT(userID, accountKP, expiry)
 	if err != nil {
 		t.Fatalf("IssueUserJWT: %v", err)
 	}
@@ -234,17 +235,17 @@ func TestIssueUserJWT_SlugInClaimsName(t *testing.T) {
 		t.Fatalf("DecodeUserJWT: %v", err)
 	}
 
-	if claims.Name != slug {
-		t.Errorf("claims.Name = %q; want slug %q (ADR-0046)", claims.Name, slug)
+	if claims.Name != userID {
+		t.Errorf("claims.Name = %q; want UUID %q (ADR-0046)", claims.Name, userID)
 	}
 
-	// The subject permissions must reference the slug, not a UUID.
-	expectedSubject := fmt.Sprintf("mclaude.%s.>", slug)
+	// The subject permissions must reference the UUID.
+	expectedSubject := fmt.Sprintf("mclaude.%s.>", userID)
 	if !containsStr(claims.Permissions.Pub.Allow, expectedSubject) {
-		t.Errorf("pub allow missing %q (slug-scoped subject)", expectedSubject)
+		t.Errorf("pub allow missing %q (UUID-scoped subject)", expectedSubject)
 	}
 	if !containsStr(claims.Permissions.Sub.Allow, expectedSubject) {
-		t.Errorf("sub allow missing %q (slug-scoped subject)", expectedSubject)
+		t.Errorf("sub allow missing %q (UUID-scoped subject)", expectedSubject)
 	}
 }
 

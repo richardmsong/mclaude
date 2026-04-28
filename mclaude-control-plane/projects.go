@@ -244,6 +244,7 @@ func ensureHostsKV(js nats.JetStreamContext) (nats.KeyValue, error) {
 // ensureSessionsKV creates the mclaude-sessions KV bucket if it doesn't exist.
 // Per spec startup step 7, the control-plane ensures this bucket exists but
 // does not write to it (session-agents own session state).
+// History=64 allows the SPA to replay recent session state updates (ADR-0046).
 func ensureSessionsKV(js nats.JetStreamContext) (nats.KeyValue, error) {
 	kv, err := js.KeyValue("mclaude-sessions")
 	if err == nil {
@@ -251,7 +252,7 @@ func ensureSessionsKV(js nats.JetStreamContext) (nats.KeyValue, error) {
 	}
 	return js.CreateKeyValue(&nats.KeyValueConfig{
 		Bucket:  "mclaude-sessions",
-		History: 1,
+		History: 64,
 	})
 }
 

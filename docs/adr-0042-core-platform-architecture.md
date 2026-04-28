@@ -3,8 +3,8 @@
 **Status**: implemented
 **Status history**:
 - 2026-04-28: draft
-- 2026-04-28: accepted — design audit CLEAN (R4), spec-evaluator identified 18 spec-debt items (not ADR issues)
-- 2026-04-28: implemented — consolidation of existing architecture (ADR-0002, ADR-0003, ADR-0024)
+- 2026-04-28: accepted — design audit CLEAN (R4)
+- 2026-04-28: implemented — spec-evaluator CLEAN (R4, 122 decisions reflected across 7 specs). Consolidation of existing architecture (ADR-0002, ADR-0003, ADR-0024).
 
 > Supersedes:
 > - `adr-0002-core-containers.md` — folded in: session image structure (entrypoint, config seeding, managed CLAUDE.md, guard hooks, Nix package management, registry mirrors), pod storage model, config-sync sidecar, CLAUDE.md three-tier system, auto-memory sharing across worktrees
@@ -56,8 +56,8 @@ Reading the platform architecture requires synthesizing all three documents and 
 | KV key separator | Uniform `.` across all buckets | Matches NATS convention. Enables wildcard key matching. |
 | Cross-user URL access | Hard 403 when JWT `sub` ≠ URL `{uslug}` | Simple, predictable, audit-friendly. Admin subtree bypasses with admin-role validation. |
 | Git worktrees | One worktree per branch per project. `joinWorktree: true` to share. | Platform manages branch switching — `git checkout`/`git switch` blocked by guard hooks. |
-| Tool installation | Nix single-user mode, shared PVC (RWX) per namespace, `pkg` shim | Install once, available in all project pods for the user. Content-addressed deduplication. |
-| Claude CLI installation | Native binary via `claude install --version {pinned}` in Dockerfile. No Node.js/npm dependency. | Version pinned. Updates go through `/upgrade-claude` skill. |
+| Tool installation | Nix single-user mode, per-project PVC at `/nix/`, `pkg` shim | Content-addressed deduplication within each project pod. |
+| Claude CLI installation | Native binary via `claude install --version {pinned}` in Dockerfile. Image based on `node:22-alpine` (Claude Code runtime requires Node.js). | Version pinned. Updates go through `/upgrade-claude` skill. |
 | Migration scope | Hard cutover for slug migration — no dual-path period | Pre-GA, all components deploy together via CI. No external users. |
 
 ---
@@ -516,18 +516,20 @@ permissionPolicy: "auto"      # auto-approve all tools
 
 No HTTP polling. No dependency on another service being up. Recovery is the same for graceful and ungraceful restarts — the agent always re-derives state from Claude Code.
 
-### Graceful Shutdown
+### Graceful Shutdown (Zero-Downtime Upgrades)
 
-On SIGTERM (pod termination):
+On SIGTERM (pod termination), the shutdown sequence preserves in-progress work:
 
-1. Stop accepting new sessions
-2. For each active Claude process: send interrupt control request → wait up to 10s → SIGKILL
-3. Flush buffered events to NATS
-4. Publish lifecycle events (session_stopped for each session)
-5. Close NATS connection
-6. Exit 0
+1. Write `state: "updating"` to KV for all sessions (SPA displays upgrade banner). Set `shutdownPending` flag to suppress further KV state flushes.
+2. Cancel the command consumer (new commands queue in JetStream for the replacement pod).
+3. Drain core NATS subscriptions (terminal API).
+4. Keep the control consumer running (interrupts and permission responses still work).
+5. Poll every 1 second: wait for all sessions to reach `idle` state with zero in-flight background agents. Auto-interrupt sessions stuck in `requires_action`.
+6. Cancel the control consumer.
+7. Publish `session_upgrading` lifecycle event per session.
+8. Exit.
 
-Set `terminationGracePeriodSeconds: 30` in pod spec.
+Set `terminationGracePeriodSeconds: 86400` (24h) in pod spec — the long window allows Claude to finish work naturally before the pod is replaced.
 
 ### Worktrees
 
@@ -602,8 +604,8 @@ If the controller times out or replies with an error, control-plane returns 503 
 |--------|------|--------|
 | `POST` | `/auth/login` | local credentials → NATS JWT + nkey seed |
 | `POST` | `/auth/refresh` | refresh NATS JWT |
-| `GET` | `/auth/sso/{provider}` | initiate SSO (Entra, Okta) |
-| `GET` | `/auth/sso/{provider}/cb` | SSO callback → NATS JWT |
+| `POST` | `/api/providers/{id}/connect` | initiate OAuth flow for a configured provider; returns `{redirectUrl}` |
+| `GET` | `/auth/providers/{id}/callback` | OAuth callback — exchanges code for token, stores connection, redirects browser |
 
 **Users (admin)**
 
@@ -758,7 +760,7 @@ Pod: project-{projectId}            namespace: mclaude-{userId}
 ├── container: session-agent
 │   image: mclaude-session-agent:{version}
 │   ├── project PVC      → /data/              (RW) repo, worktrees, shared-memory
-│   ├── nix-store PVC    → /nix/               (RWX) shared Nix store (per-namespace)
+│   ├── nix-store PVC    → /nix/               (RW) per-project Nix store
 │   ├── claude-home      → ~/.claude/           (RW) emptyDir, ephemeral
 │   ├── user-config      → ~/.claude-seed/      (RO) ConfigMap seed
 │   └── user-secrets     → ~/.user-secrets/     (RO) Secret
@@ -894,7 +896,7 @@ exit 0
 
 ## Tool Installation (Nix)
 
-Nix store (`/nix/`) lives on a PVC (RWX) — one per namespace, shared across all project pods.
+Nix store (`/nix/`) lives on a per-project PVC (`nix-{projectId}`).
 
 ```bash
 # /usr/local/bin/pkg — shim
@@ -1210,12 +1212,12 @@ readinessProbe:
 ```yaml
 livenessProbe:
   httpGet:
-    path: /health     # never checks NATS — pod must stay alive for break-glass admin port
+    path: /healthz    # never checks NATS — pod must stay alive for break-glass admin port
     port: 8080
   periodSeconds: 15
 readinessProbe:
   httpGet:
-    path: /ready      # checks Postgres only — NATS outage must not mark pod unready
+    path: /readyz     # checks Postgres only — NATS outage must not mark pod unready
     port: 8080
   periodSeconds: 10
 ```
