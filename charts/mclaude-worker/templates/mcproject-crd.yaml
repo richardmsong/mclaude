@@ -34,6 +34,12 @@ spec:
                 projectId:
                   type: string
                   description: Stable project identifier (matches Postgres row)
+                userSlug:
+                  type: string
+                  description: User slug for NATS subject construction (ADR-0050)
+                projectSlug:
+                  type: string
+                  description: Project slug for NATS subject construction (ADR-0050)
                 gitUrl:
                   type: string
                   description: Optional git remote URL (empty for scratch projects)
