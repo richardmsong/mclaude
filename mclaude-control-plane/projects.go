@@ -43,8 +43,8 @@ type ProvisionReply struct {
 // ProvisionTimeoutSeconds is the NATS request/reply timeout for project provisioning.
 const ProvisionTimeoutSeconds = 10
 
-// StartProjectsSubscriber connects to NATS, ensures the mclaude-projects and
-// mclaude-job-queue KV buckets exist, and subscribes to
+// StartProjectsSubscriber connects to NATS, ensures the mclaude-projects,
+// mclaude-job-queue, and mclaude-hosts KV buckets exist, and subscribes to
 // mclaude.*.api.projects.create.
 // The caller owns the *nats.Conn lifetime — Close() it on shutdown.
 func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
@@ -61,6 +61,12 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 	if _, err := ensureJobQueueKV(js); err != nil {
 		return err
 	}
+
+	hostsKV, err := ensureHostsKV(js)
+	if err != nil {
+		return err
+	}
+	s.hostsKV = hostsKV
 
 	// subject pattern: mclaude.{userID}.api.projects.create
 	_, err = nc.Subscribe("mclaude.*.api.projects.create", func(msg *nats.Msg) {
@@ -212,6 +218,19 @@ func ensureJobQueueKV(js nats.JetStreamContext) (nats.KeyValue, error) {
 	}
 	return js.CreateKeyValue(&nats.KeyValueConfig{
 		Bucket:  "mclaude-job-queue",
+		History: 1,
+	})
+}
+
+// ensureHostsKV creates the mclaude-hosts KV bucket if it doesn't exist (ADR-0046).
+// The bucket stores host liveness state keyed by {uslug}.{hslug}.
+func ensureHostsKV(js nats.JetStreamContext) (nats.KeyValue, error) {
+	kv, err := js.KeyValue("mclaude-hosts")
+	if err == nil {
+		return kv, nil
+	}
+	return js.CreateKeyValue(&nats.KeyValueConfig{
+		Bucket:  "mclaude-hosts",
 		History: 1,
 	})
 }

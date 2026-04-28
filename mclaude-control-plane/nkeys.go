@@ -100,22 +100,25 @@ func GenerateUserNKey() (*NKeyPair, []byte, error) {
 	return &NKeyPair{KeyPair: kp, PublicKey: pub}, seed, nil
 }
 
-// IssueUserJWT issues a NATS user JWT scoped to mclaude.{userID}.>
+// IssueUserJWT issues a NATS user JWT scoped to mclaude.{userSlug}.>
 // signed by the given account key pair.
+//
+// userSlug is the user's URL-safe slug (ADR-0046); it is stored in claims.Name
+// so the SPA can read it to construct KV key prefixes (e.g. mclaude-hosts).
 //
 // Returns the encoded JWT string and the user's NKey seed.
 // The seed must be returned to the client alongside the JWT — the client
 // needs the seed to sign NATS connection nonce challenges.
-func IssueUserJWT(userID string, accountKP nkeys.KeyPair, expirySecs int64) (jwt string, seed []byte, err error) {
+func IssueUserJWT(userSlug string, accountKP nkeys.KeyPair, expirySecs int64) (jwt string, seed []byte, err error) {
 	userKP, userSeed, err := GenerateUserNKey()
 	if err != nil {
 		return "", nil, fmt.Errorf("generate user nkey: %w", err)
 	}
 
-	perms := UserSubjectPermissions(userID)
+	perms := UserSubjectPermissions(userSlug)
 
 	claims := natsjwt.NewUserClaims(userKP.PublicKey)
-	claims.Name = userID
+	claims.Name = userSlug
 	claims.Expires = expirySecs
 	claims.Permissions.Pub.Allow = perms.PubAllow
 	claims.Permissions.Sub.Allow = perms.SubAllow

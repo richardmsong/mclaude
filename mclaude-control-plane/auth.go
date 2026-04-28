@@ -28,8 +28,11 @@ type LoginResponse struct {
 	// NKeySeed is the user's NKey seed. The client uses it to sign NATS
 	// connection nonce challenges.
 	NKeySeed string `json:"nkeySeed"`
-	// UserID is the authenticated user's ID.
+	// UserID is the authenticated user's UUID.
 	UserID string `json:"userId"`
+	// UserSlug is the authenticated user's URL-safe slug (ADR-0046).
+	// The SPA uses this as the KV key prefix for mclaude-hosts, mclaude-projects, etc.
+	UserSlug string `json:"userSlug,omitempty"`
 	// ExpiresAt is the Unix timestamp when the JWT expires.
 	ExpiresAt int64 `json:"expiresAt"`
 }
@@ -46,6 +49,7 @@ type Server struct {
 	adminToken string          // break-glass admin bearer token
 	providers  *providerRegistry // OAuth provider config and state store; nil when no providers configured
 	nc         *nats.Conn      // NATS connection for KV writes from HTTP handlers; nil when NATS unavailable
+	hostsKV    nats.KeyValue   // mclaude-hosts KV bucket; nil until StartProjectsSubscriber sets it (ADR-0046)
 }
 
 // NewServer constructs a Server. accountKP must be an account-level NKey pair —
@@ -105,7 +109,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	expirySecs := int64(s.jwtExpiry.Seconds())
 	expiresAt := time.Now().Add(s.jwtExpiry).Unix()
 
-	jwt, seed, err := IssueUserJWT(user.ID, s.accountKP, expiresAt+expirySecs)
+	jwt, seed, err := IssueUserJWT(user.Slug, s.accountKP, expiresAt+expirySecs)
 	if err != nil {
 		http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
 		return
@@ -117,6 +121,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		JWT:       jwt,
 		NKeySeed:  string(seed),
 		UserID:    user.ID,
+		UserSlug:  user.Slug,
 		ExpiresAt: expiresAt,
 	})
 }
@@ -157,6 +162,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		JWT:       newJWT,
 		NKeySeed:  string(seed),
 		UserID:    claims.Name,
+		UserSlug:  claims.Name, // claims.Name is now the user slug (ADR-0046)
 		ExpiresAt: expiresAt,
 	})
 }

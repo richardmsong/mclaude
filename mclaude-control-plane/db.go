@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,7 +23,19 @@ type User struct {
 	PasswordHash string // bcrypt — empty for SSO-only accounts
 	OAuthID      *string
 	IsAdmin      bool
+	Slug         string // URL-safe identifier derived from email local-part (ADR-0046)
 	CreatedAt    time.Time
+}
+
+// slugNonAlphaNum matches any run of characters that are not alphanumeric.
+var slugNonAlphaNum = regexp.MustCompile(`[^a-zA-Z0-9]+`)
+
+// computeUserSlug derives a URL-safe slug from an email address.
+// Uses the local part (before '@'), lowercased, with non-alphanumeric runs
+// replaced by '-'. Consistent with the SQL backfill in the schema migration.
+func computeUserSlug(email string) string {
+	local := strings.Split(email, "@")[0]
+	return strings.ToLower(slugNonAlphaNum.ReplaceAllString(local, "-"))
 }
 
 // Host is a row from the hosts table. Per ADR-0035, this is the single source
@@ -79,10 +93,10 @@ func (db *DB) Migrate(ctx context.Context) error {
 // GetUserByEmail looks up a user by email address. Returns nil, nil if not found.
 func (db *DB) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 	row := db.pool.QueryRow(ctx,
-		`SELECT id, email, name, password_hash, oauth_id, is_admin, created_at FROM users WHERE email = $1`,
+		`SELECT id, email, name, password_hash, oauth_id, is_admin, slug, created_at FROM users WHERE email = $1`,
 		email)
 	u := &User{}
-	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.OAuthID, &u.IsAdmin, &u.CreatedAt)
+	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.OAuthID, &u.IsAdmin, &u.Slug, &u.CreatedAt)
 	if err != nil {
 		if err.Error() == "no rows in result set" {
 			return nil, nil
@@ -95,10 +109,10 @@ func (db *DB) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 // GetUserByID looks up a user by ID. Returns nil, nil if not found.
 func (db *DB) GetUserByID(ctx context.Context, id string) (*User, error) {
 	row := db.pool.QueryRow(ctx,
-		`SELECT id, email, name, password_hash, oauth_id, is_admin, created_at FROM users WHERE id = $1`,
+		`SELECT id, email, name, password_hash, oauth_id, is_admin, slug, created_at FROM users WHERE id = $1`,
 		id)
 	u := &User{}
-	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.OAuthID, &u.IsAdmin, &u.CreatedAt)
+	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.OAuthID, &u.IsAdmin, &u.Slug, &u.CreatedAt)
 	if err != nil {
 		if err.Error() == "no rows in result set" {
 			return nil, nil
@@ -110,14 +124,15 @@ func (db *DB) GetUserByID(ctx context.Context, id string) (*User, error) {
 
 // CreateUser inserts a new user row. id must be a pre-generated UUID.
 func (db *DB) CreateUser(ctx context.Context, id, email, name, passwordHash string) (*User, error) {
+	slug := computeUserSlug(email)
 	now := time.Now().UTC()
 	_, err := db.pool.Exec(ctx,
-		`INSERT INTO users (id, email, name, password_hash, created_at) VALUES ($1, $2, $3, $4, $5)`,
-		id, email, name, passwordHash, now)
+		`INSERT INTO users (id, email, name, password_hash, slug, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
+		id, email, name, passwordHash, slug, now)
 	if err != nil {
 		return nil, fmt.Errorf("create user: %w", err)
 	}
-	return &User{ID: id, Email: email, Name: name, PasswordHash: passwordHash, CreatedAt: now}, nil
+	return &User{ID: id, Email: email, Name: name, PasswordHash: passwordHash, Slug: slug, CreatedAt: now}, nil
 }
 
 // SetUserAdmin sets or clears the is_admin flag on a user.
@@ -404,6 +419,10 @@ CREATE TABLE IF NOT EXISTS oauth_connections (
 -- Backward-compatible column additions for existing installations.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS oauth_id TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS slug TEXT NOT NULL DEFAULT '';
+
+-- Backfill slug from email local-part for any existing rows where slug is empty.
+UPDATE users SET slug = lower(regexp_replace(split_part(email, '@', 1), '[^a-zA-Z0-9]+', '-', 'g')) WHERE slug = '';
 
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS slug TEXT NOT NULL DEFAULT '';
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS host_id TEXT REFERENCES hosts(id) ON DELETE CASCADE;

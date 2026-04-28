@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -204,6 +205,41 @@ func seedDev(ctx context.Context, db *DB, nc *nats.Conn, logger zerolog.Logger) 
 	for _, proj := range projects {
 		if err := writeProjectKV(nc, user.ID, proj); err != nil {
 			logger.Error().Err(err).Str("projectId", proj.ID).Msg("DEV_SEED: write project KV failed (non-fatal)")
+		}
+	}
+
+	// Write the local machine host to mclaude-hosts KV so the SPA renders it
+	// as online. The local dev host has no NKey, so no $SYS CONNECT fires (ADR-0046).
+	if user.Slug != "" {
+		var localHostSlug, localHostName, localHostType, localHostRole string
+		qerr := db.pool.QueryRow(ctx, `
+			SELECT slug, name, type, role FROM hosts
+			WHERE user_id = $1 AND slug = 'local' LIMIT 1`,
+			user.ID).Scan(&localHostSlug, &localHostName, &localHostType, &localHostRole)
+		if qerr == nil {
+			js, jerr := nc.JetStream()
+			if jerr == nil {
+				hostsKV, kerr := ensureHostsKV(js)
+				if kerr == nil {
+					now := time.Now().UTC().Format(time.RFC3339)
+					state := HostKVState{
+						Slug:       localHostSlug,
+						Type:       localHostType,
+						Name:       localHostName,
+						Role:       localHostRole,
+						Online:     true,
+						LastSeenAt: &now,
+					}
+					if val, merr := json.Marshal(state); merr == nil {
+						key := user.Slug + "." + localHostSlug
+						if _, perr := hostsKV.Put(key, val); perr != nil {
+							logger.Error().Err(perr).Str("key", key).Msg("DEV_SEED: write local host KV failed (non-fatal)")
+						} else {
+							logger.Info().Str("key", key).Msg("DEV_SEED: wrote local host to mclaude-hosts KV")
+						}
+					}
+				}
+			}
 		}
 	}
 
