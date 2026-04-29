@@ -437,7 +437,7 @@ func TestPublishShellKilledNotifications(t *testing.T) {
 	}
 
 	_ = fakeNC
-	_ = mu
+	_ = &mu // use pointer to avoid copying sync.Mutex (go vet)
 	_ = published
 
 	// Verify the XML format for each shell.

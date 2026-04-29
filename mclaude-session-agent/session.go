@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog"
 )
 
 // startupTimeout is the maximum time to wait for Claude to emit an init event
@@ -110,6 +112,10 @@ type Session struct {
 	// (in the stdout router goroutine) before the line is published to NATS.
 	// Used by QuotaMonitor to scan assistant events for the SESSION_JOB_COMPLETE marker.
 	onRawOutput func(evType string, raw []byte)
+	// log is the structured logger for this session. Defaults to zerolog.Nop()
+	// so unit tests that don't wire an agent logger stay silent. The agent
+	// sets this to a.log after creating each session.
+	log      zerolog.Logger
 	// stopping is set to true when the session is being intentionally stopped
 	// (delete, restart, or graceful shutdown). The crash watcher goroutine
 	// checks this flag to distinguish intentional stops from unexpected crashes.
@@ -152,6 +158,7 @@ func newSession(state SessionState, userID string) *Session {
 		extraFlags:     state.ExtraFlags,
 		pendingShells:  make(map[string]pendingShell),
 		inFlightShells: make(map[string]*inFlightShell),
+		log:            zerolog.Nop(), // overridden by agent after construction
 	}
 }
 
@@ -665,6 +672,11 @@ func (s *Session) handleSideEffect(line []byte, writeKV func(state SessionState)
 					Tools:  init.Tools,
 					Agents: init.Agents,
 				}
+				// ADR-0051: set state to idle on init so KV reflects a
+				// successful resume, correcting stale "failed"/"restarting"
+				// state left over from the previous pod lifecycle.
+				s.state.State = StateIdle
+				s.state.StateSince = time.Now()
 				initCh := s.initCh
 				s.mu.Unlock()
 				s.flushKV(writeKV)
@@ -815,7 +827,11 @@ func (s *Session) flushKV(writeKV func(state SessionState) error) {
 	s.mu.Lock()
 	st := s.state
 	s.mu.Unlock()
-	_ = writeKV(st)
+	// ADR-0051: log KV write failures at warn level so operators have
+	// visibility into state staleness. Fire-and-forget semantics preserved.
+	if err := writeKV(st); err != nil {
+		s.log.Warn().Err(err).Str("sessionId", st.ID).Msg("flushKV: failed to write session state to KV")
+	}
 }
 
 // sendInput queues a stream-json input line for delivery to Claude's stdin.

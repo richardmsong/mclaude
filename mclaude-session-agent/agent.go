@@ -244,6 +244,7 @@ func (a *Agent) recoverSessions() error {
 
 		sess := newSession(st, a.userID)
 		sess.metrics = a.metrics
+		sess.log = a.log
 
 		// Start debug unix socket for mclaude-cli attach.
 		sessID := st.ID
@@ -271,6 +272,10 @@ func (a *Agent) recoverSessions() error {
 		a.mu.Lock()
 		a.sessions[st.ID] = sess
 		a.mu.Unlock()
+		// ADR-0051: start a crash watcher for recovered sessions, matching
+		// what handleCreate does for new sessions. Without this, a recovered
+		// session whose Claude process crashes won't auto-restart.
+		go a.watchSessionCrash(st.ID, sess)
 		a.publishLifecycle(st.ID, "session_resumed")
 		a.log.Info().Str("sessionId", st.ID).Msg("session resumed after startup")
 		if a.metrics != nil {
@@ -772,6 +777,7 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 
 	sess := newSession(state, a.userID)
 	sess.metrics = a.metrics
+	sess.log = a.log
 
 	// Apply permission policy from request (backward-compatible: absent = managed).
 	if req.PermPolicy != "" {
@@ -1109,6 +1115,7 @@ func (a *Agent) handleRestart(msg *nats.Msg) {
 	// Relaunch with --resume.
 	newSess := newSession(st, a.userID)
 	newSess.metrics = a.metrics
+	newSess.log = a.log
 
 	// Restart debug unix socket for mclaude-cli attach.
 	restartID := req.SessionID
@@ -1322,6 +1329,7 @@ func (a *Agent) watchSessionCrash(sessionID string, sess *Session) {
 
 	newSess := newSession(st, a.userID)
 	newSess.metrics = a.metrics
+	newSess.log = a.log
 
 	// Restart debug unix socket.
 	newDbg := NewDebugServer(sessionID,
