@@ -66,7 +66,7 @@ ADR-0035 (Unified Host Architecture) extends ADR-0024 by inserting `.hosts.{hslu
 `UserHostStatus(u UserSlug, h HostSlug) string` -- host presence heartbeat.
 
 **User+host+project-scoped subject helpers (ADR-0035):**
-`UserHostProjectAPISessionsInput`, `UserHostProjectAPISessionsControl`, `UserHostProjectAPISessionsCreate`, `UserHostProjectAPISessionsDelete`, `UserHostProjectAPITerminal`, `UserHostProjectEvents`, `UserHostProjectLifecycle`
+`UserHostProjectAPISessionsInput`, `UserHostProjectAPISessionsControl`, `UserHostProjectAPISessionsCreate`, `UserHostProjectAPISessionsDelete`, `UserHostProjectAPISessionsRestart`, `UserHostProjectAPITerminal`, `UserHostProjectEvents`, `UserHostProjectLifecycle`
 
 All accept `(u UserSlug, h HostSlug, p ProjectSlug, ...)` -- the `h HostSlug` parameter is required for all project-scoped subjects.
 
