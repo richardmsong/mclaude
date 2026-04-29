@@ -44,4 +44,8 @@ rules:
   - apiGroups: ["mclaude.io"]
     resources: ["mcprojects", "mcprojects/status"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  ## Leader election (coordination.k8s.io/leases)
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 {{- end }}
