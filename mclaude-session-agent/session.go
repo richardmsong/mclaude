@@ -508,6 +508,23 @@ func (s *Session) updateInFlightShells(evType string, line []byte) {
 		}
 
 	case EventTypeUser:
+		// First check for task-notification origin (removal path).
+		// Use a separate, forgiving parse that doesn't require content to be an array.
+		var originCheck struct {
+			Origin struct {
+				Kind string `json:"kind"`
+			} `json:"origin"`
+		}
+		if err := json.Unmarshal(line, &originCheck); err != nil {
+			return
+		}
+
+		// Removal: task-notification origin removes from inFlightShells.
+		if originCheck.Origin.Kind == "task-notification" {
+			s.removeShellByTaskNotification(line)
+			return
+		}
+
 		// Phase 2: look for tool_result matching a pending shell.
 		var msg struct {
 			Message struct {
@@ -517,19 +534,8 @@ func (s *Session) updateInFlightShells(evType string, line []byte) {
 					Content   string `json:"content"`
 				} `json:"content"`
 			} `json:"message"`
-			Origin struct {
-				Kind string `json:"kind"`
-			} `json:"origin"`
 		}
 		if err := json.Unmarshal(line, &msg); err != nil {
-			return
-		}
-
-		// Removal: task-notification origin removes from inFlightShells.
-		if msg.Origin.Kind == "task-notification" {
-			// Extract tool-use-id from the task-notification content (XML).
-			// The notification XML contains <tool-use-id>{id}</tool-use-id>.
-			s.removeShellByTaskNotification(line)
 			return
 		}
 
