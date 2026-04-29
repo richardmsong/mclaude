@@ -230,7 +230,7 @@ The previous `mclaude-laptops` and `mclaude-heartbeats` buckets are removed. Liv
 
 Created by: control-plane (`ensureJobQueueKV` — `nats.KeyValueConfig{Bucket: "mclaude-job-queue", History: 1}`)
 
-Key format: `{uslug}.{jobId}` (dot-separated; `{jobId}` stays UUID v4)
+Key format: `{uslug}.{jobId}` (dot-separated; `{jobId}` stays UUID v4). **Known bug:** daemon code casts `job.UserID` (UUID) to `slug.UserSlug` without converting — actual keys are `{UUID}.{jobId}`, not `{uslug}.{jobId}`. Internally consistent (daemon reads its own writes) but deviates from spec convention. Same UUID-as-slug pattern applies to daemon session KV lookups (`dispatchQueuedJob` poll, `startupRecovery` check) — these always miss because session-agents write slug-based keys.
 
 Value: `JobEntry`
 ```json

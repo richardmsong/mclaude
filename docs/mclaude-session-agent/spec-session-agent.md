@@ -355,7 +355,7 @@ Terminal sessions spawn a PTY shell and bridge I/O through core NATS subjects. T
 | Session create — Claude process fails to start | `session_failed` lifecycle event published to `lifecycle.{sslug}` |
 | Session delete — handler error | `api_error` event published to `events._api` with `operation: "delete"` |
 | Session restart — handler error | `api_error` event published to `events._api` with `operation: "restart"` |
-| Claude process crash (unexpected exit) | Session agent detects exit, publishes `session_failed` lifecycle event, auto-restarts with `--resume {sessionId}`. Increments `mclaude_claude_restarts_total` counter. |
+| Claude process crash (unexpected exit) | **Known bug:** auto-restart is not implemented. No goroutine watches session `doneCh` for unexpected exits. A crashed Claude process leaves the session dead in memory — the user must manually restart via `sessions.restart` or wait for pod restart. Spec target: session-agent detects exit, publishes `session_failed`, auto-restarts with `--resume {sessionId}`, increments `mclaude_claude_restarts_total`. |
 | Git auth error during initial clone (K8s) | `session_failed` lifecycle event with `provider_auth_failed` reason published; agent exits |
 | Credential helper setup fails | Logged as warning; continues (non-fatal, SSH key auth may still work) |
 | Session delete — process does not stop within 10s | Process is SIGKILLed; deletion proceeds |

@@ -163,7 +163,7 @@ For full NATS server config see `docs/spec-state-schema.md` — NATS Server Conf
 
 | Kind | Name | Notes |
 |---|---|---|
-| ConfigMap | `{release}-session-agent-template` | Static pod template values (image, resources, PVC sizes, corporate CA settings). Read by `mclaude-controller-k8s` to build per-project Deployments. |
+| ConfigMap | `{release}-session-agent-template` | Static pod template values (image, resources, PVC sizes, corporate CA settings). Read by `mclaude-controller-k8s` to build per-project Deployments. **Known bug:** the Helm template file for this ConfigMap is missing from `charts/mclaude-worker/templates/` — `values.yaml` `sessionAgent.*` settings (image tag, 50Gi PVC, 86400s grace, corporate CA) are never rendered. The controller falls back to `defaultTemplate()` with wrong image (`:latest`), undersized PVCs (10Gi), short grace period (30s), and no corporate CA. |
 
 ### Configuration knobs
 
