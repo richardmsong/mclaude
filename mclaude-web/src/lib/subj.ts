@@ -16,8 +16,8 @@ const PREFIX = 'mclaude'
 // User-scoped subjects (no host qualifier)
 // --------------------------------------------------------------------------
 
-export function subjProjectsCreate(uslug: UserSlug): string {
-  return `${PREFIX}.users.${uslug}.api.projects.create`
+export function subjProjectsCreate(uslug: UserSlug, hslug: HostSlug): string {
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.api.projects.create`
 }
 
 export function subjProjectsUpdated(uslug: UserSlug): string {

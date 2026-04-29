@@ -251,30 +251,31 @@ describe('SessionListVM', () => {
   })
 
   describe('createProject', () => {
-    it('publishes to mclaude.{userId}.api.projects.create and returns project id', async () => {
+    it('publishes to host-scoped api.projects.create and returns project id', async () => {
+      // G11: subject is now host-scoped: mclaude.users.{uslug}.hosts.{hslug}.api.projects.create
       mockNats.requestHandlers.set(
-        'mclaude.users.user-1.api.projects.create',
+        'mclaude.users.user-1.hosts.local.api.projects.create',
         () => enc.encode(JSON.stringify({ id: 'proj-new' }))
       )
 
       const projectId = await vm.createProject('My Project')
       expect(projectId).toBe('proj-new')
 
-      const req = mockNats.requests.find(r => r.subject === 'mclaude.users.user-1.api.projects.create')
+      const req = mockNats.requests.find(r => r.subject === 'mclaude.users.user-1.hosts.local.api.projects.create')
       expect(req).toBeDefined()
       expect(parsePublished(req!.data)).toMatchObject({ name: 'My Project' })
     })
 
     it('includes gitUrl in payload when provided', async () => {
       mockNats.requestHandlers.set(
-        'mclaude.users.user-1.api.projects.create',
+        'mclaude.users.user-1.hosts.local.api.projects.create',
         () => enc.encode(JSON.stringify({ id: 'proj-cloned' }))
       )
 
       const projectId = await vm.createProject('Cloned', 'https://github.com/org/repo')
       expect(projectId).toBe('proj-cloned')
 
-      const req = mockNats.requests.find(r => r.subject === 'mclaude.users.user-1.api.projects.create')
+      const req = mockNats.requests.find(r => r.subject === 'mclaude.users.user-1.hosts.local.api.projects.create')
       expect(parsePublished(req!.data)).toMatchObject({
         name: 'Cloned',
         gitUrl: 'https://github.com/org/repo',
@@ -283,13 +284,13 @@ describe('SessionListVM', () => {
 
     it('omits gitUrl from payload when not provided', async () => {
       mockNats.requestHandlers.set(
-        'mclaude.users.user-1.api.projects.create',
+        'mclaude.users.user-1.hosts.local.api.projects.create',
         () => enc.encode(JSON.stringify({ id: 'proj-scratch' }))
       )
 
       await vm.createProject('Scratch')
 
-      const req = mockNats.requests.find(r => r.subject === 'mclaude.users.user-1.api.projects.create')
+      const req = mockNats.requests.find(r => r.subject === 'mclaude.users.user-1.hosts.local.api.projects.create')
       const payload = parsePublished(req!.data) as Record<string, unknown>
       expect('gitUrl' in payload).toBe(false)
     })

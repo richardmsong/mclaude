@@ -801,7 +801,22 @@ export class EventStore {
         break
       }
 
-      case 'result':
+      case 'result': {
+        // Spec: result events include usage data — extract and apply to the last assistant turn
+        const resultEvent = event as { usage?: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number } }
+        if (resultEvent.usage) {
+          // Find the most recent assistant turn and update usage
+          for (let i = this._conversation.turns.length - 1; i >= 0; i--) {
+            const t = this._conversation.turns[i]
+            if (t.type === 'assistant') {
+              t.usage = resultEvent.usage
+              break
+            }
+          }
+        }
+        break
+      }
+
       case 'keep_alive':
         // No UI action needed
         break

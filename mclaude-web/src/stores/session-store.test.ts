@@ -126,21 +126,23 @@ describe('SessionStore', () => {
   })
 
   describe('KV DEL → session removal', () => {
-    it('removes session from map on DEL operation', () => {
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({ id: 'session-1', projectId: 'project-1' }))
+    it('removes session from map on DEL operation (slug-based lookup)', () => {
+      // G10 fix: DEL key contains slug, but map is keyed by UUID.
+      // The session must have a slug field matching the key's last segment.
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.my-session', makeSessionKVState({ id: 'session-1', projectId: 'project-1', slug: 'my-session' }))
       expect(store.sessions.has('session-1')).toBe(true)
 
-      mockNats.kvDelete('mclaude-sessions', 'user-1.project-1.session-1')
+      mockNats.kvDelete('mclaude-sessions', 'user-1.project-1.my-session')
       expect(store.sessions.has('session-1')).toBe(false)
     })
 
     it('notifies session listeners on DEL', () => {
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({ id: 'session-1', projectId: 'project-1' }))
+      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.my-session', makeSessionKVState({ id: 'session-1', projectId: 'project-1', slug: 'my-session' }))
 
       const calls: number[] = []
       store.onSessionChanged(sessions => calls.push(sessions.size))
 
-      mockNats.kvDelete('mclaude-sessions', 'user-1.project-1.session-1')
+      mockNats.kvDelete('mclaude-sessions', 'user-1.project-1.my-session')
       expect(calls).toEqual([0])
     })
   })

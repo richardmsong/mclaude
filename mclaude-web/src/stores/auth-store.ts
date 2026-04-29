@@ -112,7 +112,7 @@ export class AuthStore {
     if (!expiry) return
 
     const ttlMs = expiry * 1000 - Date.now()
-    if (ttlMs > 5 * 60 * 1000) return // More than 5 min left — no action
+    if (ttlMs > 15 * 60 * 1000) return // More than 15 min left — no action (spec: refresh below 15 min)
 
     this._setState({ ...this._state, status: 'refreshing' })
     try {

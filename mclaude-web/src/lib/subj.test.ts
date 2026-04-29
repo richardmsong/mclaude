@@ -37,8 +37,8 @@ const C = 'us-west' as ClusterSlug
 
 describe('NATS subject builders', () => {
   describe('user-scoped subjects', () => {
-    it('subjProjectsCreate matches spec', () => {
-      expect(subjProjectsCreate(U)).toBe('mclaude.users.alice-gmail.api.projects.create')
+    it('subjProjectsCreate matches spec (host-scoped)', () => {
+      expect(subjProjectsCreate(U, H)).toBe('mclaude.users.alice-gmail.hosts.mbp16.api.projects.create')
     })
 
     it('subjProjectsUpdated matches spec', () => {
@@ -136,7 +136,7 @@ describe('NATS subject builders', () => {
 
   describe('typed-literal structure invariants', () => {
     it('user-scoped subjects always start with mclaude.users.{uslug}', () => {
-      expect(subjProjectsCreate(U)).toMatch(/^mclaude\.users\.alice-gmail\./)
+      expect(subjProjectsCreate(U, H)).toMatch(/^mclaude\.users\.alice-gmail\./)
       expect(subjSessionsInput(U, H, P)).toMatch(/^mclaude\.users\.alice-gmail\./)
     })
 
@@ -145,7 +145,7 @@ describe('NATS subject builders', () => {
     })
 
     it('reserved word "users" appears as literal, not as a slug value', () => {
-      const s = subjProjectsCreate(U)
+      const s = subjProjectsCreate(U, H)
       // The token after 'mclaude.' is 'users' (literal), then the actual user slug
       const tokens = s.split('.')
       expect(tokens[1]).toBe('users')
