@@ -25,12 +25,17 @@ The cluster's slug is configured at deploy time via the Helm value `clusterSlug`
 |----------|----------|-------------|
 | `CLUSTER_SLUG` | Yes | The cluster's canonical slug. Used to build the wildcard NATS subscription `mclaude.users.*.hosts.{CLUSTER_SLUG}.api.projects.>`. |
 | `NATS_URL` | Yes | Worker NATS service URL (the same NATS that leaf-links into the hub). |
-| `NATS_CREDS_FILE` | Yes | Path to the per-cluster controller JWT + NKey seed (provisioned by `helm install mclaude-worker` from the cluster register response). |
-| `JS_DOMAIN` | Yes | JetStream domain for this worker (matches `hosts.js_domain` for cluster-type rows that point here). |
+| `NATS_ACCOUNT_SEED` | Yes | Account NKey seed. The controller generates its own ephemeral user JWT signed by this key — same pattern as control-plane. In Helm, populated from the `operator-keys` Secret's `accountSeed`. |
+| `NATS_CREDENTIALS_PATH` | No | Injected by Helm but **not read by the controller binary**. The leaf-creds file at this path is used only by the worker NATS StatefulSet for the leaf-node connection, not by the controller. Retained in the Helm template for future use. |
+| `JS_DOMAIN` | No | Injected by Helm but **not yet read by the controller binary**. Reserved for future JetStream domain qualification. |
 | `HELM_RELEASE_NAME` | No | Used to locate the session-agent-template ConfigMap (default `mclaude-worker`). |
 | `SESSION_AGENT_TEMPLATE_CM` | No | Explicit name of the session-agent-template ConfigMap. Overrides the `HELM_RELEASE_NAME`-derived name. Set by Helm (`{{ .Release.Name }}-session-agent-template`). |
 | `SESSION_AGENT_NATS_URL` | No | NATS URL injected into session-agent pods as `NATS_URL`. Defaults to the FQDN-qualified worker NATS URL. For single-cluster deployments where KV buckets live on hub NATS, set to the hub NATS URL (e.g. `nats://mclaude-cp-nats.mclaude-system.svc.cluster.local:4222`). |
 | `DEV_OAUTH_TOKEN` | No | Claude API OAuth token for dev environments. When set, the reconciler injects it as `oauth-token` in per-user `user-secrets` Secret. Session-agent entrypoint reads this and exports `CLAUDE_CODE_OAUTH_TOKEN`. |
+| `METRICS_ADDR` | No | Prometheus metrics listen address (default `:8082`). |
+| `HEALTH_PROBE_ADDR` | No | Health/readiness probe listen address (default `:8081`). |
+| `LEADER_ELECTION` | No | Injected by Helm as `"true"` but **not yet read by the controller binary**. Leader election is not currently configured in `ctrl.Options`. |
+| `LOG_LEVEL` | No | Injected by Helm but **not yet read by the controller binary**. Zerolog uses its default level. |
 | `LEADER_ELECTION_NAMESPACE` | No | Defaults to `mclaude-system`. |
 
 ### Interfaces
@@ -43,7 +48,7 @@ Subscribes via the per-cluster JWT (issued at `POST /admin/clusters` time, scope
 |---------|----------|
 | `mclaude.users.*.hosts.{CLUSTER_SLUG}.api.projects.provision` | Request/reply. Resolves `userSlug`, `hostSlug`, `projectSlug` from the subject + payload; creates the `MCProject` CR; returns success when reconcile reaches `Ready` (or 503-style failure). |
 | `mclaude.users.*.hosts.{CLUSTER_SLUG}.api.projects.create` | Request/reply. Identical to provision today; reserved for future fan-out. |
-| `mclaude.users.*.hosts.{CLUSTER_SLUG}.api.projects.update` | Request/reply. Reconciles per-user `user-secrets` Secret (NATS creds, OAuth tokens, CLI configs) and re-applies the pod template. |
+| `mclaude.users.*.hosts.{CLUSTER_SLUG}.api.projects.update` | Request/reply. Reconciles per-user `user-secrets` Secret (NATS creds, OAuth tokens, CLI configs) and re-applies the pod template. **Not yet implemented** — the NATS handler dispatches `create`, `provision`, and `delete` but has no handler for `update`. Reserved for future credential refresh flow. |
 | `mclaude.users.*.hosts.{CLUSTER_SLUG}.api.projects.delete` | Request/reply. Tears down the `MCProject` CR (and cascaded namespace/RBAC/PVCs/Deployment). |
 
 The wildcard at the user level is what enables one cluster controller to receive provisioning requests from every user granted access to its cluster.

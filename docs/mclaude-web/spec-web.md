@@ -125,6 +125,10 @@ Registers a one-shot listener that fires when a new session belonging to `projec
 
 `ConversationVM` includes `session_id` (the session's UUID) in every `sessions.input` NATS payload. The session-agent looks up sessions by UUID, not by slug. `App.tsx` resolves the UUID from the session store via `session?.id ?? route.sessionId` before constructing the ConversationVM, so that slug-format route URLs (e.g. `#u/dev/h/local/p/default-project/s/new-session`) produce the correct UUID in NATS messages (ADR-0050 D15).
 
+### Default Host Slug
+
+Throughout the SPA, `hostSlug` defaults to `'local'` when not available from the project, session, or route. This fallback appears in `ConversationVM`, `SessionListVM`, `EventStore`, `LifecycleStore`, and `TerminalVM` — all have `hostSlug` constructor parameters defaulting to `'local'`. This means sessions on projects without a known host will silently use `'local'` as the host slug for all NATS subjects, which is correct for single-host dev deployments but will need explicit host resolution for multi-cluster production.
+
 ### KV Watch DEL/PURGE Handling
 
 `KVEntry.operation` may be `'PUT' | 'DEL' | 'PURGE'`. The session store's `kvWatch` callback must handle `DEL` (and `PURGE`) by removing the corresponding entry from the `_sessions` map, not inserting it. Failure to handle `DEL` causes ghost sessions to appear in the UI after deletion.

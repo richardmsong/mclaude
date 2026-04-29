@@ -104,6 +104,8 @@ The agent idempotently creates or updates two JetStream streams on startup:
 
 - **MCLAUDE_API** -- Captures session API commands for at-least-once delivery. See `spec-state-schema.md` section "JetStream Streams / MCLAUDE_API" for stream config and subject pattern.
 
+Note: The agent does **not** currently create `MCLAUDE_LIFECYCLE` on startup, despite the spec-state-schema.md listing it as "Created by: session-agent". Lifecycle events are published to core NATS subjects but are not persisted without the stream. The test harness creates it for integration tests. This is a known gap.
+
 The agent creates two durable pull consumers on MCLAUDE_API:
 
 - **Command consumer** (`sa-cmd-{uslug}-{pslug}`) -- Filters `create`, `delete`, `input`, and `restart` subjects. Explicit ack, 60s ack wait, max 5 deliveries. Fetch loop: batch 10, FetchMaxWait 5s.
@@ -128,7 +130,7 @@ The agent does not write to `mclaude-hosts` (single-writer is control-plane, sou
 All publishes use the host-scoped pattern per ADR-0035: `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.…`.
 
 - **Lifecycle events** to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{sslug}` -- Published on session creation, stop, resume, restart, upgrade, failure, permission denial, quota interruption, and job completion. See `spec-state-schema.md` section "Lifecycle Event Payloads".
-- **Stream-json events** to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.events.{sslug}` -- Raw Claude Code stdout lines, forwarded to the MCLAUDE_EVENTS stream.
+- **Stream-json events** to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.events.{sslug}` -- Raw Claude Code stdout lines, forwarded to the MCLAUDE_EVENTS stream. Note: the code has a fallback path that constructs event subjects using UUIDs (`userID`, `projectID`, `sessionID`) when slug fields are empty. This should not occur in normal operation but provides backward compatibility during transitions.
 - **API error events** to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.events._api` -- Published when a create/delete/restart handler encounters an error. Payload: `{type: "api_error", request_id: string, operation: "create" | "delete" | "restart", error: string}`.
 - **Quota status** to `mclaude.users.{uslug}.quota` (daemon only) -- Published every 60 seconds from Anthropic API polling. The quota subject is user-scoped (no host segment) because quota is an account-wide signal. See `spec-state-schema.md` section "Quota Status".
 
@@ -289,7 +291,7 @@ Initial repo setup: clone bare repo from `GIT_URL` (or init scratch repo with em
 
 Sessions are isolated via git worktrees under `{dataDir}/worktrees/{branchSlug}`. The agent:
 - Creates worktrees with `git worktree add` on session creation.
-- Refreshes credentials before each git worktree operation.
+- Refreshes credentials before each git worktree operation via `CredentialManager.RefreshIfChanged(gitIdentityID)` — selects the correct OAuth connection token based on the `GIT_IDENTITY_ID` env var.
 - Checks for branch collision before creating (errors unless `joinWorktree` is true).
 - Removes worktrees with `git worktree remove --force` when the last session using a branch is deleted.
 

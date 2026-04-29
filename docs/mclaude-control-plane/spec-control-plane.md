@@ -18,7 +18,9 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 | `DATABASE_URL` / `DATABASE_DSN` | Yes | (none -- exits on startup if empty) | Postgres connection string. Hosts/users/projects persistence is required for ADR-0035. |
 | `NATS_URL` | No | `nats://localhost:4222` | Internal hub NATS broker URL |
 | `NATS_WS_URL` | No | (empty) | External WebSocket URL for browser clients; empty means client derives from origin |
-| `OPERATOR_KEYS_PATH` | No | `/etc/mclaude/operator-keys` | Mount path for the `mclaude-system/operator-keys` Secret. Reads `operatorJwt`, `accountJwt`, `accountSeed`, `operatorSeed`. Required to sign per-host user JWTs. |
+| `NATS_ACCOUNT_SEED` | Yes (one of `NATS_ACCOUNT_SEED` or `OPERATOR_KEYS_PATH`) | (none) | Account NKey seed string. When set, used directly to sign per-host user JWTs and session-agent JWTs. If not set, falls back to `OPERATOR_KEYS_PATH`. In production Helm deployments, this is populated from the `operator-keys` Secret's `accountSeed` key. |
+| `OPERATOR_KEYS_PATH` | No | `/etc/mclaude/operator-keys` | Mount path for the `mclaude-system/operator-keys` Secret. Reads `operatorJwt`, `accountJwt`, `accountSeed`, `operatorSeed`. Fallback when `NATS_ACCOUNT_SEED` is not set. |
+| `ADMIN_TOKEN` | No | (empty) | Static bearer token for the loopback admin port (9091). When set, the admin mux on the loopback port accepts this token for break-glass operations. Separate from per-user bearer tokens used on the main port's `/admin/*` routes. |
 | `BOOTSTRAP_ADMIN_EMAIL` | No | (empty) | Email of the first admin. Read from Helm value; the init-keys Job pre-creates a `users` row with `is_admin=true` and `oauth_id=NULL`; first OAuth login linking that email promotes the user. |
 | `PORT` | No | `8080` | Main API listen port |
 | `ADMIN_PORT` | No | `9091` | Loopback-only port for `/metrics` and break-glass routes. `/admin/*` routes (cluster register, grant) live on the main port and use bearer-token auth. |
@@ -28,7 +30,7 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 | `MIN_CLIENT_VERSION` | No | `0.0.0` | Minimum SPA/CLI version reported by `/version` |
 | `SERVER_VERSION` | No | (empty) | Server version string reported by `/version` |
 | `PROVIDERS_CONFIG_PATH` | No | `/etc/mclaude/providers.json` | Path to OAuth provider config (Helm ConfigMap mount) |
-| `PROVISION_TIMEOUT_SECONDS` | No | `10` | Per-request timeout for NATS provisioning request/reply (`mclaude.users.{uslug}.hosts.{hslug}.api.projects.*`) |
+| `PROVISION_TIMEOUT_SECONDS` | No | `10` | Per-request timeout for NATS provisioning request/reply (`mclaude.users.{uslug}.hosts.{hslug}.api.projects.*`). Note: currently a hardcoded constant in code (`const ProvisionTimeoutSeconds = 10`), not yet read from env. `seedDev` uses a longer 30s timeout for the initial provisioning request during startup (controller may not be ready yet). |
 
 ## Interfaces
 
@@ -118,7 +120,7 @@ Per ADR-0035 the control-plane communicates with controllers over host-scoped NA
 | `$SYS.ACCOUNT.{accountKey}.CONNECT` | Per-connection event. Switch on payload `client.kind`: `Client` → `SELECT * FROM hosts WHERE public_key = client.nkey AND type = 'machine'`, update `last_seen_at` for that single row, upsert `mclaude-hosts` KV `online=true`. `Leafnode` → `SELECT * FROM hosts WHERE public_key = client.nkey AND type = 'cluster' LIMIT 1`, then update `last_seen_at` for **all** rows where `slug = found.slug AND type = 'cluster'` and upsert KV for each user row (cluster-shared liveness). No match → ignore (covers SPA's per-login ephemeral NKey and control-plane's own connection). |
 | `$SYS.ACCOUNT.{accountKey}.DISCONNECT` | Same lookup logic; sets `mclaude-hosts` KV `online=false` for the matched row(s). Does not rewrite `last_seen_at` (it tracks last-known-online). |
 
-There is no `mclaude.*.api.projects.create` subscriber on control-plane any more — projects are created via HTTP (`POST /api/users/{uslug}/projects`); the NATS publish flows the other direction (control-plane → controller).
+Note: The control-plane also subscribes to `mclaude.users.*.api.projects.create` (a user-scoped NATS subject without the host segment) for backward-compatible NATS-based project creation from the SPA. This subject is published by the SPA's `subjProjectsCreate` helper. The handler creates the Postgres row, writes to `mclaude-projects` KV, and publishes a provisioning request to the host-scoped controller subject. This NATS path coexists with the HTTP `POST /api/users/{uslug}/projects` endpoint; both are functional.
 
 ### NATS KV Buckets
 
@@ -148,7 +150,7 @@ The control-plane does, however, mount one K8s Secret as a file:
 
 1. Connects to Postgres (fatal exit on failure) and runs idempotent schema migration including the ADR-0035 `hosts` table and `projects.host_id` column.
 2. Loads OAuth provider config from `PROVIDERS_CONFIG_PATH`, resolving client secrets from K8s Secrets.
-3. Loads operator + account NKeys from `OPERATOR_KEYS_PATH` (the mounted Secret produced by the `init-keys` Helm pre-install Job). Fatal exit if missing — control-plane cannot mint JWTs without them.
+3. Loads the account signing key from `NATS_ACCOUNT_SEED` env var (preferred) or from `OPERATOR_KEYS_PATH` file mount (fallback). If `NATS_ACCOUNT_SEED` is set, it is parsed directly as an NKey seed. If neither is available, generates an ephemeral account key (dev-only — not suitable for production). Fatal exit if signing fails — control-plane cannot mint JWTs without a valid account key.
 4. Creates the HTTP server with all route handlers.
 5. Connects to hub NATS (retry on failure, unlimited reconnects).
 6. Ensures KV buckets exist (`mclaude-projects`, `mclaude-hosts`, `mclaude-sessions`, `mclaude-job-queue`) — `mclaude-hosts` must exist before the `$SYS` subscriber starts so CONNECT events can write to it immediately.
@@ -194,7 +196,7 @@ A background goroutine runs every 15 minutes, querying `oauth_connections` for G
 2. Control plane validates the request, including optional `gitIdentityId` hostname match, and verifies the calling user has access to `hostSlug`.
 3. Resolves `host_id` from `(user_id, hostSlug)`.
 4. Creates a Postgres `projects` row (`host_id`, `slug`, `name`, `git_url`, optional `git_identity_id`).
-5. Writes the project to the `mclaude-projects` KV bucket (key `{uslug}.{hslug}.{pslug}`).
+5. Writes the project to the `mclaude-projects` KV bucket (key `{userId}.{projectId}` — UUID-based; migration to `{uslug}.{hslug}.{pslug}` deferred per ADR-0050).
 6. Publishes a NATS request on `mclaude.users.{uslug}.hosts.{hslug}.api.projects.provision` with `{userID, userSlug, hostSlug, projectID, projectSlug, gitUrl, gitIdentityId}`. Awaits the controller's reply (`PROVISION_TIMEOUT_SECONDS`).
    - For cluster hosts: `mclaude-controller-k8s` (subscribed to `mclaude.users.*.hosts.{cslug}.api.projects.>`) creates the `MCProject` CR in `mclaude-system` and reconciles namespace/RBAC/PVCs/Secrets/Deployment.
    - For machine hosts: `mclaude-controller-local` (subscribed to its own user/host's wildcard) materializes `~/.mclaude/projects/{pslug}/worktree/` and starts a session-agent subprocess.

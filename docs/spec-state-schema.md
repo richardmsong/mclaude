@@ -145,7 +145,7 @@ History: 64 (maximum supported by NATS KV; sufficient for resume tracking)
 
 Created by: control-plane (`ensureProjectsKV` — `nats.KeyValueConfig{Bucket: "mclaude-projects", History: 1}`)
 
-Key format: `{uslug}.{hslug}.{pslug}` (host-scoped per ADR-0035)
+Key format: `{userId}.{projectId}` (UUID-based; migration to `{uslug}.{hslug}.{pslug}` deferred per ADR-0050)
 
 Value: `ProjectState`
 ```json
@@ -157,11 +157,17 @@ Value: `ProjectState`
   "name": "string",
   "gitUrl": "string",
   "status": "string",
+  "createdAt": "RFC3339",
+  "gitIdentityId": "string | null"
+}
+```
+
+Note: The spec target includes `sessionCount`, `worktrees`, and `lastActiveAt` fields, but these are not yet implemented in `ProjectKVState` (Go struct). Current Go implementation writes only the 9 fields shown above. The additional fields are planned for a future iteration:
+```json
+{
   "sessionCount": 0,
   "worktrees": ["string"],
-  "createdAt": "RFC3339",
-  "lastActiveAt": "RFC3339",
-  "gitIdentityId": "string | null"
+  "lastActiveAt": "RFC3339"
 }
 ```
 
@@ -287,7 +293,7 @@ Subscribers: session-agent (pull consumer for at-least-once delivery)
 ### `MCLAUDE_LIFECYCLE`
 
 Specified in: `docs/adr-0003-k8s-integration.md`
-Created by: session-agent (`CreateOrUpdateStream` — idempotent; same pattern as MCLAUDE_EVENTS / MCLAUDE_API). Production-active stream.
+Created by: session-agent (`CreateOrUpdateStream` — idempotent; same pattern as MCLAUDE_EVENTS / MCLAUDE_API). **Note: the session-agent code does not currently create this stream on startup** — only `MCLAUDE_EVENTS` and `MCLAUDE_API` are created. The test harness (`testutil/deps.go`) creates it for integration tests. Lifecycle events are published to core NATS subjects and are received by subscribers, but without the stream they are not persisted. This is a known gap — the stream creation should be added to the agent's startup sequence.
 
 ```
 Name:      MCLAUDE_LIFECYCLE
@@ -361,7 +367,7 @@ The NATS server publishes one `$SYS.ACCOUNT.{accountKey}.CONNECT` event per clie
 
 `$SYS` is the only liveness signal. There is no periodic heartbeat publish; "online" means a NATS connection from that host (or its leaf link, for clusters) is currently live. A daemon idle for 5 minutes still shows online until its connection actually drops.
 
-The control-plane's own NATS connection uses an ephemeral signing identity scoped only to subscribe `$SYS.>` and publish provisioning requests — it does not match any row in `hosts.public_key`, so the self-event is naturally ignored. SPA connections similarly use the per-login ephemeral NKey delivered in the login response, which is not stored in `hosts.public_key`.
+The control-plane's own NATS connection uses an ephemeral user JWT signed by the account key (`claims.Name = "control-plane"`, no explicit publish/subscribe allow-lists — unrestricted within the account). It does not match any row in `hosts.public_key`, so the self-CONNECT event is naturally ignored. SPA connections similarly use the per-login ephemeral NKey delivered in the login response, which is not stored in `hosts.public_key`.
 
 Note: `sessions.input`, `sessions.create`, etc. are captured by the `MCLAUDE_API` stream for at-least-once delivery. The session-agent consumes them via a JetStream pull consumer, not a core NATS subscription.
 
@@ -376,7 +382,7 @@ Created by `mclaude-controller-k8s` (the cluster controller binary) per ADR-0035
 ### CRD: `MCProject` (`mcprojects.mclaude.io/v1alpha1`)
 
 Scope: Namespaced (in `mclaude-system`)
-Name: `{projectId}`
+Name: `{userSlug}-{projectSlug}` (e.g. `dev-default-project`)
 
 ```yaml
 spec:
@@ -464,13 +470,13 @@ Readers: reconciler — watches this ConfigMap (filtered by name + namespace) in
 - Contents: shared Nix store (cached tools)
 - Mounted at: `/nix` in session-agent pod
 
-### Deployment: `mclaude-session-agent-{projectId}` (in `mclaude-{userID}`)
+### Deployment: `project-{projectId}` (in `mclaude-{userId}`)
 
 - Replicas: 1
 - Strategy: `Recreate` — old pod must exit before new pod starts; prevents two pods consuming the same durable JetStream consumers simultaneously (ADR-0043)
-- Volumes: project PVC, nix PVC, user-config ConfigMap, user-secrets Secret
+- Volumes: project PVC (`project-data`), nix PVC, user-config ConfigMap, user-secrets Secret, `claude-home` emptyDir (mounted at `/home/node/.claude` — ephemeral per pod lifecycle, not persisted across restarts)
 - Container: session-agent image with env vars `USER_ID`, `PROJECT_ID` (UUIDs for FK joins), `USER_SLUG`, `PROJECT_SLUG`, `HOST_SLUG` (slugs for NATS subject and KV key construction per ADR-0024 + ADR-0035)
-- `CLAUDE_CODE_TMPDIR`: set to `/data/claude-tmp` (PVC subPath `claude-tmp` on the `project-data` volume) so shell output files persist across pod restarts
+- `CLAUDE_CODE_TMPDIR`: specified in the spec target but **not yet injected** by the reconciler's `buildPodTemplate()`. When implemented, should be set to `/data/claude-tmp` (PVC subPath on the `project-data` volume) so shell output files persist across pod restarts
 - Restart policy: Always (pod restarts trigger `--resume` recovery)
 
 `mclaude-controller-k8s` resolves `USER_SLUG`, `HOST_SLUG`, and `PROJECT_SLUG` directly from the host-scoped NATS subject of the provision request (`mclaude.users.{uslug}.hosts.{hslug}.api.projects.provision`) plus the request payload. The controller does not read Postgres — control-plane owns Postgres. Session slugs are per-session and flow through NATS messages / KV state; they are not pod env vars.
@@ -479,9 +485,9 @@ Writers: `mclaude-controller-k8s` (`reconcileDeployment`)
 
 ### RBAC: ServiceAccount, Role, RoleBinding (in `mclaude-{userId}`)
 
-- ServiceAccount: `mclaude-session-agent`
-- Role: allows get/watch on ConfigMaps (for config reload)
-- RoleBinding: binds Role to ServiceAccount
+- ServiceAccount: `mclaude-sa`
+- Role: `mclaude-role` — allows get/watch on ConfigMaps (for config reload)
+- RoleBinding: `mclaude-role` — binds Role to ServiceAccount
 
 Writers: `mclaude-controller-k8s` (`reconcileRBAC`)
 
@@ -735,7 +741,7 @@ Published during graceful shutdown (zero-downtime upgrade) after all sessions re
 
 ### `session_permission_denied`
 ```json
-{ "type": "session_permission_denied", "sessionId": "...", "tool": "...", "ts": "RFC3339" }
+{ "type": "session_permission_denied", "sessionId": "...", "tool": "...", "jobId": "...", "ts": "RFC3339" }
 ```
 
 ### `session_job_complete`

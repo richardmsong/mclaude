@@ -168,9 +168,12 @@ For full NATS server config see `docs/spec-state-schema.md` — NATS Server Conf
 | `clusterSlug` | `""` | **Required.** The cluster's canonical slug. Must match the slug used at `mclaude cluster register`. |
 | `jsDomain` | `""` | **Required.** JetStream domain — must match `--jetstream-domain` from registration. |
 | `leafUrl` | `""` | **Required.** Hub leaf-node URL (e.g. `nats-leaf://hub.mclaude.example:7422`). For single-cluster degenerate installs, set to `nats-leaf://{cp-release}-nats.mclaude-system.svc:7422`. |
-| `leafCreds.existingSecret` | `""` | Name of a pre-created Secret with `leafJwt` + `leafSeed`. If empty, the chart expects raw values via `leafCreds.jwt` / `leafCreds.seed`. |
+| `leafCreds.existingSecret` | `""` | Name of a pre-created Secret with `leafJwt` + `leafSeed`. If empty, the chart expects raw values via `leafCreds.jwt` / `leafCreds.seed`. Note: leaf creds are used by the **worker NATS StatefulSet** for the leaf-node connection to hub NATS. The controller binary does **not** read these creds — it authenticates via `NATS_ACCOUNT_SEED` and generates its own ephemeral user JWT. |
 | `trustChain.operatorJwt` | `""` | Operator JWT from cluster registration response. |
 | `trustChain.accountJwt` | `""` | Account JWT from cluster registration response. |
+| `trustChain.accountPublicKey` | `""` | Account NKey public key. Used in NATS `resolver_preload` configuration. |
+| `trustChain.resolverPreload` | `""` | Pre-formatted resolver preload entry for NATS config. Alternative to separate `accountPublicKey` + `accountJwt` when the admin provides a complete preload string. |
+| `hubUrl` | `""` | Hub NATS URL for reference/SPA direct connections. Informational — not consumed by any template or Go binary. Retained for operator documentation purposes. |
 | `nats.persistence.size` | `10Gi` | Worker JetStream PVC size. |
 | `controller.replicas` | `1` | Controller replicas (leader election handles HA). |
 | `sessionAgent.image.*` | ghcr.io image | Image used in per-project Deployments created by the controller. |
