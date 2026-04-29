@@ -101,9 +101,17 @@ The `SessionState.state` union includes `"updating"` (set by the session-agent o
 
 No request-reply: JetStream `api.sessions.create` messages have no Reply field. Success is signalled by the session key appearing in KV.
 
+### createProject()
+
+`SessionListVM.createProject()` publishes to `subjProjectsCreate(uslug)` with `{name, gitUrl?}`. **Known bug:** the payload does not include `hostSlug` — the control-plane's NATS handler cannot resolve the host for provisioning, so SPA-created projects get no session-agent pod.
+
 ### deleteSession()
 
-`SessionListVM.deleteSession()` publishes a fire-and-forget message to `subjSessionsDelete(uslug, hslug, pslug)`. The SPA does not wait for an acknowledgement. Session removal is detected via the KV watcher receiving a `DEL` operation for the session key.
+`SessionListVM.deleteSession()` publishes a fire-and-forget message to `subjSessionsDelete(uslug, hslug, pslug)` with `{sessionId}`. **Known gap:** spec says payload field is `sessionSlug` but code sends `sessionId` (UUID). The session-agent handles this because it looks up sessions by UUID internally.
+
+### restartSession()
+
+`SessionListVM.restartSession()` publishes to `subjSessionsRestart(uslug, hslug, pslug)` with `{sessionId}`. **Known gaps:** (1) spec says payload field is `sessionSlug` but code sends `sessionId` (UUID). (2) Spec requires `requestId` in the payload for error correlation, but it is omitted — restart errors are silently lost.
 
 ### SessionStore.onSessionAdded()
 

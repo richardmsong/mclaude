@@ -191,7 +191,7 @@ Login validates email and bcrypt password hash (or OAuth identity) against Postg
 
 Per-host user JWTs for daemons are minted at `mclaude host register` time (device-code flow) and refreshed via `POST /auth/refresh`.
 
-The auth middleware on protected routes decodes and validates the JWT against the account public key, extracts the user slug + host slug, and enforces two access boundaries: (1) rejects with 403 when the JWT's `sub` user slug does not match the URL's `{uslug}` (cross-user access), and (2) rejects with 403 when the request targets a different host than the JWT was issued for. Admin routes additionally require `users.is_admin = true`.
+The auth middleware on protected routes decodes and validates the JWT against the account public key and extracts the user UUID into the request context. **Known gap:** the spec-described access boundary enforcement (cross-user 403 when JWT `sub` doesn't match URL `{uslug}`, cross-host 403) is not implemented — the middleware only extracts the user ID without checking URL parameters. Admin routes use a separate static `ADMIN_TOKEN` middleware on the loopback port (not per-user `is_admin` checks).
 
 ### OAuth Provider Integration
 

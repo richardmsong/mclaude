@@ -273,7 +273,7 @@ Writers: daemon HTTP server (`POST /jobs`), daemon dispatcher (status transition
 Readers: daemon dispatcher (KV watch), daemon HTTP server (`GET /jobs`)
 History: 1
 
-Dispatcher uses slug fields (`userSlug`, `hostSlug`, `projectSlug`, `sessionSlug`) to construct KV keys into `mclaude-sessions`. UUID fields (`userId`, `projectId`, `sessionId`) remain for Postgres foreign-key joins.
+Dispatcher uses slug fields (`userSlug`, `hostSlug`, `projectSlug`, `sessionSlug`) to construct KV keys into `mclaude-sessions`. UUID fields (`userId`, `projectId`, `sessionId`) remain for Postgres foreign-key joins. **Known bug:** `dispatchQueuedJob()` casts `job.ProjectID` (UUID) to `slug.ProjectSlug` for NATS subject construction — dispatched messages use UUID-based subjects that don't match session-agents' slug-based subscriptions.
 
 ---
 
