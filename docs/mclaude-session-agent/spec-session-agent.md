@@ -75,7 +75,7 @@ Liveness is reported by the hub NATS via `$SYS.ACCOUNT.*.CONNECT/DISCONNECT` eve
 | `--user-id` / `USER_ID` | Flag or env | User UUID (required) |
 | `--project-id` / `PROJECT_ID` | Flag or env | Project UUID (required in standalone) |
 | `--user-slug` / `USER_SLUG` | Flag or env | User typed slug per ADR-0024 |
-| `--host` / `HOST_SLUG` | Flag or env | **Required.** Host slug per ADR-0035 (`mclaude.users.{uslug}.hosts.{hslug}.…`). K8s pods read `HOST_SLUG` injected by `mclaude-controller-k8s`'s `buildPodTemplate`. BYOH daemons read `--host` (defaulting to the target of `~/.mclaude/active-host` if unset). Hard fail at startup on absence. |
+| `--host` / `HOST_SLUG` | Flag or env | **Required.** Host slug per ADR-0035 (`mclaude.users.{uslug}.hosts.{hslug}.…`). K8s pods read `HOST_SLUG` injected by `mclaude-controller-k8s`'s `buildPodTemplate`. BYOH daemons read `--host` (defaulting to the target of `~/.mclaude/active-host` if unset). **Known bug:** code does not fatal on absence — silently falls back through `slugify(hostname)` → `slugify(os.Hostname())` → `"h-unknown"` instead of exiting. Sessions may publish to incorrect NATS subjects. |
 | `--project-slug` / `PROJECT_SLUG` | Flag or env | Project typed slug per ADR-0024 |
 | `--claude-path` / `CLAUDE_PATH` | Flag or env | Path to Claude binary (default: `claude`) |
 | `--data-dir` | Flag | Project PVC mount (default: `/data`) |
@@ -304,7 +304,7 @@ When a `compact_boundary` event is published, the agent queries the MCLAUDE_EVEN
 ### Quota Monitoring
 
 One `QuotaMonitor` goroutine per session, created when the `sessions.create` request includes a `quotaMonitor` config (used by scheduled jobs). The monitor:
-1. Subscribes to `mclaude.users.{uslug}.quota` for quota status updates.
+1. Subscribes to `mclaude.users.{uslug}.quota` for quota status updates. **Known bug:** `newQuotaMonitor()` receives `userID` (UUID) and builds the subscription subject as `mclaude.users.{UUID}.quota`, but the daemon publishes to `mclaude.users.{userSlug}.quota` (slug-based). These never match — quota signals from the daemon don't reach the QuotaMonitor, breaking scheduled job quota enforcement.
 2. When 5-hour utilization reaches the threshold, sends a `QUOTA_THRESHOLD_REACHED` message to Claude's stdin requesting graceful stop.
 3. Starts a 30-minute hard-interrupt timer as a backstop.
 4. Scans assistant events for the `SESSION_JOB_COMPLETE:{prUrl}` marker.
@@ -365,7 +365,7 @@ Terminal sessions spawn a PTY shell and bridge I/O through core NATS subjects. T
 | JetStream fetch error | Exponential backoff (100ms to 5s) with retry |
 | Event exceeds 8 MB NATS payload | Content field stripped; `truncated: true` added |
 | JWT refresh fails (daemon) | Logged as warning; children use current JWT until expiry |
-| `HOST_SLUG` / `--host` not provided | Fatal: agent or daemon refuses to start with `FATAL: HOST_SLUG required (set via env or --host flag)` (no fallback). |
+| `HOST_SLUG` / `--host` not provided | Spec requires fatal exit with `FATAL: HOST_SLUG required`. **Known bug:** code falls back to slugified hostname or `"h-unknown"` instead of exiting. |
 | Host JWT signed for the wrong host | Hub NATS auth rejects publishes/subscribes; the agent surfaces this as a NATS auth error and exits or refuses the failing operation. |
 | Job dispatch — session never reaches idle | Job retried up to 3 times, then marked `failed` |
 | Debug socket start fails | Logged as warning; CLI attach disabled but sessions function normally |

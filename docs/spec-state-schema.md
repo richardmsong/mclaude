@@ -789,10 +789,10 @@ Published during graceful shutdown (zero-downtime upgrade) after all sessions re
 
 ### `session_job_complete`
 ```json
-{ "type": "session_job_complete", "sessionId": "...", "jobId": "...", "branch": "...", "ts": "RFC3339" }
+{ "type": "session_job_complete", "sessionId": "...", "jobId": "...", "branch": "...", "prUrl": "...", "ts": "RFC3339" }
 ```
 
-Published by: QuotaMonitor's `publishExitLifecycle` when the session ended naturally (no platform-injected marker, Stop hook allowed, `sessions.delete` subsequently invoked by dispatcher). No `prUrl` — callers capture artifacts (PR URL, commit SHA, results) via git log, PR body, or external logging.
+Published by: QuotaMonitor's `publishExitLifecycle` when the session ended naturally. **Known gap:** code still includes `prUrl` (extracted from the `SESSION_JOB_COMPLETE:{prUrl}` marker in Claude output). ADR-0034 target removes this field — callers should capture artifacts via git log, PR body, or external logging. The `prUrl` field persists in code pending the ADR-0034 migration.
 
 ### `session_job_paused`
 ```json
