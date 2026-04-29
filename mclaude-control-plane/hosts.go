@@ -274,6 +274,23 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request, userID
 		return
 	}
 
+	// GAP-CP-04: Before deleting the host (which cascades to projects),
+	// publish delete notifications for each project on this host so controllers
+	// can tear down per-project resources (namespaces, Deployments, PVCs, RBAC).
+	if s.nc != nil {
+		user, userErr := s.db.GetUserByID(r.Context(), userID)
+		if userErr == nil && user != nil {
+			projects, projErr := s.db.GetProjectsByHostSlug(r.Context(), userID, hslug)
+			if projErr == nil {
+				for _, p := range projects {
+					publishProjectsDeleteToHost(s.nc, user.Slug, hslug, p.ID)
+				}
+			}
+			// Broadcast user-level projects.updated so SPA refreshes.
+			publishProjectsUpdated(s.nc, user.Slug)
+		}
+	}
+
 	tag, err := s.db.pool.Exec(r.Context(), `
 		DELETE FROM hosts WHERE user_id = $1 AND slug = $2`,
 		userID, hslug)

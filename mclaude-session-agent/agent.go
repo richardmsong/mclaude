@@ -516,22 +516,80 @@ func (a *Agent) gracefulShutdown() {
 		}
 	}
 
-	// Step 6: stop the control consumer.
+	// Step 6: publish synthetic <task-notification status=killed> for each in-flight
+	// background shell. These messages queue in JetStream for the new pod.
+	a.publishShellKilledNotifications(ids)
+
+	// Step 7: stop the control consumer.
 	if a.ctlCancel != nil {
 		a.ctlCancel()
 	}
 
-	// Step 7: publish lifecycle "session_upgrading" for each session.
+	// Step 8: publish lifecycle "session_upgrading" for each session.
 	for _, id := range ids {
 		a.publishLifecycle(id, "session_upgrading")
 	}
 
-	// Step 8: exit.
+	// Step 9: exit.
 	exitFn := a.doExit
 	if exitFn == nil {
 		exitFn = os.Exit
 	}
 	exitFn(0)
+}
+
+// publishShellKilledNotifications publishes synthetic <task-notification status=killed>
+// messages for each in-flight background shell across all sessions. Called during
+// graceful shutdown (step 6) after the drain predicate is satisfied and BEFORE
+// stopping the ctl consumer. Messages are published to the JetStream
+// api.sessions.input subject so they queue for the new pod.
+func (a *Agent) publishShellKilledNotifications(sessionIDs []string) {
+	inputSubject := subj.UserHostProjectAPISessionsInput(a.userSlug, a.hostSlug, a.projectSlug)
+
+	for _, id := range sessionIDs {
+		a.mu.RLock()
+		sess, ok := a.sessions[id]
+		a.mu.RUnlock()
+		if !ok {
+			continue
+		}
+
+		sess.mu.Lock()
+		shells := make([]*inFlightShell, 0, len(sess.inFlightShells))
+		for _, sh := range sess.inFlightShells {
+			shells = append(shells, sh)
+		}
+		sess.mu.Unlock()
+
+		for _, sh := range shells {
+			xml := fmt.Sprintf(
+				`<task-notification><task-id>%s</task-id><tool-use-id>%s</tool-use-id><output-file>%s</output-file><status>killed</status><summary>Shell "%s" was killed during server upgrade</summary></task-notification>`,
+				sh.TaskId, sh.ToolUseId, sh.OutputFilePath, sh.Command,
+			)
+
+			payload, _ := json.Marshal(map[string]interface{}{
+				"session_id": id,
+				"type":       "user",
+				"message": map[string]string{
+					"role":    "user",
+					"content": xml,
+				},
+			})
+
+			if err := a.nc.Publish(inputSubject, payload); err != nil {
+				a.log.Warn().Err(err).
+					Str("sessionId", id).
+					Str("toolUseId", sh.ToolUseId).
+					Msg("failed to publish shell-killed notification")
+			} else {
+				a.log.Info().
+					Str("sessionId", id).
+					Str("toolUseId", sh.ToolUseId).
+					Str("taskId", sh.TaskId).
+					Msg("published shell-killed notification")
+			}
+		}
+	}
 }
 
 // subscribeTerminalAPI sets up core NATS subscriptions for terminal management.

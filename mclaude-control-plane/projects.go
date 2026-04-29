@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,8 +52,20 @@ type ProvisionReply struct {
 	Code        string `json:"code,omitempty"`
 }
 
-// ProvisionTimeoutSeconds is the NATS request/reply timeout for project provisioning.
-const ProvisionTimeoutSeconds = 10
+// DefaultProvisionTimeoutSeconds is the default NATS request/reply timeout for project provisioning.
+const DefaultProvisionTimeoutSeconds = 10
+
+// provisionTimeoutSeconds returns the configured provision timeout.
+// Reads PROVISION_TIMEOUT_SECONDS from env (default 10).
+func provisionTimeoutSeconds() time.Duration {
+	v := os.Getenv("PROVISION_TIMEOUT_SECONDS")
+	if v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return DefaultProvisionTimeoutSeconds * time.Second
+}
 
 // StartProjectsSubscriber connects to NATS, ensures the mclaude-projects,
 // mclaude-job-queue, and mclaude-hosts KV buckets exist, and subscribes to
@@ -153,6 +167,7 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 		// ADR-0035 + ADR-0050: publish provisioning request to the host-scoped subject
 		// so the appropriate controller (K8s or local) can provision resources.
 		// ProvisionRequest includes both UUIDs (K8s naming) and slugs (NATS subjects/env vars).
+		provisionFailed := false
 		if req.HostSlug != "" {
 			gitIdentityIDStr := ""
 			if req.GitIdentityID != nil {
@@ -168,14 +183,15 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 				GitIdentityID: gitIdentityIDStr,
 			}
 			provData, _ := json.Marshal(provReq)
-			provSubject := "mclaude.users." + userSlug + ".hosts." + req.HostSlug + ".api.projects.create"
-			provReply, err := nc.Request(provSubject, provData, ProvisionTimeoutSeconds*time.Second)
+			provSubject := "mclaude.users." + userSlug + ".hosts." + req.HostSlug + ".api.projects.provision"
+			provReply, err := nc.Request(provSubject, provData, provisionTimeoutSeconds())
 			if err != nil {
 				log.Error().Err(err).
 					Str("userSlug", userSlug).
 					Str("hostSlug", req.HostSlug).
 					Str("projectId", id).
 					Msg("provisioning request timed out — host unreachable")
+				provisionFailed = true
 			} else {
 				var reply ProvisionReply
 				if jsonErr := json.Unmarshal(provReply.Data, &reply); jsonErr == nil && !reply.OK {
@@ -184,8 +200,26 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 						Str("projectId", id).
 						Str("error", reply.Error).
 						Msg("provisioning failed")
+					provisionFailed = true
 				}
 			}
+		}
+
+		// GAP-CP-02: On provisioning failure, mark project status='failed' and update KV.
+		if provisionFailed {
+			if dbErr := s.db.UpdateProjectStatus(context.Background(), id, "failed"); dbErr != nil {
+				log.Error().Err(dbErr).Str("projectId", id).Msg("failed to mark project as failed")
+			}
+			proj.Status = "failed"
+			// Write failed state to KV so SPA sees it.
+			hostSlug := req.HostSlug
+			if kvErr := writeProjectKV(nc, userID, userSlug, hostSlug, proj); kvErr != nil {
+				log.Warn().Err(kvErr).Str("projectId", id).Msg("project create (failed): write KV failed (non-fatal)")
+			}
+			// Publish projects.updated broadcast so SPA learns of the failure.
+			publishProjectsUpdated(nc, userSlug)
+			replyError(msg, "host "+req.HostSlug+" unreachable")
+			return
 		}
 
 		// Write to KV so session-store watchers pick it up immediately.
@@ -195,6 +229,9 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 			// Non-fatal: DB row was created; KV is best-effort.
 			log.Warn().Err(kvErr).Str("projectId", id).Msg("project create: write KV failed (non-fatal)")
 		}
+
+		// GAP-CP-10: Broadcast project state change to SPA.
+		publishProjectsUpdated(nc, userSlug)
 
 		reply, _ := json.Marshal(map[string]string{"id": id})
 		_ = msg.Respond(reply)
@@ -290,4 +327,45 @@ func replyError(msg *nats.Msg, errMsg string) {
 	}
 	b, _ := json.Marshal(map[string]string{"error": errMsg})
 	_ = msg.Respond(b)
+}
+
+// publishProjectsUpdated publishes a notification to mclaude.users.{uslug}.api.projects.updated
+// so the SPA knows project state has changed (GAP-CP-10).
+func publishProjectsUpdated(nc *nats.Conn, userSlug string) {
+	if nc == nil || userSlug == "" {
+		return
+	}
+	subject := "mclaude.users." + userSlug + ".api.projects.updated"
+	payload, _ := json.Marshal(map[string]string{"event": "updated"})
+	if err := nc.Publish(subject, payload); err != nil {
+		log.Warn().Err(err).Str("subject", subject).Msg("publish projects.updated failed (non-fatal)")
+	}
+}
+
+// publishProjectsUpdateToHost publishes a NATS message to
+// mclaude.users.{uslug}.hosts.{hslug}.api.projects.update so the controller
+// refreshes user-secrets (GAP-CP-03, GAP-CP-05).
+func publishProjectsUpdateToHost(nc *nats.Conn, userSlug, hostSlug string) {
+	if nc == nil || userSlug == "" || hostSlug == "" {
+		return
+	}
+	subject := "mclaude.users." + userSlug + ".hosts." + hostSlug + ".api.projects.update"
+	payload, _ := json.Marshal(map[string]string{"event": "credentials_changed"})
+	if err := nc.Publish(subject, payload); err != nil {
+		log.Warn().Err(err).Str("subject", subject).Msg("publish projects.update failed (non-fatal)")
+	}
+}
+
+// publishProjectsDeleteToHost publishes a NATS message to
+// mclaude.users.{uslug}.hosts.{hslug}.api.projects.delete so the controller
+// tears down per-project resources (GAP-CP-04).
+func publishProjectsDeleteToHost(nc *nats.Conn, userSlug, hostSlug, projectID string) {
+	if nc == nil || userSlug == "" || hostSlug == "" {
+		return
+	}
+	subject := "mclaude.users." + userSlug + ".hosts." + hostSlug + ".api.projects.delete"
+	payload, _ := json.Marshal(map[string]string{"projectId": projectID, "event": "deleted"})
+	if err := nc.Publish(subject, payload); err != nil {
+		log.Warn().Err(err).Str("subject", subject).Str("projectId", projectID).Msg("publish projects.delete failed (non-fatal)")
+	}
 }

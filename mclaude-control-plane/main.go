@@ -262,7 +262,7 @@ func seedDev(ctx context.Context, db *DB, nc *nats.Conn, logger zerolog.Logger) 
 					logger.Error().Err(merr).Str("projectId", proj.ID).Msg("DEV_SEED: marshal provision request failed (non-fatal)")
 					continue
 				}
-				provSubject := "mclaude.users." + user.Slug + ".hosts." + localHostSlug + ".api.projects.create"
+				provSubject := "mclaude.users." + user.Slug + ".hosts." + localHostSlug + ".api.projects.provision"
 				provReply, reqErr := nc.Request(provSubject, provData, 30*time.Second)
 				if reqErr != nil {
 					logger.Warn().Err(reqErr).

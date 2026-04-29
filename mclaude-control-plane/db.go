@@ -245,6 +245,68 @@ func (db *DB) UpdateProjectGitIdentity(ctx context.Context, projectID string, gi
 	return err
 }
 
+// UpdateProjectStatus sets the status column for a project.
+func (db *DB) UpdateProjectStatus(ctx context.Context, projectID, status string) error {
+	_, err := db.pool.Exec(ctx,
+		`UPDATE projects SET status = $1 WHERE id = $2`,
+		status, projectID)
+	return err
+}
+
+// DeleteProject removes a project by ID.
+func (db *DB) DeleteProject(ctx context.Context, projectID string) error {
+	_, err := db.pool.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID)
+	return err
+}
+
+// GetHostsByUser returns all hosts for a user.
+func (db *DB) GetHostsByUser(ctx context.Context, userID string) ([]*Host, error) {
+	rows, err := db.pool.Query(ctx,
+		`SELECT id, user_id, slug, name, type, role, js_domain, leaf_url, account_jwt,
+		        direct_nats_url, public_key, user_jwt, created_at, last_seen_at
+		 FROM hosts WHERE user_id = $1 ORDER BY created_at`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get hosts by user: %w", err)
+	}
+	defer rows.Close()
+	var hosts []*Host
+	for rows.Next() {
+		h := &Host{}
+		if err := rows.Scan(&h.ID, &h.UserID, &h.Slug, &h.Name, &h.Type, &h.Role,
+			&h.JsDomain, &h.LeafURL, &h.AccountJWT, &h.DirectNATSURL,
+			&h.PublicKey, &h.UserJWT, &h.CreatedAt, &h.LastSeenAt); err != nil {
+			return nil, err
+		}
+		hosts = append(hosts, h)
+	}
+	return hosts, rows.Err()
+}
+
+// GetProjectsByHostSlug returns all projects for a user on a specific host slug.
+func (db *DB) GetProjectsByHostSlug(ctx context.Context, userID, hostSlug string) ([]*Project, error) {
+	rows, err := db.pool.Query(ctx,
+		`SELECT p.id, p.user_id, p.name, p.slug, p.git_url, p.status, p.host_id,
+		        COALESCE(h.slug, ''), p.created_at, p.git_identity_id
+		 FROM projects p
+		 LEFT JOIN hosts h ON h.id = p.host_id
+		 WHERE p.user_id = $1 AND h.slug = $2
+		 ORDER BY p.created_at`,
+		userID, hostSlug)
+	if err != nil {
+		return nil, fmt.Errorf("get projects by host slug: %w", err)
+	}
+	defer rows.Close()
+	var projects []*Project
+	for rows.Next() {
+		p := &Project{}
+		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Slug, &p.GitURL, &p.Status, &p.HostID, &p.HostSlug, &p.CreatedAt, &p.GitIdentityID); err != nil {
+			return nil, err
+		}
+		projects = append(projects, p)
+	}
+	return projects, rows.Err()
+}
+
 // OAuthConnection is a row from the oauth_connections table.
 type OAuthConnection struct {
 	ID             string

@@ -179,6 +179,29 @@ func (s *Server) adminDeleteUser(w http.ResponseWriter, r *http.Request, userID 
 		http.Error(w, "user id required", http.StatusBadRequest)
 		return
 	}
+
+	// KNOWN-11 / GAP-CP-04: Before deleting the user (which cascades to hosts and
+	// projects), publish delete notifications for each project on each host so
+	// controllers can tear down per-project resources.
+	if s.nc != nil {
+		user, userErr := s.db.GetUserByID(r.Context(), userID)
+		if userErr == nil && user != nil {
+			hosts, hostsErr := s.db.GetHostsByUser(r.Context(), userID)
+			if hostsErr == nil {
+				for _, h := range hosts {
+					projects, projErr := s.db.GetProjectsByHostSlug(r.Context(), userID, h.Slug)
+					if projErr == nil {
+						for _, p := range projects {
+							publishProjectsDeleteToHost(s.nc, user.Slug, h.Slug, p.ID)
+						}
+					}
+				}
+			}
+			// Broadcast user-level projects.updated so SPA watchers refresh.
+			publishProjectsUpdated(s.nc, user.Slug)
+		}
+	}
+
 	if err := s.db.DeleteUser(r.Context(), userID); err != nil {
 		http.Error(w, "delete error", http.StatusInternalServerError)
 		return
