@@ -26,10 +26,11 @@ type QuotaMonitor struct {
 	quotaCh      chan *nats.Msg       // receives quota status updates from NATS
 	quotaSub     *nats.Subscription  // subscription to mclaude.{userID}.quota
 	stopCh       chan struct{}        // closed to exit the monitor goroutine
-	lastU5       int                 // last 5h utilization %
-	lastR5       time.Time           // last 5h reset time
-	completionPR string              // set by onRawOutput when SESSION_JOB_COMPLETE detected
-	stopTimeout  time.Duration       // timeout before hard interrupt; 0 = use default (30 min)
+	lastU5                   int       // last 5h utilization %
+	lastR5                   time.Time // last 5h reset time
+	outputTokensAtSoftMark   int       // outputTokens snapshot when soft threshold was reached
+	completionPR             string    // set by onRawOutput when SESSION_JOB_COMPLETE detected
+	stopTimeout              time.Duration // timeout before hard interrupt; 0 = use default (30 min)
 }
 
 // newQuotaMonitor creates a QuotaMonitor, subscribes to quota updates,
@@ -147,16 +148,21 @@ func (m *QuotaMonitor) publishExitLifecycle(stopReason string) {
 	switch {
 	case m.completionPR != "":
 		m.publishLifec(m.sessionID, "session_job_complete", map[string]string{
-			"prUrl":  m.completionPR,
 			"jobId":  m.cfg.JobID,
 			"branch": m.branch,
 		})
 	case stopReason == "quota":
+		// Compute actual output tokens since the soft mark was set.
+		currentOutputTokens := m.session.getState().Usage.OutputTokens
+		tokensSinceSoftMark := currentOutputTokens - m.outputTokensAtSoftMark
+		if tokensSinceSoftMark < 0 {
+			tokensSinceSoftMark = 0
+		}
 		m.publishLifec(m.sessionID, "session_job_paused", map[string]string{
 			"jobId":                    m.cfg.JobID,
 			"pausedVia":               "quota_threshold",
 			"r5":                      m.lastR5.UTC().Format(time.RFC3339),
-			"outputTokensSinceSoftMark": fmt.Sprintf("%d", m.lastU5),
+			"outputTokensSinceSoftMark": fmt.Sprintf("%d", tokensSinceSoftMark),
 		})
 	case stopReason == "permDenied":
 		// session_permission_denied was already published synchronously by
@@ -207,6 +213,7 @@ func (m *QuotaMonitor) run() {
 			m.lastR5 = qs.R5
 			if qs.HasData && m.cfg.Threshold > 0 && qs.U5 >= m.cfg.Threshold && stopReason == "" {
 				stopReason = "quota"
+				m.outputTokensAtSoftMark = m.session.getState().Usage.OutputTokens
 				m.sendGracefulStop()
 				d := m.stopTimeout
 				if d == 0 {

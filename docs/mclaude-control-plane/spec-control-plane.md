@@ -34,7 +34,7 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 | `PROVISION_TIMEOUT_SECONDS` | No | `10` | Per-request timeout for NATS provisioning request/reply (`mclaude.users.{uslug}.hosts.{hslug}.api.projects.*`). Note: currently a hardcoded constant in code (`const ProvisionTimeoutSeconds = 10`), not yet read from env. `seedDev` uses a longer 30s timeout for the initial provisioning request during startup (controller may not be ready yet). |
 | `LOG_LEVEL` | No | (default) | **Not read by Go code** — injected by the `mclaude-cp` Helm template but not consumed by the binary. Zerolog uses its default level. |
 | `HELM_RELEASE_NAME` | No | (none) | **Not read by Go code** — injected by the `mclaude-cp` Helm template but not consumed by the control-plane binary. (The controller-k8s binary does read this variable for ConfigMap lookup.) |
-| `METRICS_PORT` | No | (none) | **Not read by Go code** — injected by the `mclaude-cp` Helm template but not consumed. `/metrics` is served on the admin port (`ADMIN_PORT`). |
+| `METRICS_PORT` | No | (none) | **Not read by Go code** — removed from the `mclaude-cp` Helm template (ADR-0052 R7-G10). `/metrics` is served on the admin port (`ADMIN_PORT`). |
 
 ## Interfaces
 
@@ -45,11 +45,11 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/auth/login` | Authenticate with email+password; returns the [Login Response](../spec-state-schema.md#login-response-shape) — per-host user JWT, NKey seed, hub URL, host inventory, and projects |
-| `POST` | `/auth/refresh` | Exchange a valid per-host JWT from the Authorization header for a new JWT (same host scope). **Known bug:** returns `s.natsURL` (internal broker URL) instead of `s.natsWsURL` (external WebSocket URL). SPA refresh may receive an unusable `nats://` URL. |
+| `POST` | `/auth/refresh` | Exchange a valid per-host JWT from the Authorization header for a new JWT (same host scope). Returns `s.natsWsURL` (external WebSocket URL) for browser clients. |
 | `GET` | `/version` | Returns `minClientVersion` and `serverVersion` |
 | `GET` | `/health` | Returns 200 OK (process alive check — never checks NATS, so pod stays alive for break-glass admin port) |
 | `GET` | `/healthz` | Kubernetes liveness probe (same as `/health` — never checks NATS) |
-| `GET` | `/readyz` | Kubernetes readiness probe. **Known bug:** currently returns 200 unconditionally (identical to `/healthz`). Should check Postgres connectivity so the pod stops receiving traffic when DB is unreachable — NATS outage must not mark pod unready. |
+| `GET` | `/readyz` | Kubernetes readiness probe. Checks Postgres connectivity — returns 503 when DB is unreachable so the pod stops receiving traffic. NATS outage does not mark pod unready. |
 | `GET` | `/auth/providers/{id}/callback` | OAuth callback -- exchanges code for token, stores connection, redirects browser |
 
 **Protected (per-host NATS JWT or admin bearer token in Authorization header):**
@@ -71,16 +71,16 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 | `PUT` | `/api/users/{uslug}/hosts/{hslug}` | Updates host display name. |
 | `DELETE` | `/api/users/{uslug}/hosts/{hslug}` | Removes a host (cascades to its projects + sessions). For cluster hosts owned by other users, only the registering admin can delete. |
 
-**HTTP project CRUD — not yet implemented:**
+**HTTP project CRUD:**
 
-The following endpoints are spec targets but have no HTTP handlers in the code. Project creation currently uses the NATS-based path only (`mclaude.users.*.api.projects.create`). HTTP project CRUD will be implemented in a future iteration.
+HTTP handlers for project CRUD are wired and functional. `POST` (create) inserts a Postgres row but is incomplete — it does not write to KV, send a provisioning request, or broadcast `projects.updated` (see CP-6 in ADR-0052).
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/users/{uslug}/projects` | Creates a project on a specified host. **Not yet implemented.** |
-| `GET` | `/api/users/{uslug}/projects` | Lists all projects for the user. **Not yet implemented.** |
-| `GET` | `/api/users/{uslug}/projects/{pslug}` | Gets a single project by slug. **Not yet implemented.** |
-| `DELETE` | `/api/users/{uslug}/projects/{pslug}` | Deletes a project. **Not yet implemented.** |
+| `POST` | `/api/users/{uslug}/projects` | Creates a project on a specified host. **Known gap (CP-6):** creates Postgres row but skips KV write, provisioning request, and `publishProjectsUpdated` broadcast — HTTP-created projects are invisible to the SPA and have no session-agent pod. |
+| `GET` | `/api/users/{uslug}/projects` | Lists all projects for the user. |
+| `GET` | `/api/users/{uslug}/projects/{pslug}` | Gets a single project by slug. |
+| `DELETE` | `/api/users/{uslug}/projects/{pslug}` | Deletes a project. |
 
 **SCIM 2.0 (IdP user provisioning) — not yet implemented:**
 
@@ -187,7 +187,7 @@ Login validates email and bcrypt password hash (or OAuth identity) against Postg
    - publish: `mclaude.{userID}.>, mclaude.users.{userSlug}.hosts.*.>, _INBOX.>, $JS.API.>`
    - subscribe: `mclaude.{userID}.>, mclaude.users.{userSlug}.hosts.*.>, _INBOX.>, $JS.API.>, $JS.API.DIRECT.GET.>, $KV.mclaude-projects.{userID}.>, $KV.mclaude-sessions.{userID}.>, $KV.mclaude-hosts.{userSlug}.>`
    Note: `mclaude.{userID}.>` is retained for backward compatibility with un-migrated UUID-format subjects; `mclaude.users.{userSlug}.hosts.*.>` enables ADR-0035 host-scoped subjects. Both are removed when the full subject migration lands.
-4. JWT lifetime is `JWT_EXPIRY_SECONDS` (default 8h). The NKey seed is returned alongside the JWT so the client can sign NATS connection nonces. **Known bug:** `IssueUserJWT` is called with `expiresAt + expirySecs` where `expiresAt` is already `now + 8h`, resulting in `claims.Expires = now + 16h` (double the configured lifetime). `LoginResponse.ExpiresAt` is correct (`now + 8h`) so the SPA refreshes at the right time, but the NATS JWT itself is valid for 16h.
+4. JWT lifetime is `JWT_EXPIRY_SECONDS` (default 8h). The NKey seed is returned alongside the JWT so the client can sign NATS connection nonces. `IssueUserJWT` correctly uses `time.Now().Unix() + expirySecs` for `claims.Expires`, producing a JWT lifetime that matches the configured `JWT_EXPIRY_SECONDS`.
 5. The full Login Response payload (`spec-state-schema.md#login-response-shape`) is returned: `{user, jwt, nkeySeed, hubUrl, hosts[], projects[]}`.
 
 Per-host user JWTs for daemons are minted at `mclaude host register` time (device-code flow) and refreshed via `POST /auth/refresh`.

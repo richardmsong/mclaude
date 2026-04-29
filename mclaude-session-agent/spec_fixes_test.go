@@ -247,8 +247,14 @@ func TestQuotaMonitorPublishesSessionJobPaused(t *testing.T) {
 		extra  map[string]string
 	}
 	var published []event
+	sess := &Session{
+		state: SessionState{
+			Usage: UsageStats{OutputTokens: 1000},
+		},
+	}
 	m := &QuotaMonitor{
 		sessionID: "sess-k12",
+		session:   sess,
 		cfg:       QuotaMonitorConfig{JobID: "job-k12", Threshold: 80},
 		lastU5:    90,
 		lastR5:    time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC),

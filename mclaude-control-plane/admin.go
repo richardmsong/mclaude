@@ -7,6 +7,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+
+	"mclaude.io/common/pkg/slug"
+	"mclaude.io/common/pkg/subj"
 )
 
 // Admin endpoints are served on the break-glass admin port (:9091).
@@ -219,6 +222,43 @@ func (s *Server) adminDeleteUser(w http.ResponseWriter, r *http.Request, userID 
 		}
 	}
 
+	// R7-G2 (ADR-0052): NATS JWT revocation on user deletion.
+	//
+	// TODO(R7-G2): Implement NATS JWT revocation when deleting a user.
+	// Currently, the deleted user's NATS JWT remains valid until it expires
+	// naturally (8h, per JWT_EXPIRY_SECONDS). This is a security gap — the
+	// user can still connect to NATS and interact with their resources during
+	// that window.
+	//
+	// Why this is not yet implemented:
+	// 1. User NKey pairs are ephemeral — generated per login in IssueUserJWT()
+	//    and not stored in Postgres. We cannot target a specific user's NKey
+	//    public key for revocation without tracking issued keys.
+	// 2. NATS account-level revocation requires modifying the account JWT's
+	//    Revocations list and re-signing it with the operator key. The
+	//    control-plane only has the account signing key (NATS_ACCOUNT_SEED),
+	//    not the operator key needed to re-sign the account JWT.
+	// 3. The hub NATS uses a MEMORY resolver with a preloaded account JWT.
+	//    Even with the operator key, pushing updated claims at runtime
+	//    requires the system account ($SYS.REQ.CLAIMS.UPDATE) which the
+	//    control-plane does not have credentials for.
+	//
+	// To implement properly:
+	// a) Store issued NKey public keys per user (e.g. in a nats_keys table)
+	// b) Load the operator seed from OPERATOR_KEYS_PATH at startup
+	// c) Decode the account JWT, add revocations for all the user's NKey
+	//    public keys, re-sign with operator key
+	// d) Push updated account JWT via $SYS.REQ.CLAIMS.UPDATE (requires
+	//    system account credentials)
+	// Alternatively, switch from MEMORY resolver to a full resolver that
+	// supports runtime updates.
+	//
+	// Mitigation: JWT expires naturally in 8h (JWT_EXPIRY_SECONDS default).
+	// The Postgres cascade-delete removes all user data, so even if the user
+	// reconnects, auth middleware lookups will fail.
+	log.Warn().Str("userId", userID).
+		Msg("R7-G2: deleted user's NATS JWT not revoked — remains valid until natural expiry (8h)")
+
 	if err := s.db.DeleteUser(r.Context(), userID); err != nil {
 		http.Error(w, "delete error", http.StatusInternalServerError)
 		return
@@ -237,25 +277,55 @@ func (s *Server) adminStopSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// KNOWN-08: Publish NATS stop message instead of querying non-existent sessions table.
-	if s.nc != nil {
+	// CP-3 (ADR-0052): Publish to the correct host-scoped, project-scoped
+	// sessions.delete subject that the session-agent actually subscribes to:
+	// mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.delete
+	//
+	// The previous code published to mclaude.users.{uslug}.api.sessions.stop
+	// which no component subscribes to — break-glass admin stop was non-functional.
+	if s.nc != nil && s.db != nil {
 		// Look up user slug for the NATS subject.
 		var userSlug string
-		if s.db != nil {
-			if user, err := s.db.GetUserByID(r.Context(), req.UserID); err == nil && user != nil {
-				userSlug = user.Slug
-			}
+		if user, err := s.db.GetUserByID(r.Context(), req.UserID); err == nil && user != nil {
+			userSlug = user.Slug
 		}
-		if userSlug != "" {
+
+		// Look up the project to get projectSlug and hostSlug.
+		var projectSlug, hostSlug string
+		if proj, err := s.db.GetProjectByID(r.Context(), req.ProjectID); err == nil && proj != nil {
+			projectSlug = proj.Slug
+			hostSlug = proj.HostSlug
+		}
+
+		if userSlug != "" && hostSlug != "" && projectSlug != "" {
 			stopPayload, _ := json.Marshal(map[string]string{
-				"sessionId": req.SessionID,
-				"projectId": req.ProjectID,
-				"action":    "stop",
+				"sessionSlug": req.SessionID, // session-agent matches by sessionSlug or sessionId
+				"sessionId":   req.SessionID,
+				"requestId":   uuid.NewString(),
 			})
-			subject := "mclaude.users." + userSlug + ".api.sessions.stop"
+			subject := subj.UserHostProjectAPISessionsDelete(
+				slug.UserSlug(userSlug),
+				slug.HostSlug(hostSlug),
+				slug.ProjectSlug(projectSlug),
+			)
 			if err := s.nc.Publish(subject, stopPayload); err != nil {
 				log.Warn().Err(err).Str("subject", subject).Msg("admin stop session: NATS publish failed")
+			} else {
+				log.Info().
+					Str("userSlug", userSlug).
+					Str("hostSlug", hostSlug).
+					Str("projectSlug", projectSlug).
+					Str("sessionId", req.SessionID).
+					Msg("admin stop session: published sessions.delete")
 			}
+		} else {
+			log.Warn().
+				Str("userId", req.UserID).
+				Str("projectId", req.ProjectID).
+				Str("userSlug", userSlug).
+				Str("hostSlug", hostSlug).
+				Str("projectSlug", projectSlug).
+				Msg("admin stop session: missing context for NATS subject — cannot route delete")
 		}
 	}
 

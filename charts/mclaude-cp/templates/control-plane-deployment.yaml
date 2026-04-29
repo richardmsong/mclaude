@@ -61,9 +61,7 @@ spec:
             - name: admin
               containerPort: {{ .Values.controlPlane.service.adminPort }}
               protocol: TCP
-            - name: metrics
-              containerPort: {{ .Values.controlPlane.service.metricsPort }}
-              protocol: TCP
+
           env:
             - name: LOG_LEVEL
               value: {{ .Values.controlPlane.config.logLevel | quote }}
@@ -71,8 +69,7 @@ spec:
               value: {{ .Values.controlPlane.service.httpPort | quote }}
             - name: ADMIN_PORT
               value: {{ .Values.controlPlane.service.adminPort | quote }}
-            - name: METRICS_PORT
-              value: {{ .Values.controlPlane.service.metricsPort | quote }}
+
             - name: JWT_EXPIRY_SECONDS
               value: {{ .Values.controlPlane.config.jwtExpirySeconds | quote }}
             - name: JWT_REFRESH_THRESHOLD_SECONDS

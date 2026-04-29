@@ -132,7 +132,7 @@ func NewAgent(nc *nats.Conn, userID string, userSlug slug.UserSlug, hostSlug slu
 		Name:      "MCLAUDE_LIFECYCLE",
 		Subjects:  []string{subj.FilterMclaudeLifecycle},
 		Retention: jetstream.LimitsPolicy,
-		MaxAge:    7 * 24 * time.Hour,
+		MaxAge:    30 * 24 * time.Hour,
 		Storage:   jetstream.FileStorage,
 		Discard:   jetstream.DiscardOld,
 	}); err != nil {

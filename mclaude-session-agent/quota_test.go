@@ -399,8 +399,8 @@ func TestPublishExitLifecycleCompletion(t *testing.T) {
 	if published[0].evType != "session_job_complete" {
 		t.Errorf("evType: got %q, want session_job_complete", published[0].evType)
 	}
-	if published[0].extra["prUrl"] != "https://github.com/pr/42" {
-		t.Errorf("prUrl: got %q", published[0].extra["prUrl"])
+	if _, hasPrUrl := published[0].extra["prUrl"]; hasPrUrl {
+		t.Errorf("prUrl should not be present in session_job_complete, got %q", published[0].extra["prUrl"])
 	}
 	if published[0].extra["jobId"] != "job-1" {
 		t.Errorf("jobId: got %q", published[0].extra["jobId"])
@@ -416,11 +416,19 @@ func TestPublishExitLifecycleQuota(t *testing.T) {
 		extra  map[string]string
 	}
 	var published []event
+	// Create a session with usage stats to support outputTokensSinceSoftMark computation.
+	sess := &Session{
+		state: SessionState{
+			Usage: UsageStats{OutputTokens: 5000},
+		},
+	}
 	m := &QuotaMonitor{
-		sessionID: "sess-2",
-		cfg:       QuotaMonitorConfig{JobID: "job-2", Threshold: 75},
-		lastU5:    82,
-		lastR5:    time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC),
+		sessionID:              "sess-2",
+		session:                sess,
+		cfg:                    QuotaMonitorConfig{JobID: "job-2", Threshold: 75},
+		lastU5:                 82,
+		lastR5:                 time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC),
+		outputTokensAtSoftMark: 3000,
 		publishLifec: func(sessionID, evType string, extra map[string]string) {
 			published = append(published, event{evType, extra})
 		},
@@ -437,6 +445,9 @@ func TestPublishExitLifecycleQuota(t *testing.T) {
 	}
 	if published[0].extra["jobId"] != "job-2" {
 		t.Errorf("jobId: got %q, want job-2", published[0].extra["jobId"])
+	}
+	if published[0].extra["outputTokensSinceSoftMark"] != "2000" {
+		t.Errorf("outputTokensSinceSoftMark: got %q, want \"2000\"", published[0].extra["outputTokensSinceSoftMark"])
 	}
 }
 

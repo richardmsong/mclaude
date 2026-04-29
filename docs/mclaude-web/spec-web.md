@@ -140,7 +140,7 @@ Throughout the SPA, `hostSlug` defaults to `'local'` when not available from the
 
 ### KV Watch DEL/PURGE Handling
 
-`KVEntry.operation` may be `'PUT' | 'DEL' | 'PURGE'`. The session store's `kvWatch` callback must handle `DEL` (and `PURGE`) by removing the corresponding entry from the `_sessions` map, not inserting it. **Known bug:** the DEL handler extracts the session slug from the KV key (`parts[parts.length - 1]`), but the `_sessions` map is keyed by UUID (`state.id`). `this._sessions.delete(sessionSlug)` is a no-op — deleted sessions persist in the UI as ghosts until full page reload.
+`KVEntry.operation` may be `'PUT' | 'DEL' | 'PURGE'`. The session store's `kvWatch` callback must handle `DEL` (and `PURGE`) by removing the corresponding entry from the `_sessions` map, not inserting it. The DEL handler extracts the session slug from the KV key and performs a slug→UUID lookup to find and remove the correct entry from the `_sessions` map (which is keyed by UUID).
 
 ## Desktop Notifications
 

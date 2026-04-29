@@ -106,7 +106,7 @@ The agent idempotently creates or updates two JetStream streams on startup:
 
 - **MCLAUDE_API** -- Captures session API commands for at-least-once delivery. See `spec-state-schema.md` section "JetStream Streams / MCLAUDE_API" for stream config and subject pattern.
 
-Note: The agent does **not** currently create `MCLAUDE_LIFECYCLE` on startup, despite the spec-state-schema.md listing it as "Created by: session-agent". Lifecycle events are published to core NATS subjects but are not persisted without the stream. The test harness creates it for integration tests. This is a known gap.
+The agent idempotently creates `MCLAUDE_LIFECYCLE` on startup (at `agent.go:129-139`), matching the spec-state-schema.md declaration ("Created by: session-agent"). Lifecycle events are persisted to this stream.
 
 The agent creates two durable pull consumers on MCLAUDE_API:
 

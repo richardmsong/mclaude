@@ -101,10 +101,14 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 		return err
 	}
 
-	// subject pattern: mclaude.users.{userSlug}.api.projects.create
-	// SPA publishes to this subject (subjProjectsCreate in mclaude-web).
-	// ADR-0050: subject updated from old "mclaude.{UUID}.api.projects.create"
-	// to match SPA's new user-scoped slug-based format.
+	// CROSS-1 (ADR-0052): Subscribe to BOTH the legacy user-scoped subject and the
+	// host-scoped subject. The SPA publishes to the host-scoped subject
+	// mclaude.users.{uslug}.hosts.{hslug}.api.projects.create (via subjProjectsCreate),
+	// but the previous subscription only matched the user-scoped pattern
+	// mclaude.users.*.api.projects.create (wildcard * = one token only).
+	// Both subscriptions share the same handler via handleProjectCreate.
+
+	// Legacy user-scoped subject: mclaude.users.{userSlug}.api.projects.create
 	_, err = nc.Subscribe("mclaude.users.*.api.projects.create", func(msg *nats.Msg) {
 		// Extract userSlug from subject: mclaude.users.{userSlug}.api.projects.create
 		parts := strings.Split(msg.Subject, ".")
@@ -113,133 +117,163 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 			return
 		}
 		userSlug := parts[2]
+		s.handleProjectCreate(nc, msg, userSlug, "" /* hostSlug from payload */)
+	})
+	if err != nil {
+		return err
+	}
 
-		if s.db == nil {
-			replyError(msg, "service unavailable")
+	// CROSS-1: Host-scoped subject: mclaude.users.{uslug}.hosts.{hslug}.api.projects.create
+	// This is the subject the SPA actually publishes to (ADR-0035).
+	_, err = nc.Subscribe("mclaude.users.*.hosts.*.api.projects.create", func(msg *nats.Msg) {
+		// Extract userSlug and hostSlug from subject:
+		// mclaude.users.{userSlug}.hosts.{hostSlug}.api.projects.create
+		parts := strings.Split(msg.Subject, ".")
+		if len(parts) < 5 {
+			replyError(msg, "malformed subject")
 			return
 		}
-
-		// Resolve user by slug to get UUID (needed for DB writes and ProvisionRequest.UserID).
-		user, err := s.db.GetUserBySlug(context.Background(), userSlug)
-		if err != nil {
-			replyError(msg, "internal error")
-			return
-		}
-		if user == nil {
-			replyError(msg, "user not found")
-			return
-		}
-		userID := user.ID
-
-		var req struct {
-			Name          string  `json:"name"`
-			GitURL        string  `json:"gitUrl"`
-			GitIdentityID *string `json:"gitIdentityId"`
-			HostSlug      string  `json:"hostSlug,omitempty"` // ADR-0035: target host
-		}
-		if err := json.Unmarshal(msg.Data, &req); err != nil || req.Name == "" {
-			replyError(msg, "name required")
-			return
-		}
-
-		// Validate gitIdentityId if provided.
-		if req.GitIdentityID != nil && *req.GitIdentityID != "" {
-			conn, err := s.db.GetOAuthConnectionByID(context.Background(), *req.GitIdentityID)
-			if err != nil || conn == nil || conn.UserID != userID {
-				replyError(msg, "invalid gitIdentityId")
-				return
-			}
-			// Validate hostname matches gitUrl.
-			if req.GitURL != "" {
-				projHost := extractHost(req.GitURL)
-				connHost := extractHost(conn.BaseURL)
-				if projHost != "" && connHost != "" && projHost != connHost {
-					replyError(msg, "gitIdentityId hostname does not match gitUrl")
-					return
-				}
-			}
-		}
-
-		id := uuid.NewString()
-		proj, err := s.db.CreateProjectWithIdentity(context.Background(), id, userID, req.Name, req.GitURL, req.GitIdentityID)
-		if err != nil {
-			replyError(msg, "failed to create project")
-			return
-		}
-
-		// ADR-0035 + ADR-0050: publish provisioning request to the host-scoped subject
-		// so the appropriate controller (K8s or local) can provision resources.
-		// ProvisionRequest includes both UUIDs (K8s naming) and slugs (NATS subjects/env vars).
-		provisionFailed := false
-		if req.HostSlug != "" {
-			gitIdentityIDStr := ""
-			if req.GitIdentityID != nil {
-				gitIdentityIDStr = *req.GitIdentityID
-			}
-			provReq := ProvisionRequest{
-				UserID:        userID,
-				UserSlug:      userSlug,
-				HostSlug:      req.HostSlug,
-				ProjectID:     proj.ID,
-				ProjectSlug:   proj.Slug,
-				GitURL:        req.GitURL,
-				GitIdentityID: gitIdentityIDStr,
-			}
-			provData, _ := json.Marshal(provReq)
-			provSubject := subj.UserHostAPIProjectsProvision(slug.UserSlug(userSlug), slug.HostSlug(req.HostSlug))
-			provReply, err := nc.Request(provSubject, provData, provisionTimeoutSeconds())
-			if err != nil {
-				log.Error().Err(err).
-					Str("userSlug", userSlug).
-					Str("hostSlug", req.HostSlug).
-					Str("projectId", id).
-					Msg("provisioning request timed out — host unreachable")
-				provisionFailed = true
-			} else {
-				var reply ProvisionReply
-				if jsonErr := json.Unmarshal(provReply.Data, &reply); jsonErr == nil && !reply.OK {
-					log.Error().
-						Str("userSlug", userSlug).
-						Str("projectId", id).
-						Str("error", reply.Error).
-						Msg("provisioning failed")
-					provisionFailed = true
-				}
-			}
-		}
-
-		// GAP-CP-02: On provisioning failure, mark project status='failed' and update KV.
-		if provisionFailed {
-			if dbErr := s.db.UpdateProjectStatus(context.Background(), id, "failed"); dbErr != nil {
-				log.Error().Err(dbErr).Str("projectId", id).Msg("failed to mark project as failed")
-			}
-			proj.Status = "failed"
-			// Write failed state to KV so SPA sees it.
-			hostSlug := req.HostSlug
-			if kvErr := writeProjectKV(nc, userID, userSlug, hostSlug, proj); kvErr != nil {
-				log.Warn().Err(kvErr).Str("projectId", id).Msg("project create (failed): write KV failed (non-fatal)")
-			}
-			// Publish projects.updated broadcast so SPA learns of the failure.
-			publishProjectsUpdated(nc, userSlug)
-			replyError(msg, "host "+req.HostSlug+" unreachable")
-			return
-		}
-
-		// Write to KV so session-store watchers pick it up immediately.
-		// ADR-0050: pass userSlug and hostSlug so value includes slug fields.
-		hostSlug := req.HostSlug // may be empty if no host was specified
-		if kvErr := writeProjectKV(nc, userID, userSlug, hostSlug, proj); kvErr != nil {
-			// Non-fatal: DB row was created; KV is best-effort.
-			log.Warn().Err(kvErr).Str("projectId", id).Msg("project create: write KV failed (non-fatal)")
-		}
-
-		// GAP-CP-10: Broadcast project state change to SPA.
-		publishProjectsUpdated(nc, userSlug)
-
-		reply, _ := json.Marshal(map[string]string{"id": id})
-		_ = msg.Respond(reply)
+		userSlug := parts[2]
+		hostSlug := parts[4]
+		s.handleProjectCreate(nc, msg, userSlug, hostSlug)
 	})
 	return err
+}
+
+// handleProjectCreate is the shared handler for both the legacy user-scoped and
+// the ADR-0035 host-scoped project creation NATS subscriptions (CROSS-1).
+// subjectHostSlug is the host slug extracted from the NATS subject (host-scoped path),
+// or empty if the message arrived on the legacy user-scoped subject.
+func (s *Server) handleProjectCreate(nc *nats.Conn, msg *nats.Msg, userSlug, subjectHostSlug string) {
+	if s.db == nil {
+		replyError(msg, "service unavailable")
+		return
+	}
+
+	// Resolve user by slug to get UUID (needed for DB writes and ProvisionRequest.UserID).
+	user, err := s.db.GetUserBySlug(context.Background(), userSlug)
+	if err != nil {
+		replyError(msg, "internal error")
+		return
+	}
+	if user == nil {
+		replyError(msg, "user not found")
+		return
+	}
+	userID := user.ID
+
+	var req struct {
+		Name          string  `json:"name"`
+		GitURL        string  `json:"gitUrl"`
+		GitIdentityID *string `json:"gitIdentityId"`
+		HostSlug      string  `json:"hostSlug,omitempty"` // ADR-0035: target host
+	}
+	if err := json.Unmarshal(msg.Data, &req); err != nil || req.Name == "" {
+		replyError(msg, "name required")
+		return
+	}
+
+	// CROSS-1: Prefer host slug from the NATS subject (host-scoped path).
+	// Fall back to the payload's hostSlug for backward compatibility.
+	hostSlug := subjectHostSlug
+	if hostSlug == "" {
+		hostSlug = req.HostSlug
+	}
+
+	// Validate gitIdentityId if provided.
+	if req.GitIdentityID != nil && *req.GitIdentityID != "" {
+		conn, err := s.db.GetOAuthConnectionByID(context.Background(), *req.GitIdentityID)
+		if err != nil || conn == nil || conn.UserID != userID {
+			replyError(msg, "invalid gitIdentityId")
+			return
+		}
+		// Validate hostname matches gitUrl.
+		if req.GitURL != "" {
+			projHost := extractHost(req.GitURL)
+			connHost := extractHost(conn.BaseURL)
+			if projHost != "" && connHost != "" && projHost != connHost {
+				replyError(msg, "gitIdentityId hostname does not match gitUrl")
+				return
+			}
+		}
+	}
+
+	id := uuid.NewString()
+	proj, err := s.db.CreateProjectWithIdentity(context.Background(), id, userID, req.Name, req.GitURL, req.GitIdentityID)
+	if err != nil {
+		replyError(msg, "failed to create project")
+		return
+	}
+
+	// ADR-0035 + ADR-0050: publish provisioning request to the host-scoped subject
+	// so the appropriate controller (K8s or local) can provision resources.
+	// ProvisionRequest includes both UUIDs (K8s naming) and slugs (NATS subjects/env vars).
+	provisionFailed := false
+	if hostSlug != "" {
+		gitIdentityIDStr := ""
+		if req.GitIdentityID != nil {
+			gitIdentityIDStr = *req.GitIdentityID
+		}
+		provReq := ProvisionRequest{
+			UserID:        userID,
+			UserSlug:      userSlug,
+			HostSlug:      hostSlug,
+			ProjectID:     proj.ID,
+			ProjectSlug:   proj.Slug,
+			GitURL:        req.GitURL,
+			GitIdentityID: gitIdentityIDStr,
+		}
+		provData, _ := json.Marshal(provReq)
+		provSubject := subj.UserHostAPIProjectsProvision(slug.UserSlug(userSlug), slug.HostSlug(hostSlug))
+		provReply, err := nc.Request(provSubject, provData, provisionTimeoutSeconds())
+		if err != nil {
+			log.Error().Err(err).
+				Str("userSlug", userSlug).
+				Str("hostSlug", hostSlug).
+				Str("projectId", id).
+				Msg("provisioning request timed out — host unreachable")
+			provisionFailed = true
+		} else {
+			var reply ProvisionReply
+			if jsonErr := json.Unmarshal(provReply.Data, &reply); jsonErr == nil && !reply.OK {
+				log.Error().
+					Str("userSlug", userSlug).
+					Str("projectId", id).
+					Str("error", reply.Error).
+					Msg("provisioning failed")
+				provisionFailed = true
+			}
+		}
+	}
+
+	// GAP-CP-02: On provisioning failure, mark project status='failed' and update KV.
+	if provisionFailed {
+		if dbErr := s.db.UpdateProjectStatus(context.Background(), id, "failed"); dbErr != nil {
+			log.Error().Err(dbErr).Str("projectId", id).Msg("failed to mark project as failed")
+		}
+		proj.Status = "failed"
+		// Write failed state to KV so SPA sees it.
+		if kvErr := writeProjectKV(nc, userID, userSlug, hostSlug, proj); kvErr != nil {
+			log.Warn().Err(kvErr).Str("projectId", id).Msg("project create (failed): write KV failed (non-fatal)")
+		}
+		// Publish projects.updated broadcast so SPA learns of the failure.
+		publishProjectsUpdated(nc, userSlug)
+		replyError(msg, "host "+hostSlug+" unreachable")
+		return
+	}
+
+	// Write to KV so session-store watchers pick it up immediately.
+	// ADR-0050: pass userSlug and hostSlug so value includes slug fields.
+	if kvErr := writeProjectKV(nc, userID, userSlug, hostSlug, proj); kvErr != nil {
+		// Non-fatal: DB row was created; KV is best-effort.
+		log.Warn().Err(kvErr).Str("projectId", id).Msg("project create: write KV failed (non-fatal)")
+	}
+
+	// GAP-CP-10: Broadcast project state change to SPA.
+	publishProjectsUpdated(nc, userSlug)
+
+	reply, _ := json.Marshal(map[string]string{"id": id})
+	_ = msg.Respond(reply)
 }
 
 // writeProjectKV writes a Project to the mclaude-projects JetStream KV bucket.
