@@ -34,6 +34,7 @@ The SPA watches NATS KV buckets for live updates:
 
 - `mclaude-sessions` — session state (capabilities, pendingControls, usage, state)
 - `mclaude-projects` — project list and status
+- `mclaude-hosts` — host liveness and online/offline state (via `HeartbeatMonitor`)
 
 ## Event Replay
 

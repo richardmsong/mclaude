@@ -99,6 +99,10 @@ The previous `ClusterRole` / `ClusterRoleBinding` granting cross-namespace pod/s
 | `controlPlane.providers` | `[]` | OAuth provider instances. |
 | `controlPlane.config.devSeed` | `false` | Create `dev@mclaude.local` user, default `local` machine host, and a default project on startup. |
 | `controlPlane.config.jwtExpirySeconds` | `28800` | Per-host user JWT lifetime (8h). |
+| `controlPlane.service.httpPort` | `8080` | Main API listen port. Injected as `HTTP_PORT` env var. **Known mismatch:** Go code reads `PORT`, not `HTTP_PORT` — the chart env var name doesn't match. Currently works because both default to 8080. |
+| `controlPlane.service.adminPort` | `9090` | Loopback admin port. **Note:** chart default is `9090`, Go code default is `9091`. Helm deployments use 9090. |
+| `controlPlane.service.metricsPort` | `9091` | Declared as a separate metrics container port. **Known issue:** Go code does not create a third listener — `/metrics` is served on the admin port. Port 9091 has no listener in Helm deployments. Prometheus scrapes should target the admin port instead. |
+| `controlPlane.config.jwtRefreshThresholdSeconds` | `900` | Injected as `JWT_REFRESH_THRESHOLD_SECONDS`. **Not read by Go code** — phantom env var with no effect. |
 | `controlPlane.migrations.enabled` | `false` | Run dbmate schema migrations as an init container. |
 | `spa.enabled` | `true` | Deploy the SPA. |
 | `ingress.enabled` | `true` | Create Ingress resources. |
