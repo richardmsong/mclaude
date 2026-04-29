@@ -36,7 +36,7 @@ The cluster's slug is configured at deploy time via the Helm value `clusterSlug`
 | `HEALTH_PROBE_ADDR` | No | Health/readiness probe listen address (default `:8081`). |
 | `LEADER_ELECTION` | No | Injected by Helm as `"true"` but **not yet read by the controller binary**. Leader election is not currently configured in `ctrl.Options`. |
 | `LOG_LEVEL` | No | Injected by Helm but **not yet read by the controller binary**. Zerolog uses its default level. |
-| `LEADER_ELECTION_NAMESPACE` | No | Defaults to `mclaude-system`. |
+| `LEADER_ELECTION_NAMESPACE` | No | Defaults to `mclaude-system`. **Not yet implemented** — neither the Go binary nor the Helm template reads this variable. |
 
 ### Interfaces
 

@@ -31,6 +31,8 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 | `SERVER_VERSION` | No | (empty) | Server version string reported by `/version` |
 | `PROVIDERS_CONFIG_PATH` | No | `/etc/mclaude/providers.json` | Path to OAuth provider config (Helm ConfigMap mount) |
 | `PROVISION_TIMEOUT_SECONDS` | No | `10` | Per-request timeout for NATS provisioning request/reply (`mclaude.users.{uslug}.hosts.{hslug}.api.projects.*`). Note: currently a hardcoded constant in code (`const ProvisionTimeoutSeconds = 10`), not yet read from env. `seedDev` uses a longer 30s timeout for the initial provisioning request during startup (controller may not be ready yet). |
+| `LOG_LEVEL` | No | (default) | **Not read by Go code** — injected by the `mclaude-cp` Helm template but not consumed by the binary. Zerolog uses its default level. |
+| `HELM_RELEASE_NAME` | No | (none) | **Not read by Go code** — injected by the `mclaude-cp` Helm template but not consumed by the control-plane binary. (The controller-k8s binary does read this variable for ConfigMap lookup.) |
 
 ## Interfaces
 

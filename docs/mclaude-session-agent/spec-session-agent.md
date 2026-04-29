@@ -83,6 +83,8 @@ Liveness is reported by the hub NATS via `$SYS.ACCOUNT.*.CONNECT/DISCONNECT` eve
 | `--daemon` | Flag | Enable BYOH daemon mode |
 | `--refresh-url` / `REFRESH_URL` | Flag or env | JWT refresh endpoint URL (daemon only) |
 | `LOG_LEVEL` | Env | Zerolog level (default: `info`) |
+| `HOSTNAME` / `--hostname` | Flag or env | **Dead code** — daemon mode only. Stored in `DaemonConfig.Hostname` but never accessed. Remnant of the removed collision-detection flow. |
+| `MACHINE_ID` / `--machine-id` | Flag or env | **Dead code** — daemon mode only. Stored in `DaemonConfig.MachineID` but never accessed. Remnant of the removed collision-detection flow. |
 | `METRICS_ADDR` | Env | Prometheus metrics listen address (default: `:9091`) |
 | `GIT_URL` | Env | Git remote URL for initial clone (K8s mode) |
 | `GIT_IDENTITY_ID` | Env | OAuth connection ID for credential identity selection (K8s mode) |

@@ -222,7 +222,7 @@ Writers: control-plane only — single writer. Primary path: `$SYS.ACCOUNT.*.CON
 Readers: SPA (KV watch for host list + status).
 History: 1
 
-The previous `mclaude-clusters` KV is removed. SPA derives the per-user cluster list by filtering the `hosts` array in the login response (`hosts.filter(h => h.type === 'cluster')`); no separate KV bucket is needed.
+The previous `mclaude-clusters` KV is removed. SPA derives the per-user cluster list by filtering the `hosts` array in the login response (`hosts.filter(h => h.type === 'cluster')`); no separate KV bucket is needed. **Dead code:** `subj.ClustersKVKey()` in `mclaude-common/pkg/subj/subj.go` and `kvKeyUserClusters()` in `mclaude-web/src/lib/subj.ts` still reference this removed bucket.
 
 The previous `mclaude-laptops` and `mclaude-heartbeats` buckets are removed. Liveness is `$SYS`-only per ADR-0035 (no periodic heartbeat publishes).
 
@@ -267,7 +267,7 @@ Value: `JobEntry`
 }
 ```
 
-Field origins: `specPath`, `threshold`, and `prUrl` from ADR-0009 are removed (see ADR-0034). `prompt`, `title`, `branchSlug`, `resumePrompt`, `softThreshold`, `hardHeadroomTokens`, `permPolicy`, `allowedTools`, `claudeSessionID`, `pausedVia` are introduced by ADR-0034.
+**Known gap — ADR-0034 migration not complete:** The Go `JobEntry` struct still carries ADR-0009 fields (`specPath`, `threshold`, `prUrl`) and does not yet have the ADR-0034 additions (`prompt`, `title`, `branchSlug`, `resumePrompt`, `softThreshold`, `hardHeadroomTokens`, `permPolicy`, `allowedTools`, `claudeSessionID`, `pausedVia`). The schema above describes the ADR-0034 target; the code implements the ADR-0009 schema.
 
 Writers: daemon HTTP server (`POST /jobs`), daemon dispatcher (status transitions), daemon lifecycle subscriber (terminal states)
 Readers: daemon dispatcher (KV watch), daemon HTTP server (`GET /jobs`)
