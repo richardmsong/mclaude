@@ -202,7 +202,7 @@ Agent-managed states (not from Claude Code):
   restarting — transient during restart handler
 ```
 
-State transitions flow from Claude Code's `session_state_changed` system events. The agent updates in-memory state and flushes to KV on every transition, except during graceful shutdown when KV writes are suppressed to preserve the `updating` banner.
+State transitions flow from Claude Code's `session_state_changed` system events. The agent updates in-memory state and flushes to KV on every transition, except during graceful shutdown when KV writes are suppressed to preserve the `updating` banner. KV write failures are logged at warn level (ADR-0051) — the write is fire-and-forget but operators must have visibility into failures.
 
 ### Session Lifecycle
 
@@ -221,13 +221,14 @@ State transitions flow from Claude Code's `session_state_changed` system events.
 
 **Resumption (on pod restart):**
 1. Watch all keys in `mclaude-sessions` KV for initial values.
-2. Set all matching session KV entries to `state: "restarting"`, clear `pendingControls`. **Known bug:** `clearPendingControlsForResume()` sets state to `"idle"` instead of `"restarting"` — the SPA never shows the "Restarting..." indicator during recovery. Root cause: `StateRestarting` constant is not defined (only 4 of 9 state constants exist in code).
+2. Set all matching session KV entries to `state: "restarting"`, clear `pendingControls`.
 3. Publish `session_restarting` lifecycle event per session.
 4. For each session belonging to this project: resume the Claude process with `--resume {id}`.
-5. On `init` event: update KV with fresh state.
-6. Sessions in `updating` state are resumed but their KV entry stays as `updating` until all JetStream consumers are attached, then cleared to `idle`.
-7. Publish `session_resumed` lifecycle event per session.
-8. Sessions that fail to start within 30s: mark `state: "failed"`, publish `session_failed` lifecycle event. **Known gap:** the code's 30s timer fires but does nothing (comment: "Don't kill the process; it's idle but valid") — sessions that don't receive an `init` event within 30s remain in their current state indefinitely rather than being marked failed.
+5. On `init` event: set `state: "idle"`, `stateSince: now`, update model/capabilities, flush to KV. This ensures the KV state reflects successful initialization regardless of what the previous state was (ADR-0051).
+6. Start a crash watcher goroutine for each recovered session (same as `handleCreate` does for new sessions) so that a crash after resume triggers auto-restart (ADR-0051).
+7. Sessions in `updating` state are resumed but their KV entry stays as `updating` until all JetStream consumers are attached, then cleared to `idle`.
+8. Publish `session_resumed` lifecycle event per session.
+9. Sessions that fail to start within 30s: mark `state: "failed"`, publish `session_failed` lifecycle event.
 
 **Deletion:**
 1. Remove session from in-memory map.
