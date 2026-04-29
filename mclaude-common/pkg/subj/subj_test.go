@@ -17,7 +17,7 @@ var (
 )
 
 // --------------------------------------------------------------------------
-// JetStream filter constants (ADR-0004 — .hosts.*. between user and project)
+// JetStream filter constants (ADR-0035 — .hosts.*. between user and project)
 // --------------------------------------------------------------------------
 
 func TestFilterConstants(t *testing.T) {
@@ -40,7 +40,7 @@ func TestFilterConstants(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// User-scoped subjects (no host level — unchanged by ADR-0004)
+// User-scoped subjects (no host level — unchanged by ADR-0035)
 // --------------------------------------------------------------------------
 
 func TestUserAPIProjectsCreate(t *testing.T) {
@@ -68,7 +68,59 @@ func TestUserQuota(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// User+host+project-scoped API subjects (ADR-0004)
+// User+host-scoped subjects (ADR-0035)
+// --------------------------------------------------------------------------
+
+func TestUserHostStatus(t *testing.T) {
+	got := subj.UserHostStatus(u, h)
+	want := "mclaude.users.alice-gmail.hosts.mbp16.status"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestUserHostProjectAPISessionsRestart(t *testing.T) {
+	got := subj.UserHostProjectAPISessionsRestart(u, h, p)
+	want := "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.sessions.restart"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestUserHostAPIProjectsProvision(t *testing.T) {
+	got := subj.UserHostAPIProjectsProvision(u, h)
+	want := "mclaude.users.alice-gmail.hosts.mbp16.api.projects.provision"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestUserHostAPIProjectsCreate(t *testing.T) {
+	got := subj.UserHostAPIProjectsCreate(u, h)
+	want := "mclaude.users.alice-gmail.hosts.mbp16.api.projects.create"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestUserHostAPIProjectsUpdate(t *testing.T) {
+	got := subj.UserHostAPIProjectsUpdate(u, h)
+	want := "mclaude.users.alice-gmail.hosts.mbp16.api.projects.update"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestUserHostAPIProjectsDelete(t *testing.T) {
+	got := subj.UserHostAPIProjectsDelete(u, h)
+	want := "mclaude.users.alice-gmail.hosts.mbp16.api.projects.delete"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// --------------------------------------------------------------------------
+// User+host+project-scoped API subjects (ADR-0035)
 // --------------------------------------------------------------------------
 
 func TestUserHostProjectAPISessionsInput(t *testing.T) {
@@ -112,7 +164,7 @@ func TestUserHostProjectAPITerminal(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// Event and lifecycle subjects (ADR-0004)
+// Event and lifecycle subjects (ADR-0035)
 // --------------------------------------------------------------------------
 
 func TestUserHostProjectEvents(t *testing.T) {
@@ -132,7 +184,7 @@ func TestUserHostProjectLifecycle(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// KV key helpers (ADR-0004)
+// KV key helpers (ADR-0035)
 // --------------------------------------------------------------------------
 
 func TestSessionsKVKey(t *testing.T) {
@@ -146,14 +198,6 @@ func TestSessionsKVKey(t *testing.T) {
 func TestProjectsKVKey(t *testing.T) {
 	got := subj.ProjectsKVKey(u, h, p)
 	want := "alice-gmail.mbp16.my-project"
-	if got != want {
-		t.Errorf("got %q, want %q", got, want)
-	}
-}
-
-func TestClustersKVKey(t *testing.T) {
-	got := subj.ClustersKVKey(u)
-	want := "alice-gmail"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -218,8 +262,15 @@ func TestAllSpecSubjects(t *testing.T) {
 		{"mclaude.users.{u}.api.projects.create", subj.UserAPIProjectsCreate(u), "mclaude.users.alice-gmail.api.projects.create"},
 		{"mclaude.users.{u}.api.projects.updated", subj.UserAPIProjectsUpdated(u), "mclaude.users.alice-gmail.api.projects.updated"},
 		{"mclaude.users.{u}.quota", subj.UserQuota(u), "mclaude.users.alice-gmail.quota"},
-		// User+host+project-level API (ADR-0004)
+		// User+host-level (ADR-0035)
+		{"mclaude.users.{u}.hosts.{h}.status", subj.UserHostStatus(u, h), "mclaude.users.alice-gmail.hosts.mbp16.status"},
+		{"mclaude.users.{u}.hosts.{h}.api.projects.provision", subj.UserHostAPIProjectsProvision(u, h), "mclaude.users.alice-gmail.hosts.mbp16.api.projects.provision"},
+		{"mclaude.users.{u}.hosts.{h}.api.projects.create", subj.UserHostAPIProjectsCreate(u, h), "mclaude.users.alice-gmail.hosts.mbp16.api.projects.create"},
+		{"mclaude.users.{u}.hosts.{h}.api.projects.update", subj.UserHostAPIProjectsUpdate(u, h), "mclaude.users.alice-gmail.hosts.mbp16.api.projects.update"},
+		{"mclaude.users.{u}.hosts.{h}.api.projects.delete", subj.UserHostAPIProjectsDelete(u, h), "mclaude.users.alice-gmail.hosts.mbp16.api.projects.delete"},
+		// User+host+project-level API (ADR-0035)
 		{"mclaude.users.{u}.hosts.{h}.projects.{p}.api.sessions.input", subj.UserHostProjectAPISessionsInput(u, h, p), "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.sessions.input"},
+		{"mclaude.users.{u}.hosts.{h}.projects.{p}.api.sessions.restart", subj.UserHostProjectAPISessionsRestart(u, h, p), "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.sessions.restart"},
 		{"mclaude.users.{u}.hosts.{h}.projects.{p}.api.sessions.control", subj.UserHostProjectAPISessionsControl(u, h, p), "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.sessions.control"},
 		{"mclaude.users.{u}.hosts.{h}.projects.{p}.api.sessions.create", subj.UserHostProjectAPISessionsCreate(u, h, p), "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.sessions.create"},
 		{"mclaude.users.{u}.hosts.{h}.projects.{p}.api.sessions.delete", subj.UserHostProjectAPISessionsDelete(u, h, p), "mclaude.users.alice-gmail.hosts.mbp16.projects.my-project.api.sessions.delete"},
@@ -256,8 +307,6 @@ func TestAllSpecKVKeys(t *testing.T) {
 		{"mclaude-sessions key", subj.SessionsKVKey(u, h, p, s), "alice-gmail.mbp16.my-project.s-abc123"},
 		// mclaude-projects: {uslug}.{hslug}.{pslug}
 		{"mclaude-projects key", subj.ProjectsKVKey(u, h, p), "alice-gmail.mbp16.my-project"},
-		// mclaude-clusters: {uslug}
-		{"mclaude-clusters key", subj.ClustersKVKey(u), "alice-gmail"},
 		// mclaude-hosts: {uslug}.{hslug}
 		{"mclaude-hosts key", subj.HostsKVKey(u, h), "alice-gmail.mbp16"},
 		// mclaude-job-queue: {uslug}.{jobId}
