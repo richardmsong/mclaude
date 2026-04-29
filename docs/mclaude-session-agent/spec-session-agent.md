@@ -348,7 +348,7 @@ Terminal sessions spawn a PTY shell and bridge I/O through core NATS subjects. T
 
 | Failure | Behavior |
 |---------|----------|
-| NATS connection lost | NATS client auto-reconnects; state changes buffered in memory during outage and flushed on reconnect. Claude processes continue running. Reconnection counter incremented. |
+| NATS connection lost | NATS client auto-reconnects; state changes buffered in memory during outage and flushed on reconnect. Claude processes continue running. Reconnection counter incremented. **Known bug:** `natsConnect()` uses NATS defaults (`MaxReconnects=60`, no `RetryOnFailedConnect`) — on BYOH machines, the daemon permanently loses NATS after 60 failed reconnects instead of retrying indefinitely. Control-plane and controller-k8s both explicitly configure unlimited reconnects. |
 | KV bucket not found on startup | Fatal: session agent exits (control-plane not started) |
 | Session create — worktree collision | `api_error` event published to `events._api` (no NATS reply — JetStream messages have no Reply field) |
 | Session create — git worktree add fails | `api_error` event published to `events._api` (no NATS reply — JetStream messages have no Reply field) |
