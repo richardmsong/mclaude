@@ -2,7 +2,7 @@
 
 ## Role
 
-`mclaude-common` is a zero-dependency Go library (module `mclaude.io/common`) that provides typed slug identifiers and NATS subject/KV key construction helpers shared by all mclaude components. It enforces compile-time type safety: every subject and key helper accepts only typed slug wrappers, making it impossible to pass a raw string where a validated slug is expected.
+`mclaude-common` is a shared Go library (module `mclaude.io/common`) that provides typed slug identifiers, NATS subject/KV key construction helpers, NATS credential/key management utilities, and shared KV payload and lifecycle event types used by all mclaude components. It enforces compile-time type safety: every subject and key helper accepts only typed slug wrappers, making it impossible to pass a raw string where a validated slug is expected.
 
 ## Interfaces
 
@@ -81,7 +81,44 @@ All accept `(u UserSlug, h HostSlug, p ProjectSlug, ...)` -- the `h HostSlug` pa
 
 Note: `ClustersKVKey` exists in code as dead code but the `mclaude-clusters` KV bucket was removed per ADR-0035. `LaptopsKVKey` (pre-ADR-0035) is also removed. Use `HostsKVKey` with a typed `HostSlug`.
 
+### Package `nats`
+
+NATS credential formatting and key management helpers shared across mclaude components. Moved from `mclaude-control-plane` per ADR-0035 so the CLI can reuse `FormatNATSCredentials` for BYOH bootstrap.
+
+**`FormatNATSCredentials(jwt string, seed []byte) []byte`**
+
+Formats a NATS credentials file (`.creds` format) from a JWT and NKey seed. The output is the standard NATS credentials file format understood by `nats.UserCredentials()`.
+
+**`GenerateOperatorAccount(operatorName, accountName string) (*OperatorAccount, error)`**
+
+Generates a fresh operator + account NKey pair and the corresponding JWTs for the NATS 3-tier trust chain (operator → system account → application account). The operator JWT is self-signed; the account JWT is signed by the operator. Called once by the `mclaude-cp` init-keys Helm Job.
+
+**`OperatorAccount` struct:**
+
+| Field                 | Type     | Description                                           |
+|-----------------------|----------|-------------------------------------------------------|
+| `OperatorSeed`        | `[]byte` | Operator NKey seed                                    |
+| `OperatorPublicKey`   | `string` | Operator NKey public key                              |
+| `AccountSeed`         | `[]byte` | Application account NKey seed                         |
+| `AccountPublicKey`    | `string` | Application account NKey public key                   |
+| `OperatorJWT`         | `string` | Self-signed operator JWT                              |
+| `AccountJWT`          | `string` | Application account JWT (signed by operator)          |
+| `SysAccountPublicKey` | `string` | NATS system account public key                        |
+| `SysAccountJWT`       | `string` | System account JWT (signed by operator; no JetStream) |
+
+### Package `types`
+
+Shared Go struct types for NATS KV bucket payloads and lifecycle event constants. These types define the canonical wire format for data stored in `mclaude-sessions`, `mclaude-projects`, `mclaude-hosts`, and `mclaude-job-queue` KV buckets, as well as lifecycle events published on `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{sslug}` subjects. See `spec-state-schema.md` for the full schema reference.
+
+**KV payload structs:** `SessionState`, `Capabilities`, `UsageStats`, `ProjectState`, `HostState`, `QuotaStatus`, `JobEntry`.
+
+**Lifecycle event type constants:** `LifecycleSessionCreated`, `LifecycleSessionStopped`, `LifecycleSessionRestarting`, `LifecycleSessionResumed`, `LifecycleSessionFailed`, `LifecycleSessionUpgrading`, `LifecycleSessionJobPaused`, `LifecycleSessionJobComplete`, `LifecycleSessionJobCancelled`, `LifecycleSessionJobFailed`, `LifecycleSessionPermissionDenied`, `LifecycleSessionQuotaInterrupted`.
+
+**`LifecycleEvent` struct:** Envelope for all lifecycle event payloads with common fields (`Type`, `SessionID`, `TS`) and optional per-event fields.
+
 ## Dependencies
 
 - `golang.org/x/text` -- Unicode normalization (NFD decomposition, combining-mark detection) used by the slug algorithm.
-- Go standard library only (`encoding/base32`, `fmt`, `strings`, `unicode`).
+- `github.com/nats-io/jwt/v2` -- NATS JWT claims encoding for operator and account JWTs (used by `pkg/nats`).
+- `github.com/nats-io/nkeys` -- NATS NKey pair generation (used by `pkg/nats`).
+- Go standard library (`encoding/base32`, `encoding/json`, `fmt`, `strings`, `time`, `unicode`).
