@@ -29,6 +29,26 @@ export function subjQuota(uslug: UserSlug): string {
 }
 
 // --------------------------------------------------------------------------
+// User+host-scoped subjects (ADR-0035)
+// --------------------------------------------------------------------------
+
+export function subjUserHostStatus(uslug: UserSlug, hslug: HostSlug): string {
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.status`
+}
+
+export function subjProjectsProvision(uslug: UserSlug, hslug: HostSlug): string {
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.api.projects.provision`
+}
+
+export function subjProjectsUpdate(uslug: UserSlug, hslug: HostSlug): string {
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.api.projects.update`
+}
+
+export function subjProjectsDelete(uslug: UserSlug, hslug: HostSlug): string {
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.api.projects.delete`
+}
+
+// --------------------------------------------------------------------------
 // User+host+project-scoped API subjects (ADR-0035)
 // All project-scoped subjects include .hosts.{hslug}. between user and project.
 // --------------------------------------------------------------------------

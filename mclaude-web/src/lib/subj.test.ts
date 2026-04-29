@@ -3,6 +3,10 @@ import {
   subjProjectsCreate,
   subjProjectsUpdated,
   subjQuota,
+  subjUserHostStatus,
+  subjProjectsProvision,
+  subjProjectsUpdate,
+  subjProjectsDelete,
   subjSessionsInput,
   subjSessionsControl,
   subjSessionsCreate,
@@ -47,6 +51,24 @@ describe('NATS subject builders', () => {
 
     it('subjQuota matches spec', () => {
       expect(subjQuota(U)).toBe('mclaude.users.alice-gmail.quota')
+    })
+  })
+
+  describe('user+host-scoped subjects (ADR-0035)', () => {
+    it('subjUserHostStatus matches spec', () => {
+      expect(subjUserHostStatus(U, H)).toBe('mclaude.users.alice-gmail.hosts.mbp16.status')
+    })
+
+    it('subjProjectsProvision matches spec', () => {
+      expect(subjProjectsProvision(U, H)).toBe('mclaude.users.alice-gmail.hosts.mbp16.api.projects.provision')
+    })
+
+    it('subjProjectsUpdate matches spec', () => {
+      expect(subjProjectsUpdate(U, H)).toBe('mclaude.users.alice-gmail.hosts.mbp16.api.projects.update')
+    })
+
+    it('subjProjectsDelete matches spec', () => {
+      expect(subjProjectsDelete(U, H)).toBe('mclaude.users.alice-gmail.hosts.mbp16.api.projects.delete')
     })
   })
 

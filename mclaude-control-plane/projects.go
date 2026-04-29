@@ -11,6 +11,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
+
+	"mclaude.io/common/pkg/slug"
+	"mclaude.io/common/pkg/subj"
 )
 
 // ProjectKVState is the value written to the mclaude-projects JetStream KV bucket.
@@ -183,7 +186,7 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 				GitIdentityID: gitIdentityIDStr,
 			}
 			provData, _ := json.Marshal(provReq)
-			provSubject := "mclaude.users." + userSlug + ".hosts." + req.HostSlug + ".api.projects.provision"
+			provSubject := subj.UserHostAPIProjectsProvision(slug.UserSlug(userSlug), slug.HostSlug(req.HostSlug))
 			provReply, err := nc.Request(provSubject, provData, provisionTimeoutSeconds())
 			if err != nil {
 				log.Error().Err(err).
@@ -335,7 +338,7 @@ func publishProjectsUpdated(nc *nats.Conn, userSlug string) {
 	if nc == nil || userSlug == "" {
 		return
 	}
-	subject := "mclaude.users." + userSlug + ".api.projects.updated"
+	subject := subj.UserAPIProjectsUpdated(slug.UserSlug(userSlug))
 	payload, _ := json.Marshal(map[string]string{"event": "updated"})
 	if err := nc.Publish(subject, payload); err != nil {
 		log.Warn().Err(err).Str("subject", subject).Msg("publish projects.updated failed (non-fatal)")
@@ -349,7 +352,7 @@ func publishProjectsUpdateToHost(nc *nats.Conn, userSlug, hostSlug string) {
 	if nc == nil || userSlug == "" || hostSlug == "" {
 		return
 	}
-	subject := "mclaude.users." + userSlug + ".hosts." + hostSlug + ".api.projects.update"
+	subject := subj.UserHostAPIProjectsUpdate(slug.UserSlug(userSlug), slug.HostSlug(hostSlug))
 	payload, _ := json.Marshal(map[string]string{"event": "credentials_changed"})
 	if err := nc.Publish(subject, payload); err != nil {
 		log.Warn().Err(err).Str("subject", subject).Msg("publish projects.update failed (non-fatal)")
@@ -363,7 +366,7 @@ func publishProjectsDeleteToHost(nc *nats.Conn, userSlug, hostSlug, projectID st
 	if nc == nil || userSlug == "" || hostSlug == "" {
 		return
 	}
-	subject := "mclaude.users." + userSlug + ".hosts." + hostSlug + ".api.projects.delete"
+	subject := subj.UserHostAPIProjectsDelete(slug.UserSlug(userSlug), slug.HostSlug(hostSlug))
 	payload, _ := json.Marshal(map[string]string{"projectId": projectID, "event": "deleted"})
 	if err := nc.Publish(subject, payload); err != nil {
 		log.Warn().Err(err).Str("subject", subject).Str("projectId", projectID).Msg("publish projects.delete failed (non-fatal)")
