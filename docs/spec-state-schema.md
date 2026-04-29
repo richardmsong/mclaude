@@ -89,6 +89,31 @@ On user creation, control-plane writes one row to `hosts` with `slug='local'`, `
 
 See `docs/adr-0035-unified-host-architecture.md` for the unified host model.
 
+### `oauth_connections`
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | TEXT | PRIMARY KEY | UUID v4 |
+| `user_id` | TEXT | NOT NULL FK→users ON DELETE CASCADE | Owning user |
+| `provider_id` | TEXT | NOT NULL | Admin-configured provider instance ID (from `providers.json`) |
+| `provider_type` | TEXT | NOT NULL | `github` or `gitlab` |
+| `auth_type` | TEXT | NOT NULL | `oauth` or `pat` |
+| `base_url` | TEXT | NOT NULL | Provider API base URL (e.g. `https://github.com`, `https://gitlab.example.com`) |
+| `display_name` | TEXT | NOT NULL | Human-readable label (e.g. "GitHub — alice") |
+| `provider_user_id` | TEXT | NOT NULL | Provider's stable user identifier |
+| `username` | TEXT | NOT NULL DEFAULT '' | Provider username (used to resolve `GIT_IDENTITY_ID` → username in session-agent) |
+| `scopes` | TEXT | NOT NULL DEFAULT '' | Granted OAuth scopes |
+| `token_expires_at` | TIMESTAMPTZ | NULL | Token expiry (GitLab OAuth tokens expire; GitHub PATs do not) |
+| `connected_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+Constraints:
+- `UNIQUE (user_id, base_url, provider_user_id)` — one connection per user per provider identity.
+
+Tokens are stored in per-user K8s Secrets (`user-secrets` in the user namespace), not in Postgres. The `oauth_connections` table stores only metadata. Secret keys follow the pattern `conn-{id}-token`, `conn-{id}-refresh-token`, `conn-{id}-username`.
+
+Writers: control-plane (OAuth callback handler, PAT handler, GitLab token refresh goroutine).
+Readers: control-plane (provider listing, credential rotation, connection deletion).
+
 ---
 
 ## NATS KV Buckets
@@ -320,7 +345,7 @@ These are fire-and-forget messages on core NATS (not JetStream). No persistence.
 | Subject Pattern | Publisher | Subscriber | Payload |
 |----------------|-----------|------------|---------|
 | `mclaude.users.{uslug}.quota` | daemon (`runQuotaPublisher`) | `QuotaMonitor` (per-session) | `QuotaStatus` JSON — leaf under user scope (not under `.api.`, since quota is a broadcast signal, not a request/reply endpoint) |
-| `mclaude.users.{uslug}.api.projects.updated` | control-plane | SPA | Broadcast notification that project state has changed (project created, updated, or deleted). SPA invalidates its project list cache on receipt. |
+| `mclaude.users.{uslug}.api.projects.updated` | control-plane | SPA | Broadcast notification that project state has changed (project created, updated, or deleted). SPA invalidates its project list cache on receipt. **Not yet published by code** — SPA helper `subjProjectsUpdated()` exists but no control-plane code publishes to this subject. SPA currently discovers project changes through KV watches instead. |
 
 **Host-scoped subjects** (per ADR-0035 — `.hosts.{hslug}.` inserted between user and project; the only project-scoped subject family):
 
@@ -388,8 +413,8 @@ Name: `{userSlug}-{projectSlug}` (e.g. `dev-default-project`)
 spec:
   userId: string         # required — UUID v4
   projectId: string      # required — UUID v4
-  userSlug: string       # required — typed slug (ADR-0050)
-  projectSlug: string    # required — typed slug (ADR-0050)
+  userSlug: string       # typed slug (ADR-0050) — present in CRD schema but not in `required` list; should be required
+  projectSlug: string    # typed slug (ADR-0050) — present in CRD schema but not in `required` list; should be required
   gitUrl: string         # optional
   gitIdentityId: string  # optional — oauth_connections.id for git credential resolution
 status:
@@ -657,7 +682,23 @@ Readers: CLI (admin and cluster subcommands).
 
 ## Login Response Shape
 
-`POST /auth/login` returns a single JSON document used by the SPA to bootstrap. Per ADR-0035 it carries the per-host JWT, NKey seed, hub URL, the user's full host inventory (with cluster-shared fields surfaced on cluster-type rows), and the user's projects.
+`POST /auth/login` returns a JSON document used by the SPA to bootstrap.
+
+**Current implementation (flat response):**
+```json
+{
+  "natsUrl":   "wss://hub.mclaude.example/nats",
+  "jwt":       "<per-host user JWT signed by the account key>",
+  "nkeySeed":  "<NKey seed for client signing>",
+  "userId":    "uuid",
+  "userSlug":  "alice-gmail",
+  "expiresAt": 1735689600
+}
+```
+
+The SPA derives host and project data from KV watches (`mclaude-hosts`, `mclaude-projects`) rather than from the login response.
+
+**Spec target (not yet implemented):** The ADR-0035 target includes a richer response with nested `user` object, `hosts[]` array (full host inventory), and `projects[]` array. This enables the SPA to bootstrap without waiting for KV watches:
 
 ```json
 {
@@ -692,7 +733,7 @@ Readers: CLI (admin and cluster subcommands).
 }
 ```
 
-The `hosts` array is the single source of truth for host inventory. SPA derives the cluster list with `hosts.filter(h => h.type === 'cluster')`. `jsDomain` and `directNatsUrl` are present only on cluster-type entries (and on projects whose host is a cluster) — the SPA includes JetStream domain qualification only when these fields are present, so single-host BYOH deployments work unchanged.
+When implemented, the `hosts` array will be the single source of truth for host inventory. SPA will derive the cluster list with `hosts.filter(h => h.type === 'cluster')`. `jsDomain` and `directNatsUrl` will be present only on cluster-type entries — the SPA includes JetStream domain qualification only when these fields are present, so single-host BYOH deployments work unchanged.
 
 ## Lifecycle Event Payloads
 
