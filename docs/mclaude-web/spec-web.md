@@ -77,7 +77,7 @@ React Router v6 with parametric segments: `/api/users/{uslug}/projects/{pslug}/s
 ## TypeScript Slug/Subject Mirrors
 
 - `src/lib/slug.ts` — mirrors `mclaude-common/pkg/slug` (Slugify + Validate + Fallback) for display consistency.
-- `src/lib/subj.ts` — mirrors `mclaude-common/pkg/subj`. Publishes via typed helpers only. Runtime assertion in dev builds.
+- `src/lib/subj.ts` — mirrors `mclaude-common/pkg/subj`. Publishes via typed helpers only. Runtime assertion in dev builds. Note: `subjSessionsRestart()` exists in TS but has no Go counterpart (`UserHostProjectAPISessionsRestart` is missing from `subj.go`). The session-agent works around this via prefix manipulation.
 
 ## Session Management
 
