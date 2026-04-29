@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"instant-exit","skills":[],"tools":["Bash"],"agents":[],"mcp_servers":[],"model":"claude-sonnet-4-6","permissionMode":"managed"}
+{"type":"system","subtype":"session_state_changed","session_id":"instant-exit","state":"idle"}

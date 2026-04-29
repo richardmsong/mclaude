@@ -290,7 +290,15 @@ func (d *Daemon) runLifecycleSubscriber(ctx context.Context) {
 			now := time.Now().UTC()
 			job.CompletedAt = &now
 
-		case "session_quota_interrupted":
+		case "session_job_paused":
+			// session_job_paused is published by both the QuotaMonitor and the
+			// dispatcher. When the dispatcher already wrote state, this is a no-op.
+			if job.Status == "paused" {
+				d.cfg.Log.Info().
+					Str("jobId", jobID).
+					Msg("daemon: session_job_paused received (state already set by dispatcher)")
+				return
+			}
 			if job.AutoContinue {
 				job.Status = "paused"
 				if r5Str := ev["r5"]; r5Str != "" {
@@ -309,13 +317,6 @@ func (d *Daemon) runLifecycleSubscriber(ctx context.Context) {
 		case "session_job_failed":
 			job.Status = "failed"
 			job.Error = ev["error"]
-
-		case "session_job_paused":
-			// No-op — state already written by dispatcher. Log only.
-			d.cfg.Log.Info().
-				Str("jobId", jobID).
-				Msg("daemon: session_job_paused received (state already set by dispatcher)")
-			return
 
 		default:
 			return

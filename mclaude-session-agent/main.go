@@ -271,6 +271,16 @@ func main() {
 	log.Info().Msg("session agent stopped")
 }
 
+// natsProbeConnect connects to NATS for one-shot health/readiness probes.
+// Unlike natsConnect, it does NOT retry on failure so probes fail fast.
+func natsProbeConnect(natsURL, credsFile string) (*nats.Conn, error) {
+	opts := []nats.Option{}
+	if credsFile != "" {
+		opts = append(opts, nats.UserCredentials(credsFile))
+	}
+	return nats.Connect(natsURL, opts...)
+}
+
 // natsConnect connects to NATS, using a credentials file if one is provided.
 // Unlimited reconnects and retry-on-failed-connect ensure BYOH daemons never
 // permanently lose the NATS connection (spec: GAP-SA-K15).
