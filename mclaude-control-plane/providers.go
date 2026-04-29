@@ -406,6 +406,13 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		if err := s.reconcileUserCLIConfig(r.Context(), st.UserID); err != nil {
 			log.Warn().Err(err).Str("userId", st.UserID).Msg("OAuth: CLI config reconcile failed (non-fatal)")
 		}
+
+		// GAP-CP-11: Set users.oauth_id if currently NULL.
+		if profile.ProviderUserID != "" {
+			_, _ = s.db.pool.Exec(r.Context(),
+				`UPDATE users SET oauth_id = $1 WHERE id = $2 AND oauth_id IS NULL`,
+				profile.ProviderUserID, st.UserID)
+		}
 	}
 
 	// GAP-CP-03: Notify controllers so they refresh user-secrets with new tokens.

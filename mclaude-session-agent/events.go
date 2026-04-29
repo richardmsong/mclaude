@@ -23,10 +23,15 @@ const (
 
 // Session states from session_state_changed events.
 const (
-	StateIdle           = "idle"
-	StateRunning        = "running"
-	StateRequiresAction = "requires_action"
-	StateUpdating       = "updating" // pod is draining for a graceful upgrade
+	StateIdle            = "idle"
+	StateRunning         = "running"
+	StateRequiresAction  = "requires_action"
+	StateUpdating        = "updating" // pod is draining for a graceful upgrade
+	StateRestarting      = "restarting"
+	StateFailed          = "failed"
+	StatePlanMode        = "plan_mode"
+	StateWaitingForInput = "waiting_for_input"
+	StateUnknown         = "unknown"
 )
 
 // eventHeader holds the minimum fields needed to dispatch an event.

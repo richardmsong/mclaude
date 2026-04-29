@@ -110,6 +110,10 @@ type Session struct {
 	// (in the stdout router goroutine) before the line is published to NATS.
 	// Used by QuotaMonitor to scan assistant events for the SESSION_JOB_COMPLETE marker.
 	onRawOutput func(evType string, raw []byte)
+	// stopping is set to true when the session is being intentionally stopped
+	// (delete, restart, or graceful shutdown). The crash watcher goroutine
+	// checks this flag to distinguish intentional stops from unexpected crashes.
+	stopping bool
 	// shutdownPending is set to true during graceful shutdown after the KV entry
 	// has been written with state:"updating". While true, SubtypeSessionStateChanged
 	// events update in-memory state but do NOT flush to KV (to preserve the
@@ -162,6 +166,7 @@ func (s *Session) getState() SessionState {
 // then SIGKILLs if it hasn't stopped.
 func (s *Session) stopAndWait(timeout time.Duration) error {
 	s.mu.Lock()
+	s.stopping = true
 	cmd := s.cmd
 	dbg := s.debug
 	s.mu.Unlock()
@@ -367,19 +372,19 @@ func (s *Session) start(claudePath string, resume bool, publish func(subject str
 		}
 	}()
 
-	// In --input-format stream-json mode, Claude only emits the init event
-	// after receiving the first user message. Don't block on init — return
-	// immediately so the session can accept input. The init event will arrive
-	// asynchronously when the user sends their first message.
-	//
-	// Monitor for early exit in a background goroutine so we can log it.
+	// Monitor startup: if Claude doesn't reach idle within 30s, mark as failed
+	// (spec: GAP-SA-K4). Also handles early exit before init.
 	go func() {
 		select {
 		case <-s.initCh:
-			// Claude initialized successfully after receiving first message.
+			// Claude initialized successfully.
 		case <-time.After(startupTimeout):
-			// No init after timeout — likely the user never sent a message.
-			// Don't kill the process; it's idle but valid.
+			// No init after timeout — mark session as failed.
+			s.mu.Lock()
+			s.state.State = StateFailed
+			s.state.StateSince = time.Now().UTC()
+			s.mu.Unlock()
+			s.flushKV(writeKV)
 		case <-s.doneCh:
 			// Claude exited before init — will be cleaned up by the reaper.
 		}
@@ -739,9 +744,7 @@ func (s *Session) handleSideEffect(line []byte, writeKV func(state SessionState)
 		var r resultEvent
 		if err := json.Unmarshal(line, &r); err == nil {
 			s.mu.Lock()
-			s.state.Usage.InputTokens += r.Usage.InputTokens
-			s.state.Usage.OutputTokens += r.Usage.OutputTokens
-			s.state.Usage.CostUSD += r.TotalCostUSD
+			accumulateUsage(&s.state, r.Usage, r.TotalCostUSD)
 			s.mu.Unlock()
 			s.flushKV(writeKV)
 		}
@@ -831,6 +834,7 @@ func (s *Session) clearPendingControl(requestID string, writeKV func(state Sessi
 // stop interrupts and waits for the Claude process to exit.
 func (s *Session) stop() {
 	s.mu.Lock()
+	s.stopping = true
 	cmd := s.cmd
 	s.mu.Unlock()
 	if cmd == nil {
@@ -847,4 +851,15 @@ func (s *Session) stop() {
 // waitDone blocks until the Claude process exits.
 func (s *Session) waitDone() {
 	<-s.doneCh
+}
+
+// exitCode returns the process exit code, or -1 if not available.
+func (s *Session) exitCode() int {
+	s.mu.Lock()
+	cmd := s.cmd
+	s.mu.Unlock()
+	if cmd == nil || cmd.ProcessState == nil {
+		return -1
+	}
+	return cmd.ProcessState.ExitCode()
 }

@@ -126,6 +126,19 @@ func NewAgent(nc *nats.Conn, userID string, userSlug slug.UserSlug, hostSlug slu
 		return nil, fmt.Errorf("ensure MCLAUDE_API stream: %w", err)
 	}
 
+	// Ensure the MCLAUDE_LIFECYCLE stream exists (spec: GAP-SA-K8).
+	// Lifecycle events are published to core NATS and now also persisted.
+	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:      "MCLAUDE_LIFECYCLE",
+		Subjects:  []string{subj.FilterMclaudeLifecycle},
+		Retention: jetstream.LimitsPolicy,
+		MaxAge:    7 * 24 * time.Hour,
+		Storage:   jetstream.FileStorage,
+		Discard:   jetstream.DiscardOld,
+	}); err != nil {
+		return nil, fmt.Errorf("ensure MCLAUDE_LIFECYCLE stream: %w", err)
+	}
+
 	agent := &Agent{
 		sessions:      make(map[string]*Session),
 		terminals:     make(map[string]*TerminalSession),
@@ -246,6 +259,9 @@ func (a *Agent) recoverSessions() error {
 			sess.debug = dbg
 			sess.mu.Unlock()
 		}
+
+		// Publish session_restarting before starting resume (spec: GAP-SA-N5).
+		a.publishLifecycle(st.ID, "session_restarting")
 
 		if sErr := sess.start(a.claudePath, true, publish, a.writeSessionKV); sErr != nil {
 			dbg.Stop()
@@ -797,7 +813,7 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 	var monitor *QuotaMonitor
 	if req.QuotaMonitor != nil && req.QuotaMonitor.JobID != "" {
 		var monErr error
-		monitor, monErr = newQuotaMonitor(sessionID, a.userID, a.projectID, req.Branch, *req.QuotaMonitor, a.nc, sess, a.publishLifecycleExtra)
+		monitor, monErr = newQuotaMonitor(sessionID, string(a.userSlug), a.projectID, req.Branch, *req.QuotaMonitor, a.nc, sess, a.publishLifecycleExtra)
 		if monErr != nil {
 			a.log.Warn().Err(monErr).Str("sessionId", sessionID).Msg("quota monitor setup failed (non-fatal)")
 		} else {
@@ -844,7 +860,10 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 	a.sessions[sessionID] = sess
 	a.mu.Unlock()
 
-	a.publishLifecycle(sessionID, "session_created")
+	// Start crash watcher goroutine (spec: GAP-SA-K16).
+	go a.watchSessionCrash(sessionID, sess)
+
+	a.publishLifecycleWithBranch(sessionID, "session_created", branch)
 
 	a.log.Info().
 		Str("component", "session-agent").
@@ -928,7 +947,7 @@ func (a *Agent) handleDelete(msg *nats.Msg) {
 	key := sessionKVKey(a.userSlug, a.hostSlug, a.projectSlug, delSessSlug)
 	_ = a.sessKV.Delete(context.Background(), key)
 
-	a.publishLifecycle(req.SessionID, "session_stopped")
+	a.publishLifecycleWithExitCode(req.SessionID, "session_stopped", sess.exitCode())
 
 	a.log.Info().
 		Str("sessionId", req.SessionID).
@@ -1223,6 +1242,117 @@ func (a *Agent) publishPermDenied(sessionID, toolName, jobID string) {
 		"ts":        time.Now().UTC().Format(time.RFC3339),
 	})
 	_ = a.nc.Publish(subject, payload)
+}
+
+// publishLifecycleWithBranch publishes a lifecycle event that includes a branch
+// field. Used for session_created (spec: GAP-SA-K9).
+func (a *Agent) publishLifecycleWithBranch(sessionID, eventType, branch string) {
+	if a.nc == nil {
+		return
+	}
+	subject := subj.UserHostProjectLifecycle(a.userSlug, a.hostSlug, a.projectSlug, slug.SessionSlug(sessionID))
+	payload, _ := json.Marshal(map[string]string{
+		"type":      eventType,
+		"sessionId": sessionID,
+		"branch":    branch,
+		"ts":        time.Now().UTC().Format(time.RFC3339),
+	})
+	_ = a.nc.Publish(subject, payload)
+}
+
+// publishLifecycleWithExitCode publishes a lifecycle event that includes an
+// exitCode field. Used for session_stopped (spec: GAP-SA-K10).
+func (a *Agent) publishLifecycleWithExitCode(sessionID, eventType string, exitCode int) {
+	if a.nc == nil {
+		return
+	}
+	subject := subj.UserHostProjectLifecycle(a.userSlug, a.hostSlug, a.projectSlug, slug.SessionSlug(sessionID))
+	payload, _ := json.Marshal(map[string]interface{}{
+		"type":      eventType,
+		"sessionId": sessionID,
+		"exitCode":  exitCode,
+		"ts":        time.Now().UTC().Format(time.RFC3339),
+	})
+	_ = a.nc.Publish(subject, payload)
+}
+
+// watchSessionCrash monitors a session's doneCh for unexpected exits and
+// auto-restarts the Claude process (spec: GAP-SA-K16).
+// On crash: publishes session_failed lifecycle, increments mclaude_claude_restarts_total,
+// respawns with --resume {sessionId}.
+func (a *Agent) watchSessionCrash(sessionID string, sess *Session) {
+	<-sess.doneCh
+
+	// Check if this was an intentional stop.
+	sess.mu.Lock()
+	wasStopping := sess.stopping
+	sess.mu.Unlock()
+	if wasStopping {
+		return
+	}
+
+	// Check if the session is still tracked by the agent (not deleted).
+	a.mu.RLock()
+	current, tracked := a.sessions[sessionID]
+	a.mu.RUnlock()
+	if !tracked || current != sess {
+		return
+	}
+
+	a.log.Warn().Str("sessionId", sessionID).Msg("Claude process crashed unexpectedly — restarting")
+
+	// Publish session_failed lifecycle event.
+	a.publishLifecycleFailed(sessionID, "Claude process exited unexpectedly")
+
+	// Increment restart counter.
+	if a.metrics != nil {
+		a.metrics.ClaudeRestart()
+	}
+
+	// Respawn with --resume.
+	st := sess.getState()
+	clearPendingControlsForResume(&st)
+	if err := a.writeSessionKV(st); err != nil {
+		a.log.Warn().Err(err).Str("sessionId", sessionID).Msg("crash restart: KV write failed")
+	}
+
+	publish := func(subject string, data []byte) error {
+		return a.nc.Publish(subject, data)
+	}
+
+	newSess := newSession(st, a.userID)
+	newSess.metrics = a.metrics
+
+	// Restart debug unix socket.
+	newDbg := NewDebugServer(sessionID,
+		func(data []byte) { newSess.sendInput(data) },
+		func() { a.publishLifecycle(sessionID, "debug_attached") },
+		func() { a.publishLifecycle(sessionID, "debug_detached") },
+	)
+	if err := newDbg.Start(); err != nil {
+		a.log.Warn().Err(err).Str("sessionId", sessionID).Msg("debug socket start failed on crash restart (non-fatal)")
+	} else {
+		newSess.mu.Lock()
+		newSess.debug = newDbg
+		newSess.mu.Unlock()
+	}
+
+	if err := newSess.start(a.claudePath, true, publish, a.writeSessionKV); err != nil {
+		newDbg.Stop()
+		a.log.Error().Err(err).Str("sessionId", sessionID).Msg("crash restart: failed to resume session")
+		a.publishLifecycleFailed(sessionID, "crash restart failed: "+err.Error())
+		return
+	}
+
+	a.mu.Lock()
+	a.sessions[sessionID] = newSess
+	a.mu.Unlock()
+
+	// Start a new crash watcher for the restarted session.
+	go a.watchSessionCrash(sessionID, newSess)
+
+	a.publishLifecycle(sessionID, "session_resumed")
+	a.log.Info().Str("sessionId", sessionID).Msg("session restarted after crash")
 }
 
 // updateReplayFromSeq queries JetStream for the last sequence number of the

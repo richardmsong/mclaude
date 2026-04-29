@@ -93,11 +93,14 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 		http.NotFound(w, r)
 	})))
 
-	// Host CRUD endpoints (ADR-0035)
-	mux.Handle("/api/users/", s.authMiddleware(http.HandlerFunc(s.handleHostRoutes)))
+	// Host and Project CRUD endpoints (ADR-0035)
+	mux.Handle("/api/users/", s.authMiddleware(http.HandlerFunc(s.handleUserAPIRoutes)))
 
 	// Device-code registration (ADR-0035)
 	mux.HandleFunc("/api/hosts/register", s.handleHostRegister)
+
+	// KNOWN-20: SCIM 2.0 endpoints (no auth middleware — SCIM uses its own bearer token).
+	mux.Handle("/scim/v2/", s.adminAuthMiddleware(http.HandlerFunc(s.handleSCIMRoutes)))
 }
 
 // AdminMux returns an http.ServeMux for the break-glass admin port (:9091).

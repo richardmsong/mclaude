@@ -34,15 +34,17 @@ type QuotaMonitor struct {
 
 // newQuotaMonitor creates a QuotaMonitor, subscribes to quota updates,
 // starts the monitor goroutine, and returns. Called from handleCreate.
+// userSlug is used (not UUID) so the subscription subject matches the slug-based
+// subject the daemon publishes to (spec: GAP-SA-K11).
 func newQuotaMonitor(
-	sessionID, userID, projectID, branch string,
+	sessionID, userSlug, projectID, branch string,
 	cfg QuotaMonitorConfig,
 	nc *nats.Conn,
 	sess *Session,
 	publishLifec func(sessionID, evType string, extra map[string]string),
 ) (*QuotaMonitor, error) {
 	quotaCh := make(chan *nats.Msg, 16)
-	subject := "mclaude.users." + userID + ".quota"
+	subject := "mclaude.users." + userSlug + ".quota"
 	quotaSub, err := nc.ChanSubscribe(subject, quotaCh)
 	if err != nil {
 		return nil, fmt.Errorf("quota subscribe: %w", err)
@@ -50,7 +52,7 @@ func newQuotaMonitor(
 
 	m := &QuotaMonitor{
 		sessionID:    sessionID,
-		userID:       userID,
+		userID:       userSlug,
 		projectID:    projectID,
 		branch:       branch,
 		cfg:          cfg,
@@ -150,11 +152,11 @@ func (m *QuotaMonitor) publishExitLifecycle(stopReason string) {
 			"branch": m.branch,
 		})
 	case stopReason == "quota":
-		m.publishLifec(m.sessionID, "session_quota_interrupted", map[string]string{
-			"jobId":     m.cfg.JobID,
-			"threshold": fmt.Sprintf("%d", m.cfg.Threshold),
-			"u5":        fmt.Sprintf("%d", m.lastU5),
-			"r5":        m.lastR5.UTC().Format(time.RFC3339),
+		m.publishLifec(m.sessionID, "session_job_paused", map[string]string{
+			"jobId":                    m.cfg.JobID,
+			"pausedVia":               "quota_threshold",
+			"r5":                      m.lastR5.UTC().Format(time.RFC3339),
+			"outputTokensSinceSoftMark": fmt.Sprintf("%d", m.lastU5),
 		})
 	case stopReason == "permDenied":
 		// session_permission_denied was already published synchronously by

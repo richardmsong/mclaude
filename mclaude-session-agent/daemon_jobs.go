@@ -160,6 +160,19 @@ func (d *Daemon) runQuotaPublisher(ctx context.Context) {
 	}
 }
 
+// jobProjectSlug returns the project slug from a job entry, falling back to
+// slugifying the ProjectID if no explicit slug is set (spec: GAP-SA-K19).
+func jobProjectSlug(job *JobEntry) slug.ProjectSlug {
+	if job.ProjectSlug != "" {
+		return slug.ProjectSlug(job.ProjectSlug)
+	}
+	s := slug.Slugify(job.ProjectID)
+	if s == "" {
+		s = "p-" + job.ProjectID[:8]
+	}
+	return slug.ProjectSlug(s)
+}
+
 // specPathToComponent maps a spec path to a dev-harness component argument.
 func specPathToComponent(specPath string) string {
 	base := filepath.Base(specPath)
@@ -221,9 +234,10 @@ Instructions:
 	)
 }
 
-// readJobEntry reads and unmarshals a JobEntry from jobQueueKV by {userId}/{jobId}.
+// readJobEntry reads and unmarshals a JobEntry from jobQueueKV by {uslug}.{jobId}.
+// Uses the daemon's typed UserSlug (not UUID) for the key (spec: GAP-SA-K18).
 func (d *Daemon) readJobEntry(userID, jobID string) (*JobEntry, jetstream.KeyValueEntry, error) {
-	key := subj.JobQueueKVKey(slug.UserSlug(userID), jobID)
+	key := subj.JobQueueKVKey(d.cfg.UserSlug, jobID)
 	entry, err := d.jobQueueKV.Get(context.Background(), key)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get job %s: %w", key, err)
@@ -236,12 +250,13 @@ func (d *Daemon) readJobEntry(userID, jobID string) (*JobEntry, jetstream.KeyVal
 }
 
 // writeJobEntry marshals and writes a JobEntry to jobQueueKV.
+// Uses the daemon's typed UserSlug (not UUID) for the key (spec: GAP-SA-K18).
 func (d *Daemon) writeJobEntry(job *JobEntry) error {
 	data, err := json.Marshal(job)
 	if err != nil {
 		return fmt.Errorf("marshal job: %w", err)
 	}
-	key := subj.JobQueueKVKey(slug.UserSlug(job.UserID), job.ID)
+	key := subj.JobQueueKVKey(d.cfg.UserSlug, job.ID)
 	_, err = d.jobQueueKV.Put(context.Background(), key, data)
 	return err
 }
@@ -249,9 +264,9 @@ func (d *Daemon) writeJobEntry(job *JobEntry) error {
 // runLifecycleSubscriber subscribes to mclaude.{userId}.*.lifecycle.* and
 // updates jobQueueKV on terminal job lifecycle events.
 func (d *Daemon) runLifecycleSubscriber(ctx context.Context) {
-	// Subscribe to lifecycle events for all projects belonging to this user.
-	// New format: mclaude.users.{uslug}.hosts.*.projects.*.lifecycle.* (ADR-0035)
-	subject := "mclaude.users." + string(d.cfg.UserSlug) + ".hosts.*.projects.*.lifecycle.*"
+	// Subscribe to lifecycle events for this user on this host only (spec: GAP-SA-N6).
+	// New format: mclaude.users.{uslug}.hosts.{hslug}.projects.*.lifecycle.* (ADR-0035)
+	subject := "mclaude.users." + string(d.cfg.UserSlug) + ".hosts." + string(d.cfg.HostSlug) + ".projects.*.lifecycle.*"
 	sub, err := d.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var ev map[string]string
 		if err := json.Unmarshal(msg.Data, &ev); err != nil {
@@ -339,7 +354,7 @@ func (d *Daemon) dispatchQueuedJob(job *JobEntry) error {
 	}
 
 	// Build the sessions.create request.
-	createSubject := subj.UserHostProjectAPISessionsCreate(d.cfg.UserSlug, d.cfg.HostSlug, slug.ProjectSlug(job.ProjectID))
+	createSubject := subj.UserHostProjectAPISessionsCreate(d.cfg.UserSlug, d.cfg.HostSlug, jobProjectSlug(job))
 	createPayload, _ := json.Marshal(map[string]any{
 		"branch":    branch,
 		"permPolicy": "strict-allowlist",
@@ -374,7 +389,7 @@ func (d *Daemon) dispatchQueuedJob(job *JobEntry) error {
 
 	// Poll sessKV for state=idle (up to 30s).
 	// Use slug-based KV key; sessionSlug falls back to sessionID (pre-migration entries).
-	kvKey := subj.SessionsKVKey(d.cfg.UserSlug, d.cfg.HostSlug, slug.ProjectSlug(job.ProjectID), slug.SessionSlug(sessionID))
+	kvKey := subj.SessionsKVKey(d.cfg.UserSlug, d.cfg.HostSlug, jobProjectSlug(job), slug.SessionSlug(sessionID))
 	deadline := time.Now().Add(jobDispatchPollTimeout)
 	for time.Now().Before(deadline) {
 		entry, err := d.sessKV.Get(context.Background(), kvKey)
@@ -435,7 +450,7 @@ func (d *Daemon) dispatchQueuedJob(job *JobEntry) error {
 
 	// Send the dev-harness prompt via sessions.input.
 	prompt := scheduledSessionPrompt(job.SpecPath, component, fmt.Sprintf("%d", job.Priority), branch, otherSpecs)
-	inputSubject := subj.UserHostProjectAPISessionsInput(d.cfg.UserSlug, d.cfg.HostSlug, slug.ProjectSlug(job.ProjectID))
+	inputSubject := subj.UserHostProjectAPISessionsInput(d.cfg.UserSlug, d.cfg.HostSlug, jobProjectSlug(job))
 	inputPayload, _ := json.Marshal(map[string]any{
 		"type": "user",
 		"message": map[string]any{
@@ -488,7 +503,7 @@ func (d *Daemon) startupRecovery() {
 		case "running":
 			// Check if the session still exists in sessKV.
 			if job.SessionID != "" {
-				kvKey := subj.SessionsKVKey(slug.UserSlug(job.UserID), d.cfg.HostSlug, slug.ProjectSlug(job.ProjectID), slug.SessionSlug(job.SessionID))
+				kvKey := subj.SessionsKVKey(d.cfg.UserSlug, d.cfg.HostSlug, jobProjectSlug(&job), slug.SessionSlug(job.SessionID))
 				_, err := d.sessKV.Get(context.Background(), kvKey)
 				if err != nil {
 					// Session gone — reset to queued.
@@ -632,7 +647,7 @@ func (d *Daemon) processDispatch(ctx context.Context, quota QuotaStatus, changed
 					break // this job's threshold not exceeded; higher-threshold jobs also safe
 				}
 				// Send graceful stop.
-				inputSubject := subj.UserHostProjectAPISessionsInput(d.cfg.UserSlug, d.cfg.HostSlug, slug.ProjectSlug(job.ProjectID))
+				inputSubject := subj.UserHostProjectAPISessionsInput(d.cfg.UserSlug, d.cfg.HostSlug, jobProjectSlug(job))
 				stopMsg, _ := json.Marshal(map[string]any{
 					"type": "user",
 					"message": map[string]any{
@@ -643,15 +658,16 @@ func (d *Daemon) processDispatch(ctx context.Context, quota QuotaStatus, changed
 				})
 				_ = d.nc.Publish(inputSubject, stopMsg)
 
-				// Publish session_job_paused lifecycle event.
-				lifecycleSubject := subj.UserHostProjectLifecycle(d.cfg.UserSlug, d.cfg.HostSlug, slug.ProjectSlug(job.ProjectID), slug.SessionSlug(job.SessionID))
+				// Publish session_job_paused lifecycle event (spec: GAP-SA-K13).
+				lifecycleSubject := subj.UserHostProjectLifecycle(d.cfg.UserSlug, d.cfg.HostSlug, jobProjectSlug(job), slug.SessionSlug(job.SessionID))
 				pausedPayload, _ := json.Marshal(map[string]any{
-					"type":      "session_job_paused",
-					"sessionId": job.SessionID,
-					"jobId":     job.ID,
-					"priority":  job.Priority,
-					"u5":        quota.U5,
-					"ts":        time.Now().UTC().Format(time.RFC3339),
+					"type":                      "session_job_paused",
+					"sessionId":                 job.SessionID,
+					"jobId":                     job.ID,
+					"pausedVia":                 "quota_threshold",
+					"r5":                        quota.R5.UTC().Format(time.RFC3339),
+					"outputTokensSinceSoftMark": 0,
+					"ts":                        time.Now().UTC().Format(time.RFC3339),
 				})
 				_ = d.nc.Publish(lifecycleSubject, pausedPayload)
 
@@ -845,7 +861,7 @@ func (d *Daemon) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		}
 		// If running, stop the session first.
 		if job.Status == "running" && job.SessionID != "" {
-			deleteSubject := subj.UserHostProjectAPISessionsDelete(d.cfg.UserSlug, d.cfg.HostSlug, slug.ProjectSlug(job.ProjectID))
+			deleteSubject := subj.UserHostProjectAPISessionsDelete(d.cfg.UserSlug, d.cfg.HostSlug, jobProjectSlug(job))
 			payload, _ := json.Marshal(map[string]string{"sessionId": job.SessionID})
 			_ = d.nc.Publish(deleteSubject, payload)
 		}
@@ -853,6 +869,17 @@ func (d *Daemon) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		if err := d.writeJobEntry(job); err != nil {
 			http.Error(w, "KV write failed: "+err.Error(), http.StatusInternalServerError)
 			return
+		}
+		// Publish session_job_cancelled lifecycle event (spec: GAP-SA-K14).
+		if job.SessionID != "" {
+			lifecycleSubject := subj.UserHostProjectLifecycle(d.cfg.UserSlug, d.cfg.HostSlug, jobProjectSlug(job), slug.SessionSlug(job.SessionID))
+			cancelPayload, _ := json.Marshal(map[string]string{
+				"type":      "session_job_cancelled",
+				"sessionId": job.SessionID,
+				"jobId":     job.ID,
+				"ts":        time.Now().UTC().Format(time.RFC3339),
+			})
+			_ = d.nc.Publish(lifecycleSubject, cancelPayload)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{})
