@@ -221,13 +221,13 @@ State transitions flow from Claude Code's `session_state_changed` system events.
 
 **Resumption (on pod restart):**
 1. Watch all keys in `mclaude-sessions` KV for initial values.
-2. Set all matching session KV entries to `state: "restarting"`, clear `pendingControls`.
+2. Set all matching session KV entries to `state: "restarting"`, clear `pendingControls`. **Known bug:** `clearPendingControlsForResume()` sets state to `"idle"` instead of `"restarting"` — the SPA never shows the "Restarting..." indicator during recovery. Root cause: `StateRestarting` constant is not defined (only 4 of 9 state constants exist in code).
 3. Publish `session_restarting` lifecycle event per session.
 4. For each session belonging to this project: resume the Claude process with `--resume {id}`.
 5. On `init` event: update KV with fresh state.
 6. Sessions in `updating` state are resumed but their KV entry stays as `updating` until all JetStream consumers are attached, then cleared to `idle`.
 7. Publish `session_resumed` lifecycle event per session.
-8. Sessions that fail to start within 30s: mark `state: "failed"`, publish `session_failed` lifecycle event.
+8. Sessions that fail to start within 30s: mark `state: "failed"`, publish `session_failed` lifecycle event. **Known gap:** the code's 30s timer fires but does nothing (comment: "Don't kill the process; it's idle but valid") — sessions that don't receive an `init` event within 30s remain in their current state indefinitely rather than being marked failed.
 
 **Deletion:**
 1. Remove session from in-memory map.
@@ -257,7 +257,7 @@ The stdout router goroutine reads NDJSON lines from Claude Code's stdout (using 
 5. Notifies the compact-boundary callback to update `replayFromSeq`.
 6. Notifies the quota monitor raw output callback.
 7. Broadcasts to connected debug clients.
-8. Processes side effects (state changes, init, permission requests, usage accumulation).
+8. Processes side effects (state changes, init, permission requests, usage accumulation). **Known bug:** `handleSideEffect` only accumulates `inputTokens`, `outputTokens`, and `costUsd` from `result` events — `cacheReadTokens` and `cacheWriteTokens` are never accumulated (always 0 in KV). An `accumulateUsage()` helper that handles all 5 fields exists in `state.go` but is dead code (never called).
 
 The stdin serializer goroutine drains the stdin channel sequentially to prevent NDJSON line interleaving.
 

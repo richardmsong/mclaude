@@ -33,6 +33,7 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 | `PROVISION_TIMEOUT_SECONDS` | No | `10` | Per-request timeout for NATS provisioning request/reply (`mclaude.users.{uslug}.hosts.{hslug}.api.projects.*`). Note: currently a hardcoded constant in code (`const ProvisionTimeoutSeconds = 10`), not yet read from env. `seedDev` uses a longer 30s timeout for the initial provisioning request during startup (controller may not be ready yet). |
 | `LOG_LEVEL` | No | (default) | **Not read by Go code** — injected by the `mclaude-cp` Helm template but not consumed by the binary. Zerolog uses its default level. |
 | `HELM_RELEASE_NAME` | No | (none) | **Not read by Go code** — injected by the `mclaude-cp` Helm template but not consumed by the control-plane binary. (The controller-k8s binary does read this variable for ConfigMap lookup.) |
+| `METRICS_PORT` | No | (none) | **Not read by Go code** — injected by the `mclaude-cp` Helm template but not consumed. `/metrics` is served on the admin port (`ADMIN_PORT`). |
 
 ## Interfaces
 
@@ -105,11 +106,11 @@ The loopback-only port (bound to `127.0.0.1`) hosts admin break-glass endpoints 
 | `GET` | `/admin/clusters` | Lists registered clusters (deduplicated across user rows). |
 | `POST` | `/admin/clusters/{cslug}/grants` | Grants user access (`{userSlug}`). Creates a new `hosts` row for that user; mints a per-user JWT scoped to `mclaude.users.{userSlug}.hosts.{cslug}.>`. **Known bug:** handler calls `GetUserByEmail(req.UserSlug)` instead of `GetUserBySlug(req.UserSlug)`. **Known bug:** `IssueHostJWT(user.ID, ...)` passes UUID instead of slug, producing incorrect JWT subject permissions. |
 | `DELETE` | `/admin/clusters/{cslug}` | Removes the cluster. **Not yet implemented** — deferred per ADR-0035. Use direct SQL as a workaround. |
-| `POST` | `/admin/users` | Creates a user (id, email, name, optional password, optional `isAdmin`). |
+| `POST` | `/admin/users` | Creates a user (id, email, name, optional password). **Known gap:** spec says optional `isAdmin` field, but `AdminUserRequest` struct has no `IsAdmin` field — new users are always non-admin. |
 | `POST` | `/admin/users/{uslug}/promote` | Sets `users.is_admin = true`. **Not yet implemented** — DB method `SetUserAdmin` exists but HTTP handler is not wired. Use direct SQL as a workaround. |
 | `GET` | `/admin/users` | Lists all users. |
-| `DELETE` | `/admin/users/{id}` | Deletes a user: revokes NATS JWT, DELETEs from Postgres (cascades), publishes NATS delete requests to controllers. |
-| `POST` | `/admin/sessions/stop` | Break-glass session stop (records intent in DB). |
+| `DELETE` | `/admin/users/{id}` | Deletes a user from Postgres (cascades to hosts, projects, oauth_connections). **Known gap:** does not revoke the user's NATS JWT (remains valid until expiry) and does not publish NATS delete requests to controllers — orphaned K8s resources persist until manual cleanup. |
+| `POST` | `/admin/sessions/stop` | Break-glass session stop. **Known bug:** handler executes `UPDATE sessions SET status = 'stopped'` against a `sessions` table that does not exist in the schema (session state lives in NATS KV, not Postgres). Endpoint is effectively non-functional. |
 
 ### NATS Subjects
 
@@ -153,7 +154,7 @@ The control-plane has **no** K8s client at runtime and creates **no** K8s resour
 
 The control-plane binary doubles as two Helm pre-install Job entrypoints (the only code paths that use `client-go`):
 - **`control-plane init-keys`** — generates operator + account NKey pairs and JWTs, writes them to the `operator-keys` Secret in `mclaude-system`. Idempotent: exits 0 if the Secret already exists. Also creates the bootstrap admin row in Postgres when `BOOTSTRAP_ADMIN_EMAIL` is set. Run by the `mclaude-cp` chart's pre-install Job.
-- **`control-plane gen-leaf-creds`** — reads the account seed from the `operator-keys` Secret, generates a NATS user JWT + NKey seed, writes them as a `.creds` file into a `mclaude-worker-nats-leaf-creds` Secret. Idempotent: exits 0 if the leaf-creds Secret already exists. Run by the `mclaude-worker` chart's pre-install Job. Env vars: `NAMESPACE` (default `mclaude-system`), `LEAF_CREDS_SECRET` (default `mclaude-worker-nats-leaf-creds`), `ACCOUNT_SEED_SECRET` (default `operator-keys`), `ACCOUNT_SEED_KEY` (default `accountSeed`).
+- **`control-plane gen-leaf-creds`** — reads the account seed from the `operator-keys` Secret, generates a NATS user JWT + NKey seed, writes them as a `.creds` file into a `mclaude-worker-nats-leaf-creds` Secret. The JWT has no explicit pub/sub permissions (unrestricted within the account). This is a separate credential from the scoped per-cluster JWT issued by `POST /admin/clusters` — the gen-leaf-creds JWT is used only by the worker NATS StatefulSet for the leaf-node connection. Idempotent: exits 0 if the leaf-creds Secret already exists. Run by the `mclaude-worker` chart's pre-install Job. Env vars: `NAMESPACE` (default `mclaude-system`), `LEAF_CREDS_SECRET` (default `mclaude-worker-nats-leaf-creds`), `ACCOUNT_SEED_SECRET` (default `operator-keys`), `ACCOUNT_SEED_KEY` (default `accountSeed`).
 
 At runtime, the control-plane mounts one K8s Secret as a file:
 - `mclaude-system/operator-keys` — mounted at `OPERATOR_KEYS_PATH` (default `/etc/mclaude/operator-keys`). Read-only. Provides `operatorJwt`, `accountJwt`, `accountSeed`, `operatorSeed` for signing per-host user JWTs and per-cluster leaf JWTs.
@@ -185,7 +186,7 @@ Login validates email and bcrypt password hash (or OAuth identity) against Postg
    - publish: `mclaude.{userID}.>, mclaude.users.{userSlug}.hosts.*.>, _INBOX.>, $JS.API.>`
    - subscribe: `mclaude.{userID}.>, mclaude.users.{userSlug}.hosts.*.>, _INBOX.>, $JS.API.>, $JS.API.DIRECT.GET.>, $KV.mclaude-projects.{userID}.>, $KV.mclaude-sessions.{userID}.>, $KV.mclaude-hosts.{userSlug}.>`
    Note: `mclaude.{userID}.>` is retained for backward compatibility with un-migrated UUID-format subjects; `mclaude.users.{userSlug}.hosts.*.>` enables ADR-0035 host-scoped subjects. Both are removed when the full subject migration lands.
-4. JWT lifetime is `JWT_EXPIRY_SECONDS` (default 8h). The NKey seed is returned alongside the JWT so the client can sign NATS connection nonces.
+4. JWT lifetime is `JWT_EXPIRY_SECONDS` (default 8h). The NKey seed is returned alongside the JWT so the client can sign NATS connection nonces. **Known bug:** `IssueUserJWT` is called with `expiresAt + expirySecs` where `expiresAt` is already `now + 8h`, resulting in `claims.Expires = now + 16h` (double the configured lifetime). `LoginResponse.ExpiresAt` is correct (`now + 8h`) so the SPA refreshes at the right time, but the NATS JWT itself is valid for 16h.
 5. The full Login Response payload (`spec-state-schema.md#login-response-shape`) is returned: `{user, jwt, nkeySeed, hubUrl, hosts[], projects[]}`.
 
 Per-host user JWTs for daemons are minted at `mclaude host register` time (device-code flow) and refreshed via `POST /auth/refresh`.

@@ -582,10 +582,12 @@ Operator and account keys live in the K8s Secret `mclaude-system/operator-keys` 
 ```
 Secret: mclaude-system/operator-keys (Opaque, mode 0600)
 Keys:
-  operatorJwt   — self-signed operator JWT
-  operatorSeed  — operator NKey seed
-  accountJwt    — account JWT signed by the operator
-  accountSeed   — account NKey seed (used by control-plane to sign user JWTs)
+  operatorJwt      — self-signed operator JWT
+  operatorSeed     — operator NKey seed
+  accountJwt       — account JWT signed by the operator
+  accountSeed      — account NKey seed (used by control-plane to sign user JWTs)
+  accountPublicKey — account NKey public key (used in NATS resolver_preload config)
+  resolverPreload  — formatted resolver_preload entry for NATS config (accountPublicKey: accountJwt)
 ```
 
 Generated on first deploy by the `mclaude-cp` Helm pre-install Job (`mclaude-cp init-keys`). The Job is idempotent: subsequent deploys check Secret existence and exit without regenerating. The hub NATS pod template references this Secret for `resolver_preload`. The control-plane Deployment also reads the Secret to sign per-host user JWTs.
