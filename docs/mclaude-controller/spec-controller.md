@@ -61,7 +61,7 @@ For full schemas see `docs/spec-state-schema.md` — Kubernetes Resources. Summa
 - Per-user namespace `mclaude-{userId}` with ServiceAccount, Role, RoleBinding.
 - Per-user `user-secrets` Secret (NATS credentials, OAuth tokens, CLI configs) and `user-config` ConfigMap.
 - Per-project `project-{projectId}` and `nix-{projectId}` PVCs.
-- Per-project `mclaude-session-agent-{projectId}` Deployment.
+- Per-project `project-{projectId}` Deployment.
 - Watched: `{release}-session-agent-template` ConfigMap in `mclaude-system` (image, resources, PVC sizes, corporate CA settings) — changes re-enqueue all `MCProject` CRs.
 
 #### Reconciler loop

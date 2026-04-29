@@ -8,7 +8,7 @@ Per ADR-0035 the control-plane is **K8s-free**: no controller-runtime, no K8s cl
 
 ## Deployment
 
-Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central `mclaude-cp` cluster, built from an Alpine-based container image. Listens on two ports: the main API port (default 8080) for public and authenticated routes, and a loopback-only admin port (default 9091) for break-glass operations and Prometheus metrics. The admin endpoints under `/admin/*` (cluster register, grant, etc.) are served on the **main** port and protected by per-user `Authorization: Bearer <token>` plus a server-side `users.is_admin` check, so admin CLIs work over the public ingress.
+Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central `mclaude-cp` cluster, built from an Alpine-based container image. Listens on two ports: the main API port (default 8080) for public and authenticated routes, and a loopback-only admin port (default 9091, bound to `127.0.0.1`) for `/admin/*` break-glass endpoints and Prometheus metrics. Admin endpoints are protected by a static bearer token (`ADMIN_TOKEN` env var) — this port must not be exposed externally.
 
 ### Environment Variables
 
@@ -20,10 +20,10 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 | `NATS_WS_URL` | No | (empty) | External WebSocket URL for browser clients; empty means client derives from origin |
 | `NATS_ACCOUNT_SEED` | Yes (one of `NATS_ACCOUNT_SEED` or `OPERATOR_KEYS_PATH`) | (none) | Account NKey seed string. When set, used directly to sign per-host user JWTs and session-agent JWTs. If not set, falls back to `OPERATOR_KEYS_PATH`. In production Helm deployments, this is populated from the `operator-keys` Secret's `accountSeed` key. |
 | `OPERATOR_KEYS_PATH` | No | `/etc/mclaude/operator-keys` | Mount path for the `mclaude-system/operator-keys` Secret. Reads `operatorJwt`, `accountJwt`, `accountSeed`, `operatorSeed`. Fallback when `NATS_ACCOUNT_SEED` is not set. |
-| `ADMIN_TOKEN` | No | (empty) | Static bearer token for the loopback admin port (9091). When set, the admin mux on the loopback port accepts this token for break-glass operations. Separate from per-user bearer tokens used on the main port's `/admin/*` routes. |
+| `ADMIN_TOKEN` | No | (empty) | Static bearer token for the admin port (9091). All `/admin/*` routes require this token via `Authorization: Bearer <token>`. |
 | `BOOTSTRAP_ADMIN_EMAIL` | No | (empty) | Email of the first admin. Read from Helm value; the init-keys Job pre-creates a `users` row with `is_admin=true` and `oauth_id=NULL`; first OAuth login linking that email promotes the user. |
 | `PORT` | No | `8080` | Main API listen port |
-| `ADMIN_PORT` | No | `9091` | Loopback-only port for `/metrics` and break-glass routes. `/admin/*` routes (cluster register, grant) live on the main port and use bearer-token auth. |
+| `ADMIN_PORT` | No | `9091` | Loopback-only port (bound to `127.0.0.1`) for `/admin/*` break-glass routes and `/metrics`. |
 | `JWT_EXPIRY_SECONDS` | No | `28800` (8h) | Per-host user JWT lifetime in seconds |
 | `DEV_OAUTH_TOKEN` | No | (empty) | Injected into per-user secrets (cluster controller copies into the user namespace) for dev environments |
 | `DEV_SEED` | No | `false` | When `true`, creates a dev user (`dev@mclaude.local` / `dev`), a default `local` machine host, and a default project on startup |
@@ -41,11 +41,11 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/auth/login` | Authenticate with email+password; returns the [Login Response](../spec-state-schema.md#login-response-shape) — per-host user JWT, NKey seed, hub URL, host inventory, and projects |
-| `POST` | `/auth/refresh` | Exchange a valid per-host JWT from the Authorization header for a new JWT (same host scope) |
+| `POST` | `/auth/refresh` | Exchange a valid per-host JWT from the Authorization header for a new JWT (same host scope). **Known bug:** returns `s.natsURL` (internal broker URL) instead of `s.natsWsURL` (external WebSocket URL). SPA refresh may receive an unusable `nats://` URL. |
 | `GET` | `/version` | Returns `minClientVersion` and `serverVersion` |
 | `GET` | `/health` | Returns 200 OK (process alive check — never checks NATS, so pod stays alive for break-glass admin port) |
 | `GET` | `/healthz` | Kubernetes liveness probe (same as `/health` — never checks NATS) |
-| `GET` | `/readyz` | Kubernetes readiness probe (checks Postgres connectivity only — NATS outage must not mark pod unready) |
+| `GET` | `/readyz` | Kubernetes readiness probe. **Known bug:** currently returns 200 unconditionally (identical to `/healthz`). Should check Postgres connectivity so the pod stops receiving traffic when DB is unreachable — NATS outage must not mark pod unready. |
 | `GET` | `/auth/providers/{id}/callback` | OAuth callback -- exchanges code for token, stores connection, redirects browser |
 
 **Protected (per-host NATS JWT or admin bearer token in Authorization header):**
@@ -66,40 +66,51 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 | `GET` | `/api/users/{uslug}/hosts` | Lists hosts owned by or granted to the user. |
 | `POST` | `/api/users/{uslug}/hosts/code` | Generates a 6-character device code for BYOH host registration. Accepts `{publicKey}` — the host's NKey public key, generated locally by the CLI. The server stores the public key with the code record. Returns `{code, expiresAt}` (10-minute TTL). |
 | `GET` | `/api/users/{uslug}/hosts/code/{code}` | Polls device-code status. Returns `{status: "pending", expiresAt}` while waiting for dashboard redemption, or `{status: "completed", slug, jwt, hubUrl}` once redeemed. Returns 410 Gone if expired, 404 if not found. The CLI polls this endpoint after generating the code. |
-| `POST` | `/api/hosts/register` | Redeems a device code from the dashboard with `{code, name}`. Control-plane looks up the stored `publicKey` from the code record, creates a `hosts` row with `type='machine'`, `role='owner'`, `public_key=<stored publicKey>`, mints a per-host user JWT signed against that public key, and returns `{slug, jwt, hubUrl}`. The private seed never leaves the host. |
+| `POST` | `/api/hosts/register` | **Public (no JWT required)** — Redeems a device code with `{code, name}`. The device code (generated by an authenticated user via `POST /api/users/{uslug}/hosts/code`) serves as the authorization credential. Control-plane looks up the stored `publicKey` from the code record, creates a `hosts` row with `type='machine'`, `role='owner'`, `public_key=<stored publicKey>`, mints a per-host user JWT signed against that public key, and returns `{slug, jwt, hubUrl}`. The private seed never leaves the host. |
 | `PUT` | `/api/users/{uslug}/hosts/{hslug}` | Updates host display name. |
 | `DELETE` | `/api/users/{uslug}/hosts/{hslug}` | Removes a host (cascades to its projects + sessions). For cluster hosts owned by other users, only the registering admin can delete. |
 
-**Admin-only (bearer token + server-side `users.is_admin = true` check):**
+**HTTP project CRUD — not yet implemented:**
+
+The following endpoints are spec targets but have no HTTP handlers in the code. Project creation currently uses the NATS-based path only (`mclaude.users.*.api.projects.create`). HTTP project CRUD will be implemented in a future iteration.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/admin/clusters` | Registers a new cluster (`{slug, name, jsDomain, leafUrl, directNatsUrl?}`). Generates a per-cluster NKey pair, then creates a `hosts` row with `type='cluster'`, `role='owner'` for the calling admin (cluster-shared fields populated, including `public_key=<cluster NKey pubkey>` and the optional `direct_nats_url`); mints a per-cluster leaf/controller JWT (signed by the account key) scoped to `mclaude.users.*.hosts.{slug}.>`; returns `{slug, leafJwt, leafSeed, accountJwt, operatorJwt, jsDomain, directNatsUrl}` for the admin to drop into the worker cluster's NATS Secret + Helm values. |
-| `GET` | `/admin/clusters` | Lists registered clusters (deduplicated across user rows). |
-| `POST` | `/admin/clusters/{cslug}/grants` | Grants user access (`{userSlug}`). Creates a new `hosts` row for that user with `slug=cslug`, `type='cluster'`, `role='user'`; copies cluster-shared fields (`js_domain`, `leaf_url`, `account_jwt`, `direct_nats_url`, `public_key`) from the existing cluster host; mints a per-user JWT scoped to `mclaude.users.{userSlug}.hosts.{cslug}.>`. |
-| `DELETE` | `/admin/clusters/{cslug}` | Removes the cluster — deletes all `hosts` rows where `slug=cslug AND type='cluster'`, cascading to projects/sessions. In-flight session cleanup is manual (out of scope for v1). |
-| `POST` | `/admin/users` | Creates a user (id, email, name, optional password, optional `isAdmin`). |
-| `POST` | `/admin/users/{uslug}/promote` | Sets `users.is_admin = true`. |
-| `GET` | `/admin/users` | Lists all users. |
-| `DELETE` | `/admin/users/{id}` | Deletes a user: revokes NATS JWT (NATS broker terminates active connections immediately), DELETEs from Postgres (cascades to hosts, projects, oauth_connections), publishes NATS delete requests to controllers for resource cleanup. |
-| `POST` | `/admin/sessions/stop` | Break-glass session stop (records intent in DB). |
+| `POST` | `/api/users/{uslug}/projects` | Creates a project on a specified host. **Not yet implemented.** |
+| `GET` | `/api/users/{uslug}/projects` | Lists all projects for the user. **Not yet implemented.** |
+| `GET` | `/api/users/{uslug}/projects/{pslug}` | Gets a single project by slug. **Not yet implemented.** |
+| `DELETE` | `/api/users/{uslug}/projects/{pslug}` | Deletes a project. **Not yet implemented.** |
 
-**SCIM 2.0 (IdP user provisioning):**
+**SCIM 2.0 (IdP user provisioning) — not yet implemented:**
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/scim/v2/Users` | IdP provisions user |
-| `PUT` | `/scim/v2/Users/{id}` | IdP updates user |
-| `DELETE` | `/scim/v2/Users/{id}` | IdP deprovisions user |
-| `GET` | `/scim/v2/Users` | IdP syncs user list |
+| `POST` | `/scim/v2/Users` | IdP provisions user. **Not yet implemented.** |
+| `PUT` | `/scim/v2/Users/{id}` | IdP updates user. **Not yet implemented.** |
+| `DELETE` | `/scim/v2/Users/{id}` | IdP deprovisions user. **Not yet implemented.** |
+| `GET` | `/scim/v2/Users` | IdP syncs user list. **Not yet implemented.** |
 
 ### HTTP Endpoints -- Loopback Port (9091)
 
-The loopback-only port hosts only Prometheus metrics. The previous `/admin/*` endpoints have moved to the main port (above) because admins manage clusters / users from their CLI over the public ingress; bearer-token auth + `is_admin` check provides the same privilege gate without requiring loopback access.
+The loopback-only port (bound to `127.0.0.1`) hosts admin break-glass endpoints and Prometheus metrics. All `/admin/*` routes require the static `ADMIN_TOKEN` bearer token via `Authorization: Bearer <token>`.
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/metrics` | Prometheus metrics |
+
+**Admin-only (static `ADMIN_TOKEN` bearer token on loopback port):**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/admin/clusters` | Registers a new cluster (`{slug, name, jsDomain, leafUrl, directNatsUrl?}`). Generates a per-cluster NKey pair, then creates a `hosts` row with `type='cluster'`, `role='owner'` for the calling admin; mints a per-cluster leaf/controller JWT scoped to `mclaude.users.*.hosts.{slug}.>`; returns `{slug, leafJwt, leafSeed, jsDomain, directNatsUrl}`. **Known bug:** response struct has `accountJwt` and `operatorJwt` fields but they are never populated — the admin must manually copy these from the `operator-keys` Secret. |
+| `GET` | `/admin/clusters` | Lists registered clusters (deduplicated across user rows). |
+| `POST` | `/admin/clusters/{cslug}/grants` | Grants user access (`{userSlug}`). Creates a new `hosts` row for that user; mints a per-user JWT scoped to `mclaude.users.{userSlug}.hosts.{cslug}.>`. **Known bug:** handler calls `GetUserByEmail(req.UserSlug)` instead of `GetUserBySlug(req.UserSlug)`. **Known bug:** `IssueHostJWT(user.ID, ...)` passes UUID instead of slug, producing incorrect JWT subject permissions. |
+| `DELETE` | `/admin/clusters/{cslug}` | Removes the cluster. **Not yet implemented** — deferred per ADR-0035. Use direct SQL as a workaround. |
+| `POST` | `/admin/users` | Creates a user (id, email, name, optional password, optional `isAdmin`). |
+| `POST` | `/admin/users/{uslug}/promote` | Sets `users.is_admin = true`. **Not yet implemented** — DB method `SetUserAdmin` exists but HTTP handler is not wired. Use direct SQL as a workaround. |
+| `GET` | `/admin/users` | Lists all users. |
+| `DELETE` | `/admin/users/{id}` | Deletes a user: revokes NATS JWT, DELETEs from Postgres (cascades), publishes NATS delete requests to controllers. |
+| `POST` | `/admin/sessions/stop` | Break-glass session stop (records intent in DB). |
 
 ### NATS Subjects
 
@@ -139,10 +150,14 @@ Manages the `users`, `projects`, `hosts`, and `oauth_connections` tables. Schema
 
 ### Kubernetes Dependency
 
-The control-plane has **no** K8s client and creates **no** K8s resources at runtime. All MCProject CR creation, namespace provisioning, PVC management, RBAC reconciliation, and pod template construction live in `mclaude-controller-k8s` (see `docs/mclaude-controller/spec-controller.md`). The control-plane reaches the controller exclusively via NATS request/reply on `mclaude.users.{uslug}.hosts.{hslug}.api.projects.>`.
+The control-plane has **no** K8s client at runtime and creates **no** K8s resources during normal operation. All MCProject CR creation, namespace provisioning, PVC management, RBAC reconciliation, and pod template construction live in `mclaude-controller-k8s` (see `docs/mclaude-controller/spec-controller.md`). The control-plane reaches the controller exclusively via NATS request/reply on `mclaude.users.{uslug}.hosts.{hslug}.api.projects.>`.
 
-The control-plane does, however, mount one K8s Secret as a file:
-- `mclaude-system/operator-keys` — mounted at `OPERATOR_KEYS_PATH` (default `/etc/mclaude/operator-keys`). Read-only. Provides `operatorJwt`, `accountJwt`, `accountSeed`, `operatorSeed` for signing per-host user JWTs and per-cluster leaf JWTs. Generated on first install by the Helm pre-install Job (`mclaude-cp init-keys`); reused on subsequent deploys.
+The control-plane binary doubles as two Helm pre-install Job entrypoints (the only code paths that use `client-go`):
+- **`control-plane init-keys`** — generates operator + account NKey pairs and JWTs, writes them to the `operator-keys` Secret in `mclaude-system`. Idempotent: exits 0 if the Secret already exists. Also creates the bootstrap admin row in Postgres when `BOOTSTRAP_ADMIN_EMAIL` is set. Run by the `mclaude-cp` chart's pre-install Job.
+- **`control-plane gen-leaf-creds`** — reads the account seed from the `operator-keys` Secret, generates a NATS user JWT + NKey seed, writes them as a `.creds` file into a `mclaude-worker-nats-leaf-creds` Secret. Idempotent: exits 0 if the leaf-creds Secret already exists. Run by the `mclaude-worker` chart's pre-install Job. Env vars: `NAMESPACE` (default `mclaude-system`), `LEAF_CREDS_SECRET` (default `mclaude-worker-nats-leaf-creds`), `ACCOUNT_SEED_SECRET` (default `operator-keys`), `ACCOUNT_SEED_KEY` (default `accountSeed`).
+
+At runtime, the control-plane mounts one K8s Secret as a file:
+- `mclaude-system/operator-keys` — mounted at `OPERATOR_KEYS_PATH` (default `/etc/mclaude/operator-keys`). Read-only. Provides `operatorJwt`, `accountJwt`, `accountSeed`, `operatorSeed` for signing per-host user JWTs and per-cluster leaf JWTs.
 
 ## Internal Behavior
 

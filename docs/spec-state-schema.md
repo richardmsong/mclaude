@@ -486,7 +486,7 @@ Writers: `mclaude-controller-k8s` (`reconcileDeployment`)
 ### RBAC: ServiceAccount, Role, RoleBinding (in `mclaude-{userId}`)
 
 - ServiceAccount: `mclaude-sa`
-- Role: `mclaude-role` — allows get/watch on ConfigMaps (for config reload)
+- Role: `mclaude-role` — allows get/watch/patch on ConfigMap `user-config` (for config reload) and get on Secret `user-secrets` (for NATS credentials and OAuth tokens mounted into session-agent pods)
 - RoleBinding: `mclaude-role` — binds Role to ServiceAccount
 
 Writers: `mclaude-controller-k8s` (`reconcileRBAC`)

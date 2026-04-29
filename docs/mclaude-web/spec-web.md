@@ -59,7 +59,7 @@ JWT expiry is 8h (configurable server-side via `JWT_EXPIRY_SECONDS`). The SPA ch
 
 ## Model/Effort Switching
 
-The SPA sends `set_model` and `set_max_thinking_tokens` control requests mid-session to change the Claude model or thinking effort without restarting the session.
+The SPA sends `set_model`, `set_max_thinking_tokens`, and `reload_plugins` control requests mid-session. `set_model` and `set_max_thinking_tokens` change the Claude model or thinking effort without restarting. `reload_plugins` refreshes the cached capabilities (skills, tools) from Claude Code without restarting the session — triggered from the skills picker refresh button.
 
 ## Cost Tracking
 
@@ -132,6 +132,22 @@ Throughout the SPA, `hostSlug` defaults to `'local'` when not available from the
 ### KV Watch DEL/PURGE Handling
 
 `KVEntry.operation` may be `'PUT' | 'DEL' | 'PURGE'`. The session store's `kvWatch` callback must handle `DEL` (and `PURGE`) by removing the corresponding entry from the `_sessions` map, not inserting it. Failure to handle `DEL` causes ghost sessions to appear in the UI after deletion.
+
+## Desktop Notifications
+
+The SPA requests browser notification permission (`Notification.requestPermission()`) on first NATS connection. When a session transitions to `requires_action` while the tab is not visible (`document.visibilityState !== 'visible'`), a desktop notification is fired with title "MClaude — Permission needed" and body "A session needs your approval". No notification is sent when the tab is in the foreground.
+
+## Project Filter
+
+`SessionListVM` supports filtering the dashboard to a single project via `filterProjectId`. The filter is persisted to `localStorage` key `mclaude.filterProjectId`. `resolveFilter()` validates the stored project still exists in the KV store and auto-clears the filter if the project was deleted. The `DashboardScreen` UI exposes this as a project filter selector.
+
+## Dead Code
+
+The following helpers in `src/lib/subj.ts` reference removed infrastructure and are never called from production code:
+- `subjClusterProvision()` / `subjClusterStatus()` — produce `mclaude.clusters.{cslug}.*` subjects that no longer exist per ADR-0035.
+- `kvKeyUserClusters()` — references the removed `mclaude-clusters` KV bucket.
+
+These should be cleaned up in a future commit.
 
 ## Dependencies
 
