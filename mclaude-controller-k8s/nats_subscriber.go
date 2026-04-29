@@ -7,11 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -40,6 +42,7 @@ type NATSProvisioner struct {
 	k8sClient       client.Client
 	controlPlaneNs  string
 	clusterSlug     string
+	reconciler      *MCProjectReconciler
 	logger          zerolog.Logger
 }
 
@@ -88,6 +91,17 @@ func (p *NATSProvisioner) handleProvisionRequest(msg *nats.Msg) {
 		}
 		p.replyOK(msg, req.ProjectSlug)
 
+	case "update":
+		err := p.handleUpdate(ctx, req)
+		if err != nil {
+			p.logger.Error().Err(err).
+				Str("projectSlug", req.ProjectSlug).
+				Msg("update failed")
+			p.replyError(msg, err.Error(), "update_failed")
+			return
+		}
+		p.replyOK(msg, req.ProjectSlug)
+
 	case "delete":
 		err := p.handleDelete(ctx, req)
 		if err != nil {
@@ -104,7 +118,8 @@ func (p *NATSProvisioner) handleProvisionRequest(msg *nats.Msg) {
 	}
 }
 
-// handleCreate creates an MCProject CR for the provisioning request.
+// handleCreate creates an MCProject CR for the provisioning request,
+// then polls until the CR reaches Ready phase before replying success.
 func (p *NATSProvisioner) handleCreate(ctx context.Context, req ProvisionRequest) error {
 	// Use a deterministic name for the MCProject CR.
 	crName := fmt.Sprintf("%s-%s", req.UserSlug, req.ProjectSlug)
@@ -129,17 +144,69 @@ func (p *NATSProvisioner) handleCreate(ctx context.Context, req ProvisionRequest
 	}
 
 	if err := p.k8sClient.Create(ctx, mcp); err != nil {
-		if k8serrors.IsAlreadyExists(err) {
-			return nil // idempotent
+		if !k8serrors.IsAlreadyExists(err) {
+			return fmt.Errorf("create MCProject CR: %w", err)
 		}
-		return fmt.Errorf("create MCProject CR: %w", err)
+		// Already exists — fall through to poll for Ready.
 	}
 
 	p.logger.Info().
 		Str("cr", crName).
 		Str("userSlug", req.UserSlug).
 		Str("projectSlug", req.ProjectSlug).
-		Msg("MCProject CR created — reconciler will provision resources")
+		Msg("MCProject CR created — waiting for Ready phase")
+
+	// Gap 1: Poll the CR status until Ready, Failed, or timeout.
+	return p.waitForReady(ctx, crName)
+}
+
+// waitForReady polls the MCProject CR until it reaches Ready or Failed phase, or times out.
+func (p *NATSProvisioner) waitForReady(ctx context.Context, crName string) error {
+	const (
+		timeout  = 30 * time.Second
+		interval = 500 * time.Millisecond
+	)
+	deadline := time.Now().Add(timeout)
+	key := types.NamespacedName{Name: crName, Namespace: p.controlPlaneNs}
+
+	for time.Now().Before(deadline) {
+		var current MCProject
+		if err := p.k8sClient.Get(ctx, key, &current); err != nil {
+			p.logger.Debug().Err(err).Str("cr", crName).Msg("polling MCProject — get error")
+			time.Sleep(interval)
+			continue
+		}
+		switch current.Status.Phase {
+		case PhaseReady:
+			p.logger.Info().Str("cr", crName).Msg("MCProject reached Ready phase")
+			return nil
+		case PhaseFailed:
+			return fmt.Errorf("MCProject %s reached Failed phase", crName)
+		}
+		time.Sleep(interval)
+	}
+	return fmt.Errorf("timed out (30s) waiting for MCProject %s to reach Ready phase", crName)
+}
+
+// handleUpdate refreshes the user-secrets Secret for the project (Gap 5).
+func (p *NATSProvisioner) handleUpdate(ctx context.Context, req ProvisionRequest) error {
+	crName := fmt.Sprintf("%s-%s", req.UserSlug, req.ProjectSlug)
+	key := types.NamespacedName{Name: crName, Namespace: p.controlPlaneNs}
+
+	var mcp MCProject
+	if err := p.k8sClient.Get(ctx, key, &mcp); err != nil {
+		return fmt.Errorf("get MCProject CR: %w", err)
+	}
+
+	userNs := "mclaude-" + mcp.Spec.UserID
+	if err := p.reconciler.reconcileSecrets(ctx, &mcp, userNs); err != nil {
+		return fmt.Errorf("reconcile secrets: %w", err)
+	}
+
+	p.logger.Info().
+		Str("cr", crName).
+		Str("userNs", userNs).
+		Msg("user-secrets refreshed via update handler")
 
 	return nil
 }

@@ -526,6 +526,103 @@ func TestFormatNATSCredentials_SeedInBody(t *testing.T) {
 	}
 }
 
+// ---- IssuerAccount tests (GAP-CP-12) ----
+
+func TestIssueUserJWT_IssuerAccountSet(t *testing.T) {
+	accountKP, _ := nkeys.CreateAccount()
+	accountPub, _ := accountKP.PublicKey()
+
+	expiry := time.Now().Add(8 * time.Hour).Unix()
+	jwtStr, _, err := IssueUserJWT("user-ia", "user-ia-slug", accountKP, expiry)
+	if err != nil {
+		t.Fatalf("IssueUserJWT: %v", err)
+	}
+
+	claims, err := DecodeUserJWT(jwtStr, accountPub)
+	if err != nil {
+		t.Fatalf("DecodeUserJWT: %v", err)
+	}
+
+	if claims.IssuerAccount != accountPub {
+		t.Errorf("IssuerAccount = %q; want %q", claims.IssuerAccount, accountPub)
+	}
+}
+
+func TestIssueHostJWT_IssuerAccountSet(t *testing.T) {
+	accountKP, _ := nkeys.CreateAccount()
+	accountPub, _ := accountKP.PublicKey()
+
+	jwtStr, _, err := IssueHostJWT("uslug", "hslug", accountKP)
+	if err != nil {
+		t.Fatalf("IssueHostJWT: %v", err)
+	}
+
+	claims, err := DecodeUserJWT(jwtStr, accountPub)
+	if err != nil {
+		t.Fatalf("DecodeUserJWT: %v", err)
+	}
+
+	if claims.IssuerAccount != accountPub {
+		t.Errorf("IssuerAccount = %q; want %q", claims.IssuerAccount, accountPub)
+	}
+}
+
+func TestIssueSessionAgentJWT_IssuerAccountSet(t *testing.T) {
+	accountKP, _ := nkeys.CreateAccount()
+	accountPub, _ := accountKP.PublicKey()
+
+	jwtStr, _, err := IssueSessionAgentJWT("sa-user-ia", "sa-user-ia-slug", accountKP)
+	if err != nil {
+		t.Fatalf("IssueSessionAgentJWT: %v", err)
+	}
+
+	claims, err := DecodeUserJWT(jwtStr, accountPub)
+	if err != nil {
+		t.Fatalf("DecodeUserJWT: %v", err)
+	}
+
+	if claims.IssuerAccount != accountPub {
+		t.Errorf("IssuerAccount = %q; want %q", claims.IssuerAccount, accountPub)
+	}
+}
+
+// ---- Expiry tests (KNOWN-01 double-expiry fix) ----
+
+func TestIssueUserJWT_ExpiryNotDoubled(t *testing.T) {
+	accountKP, _ := nkeys.CreateAccount()
+	accountPub, _ := accountKP.PublicKey()
+
+	// Pass raw expiry seconds (e.g. 28800 for 8 hours).
+	// Before the fix, the caller passed expiresAt+expirySecs which doubled the value.
+	var expirySecs int64 = 28800
+	before := time.Now().Unix()
+	jwtStr, _, err := IssueUserJWT("expiry-user", "expiry-slug", accountKP, expirySecs)
+	if err != nil {
+		t.Fatalf("IssueUserJWT: %v", err)
+	}
+	after := time.Now().Unix()
+
+	claims, err := DecodeUserJWT(jwtStr, accountPub)
+	if err != nil {
+		t.Fatalf("DecodeUserJWT: %v", err)
+	}
+
+	// claims.Expires should be approximately now + expirySecs (not doubled).
+	wantMin := before + expirySecs
+	wantMax := after + expirySecs
+	if claims.Expires < wantMin || claims.Expires > wantMax {
+		t.Errorf("claims.Expires = %d; want between %d and %d (now + %ds, not doubled)",
+			claims.Expires, wantMin, wantMax, expirySecs)
+	}
+
+	// Verify it's NOT doubled (the old bug would produce ~now + 16h = ~now + 57600).
+	doubledMin := before + 2*expirySecs
+	if claims.Expires >= doubledMin {
+		t.Errorf("claims.Expires = %d looks doubled (>= %d); double-expiry bug not fixed",
+			claims.Expires, doubledMin)
+	}
+}
+
 // ---- helpers ----
 
 func slicesEqual(a, b []string) bool {

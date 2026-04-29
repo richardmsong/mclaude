@@ -24,6 +24,14 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if s.db == nil {
+			http.Error(w, "database not configured", http.StatusServiceUnavailable)
+			return
+		}
+		if err := s.db.pool.Ping(r.Context()); err != nil {
+			http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 

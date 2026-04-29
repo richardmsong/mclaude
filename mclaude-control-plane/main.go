@@ -68,7 +68,7 @@ func main() {
 			logger.Fatal().Err(err).Msg("migrate schema")
 		}
 	} else {
-		logger.Warn().Msg("DATABASE_DSN not set — running without persistence")
+		logger.Fatal().Msg("DATABASE_DSN required")
 	}
 
 	// EXTERNAL_URL is required — control-plane exits on startup if empty.

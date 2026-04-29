@@ -109,7 +109,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	expirySecs := int64(s.jwtExpiry.Seconds())
 	expiresAt := time.Now().Add(s.jwtExpiry).Unix()
 
-	jwt, seed, err := IssueUserJWT(user.ID, user.Slug, s.accountKP, expiresAt+expirySecs)
+	jwt, seed, err := IssueUserJWT(user.ID, user.Slug, s.accountKP, expirySecs)
 	if err != nil {
 		http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
 		return
@@ -165,7 +165,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	expirySecs := int64(s.jwtExpiry.Seconds())
 	expiresAt := time.Now().Add(s.jwtExpiry).Unix()
 
-	newJWT, seed, err := IssueUserJWT(user.ID, user.Slug, s.accountKP, expiresAt+expirySecs)
+	newJWT, seed, err := IssueUserJWT(user.ID, user.Slug, s.accountKP, expirySecs)
 	if err != nil {
 		http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
 		return
@@ -173,7 +173,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(LoginResponse{ //nolint:errcheck
-		NATSUrl:   s.natsURL,
+		NATSUrl:   s.natsWsURL,
 		JWT:       newJWT,
 		NKeySeed:  string(seed),
 		UserID:    user.ID,
