@@ -52,8 +52,11 @@ All work streams WS-1 through WS-8 were verified. Key fixes already landed:
 
 | Gap ID | Component | Description | Severity |
 |--------|-----------|-------------|----------|
-| R7-G2 (partial) | control-plane | `adminDeleteUser` notifies controllers via NATS but does **not** revoke the deleted user's NATS JWT. User can still connect to NATS until JWT expires naturally (8h). Requires adding the user's public key to the NATS account revocation list. | Medium |
+| **CROSS-1 / WEB-1** | mclaude-web + control-plane | **SPA project creation broken end-to-end.** SPA `subjProjectsCreate(uslug, hslug)` now produces host-scoped subject `mclaude.users.{uslug}.hosts.{hslug}.api.projects.create`, but control-plane subscribes to user-scoped `mclaude.users.*.api.projects.create` (wildcard `*` matches one token only). Requests route to controller instead, which doesn't create Postgres rows or KV entries, and replies in incompatible format (`{ok, projectSlug}` vs SPA-expected `{id}`). | **Critical** |
 | CP-04 (partial) | control-plane | `handleDeleteProjectHTTP` (DELETE /api/users/{uslug}/projects/{pslug}) does a bare SQL delete with **no NATS notification** to controller or SPA. Controller never tears down the project's K8s resources; SPA watchers never see the deletion. Host deletion and admin user deletion are properly notified — only this HTTP endpoint is missing the publish. | High |
+| R7-G2 (partial) | control-plane | `adminDeleteUser` notifies controllers via NATS but does **not** revoke the deleted user's NATS JWT. User can still connect to NATS until JWT expires naturally (8h). Requires adding the user's public key to the NATS account revocation list. | Medium |
+| CP-3 (updated) | control-plane | `adminStopSession` publishes to `mclaude.users.{uslug}.api.sessions.stop`, a subject no component subscribes to. Session-agent subscribes to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.delete`. Break-glass admin stop is non-functional via NATS. | Medium |
+| SA-3 (new) | session-agent | `publishExitLifecycle` quota event publishes `m.lastU5` (5h utilization %) as `outputTokensSinceSoftMark`. Semantic mismatch — field name implies token count, value is utilization percentage. | Low |
 | R8-G6 | session-agent | `session_job_complete` lifecycle event still includes stale `prUrl` field. Spec (ADR-0034) explicitly says "No prUrl". | Low |
 | R7-G10 | charts/mclaude | CP Helm chart injects `METRICS_PORT: 9091` env var but Go code serves `/metrics` on `ADMIN_PORT`. Port 9091 has no listener. Either remove the env var from the chart or add a metrics listener. | Low |
 
@@ -77,10 +80,13 @@ All work streams WS-1 through WS-8 were verified. Key fixes already landed:
 ## Component Changes
 
 ### mclaude-control-plane
-- Add NATS JWT revocation when deleting a user (R7-G2) — add user's public key to account revocation list
+- **Fix project creation NATS subscriber** (CROSS-1) — subscribe to host-scoped subject `mclaude.users.*.hosts.*.api.projects.create` (using `>` wildcard or multi-token pattern) so SPA project creation requests reach the control-plane, OR add a second subscriber alongside the existing one. Must create Postgres row, KV entry, and reply with `{id}`.
 - Add NATS notification in `handleDeleteProjectHTTP` (CP-04) — call `publishProjectsDeleteToHost` and `publishProjectsUpdated` after SQL delete
+- Add NATS JWT revocation when deleting a user (R7-G2) — add user's public key to account revocation list
+- Fix `adminStopSession` to publish to correct host-scoped session subject that session-agent actually subscribes to (CP-3)
 
 ### mclaude-session-agent
+- Fix `outputTokensSinceSoftMark` to contain actual token count, not utilization percentage (SA-3)
 - Remove stale `prUrl` field from `session_job_complete` lifecycle event payload (R8-G6)
 
 ### charts/mclaude
@@ -137,17 +143,19 @@ No changes.
 
 | Test case | What it verifies | Setup/teardown | Components exercised |
 |-----------|------------------|----------------|----------------------|
+| SPA project creation end-to-end | SPA publishes host-scoped project create → control-plane receives, creates Postgres row + KV entry, replies with `{id}` | Create test user + host; teardown: delete project | mclaude-web, control-plane, controller-k8s |
 | Project HTTP deletion propagation | DELETE /api/users/{uslug}/projects/{pslug} → controller tears down K8s resources + SPA removes project | Create test user + project; teardown: none (project deleted) | control-plane, controller-k8s, mclaude-web |
+| Admin stop session routing | Admin stop session command → session-agent receives on correct host-scoped subject | Create test session; teardown: stop session | control-plane, session-agent |
 | User deletion JWT revocation | Delete user via admin API, verify NATS connection rejected immediately (not after 8h expiry) | Create test user, obtain NATS credentials; teardown: none (user deleted) | control-plane |
 
 ## Implementation Plan
 
 | Component | Gaps | Est. lines | Notes |
 |-----------|------|------------|-------|
-| mclaude-control-plane | R7-G2, CP-04 | ~50-80 | NATS JWT revocation + project delete notification |
-| mclaude-session-agent | R8-G6 | ~5-10 | Remove one field from one lifecycle event |
-| charts/mclaude | R7-G10 | ~5-10 | Remove one env var from Helm template |
-| docs/ specs | 2 remaining corrections | ~10-15 | Applied in this ADR commit |
+| mclaude-control-plane | CROSS-1, CP-04, R7-G2, CP-3 | ~80-120 | Fix project creation subscriber, project delete notification, JWT revocation, admin stop subject |
+| mclaude-session-agent | SA-3, R8-G6 | ~10-20 | Fix outputTokensSinceSoftMark semantic, remove prUrl field |
+| charts/mclaude | R7-G10 | ~5-10 | Remove unused METRICS_PORT env var |
+| docs/ specs | 2 corrections | ~10-15 | Applied in initial ADR commit |
 
-**Total estimated lines:** ~65-105
-**Total estimated tokens:** ~40-60k (single dev-harness pass per component)
+**Total estimated lines:** ~105-165
+**Total estimated tokens:** ~50-80k
