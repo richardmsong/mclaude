@@ -26,7 +26,7 @@ Single PostgreSQL instance in the control-plane cluster. Managed by `mclaude-con
 Writers: control-plane (CreateUser, DeleteUser, PromoteAdmin, OAuth-callback link).
 Readers: control-plane (GetUserByEmail, GetUserByID, GetUserBySlug, auth middleware, admin gate).
 
-Slug charset: `[a-z0-9][a-z0-9-]{0,62}`, excluding leading `_` and the reserved-word blocklist `{users, hosts, projects, sessions, clusters, api, events, lifecycle, quota, terminal}`. See `docs/adr-0024-typed-slugs.md`.
+Slug charset: `[a-z0-9][a-z0-9-]{0,62}`, excluding leading `_` and the reserved-word blocklist `{users, hosts, projects, sessions, clusters, api, events, lifecycle, quota, terminal}`. See `docs/adr-0024-typed-slugs.md`. **Known bug:** `computeUserSlug()` in `db.go` does not check against the blocklist — a user with email `api@example.com` gets slug `api`, colliding with the reserved word.
 
 ### `projects`
 
@@ -85,7 +85,7 @@ Per-user fields that are **not** cluster-shared: `id`, `user_id`, `name`, `role`
 
 #### Default machine host
 
-On user creation, control-plane writes one row to `hosts` with `slug='local'`, `type='machine'`, `role='owner'`. The user's first project is associated with this host unless explicitly registered against a different one.
+On user creation, control-plane writes one row to `hosts` with `slug='local'`, `type='machine'`, `role='owner'`. The user's first project is associated with this host unless explicitly registered against a different one. **Known bug:** `POST /admin/users` and `seedDev` `CreateUser` do not create the default host row — only the startup migration backfill does. Admin-created users cannot create projects until the binary restarts.
 
 See `docs/adr-0035-unified-host-architecture.md` for the unified host model.
 
@@ -745,11 +745,13 @@ Published to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{ss
 ```json
 { "type": "session_created", "sessionId": "...", "branch": "...", "ts": "RFC3339" }
 ```
+**Known bug:** code uses the generic `publishLifecycle()` which only emits `{type, sessionId, ts}` — the `branch` field is not included.
 
 ### `session_stopped`
 ```json
 { "type": "session_stopped", "sessionId": "...", "exitCode": 0, "ts": "RFC3339" }
 ```
+**Known bug:** code uses the generic `publishLifecycle()` which only emits `{type, sessionId, ts}` — the `exitCode` field is not included.
 
 ### `session_restarting`
 ```json
@@ -808,14 +810,14 @@ Published by: QuotaMonitor's `publishExitLifecycle` when the session ended natur
 }
 ```
 
-Published by: QuotaMonitor's `publishExitLifecycle` on soft-stop turn-end OR hard-stop interrupt. Both variants leave the Claude Code subprocess alive; `pausedVia` distinguishes them. `r5` is sourced from the monitor's most recent `QuotaStatus` snapshot and is load-bearing — the lifecycle subscriber uses it to set `JobEntry.ResumeAt` when `autoContinue` is true. `outputTokensSinceSoftMark` is present for `quota_hard` only (unset/zero for `quota_soft`). Supersedes ADR-0009's `session_quota_interrupted` (consolidated into this event).
+**Known bugs:** (1) QuotaMonitor's `publishExitLifecycle` publishes the superseded event name `session_quota_interrupted` instead of `session_job_paused`. (2) The daemon dispatcher publishes `session_job_paused` with fields `{type, sessionId, jobId, priority, u5, ts}` — missing spec-required fields `pausedVia`, `r5` (load-bearing for autoContinue resume scheduling), `outputTokensSinceSoftMark`; includes non-spec field `priority`. Spec target: Published by QuotaMonitor on soft-stop turn-end OR hard-stop interrupt. `pausedVia` distinguishes them. `r5` sets `JobEntry.ResumeAt` when `autoContinue` is true.
 
 ### `session_job_cancelled`
 ```json
 { "type": "session_job_cancelled", "sessionId": "...", "jobId": "...", "ts": "RFC3339" }
 ```
 
-Published by: daemon dispatcher when handling `DELETE /jobs/{id}`, after publishing `sessions.delete` on `subj.UserHostProjectAPISessionsDelete`. The session-agent's existing `handleDelete` reaps the subprocess (its internal `stopAndWait` sends the `control_request` interrupt) and publishes its own generic `session_stopped` event; the dispatcher's additional `session_job_cancelled` publish is what marks this as a job cancellation. The lifecycle subscriber picks it up and writes `Status = cancelled`. The dispatcher does NOT send a separate `sessions.input` interrupt — that would be redundant with `stopAndWait`'s internal interrupt.
+**Known bug:** The daemon's DELETE /jobs/{id} handler publishes `sessions.delete` and writes `Status = cancelled` directly to KV, but does NOT publish the `session_job_cancelled` lifecycle event. The SPA's lifecycle subscriber never receives the cancellation notification. Spec target: Published by daemon dispatcher after `sessions.delete`, picked up by lifecycle subscriber to write `Status = cancelled`.
 
 ### `session_job_failed`
 ```json
