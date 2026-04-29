@@ -1,9 +1,10 @@
 # ADR: Spec-Implementation Gap Remediation
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-04-29: draft
 - 2026-04-29: accepted — paired with spec-common.md, spec-web.md
+- 2026-04-29: implemented — all scope CLEAN
 
 ## Overview
 
