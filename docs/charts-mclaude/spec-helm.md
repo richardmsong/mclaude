@@ -99,6 +99,9 @@ The previous `ClusterRole` / `ClusterRoleBinding` granting cross-namespace pod/s
 | `controlPlane.providers` | `[]` | OAuth provider instances. |
 | `controlPlane.config.devSeed` | `false` | Create `dev@mclaude.local` user, default `local` machine host, and a default project on startup. |
 | `controlPlane.config.jwtExpirySeconds` | `28800` | Per-host user JWT lifetime (8h). |
+| `controlPlane.config.natsWsUrl` | `""` | External NATS WebSocket URL returned to browser clients on login. Injected as `NATS_WS_URL`. Empty means the SPA derives it from its own origin. |
+| `controlPlane.config.logLevel` | `""` | Injected as `LOG_LEVEL`. **Not read by Go code** — zerolog uses its default level. |
+| `controlPlane.devOAuthToken` | `""` | Claude API OAuth token for dev environments. Injected as `DEV_OAUTH_TOKEN`. Passed to per-user secrets for session-agent Claude API access. |
 | `controlPlane.service.httpPort` | `8080` | Main API listen port. Injected as `HTTP_PORT` env var. **Known mismatch:** Go code reads `PORT`, not `HTTP_PORT` — the chart env var name doesn't match. Currently works because both default to 8080. |
 | `controlPlane.service.adminPort` | `9090` | Loopback admin port. **Note:** chart default is `9090`, Go code default is `9091`. Helm deployments use 9090. |
 | `controlPlane.service.metricsPort` | `9091` | Declared as a separate metrics container port. **Known issue:** Go code does not create a third listener — `/metrics` is served on the admin port. Port 9091 has no listener in Helm deployments. Prometheus scrapes should target the admin port instead. |
@@ -163,7 +166,7 @@ For full NATS server config see `docs/spec-state-schema.md` — NATS Server Conf
 
 | Kind | Name | Notes |
 |---|---|---|
-| ConfigMap | `{release}-session-agent-template` | Static pod template values (image, resources, PVC sizes, corporate CA settings). Read by `mclaude-controller-k8s` to build per-project Deployments. **Known bug:** the Helm template file for this ConfigMap is missing from `charts/mclaude-worker/templates/` — `values.yaml` `sessionAgent.*` settings (image tag, 50Gi PVC, 86400s grace, corporate CA) are never rendered. The controller falls back to `defaultTemplate()` with wrong image (`:latest`), undersized PVCs (10Gi), short grace period (30s), and no corporate CA. |
+| ConfigMap | `{release}-session-agent-template` | Static pod template values (image, imagePullPolicy, terminationGracePeriodSeconds, resourcesJson, projectPvcSize, projectPvcStorageClass, nixPvcSize, nixPvcStorageClass, corporateCAEnabled, corporateCAConfigMapName, corporateCAConfigMapKey). Read by `mclaude-controller-k8s` to build per-project Deployments. Rendered from `sessionAgent.*` Helm values. |
 
 ### Configuration knobs
 
