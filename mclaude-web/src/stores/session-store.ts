@@ -38,9 +38,23 @@ export class SessionStore {
     const sessionKey = kvKeySessionsForUser(this.userSlug as UserSlug)
     const unwatch1 = this.natsClient.kvWatch('mclaude-sessions', sessionKey, (entry) => {
       if (entry.operation === 'DEL' || entry.operation === 'PURGE') {
+        // KV key is slug-based ({uslug}.{hslug}.{pslug}.{sslug}) but the _sessions
+        // map is keyed by UUID. Find the session by matching the slug from the key.
         const parts = entry.key.split('.')
-        const sessionId = parts[parts.length - 1]
-        if (sessionId) this._sessions.delete(sessionId)
+        const sessionSlug = parts[parts.length - 1]
+        if (sessionSlug) {
+          // Iterate sessions to find the UUID matching this slug
+          let uuidToDelete: string | undefined
+          for (const [uuid, session] of this._sessions) {
+            if (session.slug === sessionSlug) {
+              uuidToDelete = uuid
+              break
+            }
+          }
+          if (uuidToDelete) {
+            this._sessions.delete(uuidToDelete)
+          }
+        }
         this._notifySessions()
         return
       }
@@ -65,17 +79,22 @@ export class SessionStore {
     // Watch projects — key format: "{userId}.{projectId}" (UUID-based keys)
     const projectKey = kvKeyProjectsForUser(this.userId as UserSlug)
     const unwatch2 = this.natsClient.kvWatch('mclaude-projects', projectKey, (entry) => {
-      try {
-        const state = JSON.parse(new TextDecoder().decode(entry.value)) as ProjectKVState
-        this._projects.set(state.id, state)
-        this._notifyProjects()
-      } catch {
+      // Spec: explicitly check DEL/PURGE instead of relying on parse failure
+      if (entry.operation === 'DEL' || entry.operation === 'PURGE') {
         const parts = entry.key.split('.')
         const projectId = parts[parts.length - 1]
         if (projectId) {
           this._projects.delete(projectId)
         }
         this._notifyProjects()
+        return
+      }
+      try {
+        const state = JSON.parse(new TextDecoder().decode(entry.value)) as ProjectKVState
+        this._projects.set(state.id, state)
+        this._notifyProjects()
+      } catch {
+        logger.warn({ component: 'session-store', key: entry.key }, 'malformed project KV entry')
       }
     })
     this._unwatchers.push(unwatch2)

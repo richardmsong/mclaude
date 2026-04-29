@@ -1,7 +1,7 @@
 import { useState, useMemo } from 'react'
 import { NavBar } from './NavBar'
 import { PRICE_PER_M, loadCalibration, saveCalibration, formatTokens, formatCost } from '@/lib/pricing'
-import type { SessionKVState } from '@/types'
+import type { SessionKVState, ProjectKVState } from '@/types'
 
 const BUDGET_KEY = 'mclaude.monthlyBudget'
 
@@ -23,6 +23,7 @@ function saveBudget(val: number): void {
 
 interface TokenUsageProps {
   sessions: SessionKVState[]
+  projects?: ProjectKVState[]
   onBack: () => void
   connected: boolean
 }
@@ -37,7 +38,7 @@ const RANGE_MS: Record<TimeRange, number> = {
   '30D': 30 * 24 * 60 * 60 * 1000,
 }
 
-export function TokenUsage({ sessions, onBack, connected }: TokenUsageProps) {
+export function TokenUsage({ sessions, projects, onBack, connected }: TokenUsageProps) {
   const [range, setRange] = useState<TimeRange>('24H')
   const [calibration, setCalibration] = useState<number>(loadCalibration)
   const [showCalibration, setShowCalibration] = useState(false)
@@ -45,17 +46,48 @@ export function TokenUsage({ sessions, onBack, connected }: TokenUsageProps) {
   const [budget, setBudget] = useState<number | null>(loadBudget)
   const [showBudgetPrompt, setShowBudgetPrompt] = useState(false)
   const [budgetInput, setBudgetInput] = useState('')
+  const [filterProjectId, setFilterProjectId] = useState<string>('')
   const ranges: TimeRange[] = ['1H', '6H', '24H', '7D', '30D']
 
-  // Filter sessions by time range using stateSince as the timestamp proxy
+  // Filter sessions by project then by time range
   const filteredSessions = useMemo(() => {
     const cutoff = Date.now() - RANGE_MS[range]
-    return sessions.filter(s => {
+    let filtered = sessions
+    if (filterProjectId) {
+      filtered = filtered.filter(s => s.projectId === filterProjectId)
+    }
+    return filtered.filter(s => {
       if (!s.stateSince) return true
       const t = new Date(s.stateSince).getTime()
       return isNaN(t) ? true : t >= cutoff
     })
-  }, [sessions, range])
+  }, [sessions, range, filterProjectId])
+
+  // Per-project cost aggregation
+  const projectCosts = useMemo(() => {
+    if (!projects || projects.length === 0) return []
+    const cutoff = Date.now() - RANGE_MS[range]
+    const costMap = new Map<string, { name: string; costUsd: number; tokens: number }>()
+    for (const p of projects) {
+      costMap.set(p.id, { name: p.name, costUsd: 0, tokens: 0 })
+    }
+    for (const s of sessions) {
+      if (s.stateSince) {
+        const t = new Date(s.stateSince).getTime()
+        if (!isNaN(t) && t < cutoff) continue
+      }
+      const entry = costMap.get(s.projectId)
+      if (entry) {
+        const u = s.usage
+        entry.costUsd += (u.inputTokens / 1_000_000 * PRICE_PER_M.input +
+          u.outputTokens / 1_000_000 * PRICE_PER_M.output +
+          u.cacheReadTokens / 1_000_000 * PRICE_PER_M.cacheRead +
+          u.cacheWriteTokens / 1_000_000 * PRICE_PER_M.cacheWrite) * calibration
+        entry.tokens += u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheWriteTokens
+      }
+    }
+    return Array.from(costMap.values()).filter(e => e.tokens > 0).sort((a, b) => b.costUsd - a.costUsd)
+  }, [projects, sessions, range, calibration])
 
   // Aggregate usage from filtered sessions
   const usage = useMemo(() => {
@@ -176,6 +208,41 @@ export function TokenUsage({ sessions, onBack, connected }: TokenUsageProps) {
             </button>
           ))}
         </div>
+
+        {/* Project filter */}
+        {projects && projects.length > 1 && (
+          <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+            <button
+              onClick={() => setFilterProjectId('')}
+              style={{
+                padding: '4px 12px',
+                borderRadius: 14,
+                fontSize: 13,
+                fontWeight: 500,
+                background: !filterProjectId ? 'var(--blue)' : 'var(--surf2)',
+                color: !filterProjectId ? '#fff' : 'var(--text2)',
+              }}
+            >
+              All Projects
+            </button>
+            {projects.map(p => (
+              <button
+                key={p.id}
+                onClick={() => setFilterProjectId(p.id)}
+                style={{
+                  padding: '4px 12px',
+                  borderRadius: 14,
+                  fontSize: 13,
+                  fontWeight: 500,
+                  background: filterProjectId === p.id ? 'var(--blue)' : 'var(--surf2)',
+                  color: filterProjectId === p.id ? '#fff' : 'var(--text2)',
+                }}
+              >
+                {p.name}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Stat tiles row: Tokens, Cost, Tok/m */}
         <div style={{
@@ -380,6 +447,40 @@ export function TokenUsage({ sessions, onBack, connected }: TokenUsageProps) {
             </div>
           ))}
         </div>
+
+        {/* Per-project cost breakdown */}
+        {projectCosts.length > 0 && !filterProjectId && (
+          <div style={{
+            background: 'var(--surf)',
+            border: '1px solid var(--border)',
+            borderRadius: 12,
+            padding: 14,
+            marginBottom: 16,
+          }}>
+            <div style={{ color: 'var(--text2)', fontSize: 12, fontWeight: 500, marginBottom: 10 }}>Cost by Project</div>
+            {projectCosts.map((p, i) => (
+              <div
+                key={p.name}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  paddingBottom: i < projectCosts.length - 1 ? 8 : 0,
+                  marginBottom: i < projectCosts.length - 1 ? 8 : 0,
+                  borderBottom: i < projectCosts.length - 1 ? '1px solid var(--border)' : 'none',
+                }}
+              >
+                <div style={{ flex: 1, color: 'var(--text)', fontSize: 13 }}>{p.name}</div>
+                <div style={{ color: 'var(--text2)', fontSize: 13, minWidth: 50, textAlign: 'right' }}>
+                  {formatTokens(p.tokens)}
+                </div>
+                <div style={{ color: 'var(--text2)', fontSize: 12, minWidth: 50, textAlign: 'right' }}>
+                  {formatCost(p.costUsd)}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Stacked token composition bar */}
         {barTotal > 0 && (

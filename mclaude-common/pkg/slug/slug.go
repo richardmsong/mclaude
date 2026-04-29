@@ -25,7 +25,7 @@ type ProjectSlug string
 // SessionSlug is a validated, URL-safe slug for a session.
 type SessionSlug string
 
-// HostSlug is a validated, URL-safe slug for a host (BYOH, ADR-0004).
+// HostSlug is a validated, URL-safe slug for a host (BYOH, ADR-0035).
 type HostSlug string
 
 // ClusterSlug is a validated, URL-safe slug for a cluster.

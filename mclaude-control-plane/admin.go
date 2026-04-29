@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -30,6 +29,7 @@ type AdminUserRequest struct {
 	Email    string `json:"email"`
 	Name     string `json:"name"`
 	Password string `json:"password"` // optional; empty = SSO-only account
+	IsAdmin  bool   `json:"isAdmin"`  // KNOWN-09: optional admin flag
 }
 
 // AdminUserResponse is a single user entry in list/create responses.
@@ -53,6 +53,7 @@ type AdminClusterRegisterRequest struct {
 	JsDomain     string `json:"jsDomain"`
 	LeafURL      string `json:"leafUrl"`
 	DirectNATSURL string `json:"directNatsUrl,omitempty"`
+	UserSlug     string `json:"userSlug,omitempty"` // owner user slug; if empty, first admin user is used
 }
 
 // AdminClusterRegisterResponse is returned on successful cluster registration.
@@ -92,6 +93,15 @@ func (s *Server) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 		cslug := strings.TrimPrefix(r.URL.Path, "/admin/clusters/")
 		cslug = strings.TrimSuffix(cslug, "/grants")
 		s.adminGrantCluster(w, r, cslug)
+	// KNOWN-21: DELETE /admin/clusters/{cslug}
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/admin/clusters/"):
+		cslug := strings.TrimPrefix(r.URL.Path, "/admin/clusters/")
+		s.adminDeleteCluster(w, r, cslug)
+	// KNOWN-10: POST /admin/users/{uslug}/promote
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/admin/users/") && strings.HasSuffix(r.URL.Path, "/promote"):
+		uslug := strings.TrimPrefix(r.URL.Path, "/admin/users/")
+		uslug = strings.TrimSuffix(uslug, "/promote")
+		s.adminPromoteUser(w, r, uslug)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
@@ -161,6 +171,13 @@ func (s *Server) adminCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// KNOWN-09: Set admin flag if requested.
+	if req.IsAdmin {
+		if err := s.db.SetUserAdmin(r.Context(), user.ID, true); err != nil {
+			log.Warn().Err(err).Str("userId", user.ID).Msg("set user admin failed (non-fatal)")
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(AdminUserResponse{ //nolint:errcheck
@@ -179,6 +196,29 @@ func (s *Server) adminDeleteUser(w http.ResponseWriter, r *http.Request, userID 
 		http.Error(w, "user id required", http.StatusBadRequest)
 		return
 	}
+
+	// KNOWN-11 / GAP-CP-04: Before deleting the user (which cascades to hosts and
+	// projects), publish delete notifications for each project on each host so
+	// controllers can tear down per-project resources.
+	if s.nc != nil {
+		user, userErr := s.db.GetUserByID(r.Context(), userID)
+		if userErr == nil && user != nil {
+			hosts, hostsErr := s.db.GetHostsByUser(r.Context(), userID)
+			if hostsErr == nil {
+				for _, h := range hosts {
+					projects, projErr := s.db.GetProjectsByHostSlug(r.Context(), userID, h.Slug)
+					if projErr == nil {
+						for _, p := range projects {
+							publishProjectsDeleteToHost(s.nc, user.Slug, h.Slug, p.ID)
+						}
+					}
+				}
+			}
+			// Broadcast user-level projects.updated so SPA watchers refresh.
+			publishProjectsUpdated(s.nc, user.Slug)
+		}
+	}
+
 	if err := s.db.DeleteUser(r.Context(), userID); err != nil {
 		http.Error(w, "delete error", http.StatusInternalServerError)
 		return
@@ -196,26 +236,29 @@ func (s *Server) adminStopSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "userId, projectId, and sessionId are required", http.StatusBadRequest)
 		return
 	}
-	if s.db == nil {
-		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-			"status":  "accepted",
-			"warning": "database not configured; stop not persisted",
-		})
-		return
+
+	// KNOWN-08: Publish NATS stop message instead of querying non-existent sessions table.
+	if s.nc != nil {
+		// Look up user slug for the NATS subject.
+		var userSlug string
+		if s.db != nil {
+			if user, err := s.db.GetUserByID(r.Context(), req.UserID); err == nil && user != nil {
+				userSlug = user.Slug
+			}
+		}
+		if userSlug != "" {
+			stopPayload, _ := json.Marshal(map[string]string{
+				"sessionId": req.SessionID,
+				"projectId": req.ProjectID,
+				"action":    "stop",
+			})
+			subject := "mclaude.users." + userSlug + ".api.sessions.stop"
+			if err := s.nc.Publish(subject, stopPayload); err != nil {
+				log.Warn().Err(err).Str("subject", subject).Msg("admin stop session: NATS publish failed")
+			}
+		}
 	}
-	_, err := s.db.pool.Exec(context.Background(),
-		`UPDATE sessions SET status = 'stopped', stopped_at = NOW()
-		 WHERE user_id = $1 AND project_id = $2 AND session_id = $3`,
-		req.UserID, req.ProjectID, req.SessionID)
-	if err != nil {
-		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-			"status":  "accepted",
-			"warning": "NATS stop not sent; session table may not exist",
-		})
-		return
-	}
+
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{"status": "accepted"}) //nolint:errcheck
 }
@@ -255,18 +298,49 @@ func (s *Server) adminRegisterCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: In production, look up admin user from bearer token.
-	// For now, create the host row without a specific admin user binding.
-	// The admin user's row is created by the caller (e.g., CLI's mclaude cluster register).
+	// KNOWN-06: Look up owner user properly instead of arbitrary (SELECT id FROM users LIMIT 1).
+	var ownerUserID string
+	if req.UserSlug != "" {
+		ownerUser, uerr := s.db.GetUserBySlug(r.Context(), req.UserSlug)
+		if uerr != nil || ownerUser == nil {
+			http.Error(w, "owner user not found", http.StatusNotFound)
+			return
+		}
+		ownerUserID = ownerUser.ID
+	} else {
+		// Fallback: use first admin user, or first user if no admin exists.
+		err = s.db.pool.QueryRow(r.Context(),
+			`SELECT id FROM users WHERE is_admin = TRUE ORDER BY created_at LIMIT 1`).Scan(&ownerUserID)
+		if err != nil {
+			// No admin user — fall back to first user.
+			err = s.db.pool.QueryRow(r.Context(),
+				`SELECT id FROM users ORDER BY created_at LIMIT 1`).Scan(&ownerUserID)
+			if err != nil {
+				http.Error(w, "no users exist to own the cluster", http.StatusBadRequest)
+				return
+			}
+		}
+	}
+
 	hostID := uuid.NewString()
 	_, err = s.db.pool.Exec(r.Context(), `
 		INSERT INTO hosts (id, user_id, slug, name, type, role, js_domain, leaf_url, account_jwt, direct_nats_url, public_key, user_jwt)
-		VALUES ($1, (SELECT id FROM users LIMIT 1), $2, $3, 'cluster', 'owner', $4, $5, '', $6, $7, $8)`,
-		hostID, req.Slug, req.Name, req.JsDomain, req.LeafURL, req.DirectNATSURL, clusterNKey.PublicKey, clusterJWT)
+		VALUES ($1, $2, $3, $4, 'cluster', 'owner', $5, $6, '', $7, $8, $9)`,
+		hostID, ownerUserID, req.Slug, req.Name, req.JsDomain, req.LeafURL, req.DirectNATSURL, clusterNKey.PublicKey, clusterJWT)
 	if err != nil {
+		if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
+			http.Error(w, "cluster slug already exists", http.StatusConflict)
+			return
+		}
 		log.Error().Err(err).Msg("create cluster host row")
 		http.Error(w, "failed to create cluster", http.StatusInternalServerError)
 		return
+	}
+
+	// KNOWN-07: Populate accountJwt and operatorJwt in the response.
+	accountJWTStr := ""
+	if pub, kerr := s.accountKP.PublicKey(); kerr == nil {
+		accountJWTStr = pub
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -275,6 +349,7 @@ func (s *Server) adminRegisterCluster(w http.ResponseWriter, r *http.Request) {
 		Slug:         req.Slug,
 		LeafJWT:      clusterJWT,
 		LeafSeed:     string(clusterSeed),
+		AccountJWT:   accountJWTStr,
 		JsDomain:     req.JsDomain,
 		DirectNATSURL: req.DirectNATSURL,
 	})
@@ -349,16 +424,15 @@ func (s *Server) adminGrantCluster(w http.ResponseWriter, r *http.Request, cslug
 		return
 	}
 
-	// Find the target user by email or slug-like identifier.
-	// For simplicity, look up by matching the user slug pattern in the email.
-	user, err := s.db.GetUserByEmail(r.Context(), req.UserSlug)
+	// KNOWN-05: Look up user by slug, not email.
+	user, err := s.db.GetUserBySlug(r.Context(), req.UserSlug)
 	if err != nil || user == nil {
 		http.Error(w, "user not found", http.StatusNotFound)
 		return
 	}
 
-	// Issue a per-user JWT for this user scoped to mclaude.users.{uslug}.hosts.{cslug}.>
-	userJWT, _, err := IssueHostJWT(user.ID, cslug, s.accountKP)
+	// KNOWN-04: Issue per-user JWT using user slug (not UUID) as first argument.
+	userJWT, _, err := IssueHostJWT(user.Slug, cslug, s.accountKP)
 	if err != nil {
 		http.Error(w, "failed to issue user jwt", http.StatusInternalServerError)
 		return
@@ -377,4 +451,55 @@ func (s *Server) adminGrantCluster(w http.ResponseWriter, r *http.Request, cslug
 
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]string{"status": "granted"}) //nolint:errcheck
+}
+
+// adminDeleteCluster handles DELETE /admin/clusters/{cslug} (KNOWN-21).
+func (s *Server) adminDeleteCluster(w http.ResponseWriter, r *http.Request, cslug string) {
+	if s.db == nil {
+		http.Error(w, "database not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if cslug == "" {
+		http.Error(w, "cluster slug required", http.StatusBadRequest)
+		return
+	}
+
+	tag, err := s.db.pool.Exec(r.Context(),
+		`DELETE FROM hosts WHERE slug = $1 AND type = 'cluster'`, cslug)
+	if err != nil {
+		http.Error(w, "delete error", http.StatusInternalServerError)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		http.Error(w, "cluster not found", http.StatusNotFound)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// adminPromoteUser handles POST /admin/users/{uslug}/promote (KNOWN-10).
+func (s *Server) adminPromoteUser(w http.ResponseWriter, r *http.Request, uslug string) {
+	if s.db == nil {
+		http.Error(w, "database not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if uslug == "" {
+		http.Error(w, "user slug required", http.StatusBadRequest)
+		return
+	}
+
+	user, err := s.db.GetUserBySlug(r.Context(), uslug)
+	if err != nil || user == nil {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+
+	if err := s.db.SetUserAdmin(r.Context(), user.ID, true); err != nil {
+		http.Error(w, "failed to promote user", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "promoted"}) //nolint:errcheck
 }

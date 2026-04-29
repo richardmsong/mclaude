@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,6 +17,24 @@ import (
 type LoginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+}
+
+// LoginHostEntry is a host in the login response hosts[] array.
+type LoginHostEntry struct {
+	ID   string `json:"id"`
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+	Role string `json:"role"`
+}
+
+// LoginProjectEntry is a project in the login response projects[] array.
+type LoginProjectEntry struct {
+	ID       string  `json:"id"`
+	Slug     string  `json:"slug"`
+	Name     string  `json:"name"`
+	HostSlug string  `json:"hostSlug,omitempty"`
+	Status   string  `json:"status"`
 }
 
 // LoginResponse is returned on successful login.
@@ -35,6 +54,9 @@ type LoginResponse struct {
 	UserSlug string `json:"userSlug,omitempty"`
 	// ExpiresAt is the Unix timestamp when the JWT expires.
 	ExpiresAt int64 `json:"expiresAt"`
+	// KNOWN-17: Hosts and Projects arrays.
+	Hosts    []LoginHostEntry    `json:"hosts"`
+	Projects []LoginProjectEntry `json:"projects"`
 }
 
 // Server holds application-wide dependencies.
@@ -109,11 +131,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	expirySecs := int64(s.jwtExpiry.Seconds())
 	expiresAt := time.Now().Add(s.jwtExpiry).Unix()
 
-	jwt, seed, err := IssueUserJWT(user.ID, user.Slug, s.accountKP, expiresAt+expirySecs)
+	jwt, seed, err := IssueUserJWT(user.ID, user.Slug, s.accountKP, expirySecs)
 	if err != nil {
 		http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
 		return
 	}
+
+	// KNOWN-17: Populate hosts[] and projects[].
+	loginHosts := s.getLoginHosts(r.Context(), user.ID)
+	loginProjects := s.getLoginProjects(r.Context(), user.ID)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(LoginResponse{ //nolint:errcheck
@@ -123,6 +149,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		UserID:    user.ID,
 		UserSlug:  user.Slug,
 		ExpiresAt: expiresAt,
+		Hosts:     loginHosts,
+		Projects:  loginProjects,
 	})
 }
 
@@ -165,20 +193,26 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	expirySecs := int64(s.jwtExpiry.Seconds())
 	expiresAt := time.Now().Add(s.jwtExpiry).Unix()
 
-	newJWT, seed, err := IssueUserJWT(user.ID, user.Slug, s.accountKP, expiresAt+expirySecs)
+	newJWT, seed, err := IssueUserJWT(user.ID, user.Slug, s.accountKP, expirySecs)
 	if err != nil {
 		http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
 		return
 	}
 
+	// KNOWN-17: Populate hosts[] and projects[].
+	loginHosts := s.getLoginHosts(r.Context(), user.ID)
+	loginProjects := s.getLoginProjects(r.Context(), user.ID)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(LoginResponse{ //nolint:errcheck
-		NATSUrl:   s.natsURL,
+		NATSUrl:   s.natsWsURL,
 		JWT:       newJWT,
 		NKeySeed:  string(seed),
 		UserID:    user.ID,
 		UserSlug:  user.Slug,
 		ExpiresAt: expiresAt,
+		Hosts:     loginHosts,
+		Projects:  loginProjects,
 	})
 }
 
@@ -243,6 +277,8 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 
 // authMiddleware validates the NATS user JWT from the Authorization header
 // and injects the userID into the request context.
+// KNOWN-22: Enforces access boundaries — if the URL contains {uslug},
+// the JWT subject must match. Returns 403 on mismatch.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := bearerToken(r)
@@ -263,7 +299,30 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		ctx := contextWithUserID(r.Context(), claims.Name)
+		userID := claims.Name
+		ctx := contextWithUserID(r.Context(), userID)
+
+		// KNOWN-22: Access boundary enforcement — check that URL {uslug} matches JWT user.
+		// Extract uslug from /api/users/{uslug}/... paths.
+		if strings.HasPrefix(r.URL.Path, "/api/users/") {
+			pathAfter := strings.TrimPrefix(r.URL.Path, "/api/users/")
+			urlUSlug := strings.SplitN(pathAfter, "/", 2)[0]
+			if urlUSlug != "" && s.db != nil {
+				user, uerr := s.db.GetUserByID(r.Context(), userID)
+				if uerr == nil && user != nil && user.Slug != urlUSlug {
+					// Check if user is admin — admins bypass access boundaries.
+					if !user.IsAdmin {
+						http.Error(w, "forbidden", http.StatusForbidden)
+						return
+					}
+				}
+				// Also inject user slug into context for downstream use.
+				if user != nil {
+					ctx = contextWithUserSlug(ctx, user.Slug)
+				}
+			}
+		}
+
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -299,4 +358,48 @@ func HashPassword(password string) (string, error) {
 // bcryptCheck compares a plaintext password against its bcrypt hash.
 var bcryptCheck = func(password, hash string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+}
+
+// getLoginHosts returns the hosts[] array for LoginResponse (KNOWN-17).
+func (s *Server) getLoginHosts(ctx context.Context, userID string) []LoginHostEntry {
+	hosts := []LoginHostEntry{}
+	if s.db == nil {
+		return hosts
+	}
+	dbHosts, err := s.db.GetHostsByUser(ctx, userID)
+	if err != nil {
+		return hosts
+	}
+	for _, h := range dbHosts {
+		hosts = append(hosts, LoginHostEntry{
+			ID:   h.ID,
+			Slug: h.Slug,
+			Name: h.Name,
+			Type: h.Type,
+			Role: h.Role,
+		})
+	}
+	return hosts
+}
+
+// getLoginProjects returns the projects[] array for LoginResponse (KNOWN-17).
+func (s *Server) getLoginProjects(ctx context.Context, userID string) []LoginProjectEntry {
+	projects := []LoginProjectEntry{}
+	if s.db == nil {
+		return projects
+	}
+	dbProjects, err := s.db.GetProjectsByUser(ctx, userID)
+	if err != nil {
+		return projects
+	}
+	for _, p := range dbProjects {
+		projects = append(projects, LoginProjectEntry{
+			ID:       p.ID,
+			Slug:     p.Slug,
+			Name:     p.Name,
+			HostSlug: p.HostSlug,
+			Status:   p.Status,
+		})
+	}
+	return projects
 }

@@ -26,10 +26,16 @@ func main() {
 	// controller-runtime v0.23+ requires SetLogger before NewManager.
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
+	// Gap 9: Read LOG_LEVEL env var and configure zerolog level.
+	logLevel, err := zerolog.ParseLevel(envOr("LOG_LEVEL", "info"))
+	if err != nil {
+		logLevel = zerolog.InfoLevel
+	}
 	logger := zerolog.New(os.Stdout).With().
 		Str("component", "controller-k8s").
 		Timestamp().
-		Logger()
+		Logger().
+		Level(logLevel)
 
 	natsURL := envOr("NATS_URL", "nats://localhost:4222")
 	clusterSlug := os.Getenv("CLUSTER_SLUG")
@@ -57,10 +63,16 @@ func main() {
 
 	restCfg := ctrl.GetConfigOrDie()
 
+	// Gap 6 + Gap 9: Leader election with configurable namespace.
+	leaderElectionNs := envOr("LEADER_ELECTION_NAMESPACE", "mclaude-system")
+
 	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
-		Scheme:                        scheme,
-		Metrics:                       metricsserver.Options{BindAddress: envOr("METRICS_ADDR", ":8082")},
-		HealthProbeBindAddress:        envOr("HEALTH_PROBE_ADDR", ":8081"),
+		Scheme:                  scheme,
+		Metrics:                 metricsserver.Options{BindAddress: envOr("METRICS_ADDR", ":8082")},
+		HealthProbeBindAddress:  envOr("HEALTH_PROBE_ADDR", ":8081"),
+		LeaderElection:          true,
+		LeaderElectionID:        "mclaude-controller-k8s",
+		LeaderElectionNamespace: leaderElectionNs,
 	})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("create controller-runtime manager")
@@ -96,7 +108,7 @@ func main() {
 	}
 
 	// NATS connection — authenticate with user JWT signed by account key (ADR-0040).
-	userJWT, userKP, err := generateNATSUserCreds(accountKP)
+	userJWT, userKP, err := generateNATSUserCreds(accountKP, clusterSlug)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("generate NATS user credentials")
 	}
@@ -119,6 +131,7 @@ func main() {
 		k8sClient:      mgr.GetClient(),
 		controlPlaneNs: controlPlaneNs,
 		clusterSlug:    clusterSlug,
+		reconciler:     reconciler,
 		logger:         logger.With().Str("subscriber", "provisioner").Logger(),
 	}
 	if err := provisioner.StartNATSSubscriber(); err != nil {
@@ -143,8 +156,8 @@ func loadAccountKey() (nkeys.KeyPair, error) {
 
 // generateNATSUserCreds creates an ephemeral user JWT signed by the account key,
 // allowing the controller-k8s to authenticate against a NATS server running
-// operator JWT auth.
-func generateNATSUserCreds(accountKP nkeys.KeyPair) (userJWT string, userKP nkeys.KeyPair, err error) {
+// operator JWT auth. Permissions are scoped to this cluster's slug per spec-state-schema.md.
+func generateNATSUserCreds(accountKP nkeys.KeyPair, clusterSlug string) (userJWT string, userKP nkeys.KeyPair, err error) {
 	userKP, err = nkeys.CreateUser()
 	if err != nil {
 		return "", nil, fmt.Errorf("create user nkey: %w", err)
@@ -156,6 +169,21 @@ func generateNATSUserCreds(accountKP nkeys.KeyPair) (userJWT string, userKP nkey
 	claims := natsjwt.NewUserClaims(userPub)
 	claims.Name = "controller-k8s"
 	claims.IssuerAccount, _ = accountKP.PublicKey()
+
+	// Gap 2: Scope controller JWT permissions to this cluster per spec-state-schema.md.
+	claims.Permissions.Pub.Allow = natsjwt.StringList{
+		fmt.Sprintf("mclaude.users.*.hosts.%s.>", clusterSlug),
+		"_INBOX.>",
+		"$JS.*.API.>",
+		"$SYS.ACCOUNT.*.CONNECT",
+		"$SYS.ACCOUNT.*.DISCONNECT",
+	}
+	claims.Permissions.Sub.Allow = natsjwt.StringList{
+		fmt.Sprintf("mclaude.users.*.hosts.%s.>", clusterSlug),
+		"_INBOX.>",
+		"$JS.*.API.>",
+	}
+
 	jwt, err := claims.Encode(accountKP)
 	if err != nil {
 		return "", nil, fmt.Errorf("encode user jwt: %w", err)

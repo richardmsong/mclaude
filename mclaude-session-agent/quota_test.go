@@ -426,14 +426,14 @@ func TestPublishExitLifecycleQuota(t *testing.T) {
 		},
 	}
 	m.publishExitLifecycle("quota")
-	if len(published) != 1 || published[0].evType != "session_quota_interrupted" {
-		t.Errorf("expected session_quota_interrupted, got %v", published)
+	if len(published) != 1 || published[0].evType != "session_job_paused" {
+		t.Errorf("expected session_job_paused, got %v", published)
 	}
-	if published[0].extra["threshold"] != "75" {
-		t.Errorf("threshold: got %q, want 75", published[0].extra["threshold"])
+	if published[0].extra["pausedVia"] != "quota_threshold" {
+		t.Errorf("pausedVia: got %q, want quota_threshold", published[0].extra["pausedVia"])
 	}
-	if published[0].extra["u5"] != "82" {
-		t.Errorf("u5: got %q, want 82", published[0].extra["u5"])
+	if published[0].extra["r5"] != "2026-04-15T10:00:00Z" {
+		t.Errorf("r5: got %q, want 2026-04-15T10:00:00Z", published[0].extra["r5"])
 	}
 	if published[0].extra["jobId"] != "job-2" {
 		t.Errorf("jobId: got %q, want job-2", published[0].extra["jobId"])
@@ -833,7 +833,7 @@ func TestNewQuotaMonitorSubscriptionAndLifecycle(t *testing.T) {
 	// --- Part 3: lifecycle event published on exit ---
 	//
 	// The goroutine had stopReason="quota" when doneCh fired, so it publishes
-	// session_quota_interrupted (not session_job_failed).
+	// session_job_paused (not session_job_failed).
 	lifecycleMu.Lock()
 	events := make([]string, len(lifecycleEvents))
 	copy(events, lifecycleEvents)
@@ -841,12 +841,12 @@ func TestNewQuotaMonitorSubscriptionAndLifecycle(t *testing.T) {
 
 	foundEvent := false
 	for _, ev := range events {
-		if ev == "session_quota_interrupted" || ev == "session_job_failed" {
+		if ev == "session_job_paused" || ev == "session_job_failed" {
 			foundEvent = true
 			break
 		}
 	}
 	if !foundEvent {
-		t.Errorf("expected quota or failed lifecycle event on exit, got: %v", events)
+		t.Errorf("expected job_paused or failed lifecycle event on exit, got: %v", events)
 	}
 }

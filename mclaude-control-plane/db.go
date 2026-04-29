@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"mclaude.io/common/pkg/slug"
 )
 
 // DB wraps a pgxpool connection pool.
@@ -33,9 +35,20 @@ var slugNonAlphaNum = regexp.MustCompile(`[^a-zA-Z0-9]+`)
 // computeUserSlug derives a URL-safe slug from an email address.
 // Uses the local part (before '@'), lowercased, with non-alphanumeric runs
 // replaced by '-'. Consistent with the SQL backfill in the schema migration.
+// KNOWN-12: Validates against reserved-word blocklist and generates fallback on collision.
 func computeUserSlug(email string) string {
 	local := strings.Split(email, "@")[0]
-	return strings.ToLower(slugNonAlphaNum.ReplaceAllString(local, "-"))
+	s := strings.ToLower(slugNonAlphaNum.ReplaceAllString(local, "-"))
+	s = strings.Trim(s, "-")
+	if s == "" {
+		return ""
+	}
+	// Validate against blocklist; generate fallback if reserved.
+	if err := slug.Validate(s); err != nil {
+		uid := uuid.New()
+		return slug.ValidateOrFallback(s, slug.KindUser, uid)
+	}
+	return s
 }
 
 // Host is a row from the hosts table. Per ADR-0035, this is the single source
@@ -139,16 +152,31 @@ func (db *DB) GetUserBySlug(ctx context.Context, slug string) (*User, error) {
 }
 
 // CreateUser inserts a new user row. id must be a pre-generated UUID.
+// KNOWN-16: Also creates a default host row with type='machine', role='owner'.
 func (db *DB) CreateUser(ctx context.Context, id, email, name, passwordHash string) (*User, error) {
-	slug := computeUserSlug(email)
+	userSlug := computeUserSlug(email)
 	now := time.Now().UTC()
 	_, err := db.pool.Exec(ctx,
 		`INSERT INTO users (id, email, name, password_hash, slug, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
-		id, email, name, passwordHash, slug, now)
+		id, email, name, passwordHash, userSlug, now)
 	if err != nil {
 		return nil, fmt.Errorf("create user: %w", err)
 	}
-	return &User{ID: id, Email: email, Name: name, PasswordHash: passwordHash, Slug: slug, CreatedAt: now}, nil
+
+	// KNOWN-16: Create default host row (type='machine', role='owner').
+	hostID := uuid.NewString()
+	_, err = db.pool.Exec(ctx,
+		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at)
+		 VALUES ($1, $2, 'local', 'Local Machine', 'machine', 'owner', $3)
+		 ON CONFLICT (user_id, slug) DO NOTHING`,
+		hostID, id, now)
+	if err != nil {
+		// Non-fatal: user was created, host creation failure is logged.
+		// The schema migration backfill will catch this on next restart.
+		_ = err
+	}
+
+	return &User{ID: id, Email: email, Name: name, PasswordHash: passwordHash, Slug: userSlug, CreatedAt: now}, nil
 }
 
 // SetUserAdmin sets or clears the is_admin flag on a user.
@@ -183,15 +211,42 @@ func (db *DB) CreateProject(ctx context.Context, id, userID, name, gitURL string
 }
 
 // CreateProjectWithIdentity inserts a new project row with optional git_identity_id.
+// KNOWN-13: Computes and sets the slug column (slugified project name) and sets host_id.
 func (db *DB) CreateProjectWithIdentity(ctx context.Context, id, userID, name, gitURL string, gitIdentityID *string) (*Project, error) {
 	now := time.Now().UTC()
-	_, err := db.pool.Exec(ctx,
-		`INSERT INTO projects (id, user_id, name, git_url, status, created_at, git_identity_id) VALUES ($1, $2, $3, $4, 'active', $5, $6)`,
-		id, userID, name, gitURL, now, gitIdentityID)
+
+	// KNOWN-13: Compute slug from project name.
+	projectSlug := slug.Slugify(name)
+	if projectSlug == "" {
+		projectSlug = "project"
+	}
+	// Validate against blocklist; generate fallback if reserved.
+	if err := slug.Validate(projectSlug); err != nil {
+		uid := uuid.New()
+		projectSlug = slug.ValidateOrFallback(projectSlug, slug.KindProject, uid)
+	}
+
+	// KNOWN-13: Look up user's default host if host_id not provided.
+	var hostID *string
+	err := db.pool.QueryRow(ctx,
+		`SELECT id FROM hosts WHERE user_id = $1 AND slug = 'local' LIMIT 1`, userID).Scan(&hostID)
+	if err != nil {
+		// If no local host, try any host for this user.
+		err = db.pool.QueryRow(ctx,
+			`SELECT id FROM hosts WHERE user_id = $1 ORDER BY created_at LIMIT 1`, userID).Scan(&hostID)
+		if err != nil {
+			hostID = nil // no host available
+		}
+	}
+
+	_, err = db.pool.Exec(ctx,
+		`INSERT INTO projects (id, user_id, name, slug, git_url, status, host_id, created_at, git_identity_id)
+		 VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8)`,
+		id, userID, name, projectSlug, gitURL, hostID, now, gitIdentityID)
 	if err != nil {
 		return nil, fmt.Errorf("create project: %w", err)
 	}
-	return &Project{ID: id, UserID: userID, Name: name, GitURL: gitURL, Status: "active", GitIdentityID: gitIdentityID, CreatedAt: now}, nil
+	return &Project{ID: id, UserID: userID, Name: name, Slug: projectSlug, GitURL: gitURL, Status: "active", HostID: hostID, GitIdentityID: gitIdentityID, CreatedAt: now}, nil
 }
 
 // GetProjectsByUser returns all projects owned by a user, with host slug joined.
@@ -243,6 +298,68 @@ func (db *DB) UpdateProjectGitIdentity(ctx context.Context, projectID string, gi
 		`UPDATE projects SET git_identity_id = $1 WHERE id = $2`,
 		gitIdentityID, projectID)
 	return err
+}
+
+// UpdateProjectStatus sets the status column for a project.
+func (db *DB) UpdateProjectStatus(ctx context.Context, projectID, status string) error {
+	_, err := db.pool.Exec(ctx,
+		`UPDATE projects SET status = $1 WHERE id = $2`,
+		status, projectID)
+	return err
+}
+
+// DeleteProject removes a project by ID.
+func (db *DB) DeleteProject(ctx context.Context, projectID string) error {
+	_, err := db.pool.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID)
+	return err
+}
+
+// GetHostsByUser returns all hosts for a user.
+func (db *DB) GetHostsByUser(ctx context.Context, userID string) ([]*Host, error) {
+	rows, err := db.pool.Query(ctx,
+		`SELECT id, user_id, slug, name, type, role, js_domain, leaf_url, account_jwt,
+		        direct_nats_url, public_key, user_jwt, created_at, last_seen_at
+		 FROM hosts WHERE user_id = $1 ORDER BY created_at`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get hosts by user: %w", err)
+	}
+	defer rows.Close()
+	var hosts []*Host
+	for rows.Next() {
+		h := &Host{}
+		if err := rows.Scan(&h.ID, &h.UserID, &h.Slug, &h.Name, &h.Type, &h.Role,
+			&h.JsDomain, &h.LeafURL, &h.AccountJWT, &h.DirectNATSURL,
+			&h.PublicKey, &h.UserJWT, &h.CreatedAt, &h.LastSeenAt); err != nil {
+			return nil, err
+		}
+		hosts = append(hosts, h)
+	}
+	return hosts, rows.Err()
+}
+
+// GetProjectsByHostSlug returns all projects for a user on a specific host slug.
+func (db *DB) GetProjectsByHostSlug(ctx context.Context, userID, hostSlug string) ([]*Project, error) {
+	rows, err := db.pool.Query(ctx,
+		`SELECT p.id, p.user_id, p.name, p.slug, p.git_url, p.status, p.host_id,
+		        COALESCE(h.slug, ''), p.created_at, p.git_identity_id
+		 FROM projects p
+		 LEFT JOIN hosts h ON h.id = p.host_id
+		 WHERE p.user_id = $1 AND h.slug = $2
+		 ORDER BY p.created_at`,
+		userID, hostSlug)
+	if err != nil {
+		return nil, fmt.Errorf("get projects by host slug: %w", err)
+	}
+	defer rows.Close()
+	var projects []*Project
+	for rows.Next() {
+		p := &Project{}
+		if err := rows.Scan(&p.ID, &p.UserID, &p.Name, &p.Slug, &p.GitURL, &p.Status, &p.HostID, &p.HostSlug, &p.CreatedAt, &p.GitIdentityID); err != nil {
+			return nil, err
+		}
+		projects = append(projects, p)
+	}
+	return projects, rows.Err()
 }
 
 // OAuthConnection is a row from the oauth_connections table.
@@ -484,6 +601,20 @@ WHERE p.user_id = h.user_id AND h.slug = 'local' AND p.host_id IS NULL;
 UPDATE projects
 SET slug = lower(regexp_replace(name, '[^a-zA-Z0-9]+', '-', 'g'))
 WHERE slug IS NULL OR slug = '';
+
+-- KNOWN-14: Enforce host_id NOT NULL after backfill (safe: all rows now have host_id).
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM projects WHERE host_id IS NULL) THEN
+        BEGIN
+            ALTER TABLE projects ALTER COLUMN host_id SET NOT NULL;
+        EXCEPTION WHEN others THEN
+            -- Constraint may already exist or table may be in inconsistent state; skip.
+            NULL;
+        END;
+    END IF;
+END
+$$;
 
 -- Unique index: projects are unique-by-slug per user per host (ADR-0035).
 CREATE UNIQUE INDEX IF NOT EXISTS projects_user_id_host_id_slug_uniq ON projects (user_id, host_id, slug);

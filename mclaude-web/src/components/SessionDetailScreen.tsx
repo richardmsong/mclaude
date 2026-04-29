@@ -312,7 +312,17 @@ export function SessionDetailScreen({
     fileInputRef.current?.click()
   }
 
+  // Toast state for file validation errors
+  const [fileError, setFileError] = useState<string | null>(null)
+
   const stageImageFile = (file: File) => {
+    // Spec: Max ~20MB per image
+    const MAX_IMAGE_SIZE = 20 * 1024 * 1024
+    if (file.size > MAX_IMAGE_SIZE) {
+      setFileError(`Image too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum is 20MB.`)
+      setTimeout(() => setFileError(null), 5000)
+      return
+    }
     const reader = new FileReader()
     reader.onload = (ev) => {
       const result = ev.target?.result as string
@@ -1005,6 +1015,24 @@ export function SessionDetailScreen({
           </button>
         ))}
       </div>
+
+      {/* File size error banner */}
+      {fileError && (
+        <div style={{
+          margin: '8px 16px 0',
+          background: 'rgba(255,69,58,0.1)',
+          border: '1px solid rgba(255,69,58,0.3)',
+          borderRadius: 10,
+          padding: '10px 14px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          flexShrink: 0,
+        }}>
+          <span style={{ color: 'var(--red)', fontSize: 14 }}>⚠</span>
+          <span style={{ color: 'var(--red)', fontSize: 13 }}>{fileError}</span>
+        </div>
+      )}
 
       {/* Updating banner */}
       {isUpdating && (

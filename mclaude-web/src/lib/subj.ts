@@ -16,8 +16,8 @@ const PREFIX = 'mclaude'
 // User-scoped subjects (no host qualifier)
 // --------------------------------------------------------------------------
 
-export function subjProjectsCreate(uslug: UserSlug): string {
-  return `${PREFIX}.users.${uslug}.api.projects.create`
+export function subjProjectsCreate(uslug: UserSlug, hslug: HostSlug): string {
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.api.projects.create`
 }
 
 export function subjProjectsUpdated(uslug: UserSlug): string {
@@ -26,6 +26,26 @@ export function subjProjectsUpdated(uslug: UserSlug): string {
 
 export function subjQuota(uslug: UserSlug): string {
   return `${PREFIX}.users.${uslug}.quota`
+}
+
+// --------------------------------------------------------------------------
+// User+host-scoped subjects (ADR-0035)
+// --------------------------------------------------------------------------
+
+export function subjUserHostStatus(uslug: UserSlug, hslug: HostSlug): string {
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.status`
+}
+
+export function subjProjectsProvision(uslug: UserSlug, hslug: HostSlug): string {
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.api.projects.provision`
+}
+
+export function subjProjectsUpdate(uslug: UserSlug, hslug: HostSlug): string {
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.api.projects.update`
+}
+
+export function subjProjectsDelete(uslug: UserSlug, hslug: HostSlug): string {
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.api.projects.delete`
 }
 
 // --------------------------------------------------------------------------

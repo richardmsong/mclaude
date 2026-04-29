@@ -8,6 +8,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -20,6 +23,51 @@ const startupTimeout = 30 * time.Second
 // maxEventBytes is the maximum NATS payload size (8 MB, matching the server
 // config).  Events larger than this are truncated before publishing.
 const maxEventBytes = 8 * 1024 * 1024
+
+// pendingShell represents a Bash(run_in_background=true) tool_use that has been
+// observed in an assistant message but whose tool_result (containing the
+// backgroundTaskId) has not yet arrived. Phase 1 of two-phase shell tracking.
+type pendingShell struct {
+	ToolUseId string
+	Command   string
+	StartedAt time.Time
+}
+
+// inFlightShell represents a fully promoted background shell: the tool_result
+// has been observed and the taskId + outputFilePath are known. Phase 2 of
+// two-phase shell tracking. Used during graceful shutdown to publish synthetic
+// <task-notification status=killed> XML messages.
+type inFlightShell struct {
+	ToolUseId      string
+	TaskId         string
+	Command        string
+	OutputFilePath string
+	StartedAt      time.Time
+}
+
+// backgroundTaskIdRe extracts the Claude Code internal random task ID from
+// a tool_result text like "Command was manually backgrounded with ID: b3f7x2a9".
+var backgroundTaskIdRe = regexp.MustCompile(`Command was manually backgrounded with ID: (\S+)`)
+
+// sanitizePath replaces every character that is NOT [a-zA-Z0-9] with '-'.
+// Matches Claude Code's TypeScript sanitizePath (sessionStoragePortable.ts).
+func sanitizePath(p string) string {
+	result := []byte(p)
+	for i, c := range result {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+			result[i] = '-'
+		}
+	}
+	return string(result)
+}
+
+// shellOutputPath constructs the absolute path to a background shell's output file
+// on the PVC. Formula: {tmpDir}/claude-{uid}/{sanitizedCwd}/{sessionId}/tasks/{taskId}.output
+func shellOutputPath(tmpDir, sanitizedCwd, sessionId, taskId string) string {
+	uid := os.Getuid()
+	return filepath.Join(tmpDir, fmt.Sprintf("claude-%d", uid),
+		sanitizedCwd, sessionId, "tasks", taskId+".output")
+}
 
 // Session manages a single Claude Code child process and its NATS routing.
 type Session struct {
@@ -62,6 +110,10 @@ type Session struct {
 	// (in the stdout router goroutine) before the line is published to NATS.
 	// Used by QuotaMonitor to scan assistant events for the SESSION_JOB_COMPLETE marker.
 	onRawOutput func(evType string, raw []byte)
+	// stopping is set to true when the session is being intentionally stopped
+	// (delete, restart, or graceful shutdown). The crash watcher goroutine
+	// checks this flag to distinguish intentional stops from unexpected crashes.
+	stopping bool
 	// shutdownPending is set to true during graceful shutdown after the KV entry
 	// has been written with state:"updating". While true, SubtypeSessionStateChanged
 	// events update in-memory state but do NOT flush to KV (to preserve the
@@ -72,6 +124,16 @@ type Session struct {
 	// been received. Guarded by mu. The drain predicate in gracefulShutdown waits
 	// for this to reach 0 before exiting.
 	inFlightBackgroundAgents int
+	// pendingShells tracks Bash(run_in_background=true) tool_use blocks observed
+	// in assistant messages. Keyed by toolUseId. Entries are promoted to
+	// inFlightShells when the matching tool_result arrives with a backgroundTaskId.
+	// Guarded by mu. Phase 1 of two-phase shell tracking.
+	pendingShells map[string]pendingShell
+	// inFlightShells tracks fully promoted background shells with known taskIds
+	// and output paths. Keyed by toolUseId. Used during graceful shutdown to
+	// publish synthetic <task-notification status=killed> XML messages.
+	// Guarded by mu. Phase 2 of two-phase shell tracking.
+	inFlightShells map[string]*inFlightShell
 }
 
 // newSession creates a Session but does not start the Claude process yet.
@@ -80,14 +142,16 @@ type Session struct {
 // re-applied on every start() call (new session and resume paths both use start).
 func newSession(state SessionState, userID string) *Session {
 	return &Session{
-		state:      state,
-		userID:     userID,
-		stdinCh:    make(chan []byte, 64),
-		stopCh:     make(chan struct{}),
-		doneCh:     make(chan struct{}),
-		initCh:     make(chan struct{}),
-		permPolicy: PermissionPolicyManaged,
-		extraFlags: state.ExtraFlags,
+		state:          state,
+		userID:         userID,
+		stdinCh:        make(chan []byte, 64),
+		stopCh:         make(chan struct{}),
+		doneCh:         make(chan struct{}),
+		initCh:         make(chan struct{}),
+		permPolicy:     PermissionPolicyManaged,
+		extraFlags:     state.ExtraFlags,
+		pendingShells:  make(map[string]pendingShell),
+		inFlightShells: make(map[string]*inFlightShell),
 	}
 }
 
@@ -102,6 +166,7 @@ func (s *Session) getState() SessionState {
 // then SIGKILLs if it hasn't stopped.
 func (s *Session) stopAndWait(timeout time.Duration) error {
 	s.mu.Lock()
+	s.stopping = true
 	cmd := s.cmd
 	dbg := s.debug
 	s.mu.Unlock()
@@ -260,6 +325,12 @@ func (s *Session) start(claudePath string, resume bool, publish func(subject str
 			// -1 when a user message with origin.kind=="task-notification" is observed.
 			s.updateInFlightBackgroundAgents(evType, lineCopy)
 
+			// Two-phase shell tracking for Bash(run_in_background=true).
+			// Phase 1: assistant message with Bash tool_use + run_in_background:true → pendingShells.
+			// Phase 2: user message with matching tool_result → promoted to inFlightShells.
+			// Removal: user message with origin.kind=="task-notification" → removed from inFlightShells.
+			s.updateInFlightShells(evType, lineCopy)
+
 			// Truncate events that exceed the NATS max payload limit (8 MB).
 			// The full content remains in Claude's JSONL for recovery.
 			lineCopy = truncateEventIfNeeded(lineCopy)
@@ -301,19 +372,19 @@ func (s *Session) start(claudePath string, resume bool, publish func(subject str
 		}
 	}()
 
-	// In --input-format stream-json mode, Claude only emits the init event
-	// after receiving the first user message. Don't block on init — return
-	// immediately so the session can accept input. The init event will arrive
-	// asynchronously when the user sends their first message.
-	//
-	// Monitor for early exit in a background goroutine so we can log it.
+	// Monitor startup: if Claude doesn't reach idle within 30s, mark as failed
+	// (spec: GAP-SA-K4). Also handles early exit before init.
 	go func() {
 		select {
 		case <-s.initCh:
-			// Claude initialized successfully after receiving first message.
+			// Claude initialized successfully.
 		case <-time.After(startupTimeout):
-			// No init after timeout — likely the user never sent a message.
-			// Don't kill the process; it's idle but valid.
+			// No init after timeout — mark session as failed.
+			s.mu.Lock()
+			s.state.State = StateFailed
+			s.state.StateSince = time.Now().UTC()
+			s.mu.Unlock()
+			s.flushKV(writeKV)
 		case <-s.doneCh:
 			// Claude exited before init — will be cleaned up by the reaper.
 		}
@@ -378,6 +449,203 @@ func (s *Session) updateInFlightBackgroundAgents(evType string, line []byte) {
 			s.mu.Unlock()
 		}
 	}
+}
+
+// updateInFlightShells implements two-phase shell tracking for
+// Bash(run_in_background=true) tool calls:
+//
+//   - Phase 1 (Pending): On assistant message with a tool_use block where
+//     name == "Bash" AND input.run_in_background == true, record a pending entry
+//     keyed by tool_use.id with command from input.command.
+//
+//   - Phase 2 (Promoted): On user message with a tool_result block whose
+//     tool_use_id matches a pending entry, extract backgroundTaskId from result
+//     text (regex: "Command was manually backgrounded with ID: {id}"), compute
+//     outputFilePath, promote to inFlightShells.
+//
+//   - Removal: On user message with origin.kind == "task-notification"
+//     referencing the shell's toolUseId (real task-notification arrived — shell
+//     completed naturally).
+//
+// Shell tracking is disabled when CLAUDE_CODE_TMPDIR is empty.
+func (s *Session) updateInFlightShells(evType string, line []byte) {
+	tmpDir := os.Getenv("CLAUDE_CODE_TMPDIR")
+	if tmpDir == "" {
+		return // shell tracking is a K8s-only feature
+	}
+
+	switch evType {
+	case EventTypeAssistant:
+		// Phase 1: look for Bash tool_use with run_in_background:true.
+		var msg struct {
+			Message struct {
+				Content []struct {
+					Type  string          `json:"type"`
+					ID    string          `json:"id"`
+					Name  string          `json:"name"`
+					Input json.RawMessage `json:"input"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(line, &msg); err != nil {
+			return
+		}
+		for _, block := range msg.Message.Content {
+			if block.Type != "tool_use" || block.Name != "Bash" {
+				continue
+			}
+			var input struct {
+				RunInBackground bool   `json:"run_in_background"`
+				Command         string `json:"command"`
+			}
+			if err := json.Unmarshal(block.Input, &input); err != nil {
+				continue
+			}
+			if input.RunInBackground && block.ID != "" {
+				s.mu.Lock()
+				s.pendingShells[block.ID] = pendingShell{
+					ToolUseId: block.ID,
+					Command:   input.Command,
+					StartedAt: time.Now(),
+				}
+				s.mu.Unlock()
+			}
+		}
+
+	case EventTypeUser:
+		// First check for task-notification origin (removal path).
+		// Use a separate, forgiving parse that doesn't require content to be an array.
+		var originCheck struct {
+			Origin struct {
+				Kind string `json:"kind"`
+			} `json:"origin"`
+		}
+		if err := json.Unmarshal(line, &originCheck); err != nil {
+			return
+		}
+
+		// Removal: task-notification origin removes from inFlightShells.
+		if originCheck.Origin.Kind == "task-notification" {
+			s.removeShellByTaskNotification(line)
+			return
+		}
+
+		// Phase 2: look for tool_result matching a pending shell.
+		var msg struct {
+			Message struct {
+				Content []struct {
+					Type      string `json:"type"`
+					ToolUseId string `json:"tool_use_id"`
+					Content   string `json:"content"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(line, &msg); err != nil {
+			return
+		}
+
+		// Phase 2: check tool_result blocks for pending shell promotion.
+		for _, block := range msg.Message.Content {
+			if block.Type != "tool_result" {
+				continue
+			}
+			s.mu.Lock()
+			pending, ok := s.pendingShells[block.ToolUseId]
+			if !ok {
+				s.mu.Unlock()
+				continue
+			}
+			delete(s.pendingShells, block.ToolUseId)
+			s.mu.Unlock()
+
+			// Extract backgroundTaskId from the result text.
+			matches := backgroundTaskIdRe.FindStringSubmatch(block.Content)
+			if len(matches) < 2 {
+				continue // not a background shell result; discard pending entry
+			}
+			taskId := matches[1]
+
+			cwd := s.getState().CWD
+			outputPath := shellOutputPath(tmpDir, sanitizePath(cwd), s.getState().ID, taskId)
+
+			s.mu.Lock()
+			s.inFlightShells[pending.ToolUseId] = &inFlightShell{
+				ToolUseId:      pending.ToolUseId,
+				TaskId:         taskId,
+				Command:        pending.Command,
+				OutputFilePath: outputPath,
+				StartedAt:      pending.StartedAt,
+			}
+			s.mu.Unlock()
+		}
+	}
+}
+
+// removeShellByTaskNotification removes an inFlightShell when a real
+// task-notification message arrives, indicating the shell completed naturally.
+// It scans the notification content for the tool-use-id to identify which shell.
+func (s *Session) removeShellByTaskNotification(line []byte) {
+	// The task-notification is a user message containing XML in the content.
+	// We need to find the tool-use-id referenced in it.
+	// Try to parse tool-use-id from the message content (XML-like extraction).
+	var msg struct {
+		Message struct {
+			Content interface{} `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(line, &msg); err != nil {
+		return
+	}
+
+	// Content can be a string or an array of content blocks.
+	var contentStr string
+	switch v := msg.Message.Content.(type) {
+	case string:
+		contentStr = v
+	case []interface{}:
+		for _, item := range v {
+			if m, ok := item.(map[string]interface{}); ok {
+				if text, ok := m["text"].(string); ok {
+					contentStr += text
+				} else if content, ok := m["content"].(string); ok {
+					contentStr += content
+				}
+			}
+		}
+	}
+
+	if contentStr == "" {
+		// Fallback: remove any inFlightShell whose toolUseId appears in the raw line.
+		s.mu.Lock()
+		for toolUseId := range s.inFlightShells {
+			if len(toolUseId) > 0 && strings.Contains(string(line), toolUseId) {
+				delete(s.inFlightShells, toolUseId)
+				break
+			}
+		}
+		s.mu.Unlock()
+		return
+	}
+
+	// Extract <tool-use-id>...</tool-use-id> from the content.
+	toolUseIdRe := regexp.MustCompile(`<tool-use-id>([^<]+)</tool-use-id>`)
+	matches := toolUseIdRe.FindStringSubmatch(contentStr)
+	if len(matches) >= 2 {
+		s.mu.Lock()
+		delete(s.inFlightShells, matches[1])
+		s.mu.Unlock()
+		return
+	}
+
+	// Fallback: check if any toolUseId appears in the content string.
+	s.mu.Lock()
+	for toolUseId := range s.inFlightShells {
+		if len(toolUseId) > 0 && strings.Contains(contentStr, toolUseId) {
+			delete(s.inFlightShells, toolUseId)
+			break
+		}
+	}
+	s.mu.Unlock()
 }
 
 // handleSideEffect inspects specific event types and updates local state/KV.
@@ -476,9 +744,7 @@ func (s *Session) handleSideEffect(line []byte, writeKV func(state SessionState)
 		var r resultEvent
 		if err := json.Unmarshal(line, &r); err == nil {
 			s.mu.Lock()
-			s.state.Usage.InputTokens += r.Usage.InputTokens
-			s.state.Usage.OutputTokens += r.Usage.OutputTokens
-			s.state.Usage.CostUSD += r.TotalCostUSD
+			accumulateUsage(&s.state, r.Usage, r.TotalCostUSD)
 			s.mu.Unlock()
 			s.flushKV(writeKV)
 		}
@@ -568,6 +834,7 @@ func (s *Session) clearPendingControl(requestID string, writeKV func(state Sessi
 // stop interrupts and waits for the Claude process to exit.
 func (s *Session) stop() {
 	s.mu.Lock()
+	s.stopping = true
 	cmd := s.cmd
 	s.mu.Unlock()
 	if cmd == nil {
@@ -584,4 +851,15 @@ func (s *Session) stop() {
 // waitDone blocks until the Claude process exits.
 func (s *Session) waitDone() {
 	<-s.doneCh
+}
+
+// exitCode returns the process exit code, or -1 if not available.
+func (s *Session) exitCode() int {
+	s.mu.Lock()
+	cmd := s.cmd
+	s.mu.Unlock()
+	if cmd == nil || cmd.ProcessState == nil {
+		return -1
+	}
+	return cmd.ProcessState.ExitCode()
 }

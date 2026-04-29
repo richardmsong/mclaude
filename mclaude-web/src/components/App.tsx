@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, Fragment } from 'react'
+import { HashRouter, useNavigate, useLocation } from 'react-router-dom'
 import { useVersionPoller } from '@/hooks/useVersionPoller'
 import { AuthClient } from '@/transport/auth-client'
 import { NATSClient } from '@/transport/nats-client'
@@ -17,31 +18,27 @@ import { Settings } from './Settings'
 import { TokenUsage } from './TokenUsage'
 import { UserManagement } from './UserManagement'
 
-// ── Hash routing (ADR-0024 + ADR-0035: typed slugs + host-scoped) ─────────
-// Session hash format: #u/{uslug}/h/{hslug}/p/{pslug}/s/{sslug} (new, host-scoped)
-// Legacy slug format: #s/{uslug}/{pslug}/{sslug} (backward compat)
-// Legacy UUID format: #s/{sessionId} (UUID, kept for backward compat)
-function getRoute(): { screen: string; sessionId?: string; hostSlug?: string } {
-  const hash = window.location.hash.slice(1) // remove leading #
-  if (!hash || hash === '/') return { screen: 'dashboard' }
-  if (hash === 'settings') return { screen: 'settings' }
-  if (hash === 'usage') return { screen: 'usage' }
-  if (hash === 'users') return { screen: 'users' }
-  if (hash === 'hosts') return { screen: 'hosts' }
-  // ADR-0035 host-scoped format: u/{uslug}/h/{hslug}/p/{pslug}/s/{sslug}
-  const hostScopedMatch = /^u\/([a-z0-9][a-z0-9-]*)\/h\/([a-z0-9][a-z0-9-]*)\/p\/([a-z0-9][a-z0-9-]*)\/s\/([a-z0-9][a-z0-9-]*)$/.exec(hash)
+// ── Hash routing helpers (React Router v6 with HashRouter) ────────────────
+// Kept for programmatic navigation — React Router v6 useNavigate returns
+// a function that navigates within the hash-based router.
+
+/** Parse route info from the current React Router location pathname. */
+function parseRoute(pathname: string): { screen: string; sessionId?: string; hostSlug?: string } {
+  if (!pathname || pathname === '/') return { screen: 'dashboard' }
+  if (pathname === '/settings') return { screen: 'settings' }
+  if (pathname === '/usage') return { screen: 'usage' }
+  if (pathname === '/users') return { screen: 'users' }
+  if (pathname === '/hosts') return { screen: 'hosts' }
+  // ADR-0035 host-scoped format: /u/{uslug}/h/{hslug}/p/{pslug}/s/{sslug}
+  const hostScopedMatch = /^\/u\/([a-z0-9][a-z0-9-]*)\/h\/([a-z0-9][a-z0-9-]*)\/p\/([a-z0-9][a-z0-9-]*)\/s\/([a-z0-9][a-z0-9-]*)$/.exec(pathname)
   if (hostScopedMatch) return { screen: 'session', sessionId: hostScopedMatch[4], hostSlug: hostScopedMatch[2] }
-  // Legacy slug format: s/{uslug}/{pslug}/{sslug}
-  const slugSessionMatch = /^s\/([a-z0-9][a-z0-9-]*)\/([a-z0-9][a-z0-9-]*)\/([a-z0-9][a-z0-9-]*)$/.exec(hash)
+  // Legacy slug format: /s/{uslug}/{pslug}/{sslug}
+  const slugSessionMatch = /^\/s\/([a-z0-9][a-z0-9-]*)\/([a-z0-9][a-z0-9-]*)\/([a-z0-9][a-z0-9-]*)$/.exec(pathname)
   if (slugSessionMatch) return { screen: 'session', sessionId: slugSessionMatch[3] }
-  // Legacy UUID format: s/{uuid-or-id}
-  const sessionMatch = /^s\/(.+)$/.exec(hash)
+  // Legacy UUID format: /s/{uuid-or-id}
+  const sessionMatch = /^\/s\/(.+)$/.exec(pathname)
   if (sessionMatch) return { screen: 'session', sessionId: sessionMatch[1] }
   return { screen: 'dashboard' }
-}
-
-function navigate(hash: string) {
-  window.location.hash = hash
 }
 
 
@@ -130,7 +127,18 @@ function readAndClearRedirectParams(): RedirectParams | null {
 // ── Global singleton ──────────────────────────────────────────────────────
 const natsClient = new NATSClient()
 
+/** Outer shell that provides HashRouter. */
 export function App() {
+  return (
+    <HashRouter>
+      <AppInner />
+    </HashRouter>
+  )
+}
+
+function AppInner() {
+  const navigate = useNavigate()
+  const location = useLocation()
   // AuthStore uses window.location.origin as the server URL — no user input needed.
   const [authClient] = useState<AuthClient>(() => new AuthClient(window.location.origin))
   const [authStore, setAuthStore] = useState<AuthStore>(() => {
@@ -139,7 +147,7 @@ export function App() {
 
   const [authState, setAuthState] = useState(authStore.state)
   const [connected, setConnected] = useState(false)
-  const [route, setRoute] = useState(getRoute)
+  const route = useMemo(() => parseRoute(location.pathname), [location.pathname])
 
   // Decode role from JWT payload — returns 'admin' | 'user' | undefined
   const userRole = useMemo(() => {
@@ -184,6 +192,11 @@ export function App() {
         store.stop()
         store.start(resumeSeq)
       }
+      // Spec: restart KV watches so session/project/host state is fresh after reconnect
+      sessionStoreRef.current?.stopWatching()
+      sessionStoreRef.current?.startWatching()
+      heartbeatMonitorRef.current?.stop()
+      heartbeatMonitorRef.current?.start()
     })
     return () => { unsub1(); unsub2() }
   }, [])
@@ -218,7 +231,7 @@ export function App() {
 
     // Navigate to the goto route
     if (params.goto === 'settings') {
-      navigate('settings')
+      navigate('/settings')
     } else if (params.goto === 'new-project') {
       // Defer opening the sheet until auth + initial data load complete
       setOpenNewProject(true)
@@ -248,21 +261,18 @@ export function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Hash routing
-  useEffect(() => {
-    const handler = () => setRoute(getRoute())
-    window.addEventListener('hashchange', handler)
-    return () => window.removeEventListener('hashchange', handler)
-  }, [])
+  // Route is now derived from React Router's location — no manual hashchange listener needed.
 
   // X3: Background reconnect — mobile browsers (iOS Safari) kill the WebSocket
   // when the tab is backgrounded. On visibility restore, reconnect NATS so
   // the session store and event store resume without a full page reload.
+  // Spec: pass current JWT to reconnect(); restart KV watches after reconnect.
   useEffect(() => {
     const handler = () => {
       if (document.visibilityState !== 'visible') return
       if (!natsClient.isConnected()) {
-        natsClient.reconnect('').catch(() => {
+        const currentJwt = authStore.getJwt() ?? ''
+        natsClient.reconnect(currentJwt).catch(() => {
           // Reconnect failure is handled by the NATS disconnect/reconnect listeners
           // which update the connected state and eventually trigger auth refresh
         })
@@ -271,7 +281,7 @@ export function App() {
     document.addEventListener('visibilitychange', handler)
     return () => document.removeEventListener('visibilitychange', handler)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [authStore])
 
   // Track session store version — increments whenever any session changes so
   // App re-renders and picks up fresh session data (name, projectId, state).
@@ -360,13 +370,20 @@ export function App() {
           "- Create more sessions for different tasks or branches\n\n" +
           "Ask me anything to get started — like \"what's in this project?\" or \"help me fix this bug\". What would you like to work on?"
         )
-        navigate(`s/${sessionId}`)
+        navigate(`/s/${sessionId}`)
       } catch {
         // server unavailable (e.g. no session-agent) — user can create manually
       }
     }, 1000)
     return () => clearTimeout(timer)
   }, [sessionListVM])
+
+  // Refs for reconnect handler — kept in sync so the NATS onReconnect callback
+  // (which runs only once, on mount) can access the current instances.
+  const sessionStoreRef = useRef<SessionStore | null>(null)
+  sessionStoreRef.current = sessionStore
+  const heartbeatMonitorRef = useRef<HeartbeatMonitor | null>(null)
+  heartbeatMonitorRef.current = heartbeatMonitor
 
   // Per-session EventStore + ConversationVM + TerminalVM
   const [eventStore, setEventStore] = useState<EventStore | null>(null)
@@ -411,11 +428,10 @@ export function App() {
     // Check if current hash is already in slug format: s/{uslug}/{pslug}/{sslug}
     const rewriteProject = sessionStore.projects.get(session.projectId)
     const hslug = session.hostSlug ?? rewriteProject?.hostSlug ?? 'local'
-    const currentHash = window.location.hash.slice(1)
-    const expectedHash = `u/${uslug}/h/${hslug}/p/${session.projectSlug}/s/${session.slug}`
-    if (currentHash !== expectedHash) {
-      // Use replaceState so the slug URL doesn't create an extra history entry
-      history.replaceState(null, '', `#${expectedHash}`)
+    const expectedPath = `/u/${uslug}/h/${hslug}/p/${session.projectSlug}/s/${session.slug}`
+    if (location.pathname !== expectedPath) {
+      // Use replace so the slug URL doesn't create an extra history entry
+      navigate(expectedPath, { replace: true })
     }
   }, [route.screen, route.sessionId, sessionStore, sessionVersion, authState.userSlug, authState.userId])
 
@@ -452,6 +468,12 @@ export function App() {
     const vm = new ConversationVM(store, sessionStore, natsClient, authState.userId, resolvedProjectId, resolvedSessionId, resolvedUserSlug, resolvedHostSlug, resolvedProjectSlug ?? resolvedProjectId)
     const lifecycle = new LifecycleStore(natsClient, authState.userId, resolvedProjectId, resolvedUserSlug, resolvedHostSlug, resolvedProjectSlug ?? resolvedProjectId)
     lifecycle.start()
+    // Spec: wire lifecycle events to trigger session list refresh (e.g., session_created, session_failed)
+    const unsubLifecycle = lifecycle.onLifecycleEvent(() => {
+      // Bump session version to trigger re-render; the actual state comes from KV watches
+      // but lifecycle events provide faster notification that something changed.
+      setSessionVersion(v => v + 1)
+    })
     const tvm = new TerminalVM(natsClient, authState.userId, resolvedProjectId, resolvedUserSlug, resolvedHostSlug, resolvedProjectSlug ?? resolvedProjectId)
     setEventStore(store)
     setConversationVM(vm)
@@ -459,6 +481,7 @@ export function App() {
     return () => {
       store.stop()
       vm.destroy()
+      unsubLifecycle()
       lifecycle.stop()
     }
   // resolvedProjectId is set once per session (functional update), so this effect fires
@@ -514,7 +537,6 @@ export function App() {
     setConnected(false)
     navigate('/')
   }
-
 
   // ── X4: Version block screen ──────────────────────────────────────────
   // Shown when the client is below minClientVersion and a reload didn't fix it.
@@ -583,7 +605,7 @@ export function App() {
           sessions={sessionStore?.sessions}
           projects={sessionStore?.projects}
           role={userRole}
-          onNavigate={navigate}
+          onNavigate={(path: string) => navigate(path.startsWith('/') ? path : `/${path}`)}
         />
         {toast && <Toast message={toast.message} isError={toast.isError} />}
         {updateAvailable && <UpdateBanner />}
@@ -596,6 +618,7 @@ export function App() {
       <Fragment>
         <TokenUsage
           sessions={sessionStore ? Array.from(sessionStore.sessions.values()) : []}
+          projects={sessionStore ? Array.from(sessionStore.projects.values()) : []}
           onBack={() => navigate('/')}
           connected={connected}
         />
@@ -650,9 +673,9 @@ export function App() {
         <DashboardScreen
           sessionListVM={sessionListVM}
           connected={connected}
-          onSelectSession={id => navigate(`s/${id}`)}
-          onSettings={() => navigate('settings')}
-          onUsage={() => navigate('usage')}
+          onSelectSession={id => navigate(`/s/${id}`)}
+          onSettings={() => navigate('/settings')}
+          onUsage={() => navigate('/usage')}
           authClient={authClient}
           openNewProject={openNewProject}
           onNewProjectOpened={() => setOpenNewProject(false)}

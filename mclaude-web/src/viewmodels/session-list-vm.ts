@@ -157,9 +157,10 @@ export class SessionListVM {
     }))
   }
 
-  async createProject(name: string, gitUrl?: string, gitIdentityId?: string): Promise<string> {
-    const subject = subjProjectsCreate(this.userSlug as UserSlug)
-    const payload: Record<string, string> = { name }
+  async createProject(name: string, gitUrl?: string, gitIdentityId?: string, hostSlug?: string): Promise<string> {
+    const hslug = (hostSlug ?? 'local') as HostSlug
+    const subject = subjProjectsCreate(this.userSlug as UserSlug, hslug)
+    const payload: Record<string, string> = { name, hostSlug: hslug }
     if (gitUrl) payload['gitUrl'] = gitUrl
     if (gitIdentityId) payload['gitIdentityId'] = gitIdentityId
     const reply = await this.natsClient.request(subject, new TextEncoder().encode(JSON.stringify(payload)))
@@ -168,7 +169,7 @@ export class SessionListVM {
     return result.id
   }
 
-  async createSession(projectId: string, branch: string, name: string, opts?: { extraFlags?: string }): Promise<string> {
+  async createSession(projectId: string, branch: string, name: string, opts?: { extraFlags?: string; cwd?: string; joinWorktree?: boolean; permPolicy?: string; quotaMonitor?: boolean }): Promise<string> {
     const requestId = crypto.randomUUID()
     // ADR-0035: use host-scoped subject. Resolve hostSlug + pslug from project KV.
     const project = this.sessionStore.projects.get(projectId)
@@ -181,6 +182,10 @@ export class SessionListVM {
       name,
       requestId,
       ...(opts?.extraFlags !== undefined ? { extraFlags: opts.extraFlags } : {}),
+      ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
+      ...(opts?.joinWorktree !== undefined ? { joinWorktree: opts.joinWorktree } : {}),
+      ...(opts?.permPolicy !== undefined ? { permPolicy: opts.permPolicy } : {}),
+      ...(opts?.quotaMonitor !== undefined ? { quotaMonitor: opts.quotaMonitor } : {}),
     }
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
 
@@ -232,7 +237,8 @@ export class SessionListVM {
     const delPslug = (delProject?.slug ?? session.projectId) as ProjectSlug
     const delHslug = (delProject?.hostSlug ?? session.hostSlug ?? 'local') as HostSlug
     const subject = subjSessionsDelete(this.userSlug as UserSlug, delHslug, delPslug)
-    this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify({ sessionId })))
+    const deleteRequestId = crypto.randomUUID()
+    this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify({ sessionId, requestId: deleteRequestId })))
   }
 
   async restartSession(sessionId: string, opts?: { extraFlags?: string }): Promise<void> {
@@ -242,8 +248,10 @@ export class SessionListVM {
     const rstPslug = (rstProject?.slug ?? session.projectId) as ProjectSlug
     const rstHslug = (rstProject?.hostSlug ?? session.hostSlug ?? 'local') as HostSlug
     const subject = subjSessionsRestart(this.userSlug as UserSlug, rstHslug, rstPslug)
+    const restartRequestId = crypto.randomUUID()
     const payload = {
       sessionId,
+      requestId: restartRequestId,
       ...(opts?.extraFlags !== undefined ? { extraFlags: opts.extraFlags } : {}),
     }
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))

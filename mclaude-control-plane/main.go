@@ -21,6 +21,9 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"github.com/rs/zerolog"
+
+	"mclaude.io/common/pkg/slug"
+	"mclaude.io/common/pkg/subj"
 )
 
 func main() {
@@ -68,7 +71,7 @@ func main() {
 			logger.Fatal().Err(err).Msg("migrate schema")
 		}
 	} else {
-		logger.Warn().Msg("DATABASE_DSN not set — running without persistence")
+		logger.Fatal().Msg("DATABASE_DSN required")
 	}
 
 	// EXTERNAL_URL is required — control-plane exits on startup if empty.
@@ -262,7 +265,7 @@ func seedDev(ctx context.Context, db *DB, nc *nats.Conn, logger zerolog.Logger) 
 					logger.Error().Err(merr).Str("projectId", proj.ID).Msg("DEV_SEED: marshal provision request failed (non-fatal)")
 					continue
 				}
-				provSubject := "mclaude.users." + user.Slug + ".hosts." + localHostSlug + ".api.projects.create"
+				provSubject := subj.UserHostAPIProjectsProvision(slug.UserSlug(user.Slug), slug.HostSlug(localHostSlug))
 				provReply, reqErr := nc.Request(provSubject, provData, 30*time.Second)
 				if reqErr != nil {
 					logger.Warn().Err(reqErr).

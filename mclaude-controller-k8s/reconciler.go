@@ -63,7 +63,14 @@ func (r *MCProjectReconciler) Reconcile(ctx context.Context, req reconcile.Reque
 		return reconcile.Result{}, fmt.Errorf("get MCProject: %w", err)
 	}
 
+	// Gap 3: Transition through Pending before Provisioning.
 	if mcp.Status.Phase == "" {
+		if err := r.setPhase(ctx, &mcp, PhasePending); err != nil {
+			log.Warn().Err(err).Msg("set phase Pending")
+		}
+		return reconcile.Result{Requeue: true}, nil
+	}
+	if mcp.Status.Phase == PhasePending {
 		if err := r.setPhase(ctx, &mcp, PhaseProvisioning); err != nil {
 			log.Warn().Err(err).Msg("set phase Provisioning")
 		}
@@ -219,6 +226,10 @@ func (r *MCProjectReconciler) reconcileSecrets(ctx context.Context, mcp *MCProje
 			existingSecret.Data["oauth-token"] = []byte(r.devOAuthToken)
 			needsUpdate = true
 		}
+		// Gap 8: Ensure this MCProject is an owner of user-secrets.
+		if ownerErr := r.addOwnerIfMissing(ctx, mcp, existingSecret); ownerErr != nil {
+			r.logger.Warn().Err(ownerErr).Msg("add owner to user-secrets")
+		}
 		if needsUpdate {
 			if updateErr := r.client.Update(ctx, existingSecret); updateErr != nil {
 				return fmt.Errorf("patch user-secrets: %w", updateErr)
@@ -235,6 +246,10 @@ func (r *MCProjectReconciler) reconcileSecrets(ctx context.Context, mcp *MCProje
 		}
 		if r.devOAuthToken != "" {
 			secret.Data["oauth-token"] = []byte(r.devOAuthToken)
+		}
+		// Gap 8: Set this MCProject as owner of the new user-secrets Secret.
+		if ownerErr := ctrlutil.SetOwnerReference(mcp, secret, r.scheme); ownerErr != nil {
+			r.logger.Warn().Err(ownerErr).Msg("set owner on user-secrets")
 		}
 		if createErr := r.client.Create(ctx, secret); createErr != nil && !k8serrors.IsAlreadyExists(createErr) {
 			return fmt.Errorf("create user-secrets: %w", createErr)
@@ -300,6 +315,8 @@ func (r *MCProjectReconciler) buildPodTemplate(ctx context.Context, mcp *MCProje
 		{Name: "USER_SLUG", Value: mcp.Spec.UserSlug},
 		{Name: "HOST_SLUG", Value: tpl.hostSlug},
 		{Name: "PROJECT_SLUG", Value: mcp.Spec.ProjectSlug},
+		// Gap 4: CLAUDE_CODE_TMPDIR — persistent temp dir on the project-data volume.
+		{Name: "CLAUDE_CODE_TMPDIR", Value: "/data/claude-tmp"},
 	}
 	if gitURL != "" {
 		env = append(env, corev1.EnvVar{Name: "GIT_URL", Value: gitURL})
@@ -322,6 +339,8 @@ func (r *MCProjectReconciler) buildPodTemplate(ctx context.Context, mcp *MCProje
 		{Name: "claude-home", MountPath: "/home/node/.claude"},
 		{Name: "user-config", MountPath: "/home/node/.claude-seed", ReadOnly: true},
 		{Name: "user-secrets", MountPath: "/home/node/.user-secrets", ReadOnly: true},
+		// Gap 4: CLAUDE_CODE_TMPDIR — SubPath on project-data for persistent temp files.
+		{Name: "project-data", MountPath: "/data/claude-tmp", SubPath: "claude-tmp"},
 	}
 
 	annotations := map[string]string{}
@@ -473,7 +492,8 @@ func (r *MCProjectReconciler) ensurePVCCR(ctx context.Context, mcp *MCProject, n
 func (r *MCProjectReconciler) ensureOwned(ctx context.Context, mcp *MCProject, obj client.Object, create func() error) error {
 	key := types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}
 	if err := r.client.Get(ctx, key, obj); err == nil {
-		return nil
+		// Gap 7: Resource exists — add this MCProject as an additional owner if not already present.
+		return r.addOwnerIfMissing(ctx, mcp, obj)
 	} else if !k8serrors.IsNotFound(err) {
 		return err
 	}
@@ -484,6 +504,21 @@ func (r *MCProjectReconciler) ensureOwned(ctx context.Context, mcp *MCProject, o
 		return err
 	}
 	return nil
+}
+
+// addOwnerIfMissing adds the MCProject as an owner reference if it is not already present.
+// Uses SetOwnerReference (non-controller) to allow multiple owners on shared resources.
+func (r *MCProjectReconciler) addOwnerIfMissing(ctx context.Context, mcp *MCProject, obj client.Object) error {
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.UID == mcp.UID {
+			return nil // already an owner
+		}
+	}
+	if err := ctrlutil.SetOwnerReference(mcp, obj, r.scheme); err != nil {
+		r.logger.Warn().Err(err).Str("name", obj.GetName()).Msg("add owner ref")
+		return nil // non-fatal
+	}
+	return r.client.Update(ctx, obj)
 }
 
 func (r *MCProjectReconciler) loadTemplate(ctx context.Context) (*sessionAgentTpl, error) {

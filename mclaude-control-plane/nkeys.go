@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	natsjwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
@@ -137,7 +138,10 @@ func IssueUserJWT(userID string, userSlug string, accountKP nkeys.KeyPair, expir
 
 	claims := natsjwt.NewUserClaims(userKP.PublicKey)
 	claims.Name = userID
-	claims.Expires = expirySecs
+	if expirySecs > 0 {
+		claims.Expires = time.Now().Unix() + expirySecs
+	}
+	claims.IssuerAccount, _ = accountKP.PublicKey()
 	claims.Permissions.Pub.Allow = perms.PubAllow
 	claims.Permissions.Sub.Allow = perms.SubAllow
 
@@ -167,6 +171,7 @@ func IssueHostJWT(uslug, hslug string, accountKP nkeys.KeyPair) (jwt string, see
 	claims := natsjwt.NewUserClaims(userKP.PublicKey)
 	claims.Name = fmt.Sprintf("host-%s-%s", uslug, hslug)
 	// No expiry for host credentials (service credentials).
+	claims.IssuerAccount, _ = accountKP.PublicKey()
 	claims.Permissions.Pub.Allow = perms.PubAllow
 	claims.Permissions.Sub.Allow = perms.SubAllow
 
@@ -196,6 +201,7 @@ func IssueSessionAgentJWT(userID string, userSlug string, accountKP nkeys.KeyPai
 	claims := natsjwt.NewUserClaims(userKP.PublicKey)
 	claims.Name = "session-agent-" + userID
 	// Expires = 0 means no expiry for session-agent service credentials.
+	claims.IssuerAccount, _ = accountKP.PublicKey()
 	claims.Permissions.Pub.Allow = perms.PubAllow
 	claims.Permissions.Sub.Allow = perms.SubAllow
 

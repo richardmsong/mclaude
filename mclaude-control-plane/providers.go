@@ -406,7 +406,17 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		if err := s.reconcileUserCLIConfig(r.Context(), st.UserID); err != nil {
 			log.Warn().Err(err).Str("userId", st.UserID).Msg("OAuth: CLI config reconcile failed (non-fatal)")
 		}
+
+		// GAP-CP-11: Set users.oauth_id if currently NULL.
+		if profile.ProviderUserID != "" {
+			_, _ = s.db.pool.Exec(r.Context(),
+				`UPDATE users SET oauth_id = $1 WHERE id = $2 AND oauth_id IS NULL`,
+				profile.ProviderUserID, st.UserID)
+		}
 	}
+
+	// GAP-CP-03: Notify controllers so they refresh user-secrets with new tokens.
+	s.notifyHostsCredentialsChanged(r.Context(), st.UserID)
 
 	http.Redirect(w, r, externalURL+returnURL, http.StatusFound)
 }
@@ -496,6 +506,9 @@ func (s *Server) handleAddPAT(w http.ResponseWriter, r *http.Request) {
 			log.Warn().Err(err).Str("userId", userID).Msg("PAT: CLI config reconcile failed (non-fatal)")
 		}
 	}
+
+	// GAP-CP-03: Notify controllers so they refresh user-secrets with new PAT.
+	s.notifyHostsCredentialsChanged(r.Context(), userID)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -589,6 +602,9 @@ func (s *Server) handleDeleteConnection(w http.ResponseWriter, r *http.Request) 
 	if err := s.reconcileUserCLIConfig(r.Context(), userID); err != nil {
 		log.Warn().Err(err).Str("userId", userID).Msg("disconnect: CLI config reconcile failed (non-fatal)")
 	}
+
+	// GAP-CP-03: Notify controllers so they refresh user-secrets after disconnect.
+	s.notifyHostsCredentialsChanged(r.Context(), userID)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -728,6 +744,12 @@ func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 			if kvErr := writeProjectKV(s.nc, userID, kvUser.Slug, updatedProj.HostSlug, updatedProj); kvErr != nil {
 				log.Warn().Err(kvErr).Str("projectId", projectID).Msg("PATCH project: write KV failed (non-fatal)")
 			}
+			// GAP-CP-05: Notify controller so it applies project metadata changes.
+			if updatedProj.HostSlug != "" {
+				publishProjectsUpdateToHost(s.nc, kvUser.Slug, updatedProj.HostSlug)
+			}
+			// GAP-CP-10: Broadcast project state change to SPA.
+			publishProjectsUpdated(s.nc, kvUser.Slug)
 		}
 	}
 
@@ -1096,6 +1118,33 @@ func revokeToken(conn *OAuthConnection, token string, reg *providerRegistry) {
 			resp.Body.Close()
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// NATS credential change propagation (GAP-CP-03)
+// ---------------------------------------------------------------------------
+
+// notifyHostsCredentialsChanged publishes api.projects.update to all hosts for
+// a user so controllers refresh user-secrets after credential changes (OAuth
+// connect/disconnect, PAT add, GitLab token refresh).
+func (s *Server) notifyHostsCredentialsChanged(ctx context.Context, userID string) {
+	if s.nc == nil || s.db == nil {
+		return
+	}
+	user, err := s.db.GetUserByID(ctx, userID)
+	if err != nil || user == nil {
+		return
+	}
+	hosts, err := s.db.GetHostsByUser(ctx, userID)
+	if err != nil {
+		log.Warn().Err(err).Str("userId", userID).Msg("notifyHostsCredentialsChanged: get hosts failed")
+		return
+	}
+	for _, h := range hosts {
+		publishProjectsUpdateToHost(s.nc, user.Slug, h.Slug)
+	}
+	// Also broadcast user-level projects.updated so SPA refreshes.
+	publishProjectsUpdated(s.nc, user.Slug)
 }
 
 // ---------------------------------------------------------------------------
@@ -1536,6 +1585,10 @@ func (s *Server) refreshGitLabToken(ctx context.Context, conn *OAuthConnection) 
 	if err := s.reconcileUserCLIConfig(ctx, conn.UserID); err != nil {
 		log.Warn().Err(err).Str("connectionId", conn.ID).Msg("CLI config reconcile after refresh")
 	}
+
+	// GAP-CP-03: Notify controllers so they refresh user-secrets with new GitLab token.
+	s.notifyHostsCredentialsChanged(ctx, conn.UserID)
+
 	return nil
 }
 

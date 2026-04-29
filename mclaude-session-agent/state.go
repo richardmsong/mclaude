@@ -88,7 +88,7 @@ func removePendingControl(st *SessionState, requestID string) {
 // after a crash or ungraceful shutdown.  Called before restarting with --resume.
 func clearPendingControlsForResume(st *SessionState) {
 	st.PendingControls = make(map[string]any)
-	st.State = StateIdle
+	st.State = StateRestarting
 }
 
 // accumulateUsage adds token counts and cost from a result event to the session.
@@ -133,27 +133,40 @@ type QuotaMonitorConfig struct {
 
 // JobEntry is the value stored in the mclaude-job-queue KV bucket.
 // Key: {uslug}.{jobId} per ADR-0024.
+// ADR-0034 target schema adds: Prompt, Title, BranchSlug, ResumePrompt,
+// SoftThreshold, HardHeadroomTokens, PermPolicy, AllowedTools, ClaudeSessionID, PausedVia.
 type JobEntry struct {
-	ID           string     `json:"id"`
-	UserID       string     `json:"userId"`
-	UserSlug     string     `json:"userSlug,omitempty"`     // user slug (uslug) per ADR-0024
-	HostSlug     string     `json:"hostSlug,omitempty"`     // host slug (hslug) per ADR-0035
-	ProjectID    string     `json:"projectId"`
-	ProjectSlug  string     `json:"projectSlug,omitempty"`  // project slug (pslug) per ADR-0024
-	SessionID    string     `json:"sessionId"`
-	SessionSlug  string     `json:"sessionSlug,omitempty"`  // session slug (sslug) per ADR-0024
-	SpecPath     string     `json:"specPath"`
-	Priority     int        `json:"priority"`
-	Threshold    int        `json:"threshold"`
-	AutoContinue bool       `json:"autoContinue"`
-	Status       string     `json:"status"`
-	Branch       string     `json:"branch"`
-	PRUrl        string     `json:"prUrl"`
-	FailedTool   string     `json:"failedTool"`
-	Error        string     `json:"error"`
-	RetryCount   int        `json:"retryCount"`
-	ResumeAt     *time.Time `json:"resumeAt"`
-	CreatedAt    time.Time  `json:"createdAt"`
-	StartedAt    *time.Time `json:"startedAt"`
-	CompletedAt  *time.Time `json:"completedAt"`
+	ID                 string     `json:"id"`
+	UserID             string     `json:"userId"`
+	UserSlug           string     `json:"userSlug,omitempty"`           // user slug (uslug) per ADR-0024
+	HostSlug           string     `json:"hostSlug,omitempty"`           // host slug (hslug) per ADR-0035
+	ProjectID          string     `json:"projectId"`
+	ProjectSlug        string     `json:"projectSlug,omitempty"`        // project slug (pslug) per ADR-0024
+	SessionID          string     `json:"sessionId"`
+	SessionSlug        string     `json:"sessionSlug,omitempty"`        // session slug (sslug) per ADR-0024
+	SpecPath           string     `json:"specPath"`
+	Priority           int        `json:"priority"`
+	Threshold          int        `json:"threshold"`
+	AutoContinue       bool       `json:"autoContinue"`
+	Status             string     `json:"status"`
+	Branch             string     `json:"branch"`
+	PRUrl              string     `json:"prUrl"`
+	FailedTool         string     `json:"failedTool"`
+	Error              string     `json:"error"`
+	RetryCount         int        `json:"retryCount"`
+	ResumeAt           *time.Time `json:"resumeAt"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	StartedAt          *time.Time `json:"startedAt"`
+	CompletedAt        *time.Time `json:"completedAt"`
+	// ADR-0034 fields:
+	Prompt             string   `json:"prompt,omitempty"`
+	Title              string   `json:"title,omitempty"`
+	BranchSlug         string   `json:"branchSlug,omitempty"`
+	ResumePrompt       string   `json:"resumePrompt,omitempty"`
+	SoftThreshold      int      `json:"softThreshold,omitempty"`
+	HardHeadroomTokens int      `json:"hardHeadroomTokens,omitempty"`
+	PermPolicy         string   `json:"permPolicy,omitempty"`
+	AllowedTools       []string `json:"allowedTools,omitempty"`
+	ClaudeSessionID    string   `json:"claudeSessionId,omitempty"`
+	PausedVia          string   `json:"pausedVia,omitempty"`
 }

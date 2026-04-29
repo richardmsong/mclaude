@@ -26,15 +26,24 @@ func buildAgentBinary(t *testing.T) string {
 	return binPath
 }
 
-// TestHealthProbeExitsZero verifies that `session-agent --health` exits 0
-// without needing a NATS connection (liveness must not depend on NATS).
-func TestHealthProbeExitsZero(t *testing.T) {
+// TestHealthProbeFailsWithoutNATS verifies that `session-agent --health` exits
+// non-zero when NATS is not reachable (spec: checks process alive AND NATS connection).
+func TestHealthProbeFailsWithoutNATS(t *testing.T) {
 	bin := buildAgentBinary(t)
 
 	cmd := exec.Command(bin, "--health")
-	cmd.Env = os.Environ() // inherit, but NATS_URL may be anything — must not matter
-	if err := cmd.Run(); err != nil {
-		t.Errorf("--health exited non-zero: %v", err)
+	// Point at a port that will refuse connections immediately.
+	cmd.Env = append(os.Environ(), "NATS_URL=nats://127.0.0.1:14225")
+
+	start := time.Now()
+	err := cmd.Run()
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Error("--health should exit non-zero when NATS is unreachable, got exit 0")
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("--health took too long to fail: %v (want < 10s)", elapsed)
 	}
 }
 
@@ -98,15 +107,23 @@ func TestCLIFlagsHelp(t *testing.T) {
 	}
 }
 
-// TestHealthProbeIgnoresOtherFlags verifies that --health short-circuits flag
-// parsing and does not attempt to parse the remaining arguments.
+// TestHealthProbeShortCircuits verifies that --health short-circuits flag
+// parsing and responds quickly (success depends on NATS availability).
 func TestHealthProbeShortCircuits(t *testing.T) {
 	bin := buildAgentBinary(t)
 
-	// Pass --health as the only argument — should exit 0 immediately.
+	// Pass --health with an unreachable NATS — should exit non-zero quickly.
 	cmd := exec.Command(bin, "--health")
-	if err := cmd.Run(); err != nil {
-		t.Errorf("--health should exit 0: %v", err)
+	cmd.Env = append(os.Environ(), "NATS_URL=nats://127.0.0.1:14226")
+
+	start := time.Now()
+	_ = cmd.Run()
+	elapsed := time.Since(start)
+
+	// The main check is that the probe short-circuits flag parsing and
+	// responds quickly, regardless of exit code.
+	if elapsed > 10*time.Second {
+		t.Errorf("--health took too long: %v (want < 10s)", elapsed)
 	}
 }
 

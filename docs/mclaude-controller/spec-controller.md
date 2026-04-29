@@ -71,7 +71,7 @@ On each reconcile cycle:
 1. Loads the session-agent-template ConfigMap for image, resource, and PVC configuration.
 2. Ensures the user namespace exists with correct labels (including `mclaude.io/user-namespace: "true"` when corporate CA is enabled for trust-manager targeting).
 3. Ensures RBAC resources (ServiceAccount, Role, RoleBinding).
-4. Ensures the `user-config` ConfigMap and `user-secrets` Secret. NATS credentials in the Secret are the per-host JWT issued by control-plane (the controller does not mint JWTs).
+4. Ensures the `user-config` ConfigMap and `user-secrets` Secret. NATS credentials in the Secret are session-agent JWTs minted by the controller via `IssueSessionAgentJWT` (signed by the account signing key).
 5. Copies imagePullSecrets from the controller's namespace.
 6. Ensures the project PVC and Nix PVC.
 7. Ensures the session-agent Deployment with `Recreate` strategy. Pod env vars include `USER_ID`, `USER_SLUG`, `HOST_SLUG`, `PROJECT_ID`, `PROJECT_SLUG`, plus the standard NATS credentials mount.

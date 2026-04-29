@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+	"mclaude.io/common/pkg/slug"
 )
 
 // HostResponse is a single host entry in list/CRUD responses.
@@ -25,6 +26,8 @@ type HostResponse struct {
 	DirectNATSURL *string    `json:"directNatsUrl,omitempty"`
 	LastSeenAt    *time.Time `json:"lastSeenAt,omitempty"`
 	CreatedAt     time.Time  `json:"createdAt"`
+	JWT           string     `json:"jwt,omitempty"`      // GAP-CP-09: minted JWT for host auth
+	NKeySeed      string     `json:"nkeySeed,omitempty"` // GAP-CP-09: NKey seed for NATS connection
 }
 
 // HostCreateRequest is the body for POST /api/users/{uslug}/hosts.
@@ -52,10 +55,11 @@ type DeviceCodeResponse struct {
 
 // DeviceCodeStatusResponse is returned for GET /api/users/{uslug}/hosts/code/{code}.
 type DeviceCodeStatusResponse struct {
-	Status string  `json:"status"` // "pending" or "completed"
-	Slug   string  `json:"slug,omitempty"`
-	JWT    string  `json:"jwt,omitempty"`
-	HubURL string  `json:"hubUrl,omitempty"`
+	Status    string `json:"status"` // "pending" or "completed"
+	Slug      string `json:"slug,omitempty"`
+	JWT       string `json:"jwt,omitempty"`
+	HubURL    string `json:"hubUrl,omitempty"`
+	ExpiresAt int64  `json:"expiresAt,omitempty"` // KNOWN-15: Unix timestamp when the code expires
 }
 
 // HostRegisterRequest is the body for POST /api/hosts/register.
@@ -100,6 +104,24 @@ func generateDeviceCode() (string, error) {
 		return "", err
 	}
 	return strings.ToUpper(hex.EncodeToString(b)), nil
+}
+
+// handleUserAPIRoutes dispatches /api/users/{uslug}/* requests to the correct sub-handler.
+func (s *Server) handleUserAPIRoutes(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/users/")
+	parts := strings.SplitN(path, "/", 4)
+	if len(parts) < 2 {
+		http.NotFound(w, r)
+		return
+	}
+	switch parts[1] {
+	case "hosts":
+		s.handleHostRoutes(w, r)
+	case "projects":
+		s.handleProjectHTTPRoutes(w, r)
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 // handleHostRoutes dispatches /api/users/{uslug}/hosts/* requests.
@@ -201,8 +223,15 @@ func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request, userID
 		return
 	}
 
-	// Issue a per-host user JWT.
-	hostJWT, _, err := IssueHostJWT(userID, req.Slug, s.accountKP)
+	// KNOWN-04: Look up user slug for IssueHostJWT (must pass slug, not UUID).
+	user, err := s.db.GetUserByID(r.Context(), userID)
+	if err != nil || user == nil {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+
+	// Issue a per-host user JWT using user slug (KNOWN-04).
+	hostJWT, hostSeed, err := IssueHostJWT(user.Slug, req.Slug, s.accountKP)
 	if err != nil {
 		http.Error(w, "failed to issue host jwt", http.StatusInternalServerError)
 		return
@@ -222,6 +251,7 @@ func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request, userID
 		return
 	}
 
+	// GAP-CP-09: Return JWT and NKey seed so caller can connect to NATS.
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(HostResponse{ //nolint:errcheck
@@ -231,6 +261,8 @@ func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request, userID
 		Type:      "machine",
 		Role:      "owner",
 		CreatedAt: time.Now().UTC(),
+		JWT:       hostJWT,
+		NKeySeed:  string(hostSeed),
 	})
 }
 
@@ -272,6 +304,23 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request, userID
 	if s.db == nil {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
+	}
+
+	// GAP-CP-04: Before deleting the host (which cascades to projects),
+	// publish delete notifications for each project on this host so controllers
+	// can tear down per-project resources (namespaces, Deployments, PVCs, RBAC).
+	if s.nc != nil {
+		user, userErr := s.db.GetUserByID(r.Context(), userID)
+		if userErr == nil && user != nil {
+			projects, projErr := s.db.GetProjectsByHostSlug(r.Context(), userID, hslug)
+			if projErr == nil {
+				for _, p := range projects {
+					publishProjectsDeleteToHost(s.nc, user.Slug, hslug, p.ID)
+				}
+			}
+			// Broadcast user-level projects.updated so SPA refreshes.
+			publishProjectsUpdated(s.nc, user.Slug)
+		}
 	}
 
 	tag, err := s.db.pool.Exec(r.Context(), `
@@ -346,7 +395,8 @@ func (s *Server) handleHostCodeStatus(w http.ResponseWriter, r *http.Request, us
 	}
 
 	resp := DeviceCodeStatusResponse{
-		Status: "pending",
+		Status:    "pending",
+		ExpiresAt: entry.ExpiresAt.Unix(), // KNOWN-15: always include expiresAt
 	}
 	if entry.Completed {
 		resp.Status = "completed"
@@ -404,13 +454,20 @@ func (s *Server) handleHostRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Slugify the name for the host slug.
-	slug := slugify(req.Name)
-	if slug == "" {
-		slug = "host-" + req.Code[:4]
+	hostSlug := slugify(req.Name)
+	if hostSlug == "" {
+		hostSlug = "host-" + req.Code[:4]
 	}
 
-	// Issue a per-host user JWT.
-	hostJWT, _, err := IssueHostJWT(entry.UserID, slug, s.accountKP)
+	// KNOWN-04: Look up user slug for IssueHostJWT (must pass slug, not UUID).
+	regUser, userErr := s.db.GetUserByID(context.Background(), entry.UserID)
+	if userErr != nil || regUser == nil {
+		http.Error(w, "user not found", http.StatusInternalServerError)
+		return
+	}
+
+	// Issue a per-host user JWT using user slug (KNOWN-04).
+	hostJWT, _, err := IssueHostJWT(regUser.Slug, hostSlug, s.accountKP)
 	if err != nil {
 		http.Error(w, "failed to issue host jwt", http.StatusInternalServerError)
 		return
@@ -421,7 +478,7 @@ func (s *Server) handleHostRegister(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key, user_jwt)
 		VALUES ($1, $2, $3, $4, 'machine', 'owner', $5, $6)
 		ON CONFLICT (user_id, slug) DO UPDATE SET name = EXCLUDED.name, public_key = EXCLUDED.public_key, user_jwt = EXCLUDED.user_jwt`,
-		hostID, entry.UserID, slug, req.Name, entry.PublicKey, hostJWT)
+		hostID, entry.UserID, hostSlug, req.Name, entry.PublicKey, hostJWT)
 	if err != nil {
 		log.Error().Err(err).Msg("create host from device code")
 		http.Error(w, "failed to register host", http.StatusInternalServerError)
@@ -431,29 +488,33 @@ func (s *Server) handleHostRegister(w http.ResponseWriter, r *http.Request) {
 	// Mark device code as completed.
 	globalDeviceCodeStore.mu.Lock()
 	entry.Completed = true
-	entry.Slug = slug
+	entry.Slug = hostSlug
 	entry.JWT = hostJWT
 	globalDeviceCodeStore.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(HostRegisterResponse{ //nolint:errcheck
-		Slug:   slug,
+		Slug:   hostSlug,
 		JWT:    hostJWT,
 		HubURL: s.natsWsURL,
 	})
 }
 
 // slugify converts a display name to a URL-safe slug.
+// GAP-CP-08: Uses slug.Slugify from mclaude-common for proper Unicode handling,
+// then validates against the reserved-word blocklist and enforces max 63 char length.
+// Returns a fallback slug on reserved-word collision.
 func slugify(name string) string {
-	s := strings.ToLower(name)
-	var b strings.Builder
-	for _, c := range s {
-		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' {
-			b.WriteRune(c)
-		} else if c == ' ' || c == '_' {
-			b.WriteByte('-')
-		}
+	s := slug.Slugify(name)
+	if s == "" {
+		return ""
 	}
-	return strings.Trim(b.String(), "-")
+	// Validate against blocklist and charset; generate fallback on collision.
+	if err := slug.Validate(s); err != nil {
+		// Generate a deterministic fallback using a UUID seed.
+		uid := uuid.New()
+		return slug.ValidateOrFallback(s, slug.KindHost, uid)
+	}
+	return s
 }

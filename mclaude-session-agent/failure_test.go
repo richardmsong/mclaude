@@ -95,8 +95,8 @@ func TestResumeClearsPendingControls(t *testing.T) {
 	if len(staleSt.PendingControls) != 0 {
 		t.Errorf("expected pending controls cleared, got %d", len(staleSt.PendingControls))
 	}
-	if staleSt.State != StateIdle {
-		t.Errorf("expected state reset to idle, got %q", staleSt.State)
+	if staleSt.State != StateRestarting {
+		t.Errorf("expected state reset to restarting, got %q", staleSt.State)
 	}
 
 	// Step 3: Start a resumed session with the cleared state.

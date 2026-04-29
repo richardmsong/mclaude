@@ -6,7 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -33,19 +35,41 @@ func main() {
 	if len(os.Args) == 2 {
 		switch os.Args[1] {
 		case "--health":
-			os.Exit(0)
-		case "--ready":
+			// Spec: checks process alive and NATS connection status. Exits 0 if both OK.
 			natsURL := os.Getenv("NATS_URL")
 			if natsURL == "" {
 				natsURL = nats.DefaultURL
 			}
 			natsCredsFile := os.Getenv("NATS_CREDS_FILE")
-			nc, err := natsConnect(natsURL, natsCredsFile)
+			nc, err := natsProbeConnect(natsURL, natsCredsFile)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "health: NATS not reachable: %v\n", err)
+				os.Exit(1)
+			}
+			nc.Close()
+			os.Exit(0)
+		case "--ready":
+			// Spec: attempts a NATS connection and verifies Claude Code can be spawned.
+			natsURL := os.Getenv("NATS_URL")
+			if natsURL == "" {
+				natsURL = nats.DefaultURL
+			}
+			natsCredsFile := os.Getenv("NATS_CREDS_FILE")
+			nc, err := natsProbeConnect(natsURL, natsCredsFile)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "readiness: NATS not reachable: %v\n", err)
 				os.Exit(1)
 			}
 			nc.Close()
+			// Verify Claude Code binary exists (spec: GAP-SA-N2).
+			claudeBin := os.Getenv("CLAUDE_PATH")
+			if claudeBin == "" {
+				claudeBin = "claude"
+			}
+			if _, err := exec.LookPath(claudeBin); err != nil {
+				fmt.Fprintf(os.Stderr, "readiness: Claude binary not found: %v\n", err)
+				os.Exit(1)
+			}
 			os.Exit(0)
 		}
 	}
@@ -65,7 +89,7 @@ func main() {
 		flagRefreshURL  = flag.String("refresh-url", os.Getenv("REFRESH_URL"), "POST /auth/refresh URL for JWT refresh (--daemon only)")
 		flagUserSlug    = flag.String("user-slug", os.Getenv("USER_SLUG"), "User slug (uslug) per ADR-0024 (required in standalone mode)")
 		flagProjectSlug = flag.String("project-slug", os.Getenv("PROJECT_SLUG"), "Project slug (pslug) per ADR-0024 (required in standalone mode)")
-		flagHostSlug    = flag.String("host-slug", os.Getenv("HOST_SLUG"), "Host slug (hslug) per ADR-0035 (required)")
+		flagHostSlug    = flag.String("host", os.Getenv("HOST_SLUG"), "Host slug (hslug) per ADR-0035 (required)")
 	)
 	flag.Parse()
 
@@ -96,6 +120,14 @@ func main() {
 	projectSlug := slug.ProjectSlug(projectSlugStr)
 	hostSlugStr := *flagHostSlug
 	if slug.Validate(hostSlugStr) != nil {
+		// Try reading ~/.mclaude/active-host symlink target (spec: N4).
+		if home, hErr := os.UserHomeDir(); hErr == nil {
+			if target, lErr := os.Readlink(filepath.Join(home, ".mclaude", "active-host")); lErr == nil && target != "" {
+				hostSlugStr = slug.Slugify(target)
+			}
+		}
+	}
+	if slug.Validate(hostSlugStr) != nil {
 		hostSlugStr = slug.Slugify(*flagHostname)
 	}
 	if hostSlugStr == "" {
@@ -103,7 +135,7 @@ func main() {
 		hostSlugStr = slug.Slugify(h)
 	}
 	if hostSlugStr == "" {
-		hostSlugStr = "h-unknown"
+		log.Fatal().Msg("FATAL: HOST_SLUG required")
 	}
 	hostSlug := slug.HostSlug(hostSlugStr)
 	claudePath := *flagClaudePath
@@ -163,7 +195,7 @@ func main() {
 				"--claude-path", claudePath,
 				"--data-dir", dataDir,
 				"--user-slug", string(userSlug),
-				"--host-slug", string(hostSlug),
+				"--host", string(hostSlug),
 			},
 			Log: log.Logger,
 		}
@@ -239,9 +271,24 @@ func main() {
 	log.Info().Msg("session agent stopped")
 }
 
-// natsConnect connects to NATS, using a credentials file if one is provided.
-func natsConnect(natsURL, credsFile string) (*nats.Conn, error) {
+// natsProbeConnect connects to NATS for one-shot health/readiness probes.
+// Unlike natsConnect, it does NOT retry on failure so probes fail fast.
+func natsProbeConnect(natsURL, credsFile string) (*nats.Conn, error) {
 	opts := []nats.Option{}
+	if credsFile != "" {
+		opts = append(opts, nats.UserCredentials(credsFile))
+	}
+	return nats.Connect(natsURL, opts...)
+}
+
+// natsConnect connects to NATS, using a credentials file if one is provided.
+// Unlimited reconnects and retry-on-failed-connect ensure BYOH daemons never
+// permanently lose the NATS connection (spec: GAP-SA-K15).
+func natsConnect(natsURL, credsFile string) (*nats.Conn, error) {
+	opts := []nats.Option{
+		nats.MaxReconnects(-1),
+		nats.RetryOnFailedConnect(true),
+	}
 	if credsFile != "" {
 		opts = append(opts, nats.UserCredentials(credsFile))
 	}
