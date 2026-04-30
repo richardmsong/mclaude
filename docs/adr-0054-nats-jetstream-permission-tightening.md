@@ -280,13 +280,13 @@ Pub.Allow:
   # KV buckets: read-only. Sessions written by agents, projects/hosts by control-plane.
   # No $KV publish permissions — all mutations go through CP or session-agents.
   $O.mclaude-imports-alice.>             # Object Store: upload import archive chunks + metadata
-  $JS.API.DIRECT.GET.KV_mclaude-sessions-alice   # KV get: read session state
-  $JS.API.DIRECT.GET.KV_mclaude-projects-alice   # KV get: read project state
-  $JS.API.DIRECT.GET.KV_mclaude-hosts-alice      # KV get: read host state
-  $JS.API.CONSUMER.CREATE.KV_mclaude-sessions-alice   # KV watch: create consumer for live updates
-  $JS.API.CONSUMER.CREATE.KV_mclaude-projects-alice   # KV watch
-  $JS.API.CONSUMER.CREATE.KV_mclaude-hosts-alice      # KV watch
-  $JS.API.CONSUMER.CREATE.MCLAUDE_EVENTS_alice        # Events: create consumer for replay
+  $JS.API.DIRECT.GET.KV_mclaude-sessions-alice.>   # KV get: subject-form, covers all keys (users see all own data)
+  $JS.API.DIRECT.GET.KV_mclaude-projects-alice.>   # KV get: read project state
+  $JS.API.DIRECT.GET.KV_mclaude-hosts-alice.>      # KV get: read host state
+  $JS.API.CONSUMER.CREATE.KV_mclaude-sessions-alice.>   # KV watch: filtered form, any consumer + filter on own bucket
+  $JS.API.CONSUMER.CREATE.KV_mclaude-projects-alice.>   # KV watch
+  $JS.API.CONSUMER.CREATE.KV_mclaude-hosts-alice.>      # KV watch
+  $JS.API.CONSUMER.CREATE.MCLAUDE_EVENTS_alice.>        # Events: create consumer for replay
   $JS.API.STREAM.INFO.KV_mclaude-sessions-alice       # Stream info: needed by NATS client for KV init
   $JS.API.STREAM.INFO.KV_mclaude-projects-alice       # Stream info
   $JS.API.STREAM.INFO.KV_mclaude-hosts-alice          # Stream info
@@ -295,22 +295,33 @@ Pub.Allow:
   $JS.API.CONSUMER.INFO.KV_mclaude-sessions-alice.*   # Consumer info: needed by NATS client
   $JS.API.CONSUMER.INFO.KV_mclaude-projects-alice.*   # Consumer info
   $JS.API.CONSUMER.INFO.KV_mclaude-hosts-alice.*      # Consumer info
+  $JS.API.CONSUMER.INFO.MCLAUDE_EVENTS_alice.*        # Consumer info: event stream consumers
   $JS.ACK.KV_mclaude-sessions-alice.>    # Ack consumed KV messages
   $JS.ACK.KV_mclaude-projects-alice.>    # Ack consumed KV messages
   $JS.ACK.KV_mclaude-hosts-alice.>       # Ack consumed KV messages
   $JS.ACK.MCLAUDE_EVENTS_alice.>         # Ack consumed event messages
-  $JS.FC.>                               # Flow control (NATS requirement for consumers)
+  $JS.FC.KV_mclaude-sessions-alice.>     # Flow control: scoped to own streams
+  $JS.FC.KV_mclaude-projects-alice.>
+  $JS.FC.KV_mclaude-hosts-alice.>
+  $JS.FC.MCLAUDE_EVENTS_alice.>
+  $JS.FC.OBJ_mclaude-imports-alice.>
 
 Sub.Allow:
   mclaude.users.alice.hosts.*.>          # Receive replies from own hosts
-  _INBOX.>                               # Request/reply: all JetStream API responses (stream info,
-                                         #   consumer create/info, direct get) arrive here
+  _INBOX.>                               # Request/reply: all JetStream API responses arrive here.
+                                         #   Residual: _INBOX.> allows subscribing to all reply subjects
+                                         #   in the account. Low practical risk (random inbox prefixes).
+                                         #   Future: per-identity inbox prefixes with allow_responses.
   $KV.mclaude-sessions-alice.>           # KV watch: push delivery of session state changes
   $KV.mclaude-projects-alice.>           # KV watch: push delivery of project state changes
   $KV.mclaude-hosts-alice.>              # KV watch: push delivery of host state changes
   MCLAUDE_EVENTS_alice.>                 # Event replay: push delivery from event stream consumers
-  $O.mclaude-imports-alice.>             # Object Store: push delivery of chunks on get (if needed)
-  $JS.FC.>                               # Flow control (NATS requirement for consumers)
+  # No $O subscribe — users only upload to Object Store, not download.
+  $JS.FC.KV_mclaude-sessions-alice.>     # Flow control: scoped to own streams
+  $JS.FC.KV_mclaude-projects-alice.>
+  $JS.FC.KV_mclaude-hosts-alice.>
+  $JS.FC.MCLAUDE_EVENTS_alice.>
+  $JS.FC.OBJ_mclaude-imports-alice.>
 ```
 
 **What alice CANNOT do:** Anything involving `bob` — every resource name contains `alice`. No wildcards that could match other users' resources. No `$JS.API.STREAM.DELETE.*`, `$JS.API.STREAM.PURGE.*`, or `$JS.API.STREAM.CREATE.*` — users cannot create, delete, or purge streams. No KV writes — sessions are written by session-agents, projects and hosts by the control-plane. The SPA is read-only on all KV buckets; user actions that mutate state go through the control-plane via `mclaude.users.alice.hosts.*.>`.
@@ -341,16 +352,18 @@ Pub.Allow:
   _INBOX.>                                               # Request/reply (NATS requirement)
   $KV.mclaude-sessions-alice.laptop-a.myapp.>            # KV write: create/update/delete sessions for this project
   $KV.mclaude-projects-alice.laptop-a.myapp              # KV write: update this project's state (e.g., clear ImportObjectRef)
-  $KV.mclaude-job-queue-alice.laptop-a.myapp.>            # KV write: manage this project's job queue entries
-  $JS.API.DIRECT.GET.KV_mclaude-sessions-alice.laptop-a.myapp.>    # KV get: subject-form only, scoped to this project
-  $JS.API.DIRECT.GET.KV_mclaude-projects-alice.laptop-a.myapp     # KV get: this project's state
-  $JS.API.DIRECT.GET.KV_mclaude-hosts-alice.laptop-a              # KV get: this host's config (read-only, needed for self-configuration)
-  $JS.API.DIRECT.GET.KV_mclaude-job-queue-alice.laptop-a.myapp.>  # KV get: this project's jobs
-  $JS.API.CONSUMER.CREATE.KV_mclaude-sessions-alice.*.laptop-a.myapp.>      # KV watch: filtered form, scoped to this project's keys
-  $JS.API.CONSUMER.CREATE.KV_mclaude-projects-alice.*.laptop-a.myapp       # KV watch: this project only
-  $JS.API.CONSUMER.CREATE.KV_mclaude-hosts-alice.*.laptop-a                # KV watch: this host only
-  $JS.API.CONSUMER.CREATE.KV_mclaude-job-queue-alice.*.laptop-a.myapp.>    # KV watch: this project's jobs
-  $JS.API.CONSUMER.CREATE.MCLAUDE_EVENTS_alice.*.laptop-a.myapp.>          # Events: filtered to this project
+  $KV.mclaude-job-queue-alice.laptop-a.myapp.>           # KV write: manage this project's job queue entries
+  # Direct-get: subject-form with full $KV.<bucket>.<key> path (C2 fix)
+  $JS.API.DIRECT.GET.KV_mclaude-sessions-alice.$KV.mclaude-sessions-alice.laptop-a.myapp.>    # KV get: this project's sessions
+  $JS.API.DIRECT.GET.KV_mclaude-projects-alice.$KV.mclaude-projects-alice.laptop-a.myapp      # KV get: this project's state
+  $JS.API.DIRECT.GET.KV_mclaude-hosts-alice.$KV.mclaude-hosts-alice.laptop-a                  # KV get: this host's config (read-only)
+  $JS.API.DIRECT.GET.KV_mclaude-job-queue-alice.$KV.mclaude-job-queue-alice.laptop-a.myapp.>  # KV get: this project's jobs
+  # Consumer create: filtered form with full $KV.<bucket>.<key> filter subject (C1 fix)
+  $JS.API.CONSUMER.CREATE.KV_mclaude-sessions-alice.*.$KV.mclaude-sessions-alice.laptop-a.myapp.>      # KV watch: this project's sessions
+  $JS.API.CONSUMER.CREATE.KV_mclaude-projects-alice.*.$KV.mclaude-projects-alice.laptop-a.myapp        # KV watch: this project only
+  $JS.API.CONSUMER.CREATE.KV_mclaude-hosts-alice.*.$KV.mclaude-hosts-alice.laptop-a                    # KV watch: this host only
+  $JS.API.CONSUMER.CREATE.KV_mclaude-job-queue-alice.*.$KV.mclaude-job-queue-alice.laptop-a.myapp.>    # KV watch: this project's jobs
+  $JS.API.CONSUMER.CREATE.MCLAUDE_EVENTS_alice.*.MCLAUDE_EVENTS_alice.laptop-a.myapp.>                 # Events: filtered to this project
   $JS.API.STREAM.INFO.KV_mclaude-sessions-alice          # Stream info (NATS client needs this for KV init)
   $JS.API.STREAM.INFO.KV_mclaude-projects-alice
   $JS.API.STREAM.INFO.KV_mclaude-hosts-alice
@@ -361,12 +374,17 @@ Pub.Allow:
   $JS.API.CONSUMER.INFO.KV_mclaude-projects-alice.*
   $JS.API.CONSUMER.INFO.KV_mclaude-hosts-alice.*
   $JS.API.CONSUMER.INFO.KV_mclaude-job-queue-alice.*
+  $JS.API.CONSUMER.INFO.MCLAUDE_EVENTS_alice.*           # Consumer info: event stream consumers (L1 fix)
   $JS.ACK.KV_mclaude-sessions-alice.>                    # Ack consumed KV messages (consumer-specific tokens, not key names)
   $JS.ACK.KV_mclaude-projects-alice.>
   $JS.ACK.KV_mclaude-hosts-alice.>
   $JS.ACK.KV_mclaude-job-queue-alice.>
   $JS.ACK.MCLAUDE_EVENTS_alice.>
-  $JS.FC.>                                                # Flow control (NATS consumer requirement)
+  $JS.FC.KV_mclaude-sessions-alice.>                     # Flow control: scoped to own streams (M2 fix)
+  $JS.FC.KV_mclaude-projects-alice.>
+  $JS.FC.KV_mclaude-hosts-alice.>
+  $JS.FC.KV_mclaude-job-queue-alice.>
+  $JS.FC.MCLAUDE_EVENTS_alice.>
 
 Sub.Allow:
   mclaude.users.alice.hosts.laptop-a.projects.myapp.>    # Receive on this project's subjects only
@@ -375,9 +393,13 @@ Sub.Allow:
   $KV.mclaude-projects-alice.laptop-a.myapp              # KV watch: push delivery of this project's state
   $KV.mclaude-hosts-alice.laptop-a                       # KV watch: push delivery of this host's config only
   $KV.mclaude-job-queue-alice.laptop-a.myapp.>           # KV watch: push delivery of this project's jobs
-  MCLAUDE_EVENTS_alice.>                                 # Event replay: push delivery from event stream consumers
+  MCLAUDE_EVENTS_alice.laptop-a.myapp.>                  # Event replay: push delivery scoped to this project (L4 fix)
   # No Object Store subscribe — import downloads use a one-shot JWT
-  $JS.FC.>                                               # Flow control (NATS consumer requirement)
+  $JS.FC.KV_mclaude-sessions-alice.>                     # Flow control: scoped to own streams (M2 fix)
+  $JS.FC.KV_mclaude-projects-alice.>
+  $JS.FC.KV_mclaude-hosts-alice.>
+  $JS.FC.KV_mclaude-job-queue-alice.>
+  $JS.FC.MCLAUDE_EVENTS_alice.>
 ```
 
 **How per-project scoping works at each layer:**
@@ -387,7 +409,7 @@ Sub.Allow:
 | NATS subjects | `mclaude.users.alice.hosts.laptop-a.projects.myapp.>` | Agent can only publish/subscribe on its own project's command and event subjects |
 | KV pub/sub | `$KV.mclaude-sessions-alice.laptop-a.myapp.>` | Agent can only write KV entries keyed under its project. KV watch only delivers its project's updates. |
 | JetStream API | `$JS.API.*.KV_mclaude-sessions-alice` | Agent can call JetStream API on alice's session bucket (per-user bucket). Cannot access bob's buckets. |
-| KV direct-get | `$JS.API.DIRECT.GET.KV_mclaude-sessions-alice.laptop-a.myapp.>` | Uses subject-form direct-get (key appended to subject, not in payload). Agent can only read its own project's keys. Implementation must use subject-form; payload-form is not permitted. |
+| KV direct-get | `$JS.API.DIRECT.GET.KV_mclaude-sessions-alice.$KV.mclaude-sessions-alice.laptop-a.myapp.>` | Uses subject-form direct-get. The key portion is the **full message subject** (`$KV.<bucket>.<key>`), not just the key. Agent can only read its own project's keys. Implementation must use subject-form; payload-form is not permitted. |
 | Stream info | `$JS.API.STREAM.INFO.KV_mclaude-sessions-alice` | **Residual metadata leakage (accepted).** Stream info is per-stream (per-user bucket), not per-key. Agent can query aggregate metadata (message count, byte size, first/last sequence) for alice's entire sessions bucket, not just its project. Required by the NATS client SDK for KV bucket initialization — called unconditionally before any KV operation. Leaks activity volume across all projects but not key contents or values. |
 | Consumer info | `$JS.API.CONSUMER.INFO.KV_mclaude-sessions-alice.*` | **Residual metadata leakage (accepted).** The `*` wildcard allows querying info for any consumer on alice's bucket, not just the agent's own. Consumer names are ephemeral UUIDs — an attacker would need to guess or brute-force them. Even if found, consumer info reveals only delivery state (pending count, ack floor, last delivered sequence), not message contents. Cannot be tightened: consumer names are auto-generated at runtime by the NATS client. `$JS.API.CONSUMER.LIST` and `$JS.API.CONSUMER.NAMES` are NOT granted — agent cannot enumerate consumers. |
 
@@ -403,19 +425,23 @@ a second credential alongside the standard agent JWT. This one-shot JWT permits 
 exact Object Store subjects needed to download the specific import tarball:
 
 ```
-One-shot Import JWT (1h safety TTL, revoked on completion):
+One-shot Import JWT (max_connections: 1, 1h safety TTL, revoked on completion):
 Pub.Allow:
-  $O.mclaude-imports-alice.C.<sha256-chunk-1>    # exact chunk subjects (CP knows them)
-  $O.mclaude-imports-alice.C.<sha256-chunk-2>
-  ...
-  $O.mclaude-imports-alice.M.<object-name>       # exact metadata subject
-  $JS.API.STREAM.INFO.OBJ_mclaude-imports-alice  # OS client init
+  _INBOX.>                                                                                  # request/reply
+  $JS.API.STREAM.INFO.OBJ_mclaude-imports-alice                                             # OS client init
+  $JS.API.DIRECT.GET.OBJ_mclaude-imports-alice.$O.mclaude-imports-alice.M.<object-name>     # metadata fetch (subject-form)
+  $JS.API.CONSUMER.CREATE.OBJ_mclaude-imports-alice.>                                       # consumer for chunk download
+  $JS.API.CONSUMER.INFO.OBJ_mclaude-imports-alice.*                                         # consumer info
+  $JS.ACK.OBJ_mclaude-imports-alice.>                                                       # ack consumed chunks
+  $JS.FC.OBJ_mclaude-imports-alice.>                                                        # flow control
+  # No $O.* publish — that would WRITE chunks/metadata. This JWT is download-only.
 Sub.Allow:
   _INBOX.>                                       # request/reply responses
-  $O.mclaude-imports-alice.C.<sha256-chunk-1>    # receive chunk data
+  $O.mclaude-imports-alice.C.<sha256-chunk-1>    # receive chunk data (push delivery from consumer)
   $O.mclaude-imports-alice.C.<sha256-chunk-2>
   ...
-  $O.mclaude-imports-alice.M.<object-name>       # receive metadata
+  $O.mclaude-imports-alice.M.<object-name>       # receive metadata (push delivery)
+  $JS.FC.OBJ_mclaude-imports-alice.>             # flow control
 ```
 
 **Lifecycle:**
@@ -459,12 +485,14 @@ normal operation.
 Pub.Allow:
   mclaude.hosts.laptop-a.>              # Provisioning: receive and reply to project create/delete
   _INBOX.>                              # Request/reply
-  $SYS.ACCOUNT.*.CONNECT                # System events: connection tracking
-  $SYS.ACCOUNT.*.DISCONNECT             # System events: disconnection tracking
 
 Sub.Allow:
   mclaude.hosts.laptop-a.>              # Subscribe to provisioning requests for this host
   _INBOX.>                              # Request/reply
+  $SYS.ACCOUNT.*.CONNECT               # System events: receive connection notifications (M3 fix: moved from Pub)
+  $SYS.ACCOUNT.*.DISCONNECT            # System events: receive disconnection notifications
+  # Residual (M4): account wildcard * matches all accounts. Harmless in single-account
+  # architecture. If multi-account support is added (deferred), scope to specific account ID.
 ```
 
 **No `$JS.*`, `$KV.*`, or `$O.*` subjects at all.** The host controller only uses NATS core pub/sub for provisioning commands. Session-agents get their own separate per-user JWTs with JetStream access.
@@ -509,12 +537,13 @@ The wildcard `mclaude.users.*.hosts.{hslug}.>` is reserved exclusively for the p
 Pub.Allow:
   mclaude.hosts.us-east.>               # Provisioning: this cluster (same as any host)
   _INBOX.>                              # Request/reply
-  $SYS.ACCOUNT.*.CONNECT                # System events
-  $SYS.ACCOUNT.*.DISCONNECT             # System events
 
 Sub.Allow:
   mclaude.hosts.us-east.>               # Subscribe to provisioning for this cluster
   _INBOX.>                              # Request/reply
+  $SYS.ACCOUNT.*.CONNECT               # System events: receive connection notifications
+  $SYS.ACCOUNT.*.DISCONNECT            # System events: receive disconnection notifications
+  # Residual: same account wildcard note as BYOH hosts (see M4 above)
 ```
 
 **Identical structure to BYOH hosts.** With host-scoped subjects, the platform controller no longer needs a wildcard user (`mclaude.users.*.hosts.us-east.>`). It subscribes to `mclaude.hosts.us-east.>` — the same pattern as any other host. The control-plane publishes provisioning requests here after validating group membership. Zero JetStream access.
@@ -528,6 +557,82 @@ Sub.Allow:
 ```
 
 The control-plane is the JWT issuer and the authoritative writer for project/host KV state. It connects to NATS with its own credentials and has access to all resources. If the control-plane is compromised, all credentials are compromised. Scoping it further is not meaningful — it IS the trust root for non-operator identities.
+
+## NATS Subject Derivation Reference
+
+How each NATS subject pattern is composed. Use this to verify the permission specs above.
+
+**Sources:**
+- [JetStream wire API Reference](https://docs.nats.io/reference/reference-protocols/nats_api_reference) — stream, consumer, and message API subjects; ACL patterns
+- [ADR-115: Get Message Enhancement (Direct API)](https://github.com/nats-io/nats-architecture-and-design/issues/115) — subject-form direct-get (`$JS.API.DIRECT.GET.<stream>.<subject>`), permission scoping rationale
+- [nats.net#770: Subject in GetDirectAsync differs across client libraries](https://github.com/nats-io/nats.net/issues/770) — confirms Go client uses subject-form by default, `.NET` fixed to match
+- [nats.py#193: Reconnect on JWT expiry](https://github.com/nats-io/nats.py/issues/193) — confirms NATS server disconnects clients on JWT expiry
+- [NATS JWT Guide](https://docs.nats.io/running-a-nats-service/nats_admin/security/jwt) — JWT fields including `max_connections`, TTL, revocation lists
+- NATS server source: KV subjects in `kv.go`, Object Store subjects in `object.go`, consumer create filtered form in `jetstream_api.go`
+
+### KV (Key-Value)
+
+KV is built on JetStream streams. Bucket `foo` is backed by stream `KV_foo`.
+
+| Operation | Subject | Notes |
+|-----------|---------|-------|
+| **Put** (write key) | `$KV.foo.mykey` | Client publishes value to this subject. Multi-token keys supported: `$KV.foo.a.b.c` |
+| **Watch** (subscribe to changes) | `$KV.foo.>` | Push delivery. Client creates a consumer with filter `$KV.foo.>` (or narrower) and subscribes to the delivery subject. Messages arrive on `$KV.foo.<key>`. |
+| **Get** (direct-get, payload form) | Pub to `$JS.API.DIRECT.GET.KV_foo` with payload `{"last_by_subj":"$KV.foo.mykey"}` | Response on `_INBOX`. Key is in payload, not subject — **cannot be permission-scoped by key**. |
+| **Get** (direct-get, subject form) | Pub to `$JS.API.DIRECT.GET.KV_foo.$KV.foo.mykey` | Response on `_INBOX`. Key is the **full message subject** `$KV.<bucket>.<key>` appended to the API subject. **Can be permission-scoped.** Go client uses this form by default. |
+| **Delete** (tombstone) | `$KV.foo.mykey` with `KV-Operation: DEL` header | Same subject as Put. |
+
+**Key insight:** The "key" in KV direct-get subject form is the full message subject (`$KV.<bucket>.<key>`), not just the key portion. This is why permission entries look like `$JS.API.DIRECT.GET.KV_foo.$KV.foo.prefix.>` — the bucket name appears twice.
+
+### Object Store
+
+Object Store is built on JetStream streams. Bucket `bar` is backed by stream `OBJ_bar`.
+
+| Operation | Subject | Notes |
+|-----------|---------|-------|
+| **Put chunk** (upload) | `$O.bar.C.<sha256>` | Content-addressed. **No object name or key in the chunk subject.** |
+| **Put metadata** (upload) | `$O.bar.M.<object-name>` | Object name can contain `.` tokens: `$O.bar.M.path.to.file` |
+| **Get** (download) | Creates an ordered consumer on `OBJ_bar`, filtered to the object's chunk subjects. Chunks delivered via push subscription to `$O.bar.C.<sha256>`. Metadata fetched via direct-get: `$JS.API.DIRECT.GET.OBJ_bar.$O.bar.M.<object-name>` |
+| **Watch** (list/observe) | Consumer on `OBJ_bar` filtered to `$O.bar.M.>` | Metadata-only watch. |
+
+**Key insight:** Chunk subjects are content-addressed by SHA256 — no object name, path, or owner info. Per-object scoping via subject permissions requires enumerating exact chunk SHAs. Per-bucket scoping (`$O.bar.>`) is the practical minimum for standing access.
+
+### JetStream API
+
+All JetStream API calls are request/reply: client publishes to `$JS.API.*`, server responds on `_INBOX.>`.
+
+| Operation | Subject | Notes |
+|-----------|---------|-------|
+| **Stream info** | `$JS.API.STREAM.INFO.<stream>` | Per-stream, not per-key. Returns aggregate metadata. |
+| **Consumer create** (unfiltered) | `$JS.API.CONSUMER.CREATE.<stream>` | Config in payload. Legacy form — modern clients prefer filtered form. |
+| **Consumer create** (filtered, single filter) | `$JS.API.CONSUMER.CREATE.<stream>.<consumer>.<filter_subject>` | `<consumer>` is the consumer name (often auto-generated UUID). `<filter_subject>` is the **full message subject pattern** being filtered on (e.g., `$KV.foo.prefix.>`). NATS 2.10+. |
+| **Consumer info** | `$JS.API.CONSUMER.INFO.<stream>.<consumer>` | Point lookup by consumer name. |
+| **Consumer list/names** | `$JS.API.CONSUMER.LIST.<stream>`, `$JS.API.CONSUMER.NAMES.<stream>` | Enumerates all consumers. **Not granted to any non-CP identity.** |
+| **Stream create/delete/purge** | `$JS.API.STREAM.CREATE.<stream>`, etc. | **Not granted to any non-CP identity.** |
+| **Message ack** | `$JS.ACK.<stream>.<consumer>.<delivered>.<stream_seq>.<consumer_seq>.<timestamp>.<pending>` | Consumer-specific. The `>` wildcard after stream covers all consumer tokens. |
+| **Flow control** | `$JS.FC.<stream>.<consumer_id>.<sequence>` | Server sends FC message; client must reply. Per-stream scoping: `$JS.FC.<stream>.>` |
+
+**Key insight for consumer create:** The filter subject in position 3+ is the **full message subject**, not a key. For KV bucket `foo` with key `a.b.c`, the filter is `$KV.foo.a.b.c`, making the full API subject `$JS.API.CONSUMER.CREATE.KV_foo.<consumer>.$KV.foo.a.b.c`. The bucket name appears in both the stream name and the filter.
+
+### NATS Core
+
+| Operation | Subject | Notes |
+|-----------|---------|-------|
+| **Request/reply** | Pub to any subject with reply-to `_INBOX.<random>` | Response arrives on `_INBOX.<random>`. All JetStream API uses this. |
+| **System events** | `$SYS.ACCOUNT.<account_id>.CONNECT`, `$SYS.ACCOUNT.<account_id>.DISCONNECT` | Published by server, not clients. Clients need Sub permission to receive. |
+
+### mclaude Resource Naming
+
+| Resource type | Stream name | Subject prefix | Key structure |
+|---------------|-------------|----------------|---------------|
+| Sessions KV | `KV_mclaude-sessions-{uslug}` | `$KV.mclaude-sessions-{uslug}.` | `{hslug}.{pslug}.{sslug}` |
+| Projects KV | `KV_mclaude-projects-{uslug}` | `$KV.mclaude-projects-{uslug}.` | `{hslug}.{pslug}` |
+| Hosts KV | `KV_mclaude-hosts-{uslug}` | `$KV.mclaude-hosts-{uslug}.` | `{hslug}` |
+| Job Queue KV | `KV_mclaude-job-queue-{uslug}` | `$KV.mclaude-job-queue-{uslug}.` | `{hslug}.{pslug}.{jobid}` |
+| Events stream | `MCLAUDE_EVENTS_{uslug}` | `MCLAUDE_EVENTS_{uslug}.` | `{hslug}.{pslug}.{sslug}.{seq}` |
+| Imports Object Store | `OBJ_mclaude-imports-{uslug}` | `$O.mclaude-imports-{uslug}.` | `C.<sha256>` / `M.<object-name>` |
+| App subjects | — | `mclaude.users.{uslug}.hosts.{hslug}.` | `projects.{pslug}.>` |
+| Host subjects | — | `mclaude.hosts.{hslug}.` | `api.>` |
 
 ## Component Changes
 
