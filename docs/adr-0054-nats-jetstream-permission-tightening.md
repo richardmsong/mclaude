@@ -39,6 +39,7 @@ The fix: replace broad wildcards with the minimum JetStream subjects each identi
 | Credential lifecycle | Short TTL + proactive refresh for all identity types | Host JWTs: 5 min TTL (frequent membership changes). Session-agent JWTs: 5 min TTL (consistent). User JWTs: keep existing ~8h TTL (SPA already refreshes every 60s; users don't change permissions as frequently). All refresh via NKey signature challenge. |
 | Session-agent JWT issuance | Control-plane only (host controllers no longer hold the account key) | Hosts request agent credentials from the control-plane via NATS. CP validates group membership, project ownership, and host assignment before minting. Removes the account signing key from all host controllers — hosts can request credentials but not forge them. |
 | Session-agent refresh auth | NKey signature challenge | Agent signs a nonce with its NKey seed, control-plane validates against stored public key, issues new JWT. Most robust — survives JWT expiry, cryptographic proof of identity. |
+| NATS topology | All agents (BYOH and K8s) connect directly to hub NATS | Leaf-node topology removed from scope. When a leaf node has a JetStream domain set, `$JS.API.>` is suppressed — clients must use `$JS.{domain}.API.*` to reach hub. This adds complexity and brittleness (host operator must configure NATS correctly). Direct hub connection is simpler, more robust, and keeps one set of permission specs. Leaf-node topology can be added later as opt-in for offline resilience if needed. |
 | Migration | Self-healing via credential refresh | Deploy new permission code. On next refresh cycle (within 24h), session-agents automatically receive tightened JWTs. For immediate effect, restart agents to trigger immediate refresh. |
 | Bucket lifecycle | Control-plane creates per-user buckets on user registration | Buckets are provisioned once. If a bucket is missing at runtime, the control-plane creates it on demand. |
 | Host binding model | Every host is bound to a group; groups have members | Unifies single-user BYOH, team BYOH, and platform hosts. Platform host = "everyone" group. No separate code paths. |
@@ -260,11 +261,25 @@ With tightened permissions + TTL on all credential types, the blast radius reduc
 | User A ↔ User B (NATS subjects) | Subject-level pub/sub scoping | None — correctly enforced | N/A |
 | User A ↔ User B (JetStream/KV) | None (`$JS.API.>` wildcard) | Full cross-user read/write | Scope JetStream API subjects to user's own buckets |
 | User A ↔ User B (Object Store) | None (Object Store uses JetStream API) | Full cross-user read/write | Per-user buckets + scoped permissions |
-| Host ↔ other users (NATS subjects) | Subject-level scoping to `{uslug}.{hslug}` | None — correctly enforced | N/A |
-| Host ↔ other users (JetStream) | None (`$JS.*.API.>` wildcard) | Full cross-user read/write | Scope host JetStream to operational needs only |
-| Session-agent ↔ other users (KV) | None (unscoped `$KV.*.>` wildcards) | Full cross-user read/write | Scope KV subjects to agent's user prefix |
+| Host ↔ other users (NATS subjects) | `mclaude.hosts.{hslug}.>` — group membership enforced by control-plane, not NATS subject scoping | None — correctly enforced | N/A |
+| Host ↔ other users (JetStream) | Removed entirely — zero `$JS.*`, `$KV.*`, or `$O.*` subjects | None | N/A |
+| Session-agent ↔ other users (KV) | Per-project scoped: `$KV.mclaude-sessions-{uslug}.{hslug}.{pslug}.>` | None — per-project scoped | N/A |
 | Session-agent ↔ other users (JetStream) | None (`$JS.API.>` wildcard) | Full cross-user read/write | Scope JetStream API to user's own resources |
 | Platform controller ↔ all users | By design (wildcard user for provisioning) | JetStream access broader than needed | Scope controller JetStream to provisioning operations only (it doesn't use KV/ObjectStore directly) |
+
+### Post-Fix Residual Risks
+
+**R1: Group membership authorization** — The group API endpoints must enforce that only the group owner (or platform operator) can modify membership. Without this, any authenticated user could add themselves to any group. This is an application-layer authorization check, not a NATS-level concern.
+
+**R2: Control-plane compromise** — CP holds the account signing key and is the sole JWT issuer. CP compromise = all credentials compromised. CP unavailability causes cascading credential expiry (5-min TTL for hosts/agents). This is inherent to centralized credential issuance and accepted.
+
+**R3: Membership cache staleness** — 60-second cache TTL means a removed user could obtain credentials for up to 60 seconds after removal. The explicit "refresh now" signal handles the common case; the 60s window is the fallback.
+
+**R4: Stream info / consumer info metadata leakage** — Documented in the session-agent permission spec. Per-user bucket, not per-project. Leaks activity volume, not content.
+
+**R5: `_INBOX.>` cross-client eavesdropping** — Single-account limitation. Random inbox prefixes make targeted eavesdropping impractical. Future: per-identity inbox prefixes.
+
+**R6: One-shot JWT crash scenario** — If agent crashes without signaling completion, the one-shot JWT remains valid for up to 1 hour (safety TTL). `max_connections: 1` prevents concurrent use but not sequential reuse after disconnect.
 
 ## Full Permission Specifications by Identity
 
@@ -287,23 +302,33 @@ Pub.Allow:
   $JS.API.CONSUMER.CREATE.KV_mclaude-projects-alice.>   # KV watch
   $JS.API.CONSUMER.CREATE.KV_mclaude-hosts-alice.>      # KV watch
   $JS.API.CONSUMER.CREATE.MCLAUDE_EVENTS_alice.>        # Events: create consumer for replay
+  $JS.API.CONSUMER.CREATE.MCLAUDE_API_alice.>          # API stream: create consumer to send commands
+  $JS.API.CONSUMER.CREATE.MCLAUDE_LIFECYCLE_alice.>    # Lifecycle stream: create consumer to watch lifecycle events
   $JS.API.STREAM.INFO.KV_mclaude-sessions-alice       # Stream info: needed by NATS client for KV init
   $JS.API.STREAM.INFO.KV_mclaude-projects-alice       # Stream info
   $JS.API.STREAM.INFO.KV_mclaude-hosts-alice          # Stream info
   $JS.API.STREAM.INFO.MCLAUDE_EVENTS_alice            # Stream info: event stream metadata
+  $JS.API.STREAM.INFO.MCLAUDE_API_alice              # Stream info: API stream metadata
+  $JS.API.STREAM.INFO.MCLAUDE_LIFECYCLE_alice        # Stream info: lifecycle stream metadata
   $JS.API.STREAM.INFO.OBJ_mclaude-imports-alice       # Stream info: Object Store bucket metadata
   $JS.API.CONSUMER.INFO.KV_mclaude-sessions-alice.*   # Consumer info: needed by NATS client
   $JS.API.CONSUMER.INFO.KV_mclaude-projects-alice.*   # Consumer info
   $JS.API.CONSUMER.INFO.KV_mclaude-hosts-alice.*      # Consumer info
   $JS.API.CONSUMER.INFO.MCLAUDE_EVENTS_alice.*        # Consumer info: event stream consumers
+  $JS.API.CONSUMER.INFO.MCLAUDE_API_alice.*          # Consumer info: API stream consumers
+  $JS.API.CONSUMER.INFO.MCLAUDE_LIFECYCLE_alice.*    # Consumer info: lifecycle stream consumers
   $JS.ACK.KV_mclaude-sessions-alice.>    # Ack consumed KV messages
   $JS.ACK.KV_mclaude-projects-alice.>    # Ack consumed KV messages
   $JS.ACK.KV_mclaude-hosts-alice.>       # Ack consumed KV messages
   $JS.ACK.MCLAUDE_EVENTS_alice.>         # Ack consumed event messages
+  $JS.ACK.MCLAUDE_API_alice.>            # Ack consumed API stream messages
+  $JS.ACK.MCLAUDE_LIFECYCLE_alice.>      # Ack consumed lifecycle stream messages
   $JS.FC.KV_mclaude-sessions-alice.>     # Flow control: scoped to own streams
   $JS.FC.KV_mclaude-projects-alice.>
   $JS.FC.KV_mclaude-hosts-alice.>
   $JS.FC.MCLAUDE_EVENTS_alice.>
+  $JS.FC.MCLAUDE_API_alice.>
+  $JS.FC.MCLAUDE_LIFECYCLE_alice.>
   $JS.FC.OBJ_mclaude-imports-alice.>
 
 Sub.Allow:
@@ -315,12 +340,15 @@ Sub.Allow:
   $KV.mclaude-sessions-alice.>           # KV watch: push delivery of session state changes
   $KV.mclaude-projects-alice.>           # KV watch: push delivery of project state changes
   $KV.mclaude-hosts-alice.>              # KV watch: push delivery of host state changes
-  MCLAUDE_EVENTS_alice.>                 # Event replay: push delivery from event stream consumers
+  # Event stream push delivery covered by mclaude.users.alice.hosts.*.> (messages use mclaude.users.* subjects)
+  MCLAUDE_LIFECYCLE_alice.>              # Lifecycle stream: push delivery (if using push consumers)
   # No $O subscribe — users only upload to Object Store, not download.
   $JS.FC.KV_mclaude-sessions-alice.>     # Flow control: scoped to own streams
   $JS.FC.KV_mclaude-projects-alice.>
   $JS.FC.KV_mclaude-hosts-alice.>
   $JS.FC.MCLAUDE_EVENTS_alice.>
+  $JS.FC.MCLAUDE_API_alice.>
+  $JS.FC.MCLAUDE_LIFECYCLE_alice.>
   $JS.FC.OBJ_mclaude-imports-alice.>
 ```
 
@@ -348,7 +376,8 @@ New projects get new agents with new JWTs — no existing credential needs updat
 
 ```
 Pub.Allow:
-  mclaude.users.alice.hosts.laptop-a.projects.myapp.>    # Lifecycle events, session updates — this project only
+  mclaude.users.alice.hosts.laptop-a.projects.myapp.>    # Lifecycle events, session updates, credential refresh — this project only
+                                                         # (includes refresh subject: mclaude.users.alice.hosts.laptop-a.projects.myapp.api.agents.refresh)
   _INBOX.>                                               # Request/reply (NATS requirement)
   $KV.mclaude-sessions-alice.laptop-a.myapp.>            # KV write: create/update/delete sessions for this project
   $KV.mclaude-projects-alice.laptop-a.myapp              # KV write: update this project's state (e.g., clear ImportObjectRef)
@@ -363,28 +392,38 @@ Pub.Allow:
   $JS.API.CONSUMER.CREATE.KV_mclaude-projects-alice.*.$KV.mclaude-projects-alice.laptop-a.myapp        # KV watch: this project only
   $JS.API.CONSUMER.CREATE.KV_mclaude-hosts-alice.*.$KV.mclaude-hosts-alice.laptop-a                    # KV watch: this host only
   $JS.API.CONSUMER.CREATE.KV_mclaude-job-queue-alice.*.$KV.mclaude-job-queue-alice.laptop-a.myapp.>    # KV watch: this project's jobs
-  $JS.API.CONSUMER.CREATE.MCLAUDE_EVENTS_alice.*.MCLAUDE_EVENTS_alice.laptop-a.myapp.>                 # Events: filtered to this project
+  $JS.API.CONSUMER.CREATE.MCLAUDE_EVENTS_alice.*.mclaude.users.alice.hosts.laptop-a.projects.myapp.events.*   # Events: filtered to this project
+  $JS.API.CONSUMER.CREATE.MCLAUDE_API_alice.*.mclaude.users.alice.hosts.laptop-a.projects.myapp.api.sessions.>   # API: filtered to this project's commands
+  $JS.API.CONSUMER.CREATE.MCLAUDE_LIFECYCLE_alice.*.mclaude.users.alice.hosts.laptop-a.projects.myapp.lifecycle.*  # Lifecycle: filtered to this project
   $JS.API.STREAM.INFO.KV_mclaude-sessions-alice          # Stream info (NATS client needs this for KV init)
   $JS.API.STREAM.INFO.KV_mclaude-projects-alice
   $JS.API.STREAM.INFO.KV_mclaude-hosts-alice
   $JS.API.STREAM.INFO.KV_mclaude-job-queue-alice
   $JS.API.STREAM.INFO.MCLAUDE_EVENTS_alice
+  $JS.API.STREAM.INFO.MCLAUDE_API_alice
+  $JS.API.STREAM.INFO.MCLAUDE_LIFECYCLE_alice
   # No Object Store permissions — import downloads use a one-shot JWT (see below)
   $JS.API.CONSUMER.INFO.KV_mclaude-sessions-alice.*      # Consumer info (NATS client needs this)
   $JS.API.CONSUMER.INFO.KV_mclaude-projects-alice.*
   $JS.API.CONSUMER.INFO.KV_mclaude-hosts-alice.*
   $JS.API.CONSUMER.INFO.KV_mclaude-job-queue-alice.*
   $JS.API.CONSUMER.INFO.MCLAUDE_EVENTS_alice.*           # Consumer info: event stream consumers (L1 fix)
+  $JS.API.CONSUMER.INFO.MCLAUDE_API_alice.*             # Consumer info: API stream consumers
+  $JS.API.CONSUMER.INFO.MCLAUDE_LIFECYCLE_alice.*       # Consumer info: lifecycle stream consumers
   $JS.ACK.KV_mclaude-sessions-alice.>                    # Ack consumed KV messages (consumer-specific tokens, not key names)
   $JS.ACK.KV_mclaude-projects-alice.>
   $JS.ACK.KV_mclaude-hosts-alice.>
   $JS.ACK.KV_mclaude-job-queue-alice.>
   $JS.ACK.MCLAUDE_EVENTS_alice.>
+  $JS.ACK.MCLAUDE_API_alice.>
+  $JS.ACK.MCLAUDE_LIFECYCLE_alice.>
   $JS.FC.KV_mclaude-sessions-alice.>                     # Flow control: scoped to own streams (M2 fix)
   $JS.FC.KV_mclaude-projects-alice.>
   $JS.FC.KV_mclaude-hosts-alice.>
   $JS.FC.KV_mclaude-job-queue-alice.>
   $JS.FC.MCLAUDE_EVENTS_alice.>
+  $JS.FC.MCLAUDE_API_alice.>
+  $JS.FC.MCLAUDE_LIFECYCLE_alice.>
 
 Sub.Allow:
   mclaude.users.alice.hosts.laptop-a.projects.myapp.>    # Receive on this project's subjects only
@@ -393,13 +432,16 @@ Sub.Allow:
   $KV.mclaude-projects-alice.laptop-a.myapp              # KV watch: push delivery of this project's state
   $KV.mclaude-hosts-alice.laptop-a                       # KV watch: push delivery of this host's config only
   $KV.mclaude-job-queue-alice.laptop-a.myapp.>           # KV watch: push delivery of this project's jobs
-  MCLAUDE_EVENTS_alice.laptop-a.myapp.>                  # Event replay: push delivery scoped to this project (L4 fix)
+  # Event stream push delivery covered by mclaude.users.alice.hosts.laptop-a.projects.myapp.> (messages use mclaude.users.* subjects)
+  # API command push delivery covered by mclaude.users.alice.hosts.laptop-a.projects.myapp.> (agent receives commands on project subjects)
   # No Object Store subscribe — import downloads use a one-shot JWT
   $JS.FC.KV_mclaude-sessions-alice.>                     # Flow control: scoped to own streams (M2 fix)
   $JS.FC.KV_mclaude-projects-alice.>
   $JS.FC.KV_mclaude-hosts-alice.>
   $JS.FC.KV_mclaude-job-queue-alice.>
   $JS.FC.MCLAUDE_EVENTS_alice.>
+  $JS.FC.MCLAUDE_API_alice.>
+  $JS.FC.MCLAUDE_LIFECYCLE_alice.>
 ```
 
 **How per-project scoping works at each layer:**
@@ -623,16 +665,18 @@ All JetStream API calls are request/reply: client publishes to `$JS.API.*`, serv
 
 ### mclaude Resource Naming
 
-| Resource type | Stream name | Subject prefix | Key structure |
+| Resource type | Stream name | Subject filter | Key structure |
 |---------------|-------------|----------------|---------------|
-| Sessions KV | `KV_mclaude-sessions-{uslug}` | `$KV.mclaude-sessions-{uslug}.` | `{hslug}.{pslug}.{sslug}` |
-| Projects KV | `KV_mclaude-projects-{uslug}` | `$KV.mclaude-projects-{uslug}.` | `{hslug}.{pslug}` |
-| Hosts KV | `KV_mclaude-hosts-{uslug}` | `$KV.mclaude-hosts-{uslug}.` | `{hslug}` |
-| Job Queue KV | `KV_mclaude-job-queue-{uslug}` | `$KV.mclaude-job-queue-{uslug}.` | `{hslug}.{pslug}.{jobid}` |
-| Events stream | `MCLAUDE_EVENTS_{uslug}` | `MCLAUDE_EVENTS_{uslug}.` | `{hslug}.{pslug}.{sslug}.{seq}` |
-| Imports Object Store | `OBJ_mclaude-imports-{uslug}` | `$O.mclaude-imports-{uslug}.` | `C.<sha256>` / `M.<object-name>` |
-| App subjects | — | `mclaude.users.{uslug}.hosts.{hslug}.` | `projects.{pslug}.>` |
-| Host subjects | — | `mclaude.hosts.{hslug}.` | `api.>` |
+| Sessions KV | `KV_mclaude-sessions-{uslug}` | `$KV.mclaude-sessions-{uslug}.>` | `{hslug}.{pslug}.{sslug}` |
+| Projects KV | `KV_mclaude-projects-{uslug}` | `$KV.mclaude-projects-{uslug}.>` | `{hslug}.{pslug}` |
+| Hosts KV | `KV_mclaude-hosts-{uslug}` | `$KV.mclaude-hosts-{uslug}.>` | `{hslug}` |
+| Job Queue KV | `KV_mclaude-job-queue-{uslug}` | `$KV.mclaude-job-queue-{uslug}.>` | `{hslug}.{pslug}.{jobid}` |
+| Events stream | `MCLAUDE_EVENTS_{uslug}` | `mclaude.users.{uslug}.hosts.*.projects.*.events.*` | N/A (stream, not KV) |
+| API stream | `MCLAUDE_API_{uslug}` | `mclaude.users.{uslug}.hosts.*.projects.*.api.sessions.>` | N/A (stream, not KV) |
+| Lifecycle stream | `MCLAUDE_LIFECYCLE_{uslug}` | `mclaude.users.{uslug}.hosts.*.projects.*.lifecycle.*` | N/A (stream, not KV) |
+| Imports Object Store | `OBJ_mclaude-imports-{uslug}` | `$O.mclaude-imports-{uslug}.>` | `C.<sha256>` / `M.<object-name>` |
+| App subjects | — | `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.>` | — |
+| Host subjects | — | `mclaude.hosts.{hslug}.>` | — |
 
 ## Component Changes
 
@@ -646,19 +690,32 @@ All JetStream API calls are request/reply: client publishes to `$JS.API.*`, serv
 - New: bucket/stream lifecycle management — create per-user KV buckets + event stream on user registration; create on demand if missing at runtime
 - Data migration: move existing shared-bucket data to per-user buckets (one-time migration job)
 - Remove account key from host registration response and cluster registration response — hosts no longer receive the signing key
+- New: `groups` and `group_members` Postgres tables + migrations
+- New: `group_id` column on `hosts` table + migration
+- New: REST API endpoints: `POST /groups`, `GET /groups`, `POST /groups/{gslug}/members`, `DELETE /groups/{gslug}/members/{uslug}`, `GET /groups/{gslug}/members`
+- New: in-memory membership cache (`groupSlug -> {members, resolvedAt}`, 60s TTL, invalidated on mutations)
+- New: on membership change, push "refresh now" signal to affected host's NATS subject, revoke old host JWT
+- Authorization: only group owner can modify group membership (add/remove members). Platform operator can modify any group.
+- New: subscriber on `mclaude.users.*.hosts.*.projects.*.api.agents.refresh` — validates the request (same checks as initial issuance), returns new JWT
 
 ### mclaude-controller-k8s
 - Remove account key from controller entirely — controller no longer mints session-agent JWTs
 - New: on project provisioning, request agent credentials from control-plane via `mclaude.hosts.{hslug}.api.agents.credentials` (NATS request/reply)
 - Write received JWT + NKey seed into K8s Secret (same as today, just sourced from CP instead of locally generated)
 - Remove `$JS.*.API.>` from controller's own JWT (it doesn't need JetStream)
+- K8s controller connects directly to hub NATS (no worker NATS, no leaf node). This supersedes ADR-0035's leaf-node topology for K8s.
 
 ### mclaude-session-agent
 - Update KV bucket names from `mclaude-sessions` to `mclaude-sessions-{uslug}` (read from config/env)
 - Update event stream name from `MCLAUDE_EVENTS` to `MCLAUDE_EVENTS_{uslug}`
 - New credential refresh loop: periodically refreshes NATS JWT before TTL expiry (similar to SPA's 60s check cycle)
 - On `permissions violation` error: immediate refresh + retry
-- Credential refresh endpoint: NATS request/reply to control-plane for new JWT
+- Credential refresh endpoint: NATS request/reply to control-plane on subject `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.agents.refresh` (within the agent's existing project scope — no additional permission needed)
+- Update job queue key construction: change from `{uslug}.{jobId}` to `{hslug}.{pslug}.{jobid}` (matches per-project scoping)
+- Update daemon job dispatch, KV watch filter, and key parsing in `daemon.go` / `daemon_jobs.go`
+
+### mclaude-common
+- Update `subj.JobQueueKVKey()` to produce `{hslug}.{pslug}.{jobid}` format
 
 ### mclaude-web
 - Update KV bucket names in `nats-client.ts` / `subj.ts` to use `mclaude-sessions-{uslug}`, `mclaude-projects-{uslug}`, etc.
@@ -667,9 +724,38 @@ All JetStream API calls are request/reply: client publishes to `$JS.API.*`, serv
 
 ### mclaude-cli
 - Use per-user bucket/stream names (provided by login response or derived from user slug)
+- New: `mclaude group create <name>`, `mclaude group add-member <gslug> <uslug>`, `mclaude group remove-member <gslug> <uslug>`, `mclaude host bind <hslug> <gslug>`
 
 ## Data Model
-No schema changes. This ADR only changes the permission strings embedded in NATS user JWTs.
+
+### JetStream Resource Changes (per-user isolation)
+
+**Per-user KV buckets** (replacing shared buckets):
+- `mclaude-sessions-{uslug}` — session state (was shared `mclaude-sessions`)
+- `mclaude-projects-{uslug}` — project state (was shared `mclaude-projects`)
+- `mclaude-hosts-{uslug}` — host configuration (was shared `mclaude-hosts`)
+- `mclaude-job-queue-{uslug}` — job queue entries (was shared `mclaude-job-queue`)
+
+**Per-user event streams** (replacing shared streams):
+- `MCLAUDE_EVENTS_{uslug}` — session event replay (was shared `MCLAUDE_EVENTS`)
+- `MCLAUDE_API_{uslug}` — session commands: create, input, delete, control, restart (was shared `MCLAUDE_API`)
+- `MCLAUDE_LIFECYCLE_{uslug}` — session lifecycle events (was shared `MCLAUDE_LIFECYCLE`)
+
+**Per-user Object Store** (new):
+- `mclaude-imports-{uslug}` — import archive storage (ADR-0053)
+
+### Postgres Schema Changes
+
+**New tables:**
+- `groups` (`id`, `slug`, `name`, `owner_id`, `is_everyone`) — host group definitions
+- `group_members` (`group_id`, `member_id`, `member_type`) — group membership; `member_type` supports flat members now, nested groups later
+
+**Modified tables:**
+- `hosts` — new `group_id` column (replaces implicit single-user binding)
+
+### KV Key Format Changes
+
+- Job queue keys: changed from `{uslug}.{jobId}` to `{hslug}.{pslug}.{jobid}` (matches per-project scoping)
 
 ## Error Handling
 
