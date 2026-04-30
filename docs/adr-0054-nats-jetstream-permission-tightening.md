@@ -28,17 +28,17 @@ The fix: replace broad wildcards with the minimum JetStream subjects each identi
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Isolation model | Per-user JetStream resources | Hard NATS-level isolation. Separate KV buckets, event streams, and Object Store buckets per user. No payload-inspection gaps. NATS handles many streams at scale. |
+| Isolation model | Per-user JetStream resources | Hard NATS-level isolation. Separate KV buckets, sessions streams, and Object Store buckets per user. No payload-inspection gaps. NATS handles many streams at scale. |
 | Approach | Replace wildcards with explicit allow-lists referencing per-user resource names | Each identity's JWT lists the exact stream/bucket names it can touch. |
 | KV buckets | Per-user: `mclaude-sessions-{uslug}`, `mclaude-projects-{uslug}`, `mclaude-hosts-{uslug}`, `mclaude-job-queue-{uslug}` | Eliminates shared-bucket prefix-scoping gaps. Direct-get is physically scoped to the user's own bucket. |
-| Events stream | Per-user: `MCLAUDE_EVENTS_{uslug}` | Consumer creation is scoped by stream name in the subject. No filter-bypass gap. |
+| Sessions stream | Per-user: `MCLAUDE_SESSIONS_{uslug}` (consolidates events, commands, lifecycle) | One stream per user captures all session activity under `mclaude.users.{uslug}.hosts.*.projects.*.sessions.>`. Consumer creation is scoped by stream name in the subject. No filter-bypass gap. |
 | Object Store | Per-user: `mclaude-imports-{uslug}` (ADR-0053) | Already per-user by design. Consistent with the rest. |
 | Host/controller JetStream | None — removed entirely | Hosts and controllers only use NATS subjects for provisioning. They never needed JetStream. |
 | Host subject scheme | `mclaude.hosts.{hslug}.>` (supersedes ADR-0035's `mclaude.users.{uslug}.hosts.{hslug}.>` for host-side subscriptions) | Removes user prefix from host subscriptions. Group membership enforced by control-plane (which already intercepts all requests). Host JWT is constant-size regardless of group membership. User/agent/SPA subjects unchanged. |
 | Session-agent scope | Per-project | Each agent runs per-project and gets a JWT scoped to that project's KV keys only. Stolen credential on a shared BYOH host exposes one project, not all of the user's data across all hosts. No credential reissuance concern — each new project spawns a new agent with its own JWT at spawn time. |
-| Credential lifecycle | Short TTL + proactive refresh for all identity types | Host JWTs: 5 min TTL (frequent membership changes). Session-agent JWTs: 5 min TTL (consistent). User JWTs: keep existing ~8h TTL (SPA already refreshes every 60s; users don't change permissions as frequently). All refresh via NKey signature challenge. |
+| Credential lifecycle | Short TTL + proactive refresh for all identity types | Host JWTs: 5 min TTL (frequent membership changes). Session-agent JWTs: 5 min TTL (consistent). User JWTs: keep existing ~8h TTL (SPA already refreshes every 60s; users don't change permissions as frequently). All refresh via NATS-authenticated request (connection-level JWT + NKey validation by NATS server). |
 | Session-agent JWT issuance | Control-plane only (host controllers no longer hold the account key) | Hosts request agent credentials from the control-plane via NATS. CP validates group membership, project ownership, and host assignment before minting. Removes the account signing key from all host controllers — hosts can request credentials but not forge them. |
-| Session-agent refresh auth | NKey signature challenge | Agent signs a nonce with its NKey seed, control-plane validates against stored public key, issues new JWT. Most robust — survives JWT expiry, cryptographic proof of identity. |
+| Session-agent refresh auth | NATS-authenticated request | Agent refresh: before JWT TTL expiry, agent publishes a refresh request on `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.agents.refresh`. The request is authenticated by the agent's current NATS connection (JWT + NKey, validated by NATS server). CP validates the request (user in group, project provisioned to host), mints a new JWT with the same scope, and returns it on the reply subject. Agent updates its NATS credentials in-flight. If the JWT has already expired (agent was disconnected too long), the NATS server closes the connection — the host controller must re-request credentials from CP via `mclaude.hosts.{hslug}.api.agents.credentials`. |
 | NATS topology | All agents (BYOH and K8s) connect directly to hub NATS | Leaf-node topology removed from scope. When a leaf node has a JetStream domain set, `$JS.API.>` is suppressed — clients must use `$JS.{domain}.API.*` to reach hub. This adds complexity and brittleness (host operator must configure NATS correctly). Direct hub connection is simpler, more robust, and keeps one set of permission specs. Leaf-node topology can be added later as opt-in for offline resilience if needed. |
 | Migration | Self-healing via credential refresh | Deploy new permission code. On next refresh cycle (within 24h), session-agents automatically receive tightened JWTs. For immediate effect, restart agents to trigger immediate refresh. |
 | Bucket lifecycle | Control-plane creates per-user buckets on user registration | Buckets are provisioned once. If a bucket is missing at runtime, the control-plane creates it on demand. |
@@ -99,12 +99,12 @@ flowchart TB
         subgraph Partition_A["alice's resources (separate streams/buckets)"]
             KV_A["KV: sessions-alice<br/>KV: projects-alice<br/>KV: hosts-alice<br/>KV: job-queue-alice"]
             OBJ_A["Obj Store:<br/>imports-alice"]
-            EVT_A["Stream:<br/>EVENTS_alice"]
+            EVT_A["Stream:<br/>SESSIONS_alice"]
         end
         subgraph Partition_B["bob's resources (separate streams/buckets)"]
             KV_B["KV: sessions-bob<br/>KV: projects-bob<br/>KV: hosts-bob<br/>KV: job-queue-bob"]
             OBJ_B["Obj Store:<br/>imports-bob"]
-            EVT_B["Stream:<br/>EVENTS_bob"]
+            EVT_B["Stream:<br/>SESSIONS_bob"]
         end
     end
 
@@ -122,22 +122,22 @@ flowchart TB
     %% ── Edges: Alice SPA ──
     SPA_A -- "R: KV watch/get" --> KV_A
     SPA_A -- "R/W: upload imports" --> OBJ_A
-    SPA_A -- "R: subscribe own events" --> EVT_A
+    SPA_A -- "R: subscribe own sessions" --> EVT_A
 
     %% ── Edges: Bob SPA ──
     SPA_B -- "R: KV watch/get" --> KV_B
     SPA_B -- "R/W: upload imports" --> OBJ_B
-    SPA_B -- "R: subscribe own events" --> EVT_B
+    SPA_B -- "R: subscribe own sessions" --> EVT_B
 
     %% ── Edges: Session-Agent A (on shared host) ──
     AGENT_A -- "R/W: manage sessions,<br/>projects, jobs" --> KV_A
     AGENT_A -- "R: download imports" --> OBJ_A
-    AGENT_A -- "R/W: publish lifecycle" --> EVT_A
+    AGENT_A -- "R/W: session events,<br/>commands, lifecycle" --> EVT_A
 
     %% ── Edges: Session-Agent B (on shared host) ──
     AGENT_B -- "R/W: manage sessions,<br/>projects, jobs" --> KV_B
     AGENT_B -- "R: download imports" --> OBJ_B
-    AGENT_B -- "R/W: publish lifecycle" --> EVT_B
+    AGENT_B -- "R/W: session events,<br/>commands, lifecycle" --> EVT_B
 
     %% ── BYOH hosts: no JetStream ──
     CTRL_A -.-x|"no JetStream"| NATS
@@ -153,8 +153,8 @@ flowchart TB
 - Session-agents on the shared host are in separate K8s namespaces; each agent's JWT is scoped to its user's resources only.
 - All host controllers (BYOH and platform) use `mclaude.hosts.{hslug}.>` — constant-size JWT regardless of group membership. Zero JetStream access.
 - Group membership enforcement is in the control-plane, which already intercepts all requests.
-- Users (SPA/CLI) get read-only KV, read/write Object Store, read-only events.
-- Session-agents get read/write KV + events, read-only Object Store.
+- Users (SPA/CLI) get read-only KV, read/write Object Store, read-only sessions stream.
+- Session-agents get read/write KV + sessions stream, read-only Object Store.
 
 ### Trust Tiers
 
@@ -275,11 +275,53 @@ With tightened permissions + TTL on all credential types, the blast radius reduc
 
 **R3: Membership cache staleness** — 60-second cache TTL means a removed user could obtain credentials for up to 60 seconds after removal. The explicit "refresh now" signal handles the common case; the 60s window is the fallback.
 
-**R4: Stream info / consumer info metadata leakage** — Documented in the session-agent permission spec. Per-user bucket, not per-project. Leaks activity volume, not content.
+**R4: Stream info / consumer info metadata leakage** — `$JS.API.STREAM.INFO.<stream>` returns the full `StreamState` struct. NATS permissions gate which subjects an identity can *publish to* (i.e., which streams it can query), but do NOT gate the request payload content. This means options like `SubjectFilter` and `DeletedDetails` in the request body are accessible to anyone with publish permission on the stream info subject. A per-project agent credential can query the per-user stream and extract metadata about ALL of the user's projects across all hosts.
+
+**Attacker profile.** The attacker must hold a credential with `$JS.API.STREAM.INFO.<per-user-stream>` in its Pub.Allow. Two identity types have this:
+
+1. **Session agent credential** — The primary threat vector. Agent JWTs are per-project scoped, but stream info subjects are per-user (not per-project), so any agent credential for alice grants stream info across all of alice's per-user streams. To obtain one, the attacker must:
+   - **Compromise the host machine** where an agent runs (read credential from the agent process or filesystem), OR
+   - **Be a malicious host owner** in the group/enterprise model — the host owner has root access to the box and can extract agent credentials for any project provisioned on their host. This is the most realistic scenario: if alice provisions a project on bob's shared host, bob can extract the agent credential and use `SubjectFilter` to enumerate alice's full project/session topology across ALL hosts, not just bob's.
+   - K8s cluster owners have equivalent access (same root-level control over agent pods).
+
+2. **User JWT (SPA/CLI)** — alice herself has stream info on her own streams. This is not an attack vector (querying your own metadata is expected behavior).
+
+The host controller identity does NOT have stream info permissions (it uses host-scoped subjects only), so compromising just the host controller credential is not sufficient for this attack.
+
+Full `StreamState` response field analysis:
+
+| Field | What it reveals | Threat |
+|-------|----------------|--------|
+| `Msgs`, `Bytes` | Total message count and byte size | Activity volume across all of alice's projects — attacker learns how active she is |
+| `FirstTime` | Timestamp of oldest message | When alice's earliest persisted session activity occurred |
+| `LastTime` | **Exact timestamp of most recent message** | **Most sensitive.** When alice was last active on any session on any project. Enables presence tracking. |
+| `Consumers` | Number of active consumers | How many SPA tabs, agents, or watchers alice has running right now |
+| `NumSubjects` | Number of unique subjects with messages | Cardinality of alice's host+project+session combinations across all hosts |
+| `Subjects` (with `SubjectFilter`) | Per-subject message counts | **Worst case.** NATS permissions do not gate request payload content, so any agent with stream info permission can pass `SubjectFilter` and get back a map of every subject (every host.project.session combination) with per-subject message counts. This fully enumerates alice's project/session topology. |
+| `NumDeleted` | Count of deleted messages | Whether alice deletes sessions/history |
+| `FirstSeq`, `LastSeq` | Sequence numbers | History depth (gap between first and last) |
+| `Deleted` (with `DeletedDetails`) | List of deleted sequence numbers | Which specific messages were deleted (requires `DeletedDetails` option in request — also not gated by permissions) |
+
+This is metadata surveillance, not data access. An attacker with a stolen per-project agent credential can learn alice's usage patterns (when she's active, how much she uses the platform, how many projects/sessions she has, which hosts she uses) but cannot read message contents. The `Subjects` map with `SubjectFilter` is the most damaging — it fully enumerates alice's project topology. Per-project streams would close this gap but were rejected due to resource proliferation.
+
+Consumer info leakage is lower-severity: consumer names are ephemeral UUIDs (an attacker must brute-force them), and even if found, consumer info reveals only delivery state (pending count, ack floor), not content. `$JS.API.CONSUMER.LIST` and `$JS.API.CONSUMER.NAMES` are NOT granted — agents cannot enumerate consumers.
 
 **R5: `_INBOX.>` cross-client eavesdropping** — Single-account limitation. Random inbox prefixes make targeted eavesdropping impractical. Future: per-identity inbox prefixes.
 
 **R6: One-shot JWT crash scenario** — If agent crashes without signaling completion, the one-shot JWT remains valid for up to 1 hour (safety TTL). `max_connections: 1` prevents concurrent use but not sequential reuse after disconnect.
+
+**R7: Secure introduction — fraudulent credential requests** — A compromised host controller can request agent JWTs from CP for any user in its group. CP validates group membership, project ownership, and host assignment before minting (`mclaude.hosts.{hslug}.api.agents.credentials`). NATS subject scoping prevents the host from impersonating a different host (it can only publish to its own `mclaude.hosts.{hslug}.>`). However, the host assignment check is an application-layer guard — if CP's implementation is incomplete or the check is bypassed, the blast radius is limited:
+
+- **No data exfiltration.** The fraudulently-obtained agent credential is scoped to a specific project prefix (e.g., `laptop-a.myapp.>` in KV). If the project doesn't actually run on that host, those keys don't exist — there is nothing to read.
+- **Write pollution.** The agent could write fake session/project data into alice's per-user KV namespace under the claimed project prefix. Alice would see a project she didn't create with sessions she didn't run (phishing / confusion vector).
+- **Stream info metadata leakage.** The agent gains R4-level metadata visibility into alice's per-user streams. But the host owner already has root on the box and could extract any legitimate agent credential running there — this doesn't expand the existing blast radius for host owners.
+
+**Attestation asymmetry by host type:**
+
+- **K8s controllers** could in theory use Kubernetes ServiceAccount token exchange for secure introduction (projected SA token validated against the cluster's OIDC issuer). However, this provides limited additional security: if an attacker has broken RBAC enough to read the controller's NATS credentials from its Secret, they can almost certainly read agent credentials directly from agent pod Secrets in the same namespace — bypassing the introduction mechanism entirely. KSA token exchange only blocks the narrow scenario where the controller credential leaks through a non-RBAC channel (e.g., logs, monitoring) but agent credentials don't.
+- **BYOH controllers** authenticate with NATS JWT + NKey seed on the host filesystem. Anyone with root access can extract these credentials. The security boundary is filesystem permissions — i.e., trust the host owner.
+
+In both models, the host/cluster owner is the trust boundary. The real security boundary is the NATS permission model (what a credential can do once obtained), not the introduction mechanism (how the credential is obtained). The host assignment check at CP issuance time is defense-in-depth, not a security boundary — tightening it is a pure application-logic guard clause requiring no architectural changes. Comprehensive K8s multi-tenant security (RBAC hardening, namespace isolation, secret encryption, network policies, pod security standards) is deferred to a dedicated ADR.
 
 ## Full Permission Specifications by Identity
 
@@ -301,34 +343,24 @@ Pub.Allow:
   $JS.API.CONSUMER.CREATE.KV_mclaude-sessions-alice.>   # KV watch: filtered form, any consumer + filter on own bucket
   $JS.API.CONSUMER.CREATE.KV_mclaude-projects-alice.>   # KV watch
   $JS.API.CONSUMER.CREATE.KV_mclaude-hosts-alice.>      # KV watch
-  $JS.API.CONSUMER.CREATE.MCLAUDE_EVENTS_alice.>        # Events: create consumer for replay
-  $JS.API.CONSUMER.CREATE.MCLAUDE_API_alice.>          # API stream: create consumer to send commands
-  $JS.API.CONSUMER.CREATE.MCLAUDE_LIFECYCLE_alice.>    # Lifecycle stream: create consumer to watch lifecycle events
+  $JS.API.CONSUMER.CREATE.MCLAUDE_SESSIONS_alice.>      # Session stream: any consumer + filter on own stream
   $JS.API.STREAM.INFO.KV_mclaude-sessions-alice       # Stream info: needed by NATS client for KV init
   $JS.API.STREAM.INFO.KV_mclaude-projects-alice       # Stream info
   $JS.API.STREAM.INFO.KV_mclaude-hosts-alice          # Stream info
-  $JS.API.STREAM.INFO.MCLAUDE_EVENTS_alice            # Stream info: event stream metadata
-  $JS.API.STREAM.INFO.MCLAUDE_API_alice              # Stream info: API stream metadata
-  $JS.API.STREAM.INFO.MCLAUDE_LIFECYCLE_alice        # Stream info: lifecycle stream metadata
+  $JS.API.STREAM.INFO.MCLAUDE_SESSIONS_alice          # Stream info: session stream metadata
   $JS.API.STREAM.INFO.OBJ_mclaude-imports-alice       # Stream info: Object Store bucket metadata
   $JS.API.CONSUMER.INFO.KV_mclaude-sessions-alice.*   # Consumer info: needed by NATS client
   $JS.API.CONSUMER.INFO.KV_mclaude-projects-alice.*   # Consumer info
   $JS.API.CONSUMER.INFO.KV_mclaude-hosts-alice.*      # Consumer info
-  $JS.API.CONSUMER.INFO.MCLAUDE_EVENTS_alice.*        # Consumer info: event stream consumers
-  $JS.API.CONSUMER.INFO.MCLAUDE_API_alice.*          # Consumer info: API stream consumers
-  $JS.API.CONSUMER.INFO.MCLAUDE_LIFECYCLE_alice.*    # Consumer info: lifecycle stream consumers
+  $JS.API.CONSUMER.INFO.MCLAUDE_SESSIONS_alice.*      # Consumer info: session stream consumers
   $JS.ACK.KV_mclaude-sessions-alice.>    # Ack consumed KV messages
   $JS.ACK.KV_mclaude-projects-alice.>    # Ack consumed KV messages
   $JS.ACK.KV_mclaude-hosts-alice.>       # Ack consumed KV messages
-  $JS.ACK.MCLAUDE_EVENTS_alice.>         # Ack consumed event messages
-  $JS.ACK.MCLAUDE_API_alice.>            # Ack consumed API stream messages
-  $JS.ACK.MCLAUDE_LIFECYCLE_alice.>      # Ack consumed lifecycle stream messages
+  $JS.ACK.MCLAUDE_SESSIONS_alice.>       # Ack consumed session stream messages
   $JS.FC.KV_mclaude-sessions-alice.>     # Flow control: scoped to own streams
   $JS.FC.KV_mclaude-projects-alice.>
   $JS.FC.KV_mclaude-hosts-alice.>
-  $JS.FC.MCLAUDE_EVENTS_alice.>
-  $JS.FC.MCLAUDE_API_alice.>
-  $JS.FC.MCLAUDE_LIFECYCLE_alice.>
+  $JS.FC.MCLAUDE_SESSIONS_alice.>
   $JS.FC.OBJ_mclaude-imports-alice.>
 
 Sub.Allow:
@@ -340,15 +372,12 @@ Sub.Allow:
   $KV.mclaude-sessions-alice.>           # KV watch: push delivery of session state changes
   $KV.mclaude-projects-alice.>           # KV watch: push delivery of project state changes
   $KV.mclaude-hosts-alice.>              # KV watch: push delivery of host state changes
-  # Event stream push delivery covered by mclaude.users.alice.hosts.*.> (messages use mclaude.users.* subjects)
-  MCLAUDE_LIFECYCLE_alice.>              # Lifecycle stream: push delivery (if using push consumers)
+  # Session stream push delivery covered by mclaude.users.alice.hosts.*.> (messages use mclaude.users.* subjects)
   # No $O subscribe — users only upload to Object Store, not download.
   $JS.FC.KV_mclaude-sessions-alice.>     # Flow control: scoped to own streams
   $JS.FC.KV_mclaude-projects-alice.>
   $JS.FC.KV_mclaude-hosts-alice.>
-  $JS.FC.MCLAUDE_EVENTS_alice.>
-  $JS.FC.MCLAUDE_API_alice.>
-  $JS.FC.MCLAUDE_LIFECYCLE_alice.>
+  $JS.FC.MCLAUDE_SESSIONS_alice.>
   $JS.FC.OBJ_mclaude-imports-alice.>
 ```
 
@@ -392,38 +421,28 @@ Pub.Allow:
   $JS.API.CONSUMER.CREATE.KV_mclaude-projects-alice.*.$KV.mclaude-projects-alice.laptop-a.myapp        # KV watch: this project only
   $JS.API.CONSUMER.CREATE.KV_mclaude-hosts-alice.*.$KV.mclaude-hosts-alice.laptop-a                    # KV watch: this host only
   $JS.API.CONSUMER.CREATE.KV_mclaude-job-queue-alice.*.$KV.mclaude-job-queue-alice.laptop-a.myapp.>    # KV watch: this project's jobs
-  $JS.API.CONSUMER.CREATE.MCLAUDE_EVENTS_alice.*.mclaude.users.alice.hosts.laptop-a.projects.myapp.events.*   # Events: filtered to this project
-  $JS.API.CONSUMER.CREATE.MCLAUDE_API_alice.*.mclaude.users.alice.hosts.laptop-a.projects.myapp.api.sessions.>   # API: filtered to this project's commands
-  $JS.API.CONSUMER.CREATE.MCLAUDE_LIFECYCLE_alice.*.mclaude.users.alice.hosts.laptop-a.projects.myapp.lifecycle.*  # Lifecycle: filtered to this project
+  $JS.API.CONSUMER.CREATE.MCLAUDE_SESSIONS_alice.*.mclaude.users.alice.hosts.laptop-a.projects.myapp.sessions.>   # Session stream: filtered to this project
   $JS.API.STREAM.INFO.KV_mclaude-sessions-alice          # Stream info (NATS client needs this for KV init)
   $JS.API.STREAM.INFO.KV_mclaude-projects-alice
   $JS.API.STREAM.INFO.KV_mclaude-hosts-alice
   $JS.API.STREAM.INFO.KV_mclaude-job-queue-alice
-  $JS.API.STREAM.INFO.MCLAUDE_EVENTS_alice
-  $JS.API.STREAM.INFO.MCLAUDE_API_alice
-  $JS.API.STREAM.INFO.MCLAUDE_LIFECYCLE_alice
+  $JS.API.STREAM.INFO.MCLAUDE_SESSIONS_alice             # Stream info: session stream metadata
   # No Object Store permissions — import downloads use a one-shot JWT (see below)
   $JS.API.CONSUMER.INFO.KV_mclaude-sessions-alice.*      # Consumer info (NATS client needs this)
   $JS.API.CONSUMER.INFO.KV_mclaude-projects-alice.*
   $JS.API.CONSUMER.INFO.KV_mclaude-hosts-alice.*
   $JS.API.CONSUMER.INFO.KV_mclaude-job-queue-alice.*
-  $JS.API.CONSUMER.INFO.MCLAUDE_EVENTS_alice.*           # Consumer info: event stream consumers (L1 fix)
-  $JS.API.CONSUMER.INFO.MCLAUDE_API_alice.*             # Consumer info: API stream consumers
-  $JS.API.CONSUMER.INFO.MCLAUDE_LIFECYCLE_alice.*       # Consumer info: lifecycle stream consumers
+  $JS.API.CONSUMER.INFO.MCLAUDE_SESSIONS_alice.*         # Consumer info: session stream consumers
   $JS.ACK.KV_mclaude-sessions-alice.>                    # Ack consumed KV messages (consumer-specific tokens, not key names)
   $JS.ACK.KV_mclaude-projects-alice.>
   $JS.ACK.KV_mclaude-hosts-alice.>
   $JS.ACK.KV_mclaude-job-queue-alice.>
-  $JS.ACK.MCLAUDE_EVENTS_alice.>
-  $JS.ACK.MCLAUDE_API_alice.>
-  $JS.ACK.MCLAUDE_LIFECYCLE_alice.>
+  $JS.ACK.MCLAUDE_SESSIONS_alice.>                       # Ack consumed session stream messages
   $JS.FC.KV_mclaude-sessions-alice.>                     # Flow control: scoped to own streams (M2 fix)
   $JS.FC.KV_mclaude-projects-alice.>
   $JS.FC.KV_mclaude-hosts-alice.>
   $JS.FC.KV_mclaude-job-queue-alice.>
-  $JS.FC.MCLAUDE_EVENTS_alice.>
-  $JS.FC.MCLAUDE_API_alice.>
-  $JS.FC.MCLAUDE_LIFECYCLE_alice.>
+  $JS.FC.MCLAUDE_SESSIONS_alice.>                        # Flow control: session stream
 
 Sub.Allow:
   mclaude.users.alice.hosts.laptop-a.projects.myapp.>    # Receive on this project's subjects only
@@ -432,16 +451,13 @@ Sub.Allow:
   $KV.mclaude-projects-alice.laptop-a.myapp              # KV watch: push delivery of this project's state
   $KV.mclaude-hosts-alice.laptop-a                       # KV watch: push delivery of this host's config only
   $KV.mclaude-job-queue-alice.laptop-a.myapp.>           # KV watch: push delivery of this project's jobs
-  # Event stream push delivery covered by mclaude.users.alice.hosts.laptop-a.projects.myapp.> (messages use mclaude.users.* subjects)
-  # API command push delivery covered by mclaude.users.alice.hosts.laptop-a.projects.myapp.> (agent receives commands on project subjects)
+  # Session stream push delivery covered by mclaude.users.alice.hosts.laptop-a.projects.myapp.> (messages use mclaude.users.* subjects)
   # No Object Store subscribe — import downloads use a one-shot JWT
   $JS.FC.KV_mclaude-sessions-alice.>                     # Flow control: scoped to own streams (M2 fix)
   $JS.FC.KV_mclaude-projects-alice.>
   $JS.FC.KV_mclaude-hosts-alice.>
   $JS.FC.KV_mclaude-job-queue-alice.>
-  $JS.FC.MCLAUDE_EVENTS_alice.>
-  $JS.FC.MCLAUDE_API_alice.>
-  $JS.FC.MCLAUDE_LIFECYCLE_alice.>
+  $JS.FC.MCLAUDE_SESSIONS_alice.>                        # Flow control: session stream
 ```
 
 **How per-project scoping works at each layer:**
@@ -452,7 +468,8 @@ Sub.Allow:
 | KV pub/sub | `$KV.mclaude-sessions-alice.laptop-a.myapp.>` | Agent can only write KV entries keyed under its project. KV watch only delivers its project's updates. |
 | JetStream API | `$JS.API.*.KV_mclaude-sessions-alice` | Agent can call JetStream API on alice's session bucket (per-user bucket). Cannot access bob's buckets. |
 | KV direct-get | `$JS.API.DIRECT.GET.KV_mclaude-sessions-alice.$KV.mclaude-sessions-alice.laptop-a.myapp.>` | Uses subject-form direct-get. The key portion is the **full message subject** (`$KV.<bucket>.<key>`), not just the key. Agent can only read its own project's keys. Implementation must use subject-form; payload-form is not permitted. |
-| Stream info | `$JS.API.STREAM.INFO.KV_mclaude-sessions-alice` | **Residual metadata leakage (accepted).** Stream info is per-stream (per-user bucket), not per-key. Agent can query aggregate metadata (message count, byte size, first/last sequence) for alice's entire sessions bucket, not just its project. Required by the NATS client SDK for KV bucket initialization — called unconditionally before any KV operation. Leaks activity volume across all projects but not key contents or values. |
+| Stream info | `$JS.API.STREAM.INFO.KV_mclaude-sessions-alice` | **Residual metadata leakage (accepted).** Stream info is per-stream (per-user bucket), not per-key. Agent can query aggregate metadata for alice's entire sessions bucket, not just its project. Required by the NATS client SDK for KV bucket initialization — called unconditionally before any KV operation. Leaks activity volume AND project/session topology via `SubjectFilter` (NATS does not gate request payload content), but not message contents. See R4 in Post-Fix Residual Risks for the full field-by-field `StreamState` analysis. |
+| Session stream info | `$JS.API.STREAM.INFO.MCLAUDE_SESSIONS_alice` | **Residual metadata leakage (accepted).** Same as KV buckets — stream info is per-stream (per-user), not per-project. Agent can query aggregate metadata for alice's entire sessions stream. Required by NATS client SDK for consumer initialization. Leaks activity volume AND project/session topology via `SubjectFilter` (NATS does not gate request payload content), but not message contents. Per-project streams would close this gap but cause resource proliferation (same trade-off as per-project KV buckets, rejected). See R4 in Post-Fix Residual Risks for the full field-by-field `StreamState` analysis. |
 | Consumer info | `$JS.API.CONSUMER.INFO.KV_mclaude-sessions-alice.*` | **Residual metadata leakage (accepted).** The `*` wildcard allows querying info for any consumer on alice's bucket, not just the agent's own. Consumer names are ephemeral UUIDs — an attacker would need to guess or brute-force them. Even if found, consumer info reveals only delivery state (pending count, ack floor, last delivered sequence), not message contents. Cannot be tightened: consumer names are auto-generated at runtime by the NATS client. `$JS.API.CONSUMER.LIST` and `$JS.API.CONSUMER.NAMES` are NOT granted — agent cannot enumerate consumers. |
 
 **Differences from User JWT:**
@@ -485,6 +502,8 @@ Sub.Allow:
   $O.mclaude-imports-alice.M.<object-name>       # receive metadata (push delivery)
   $JS.FC.OBJ_mclaude-imports-alice.>             # flow control
 ```
+
+**How CP knows the chunk SHAs:** During the import upload phase, the CLI streams the tarball to CP, which writes it to Object Store via the account credentials. CP records the resulting chunk SHAs in the import metadata (Postgres or KV). When minting the one-shot JWT for the agent download, CP reads the stored metadata to enumerate the exact chunk subjects for the Sub.Allow list.
 
 **Lifecycle:**
 
@@ -521,7 +540,7 @@ normal operation.
 
 **Why this is safe:** The control-plane already intercepts all user requests and re-publishes to the host. The SPA never talks to the host directly. The control-plane validates group membership before publishing to `mclaude.hosts.{hslug}.api.projects.*`. The NATS-level user-prefix check on the host side was redundant.
 
-**What doesn't change:** User (SPA/CLI) JWTs, session-agent JWTs, KV structure, and event streams are all unaffected. Only the host controller's subscription and the control-plane's publish-to-host target change.
+**What doesn't change:** User (SPA/CLI) JWTs, session-agent JWTs, KV structure, and sessions streams are all unaffected. Only the host controller's subscription and the control-plane's publish-to-host target change.
 
 ```
 Pub.Allow:
@@ -671,9 +690,7 @@ All JetStream API calls are request/reply: client publishes to `$JS.API.*`, serv
 | Projects KV | `KV_mclaude-projects-{uslug}` | `$KV.mclaude-projects-{uslug}.>` | `{hslug}.{pslug}` |
 | Hosts KV | `KV_mclaude-hosts-{uslug}` | `$KV.mclaude-hosts-{uslug}.>` | `{hslug}` |
 | Job Queue KV | `KV_mclaude-job-queue-{uslug}` | `$KV.mclaude-job-queue-{uslug}.>` | `{hslug}.{pslug}.{jobid}` |
-| Events stream | `MCLAUDE_EVENTS_{uslug}` | `mclaude.users.{uslug}.hosts.*.projects.*.events.*` | N/A (stream, not KV) |
-| API stream | `MCLAUDE_API_{uslug}` | `mclaude.users.{uslug}.hosts.*.projects.*.api.sessions.>` | N/A (stream, not KV) |
-| Lifecycle stream | `MCLAUDE_LIFECYCLE_{uslug}` | `mclaude.users.{uslug}.hosts.*.projects.*.lifecycle.*` | N/A (stream, not KV) |
+| Sessions stream | `MCLAUDE_SESSIONS_{uslug}` | `mclaude.users.{uslug}.hosts.*.projects.*.sessions.>` | N/A (stream, not KV) |
 | Imports Object Store | `OBJ_mclaude-imports-{uslug}` | `$O.mclaude-imports-{uslug}.>` | `C.<sha256>` / `M.<object-name>` |
 | App subjects | — | `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.>` | — |
 | Host subjects | — | `mclaude.hosts.{hslug}.>` | — |
@@ -681,13 +698,14 @@ All JetStream API calls are request/reply: client publishes to `$JS.API.*`, serv
 ## Component Changes
 
 ### mclaude-control-plane
-- `nkeys.go`: Rewrite `UserSubjectPermissions()`, `SessionAgentSubjectPermissions()`, `HostSubjectPermissions()` — permissions now reference per-user resource names (`KV_mclaude-sessions-{uslug}`, `MCLAUDE_EVENTS_{uslug}`, etc.). `SessionAgentSubjectPermissions()` now takes project slug + host slug and produces per-project scoped permissions.
+- `nkeys.go`: Rewrite `UserSubjectPermissions()`, `SessionAgentSubjectPermissions()`, `HostSubjectPermissions()` — permissions now reference per-user resource names (`KV_mclaude-sessions-{uslug}`, `MCLAUDE_SESSIONS_{uslug}`, etc.). `SessionAgentSubjectPermissions()` now takes project slug + host slug and produces per-project scoped permissions.
 - `nkeys.go`: Remove `$JS.API.>` and `$JS.*.API.>` wildcards from all identity types
 - `nkeys.go`: Remove all `$JS.*` from `HostSubjectPermissions()` entirely
 - `nkeys_test.go`: Update tests to verify new permissions deny cross-user access
 - `auth.go`: On JWT refresh, issue new JWT with tightened permissions
 - New: `mclaude.hosts.{hslug}.api.agents.credentials` NATS subscriber — host controllers request agent JWTs here. CP validates group membership + project ownership + host assignment, then mints per-project scoped agent JWT and returns it. This is the **only** path for agent JWT issuance.
-- New: bucket/stream lifecycle management — create per-user KV buckets + event stream on user registration; create on demand if missing at runtime
+- New: bucket/stream lifecycle management — create per-user KV buckets + `MCLAUDE_SESSIONS_{uslug}` stream on user registration; create on demand if missing at runtime
+- Update provisioning publish subjects from `mclaude.users.{uslug}.hosts.{hslug}.api.projects.*` to `mclaude.hosts.{hslug}.api.projects.*` (host-scoped scheme per this ADR)
 - Data migration: move existing shared-bucket data to per-user buckets (one-time migration job)
 - Remove account key from host registration response and cluster registration response — hosts no longer receive the signing key
 - New: `groups` and `group_members` Postgres tables + migrations
@@ -696,18 +714,22 @@ All JetStream API calls are request/reply: client publishes to `$JS.API.*`, serv
 - New: in-memory membership cache (`groupSlug -> {members, resolvedAt}`, 60s TTL, invalidated on mutations)
 - New: on membership change, push "refresh now" signal to affected host's NATS subject, revoke old host JWT
 - Authorization: only group owner can modify group membership (add/remove members). Platform operator can modify any group.
-- New: subscriber on `mclaude.users.*.hosts.*.projects.*.api.agents.refresh` — validates the request (same checks as initial issuance), returns new JWT
+- New: subscriber on `mclaude.users.*.hosts.*.projects.*.api.agents.refresh` — validates the request (user in group, project provisioned to host — same checks as initial issuance), mints a new JWT with the same scope, and returns it on the reply subject. Agent updates its NATS credentials in-flight. If the JWT has already expired, the NATS server closes the connection — the host controller must re-request credentials from CP via `mclaude.hosts.{hslug}.api.agents.credentials`.
 
 ### mclaude-controller-k8s
 - Remove account key from controller entirely — controller no longer mints session-agent JWTs
+- Update provisioning subscription from `mclaude.users.*.hosts.{hslug}.>` to `mclaude.hosts.{hslug}.>` (host-scoped scheme per this ADR)
 - New: on project provisioning, request agent credentials from control-plane via `mclaude.hosts.{hslug}.api.agents.credentials` (NATS request/reply)
 - Write received JWT + NKey seed into K8s Secret (same as today, just sourced from CP instead of locally generated)
 - Remove `$JS.*.API.>` from controller's own JWT (it doesn't need JetStream)
 - K8s controller connects directly to hub NATS (no worker NATS, no leaf node). This supersedes ADR-0035's leaf-node topology for K8s.
 
+### mclaude-controller-local
+- Update provisioning subscription from `mclaude.users.*.hosts.{hslug}.>` to `mclaude.hosts.{hslug}.>` (host-scoped scheme per this ADR)
+
 ### mclaude-session-agent
 - Update KV bucket names from `mclaude-sessions` to `mclaude-sessions-{uslug}` (read from config/env)
-- Update event stream name from `MCLAUDE_EVENTS` to `MCLAUDE_EVENTS_{uslug}`
+- Remove stream creation code (CreateOrUpdateStream for MCLAUDE_EVENTS, MCLAUDE_API, MCLAUDE_LIFECYCLE) — the consolidated `MCLAUDE_SESSIONS_{uslug}` stream is created by the control-plane during user registration
 - New credential refresh loop: periodically refreshes NATS JWT before TTL expiry (similar to SPA's 60s check cycle)
 - On `permissions violation` error: immediate refresh + retry
 - Credential refresh endpoint: NATS request/reply to control-plane on subject `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.agents.refresh` (within the agent's existing project scope — no additional permission needed)
@@ -715,11 +737,13 @@ All JetStream API calls are request/reply: client publishes to `$JS.API.*`, serv
 - Update daemon job dispatch, KV watch filter, and key parsing in `daemon.go` / `daemon_jobs.go`
 
 ### mclaude-common
+- Update subject constants (`FilterMclaudeEvents`, `FilterMclaudeAPI`, `FilterMclaudeLifecycle`) to new `sessions.>` hierarchy under `mclaude.users.{uslug}.hosts.*.projects.*.sessions.>`
 - Update `subj.JobQueueKVKey()` to produce `{hslug}.{pslug}.{jobid}` format
+- Update `subj.ProjectsKVKey()` to produce `{hslug}.{pslug}` format (was `{userId}.{hostId}.{projectId}`)
 
 ### mclaude-web
 - Update KV bucket names in `nats-client.ts` / `subj.ts` to use `mclaude-sessions-{uslug}`, `mclaude-projects-{uslug}`, etc.
-- Update event stream name to `MCLAUDE_EVENTS_{uslug}`
+- Update stream references from three separate streams (`MCLAUDE_EVENTS`, `MCLAUDE_API`, `MCLAUDE_LIFECYCLE`) to the consolidated `MCLAUDE_SESSIONS_{uslug}`
 - User slug available from auth store at connection time
 
 ### mclaude-cli
@@ -736,10 +760,8 @@ All JetStream API calls are request/reply: client publishes to `$JS.API.*`, serv
 - `mclaude-hosts-{uslug}` — host configuration (was shared `mclaude-hosts`)
 - `mclaude-job-queue-{uslug}` — job queue entries (was shared `mclaude-job-queue`)
 
-**Per-user event streams** (replacing shared streams):
-- `MCLAUDE_EVENTS_{uslug}` — session event replay (was shared `MCLAUDE_EVENTS`)
-- `MCLAUDE_API_{uslug}` — session commands: create, input, delete, control, restart (was shared `MCLAUDE_API`)
-- `MCLAUDE_LIFECYCLE_{uslug}` — session lifecycle events (was shared `MCLAUDE_LIFECYCLE`)
+**Per-user sessions stream** (replacing shared streams):
+- `MCLAUDE_SESSIONS_{uslug}` — consolidates events, commands, and lifecycle (was shared `MCLAUDE_EVENTS`, `MCLAUDE_API`, `MCLAUDE_LIFECYCLE`). Captures `mclaude.users.{uslug}.hosts.*.projects.*.sessions.>`.
 
 **Per-user Object Store** (new):
 - `mclaude-imports-{uslug}` — import archive storage (ADR-0053)
@@ -755,6 +777,7 @@ All JetStream API calls are request/reply: client publishes to `$JS.API.*`, serv
 
 ### KV Key Format Changes
 
+- Projects keys: changed from `{userId}.{hostId}.{projectId}` to `{hslug}.{pslug}` (per-user bucket, host+project scoping)
 - Job queue keys: changed from `{uslug}.{jobId}` to `{hslug}.{pslug}.{jobid}` (matches per-project scoping)
 
 ## Error Handling
@@ -788,12 +811,12 @@ Components implementing the change:
 ## Scope
 
 **v1:**
-- Migrate from shared JetStream resources to per-user resources (KV buckets, event streams, Object Store buckets)
+- Migrate from shared JetStream resources to per-user resources (KV buckets, sessions streams, Object Store buckets)
 - Rewrite all JWT permission functions to reference per-user resource names
 - Remove all `$JS.*` permissions from host/controller JWTs
 - Data migration job: copy existing shared-bucket data to per-user buckets
 - Update SPA, session-agent, CLI to use per-user resource names
-- Add credential refresh loop to session-agent (TTL + NKey challenge)
+- Add credential refresh loop to session-agent (TTL + NATS-authenticated refresh request)
 - Reissue long-lived credentials (session-agent, host)
 
 **Deferred:**
