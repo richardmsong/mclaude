@@ -74,10 +74,11 @@ type Agent struct {
 	// writeSessionKVFn, if non-nil, overrides writeSessionKV. Used in tests that
 	// exercise gracefulShutdown without a real NATS connection.
 	writeSessionKVFn func(state SessionState) error
-	// pendingUpdatingIDs tracks session IDs that were in "updating" state during
+	// pendingUpdatingIDs tracks sessions that were in "updating" state during
 	// recovery. clearUpdatingState() uses this to write idle to KV after consumers
-	// are attached, since the in-memory state is already idle.
-	pendingUpdatingIDs map[string]bool
+	// are attached. Stores full SessionState so orphaned sessions (failed to resume)
+	// can still have their KV cleared.
+	pendingUpdatingIDs map[string]SessionState
 	// credMgr refreshes git credentials before git operations (nil in dev/laptop mode).
 	credMgr *CredentialManager
 	// gitIdentityID is the GIT_IDENTITY_ID for credential identity selection.
@@ -265,9 +266,9 @@ func (a *Agent) recoverSessions() error {
 		// state:"idle" later, after consumers are attached and the agent is ready.
 		if wasUpdating {
 			if a.pendingUpdatingIDs == nil {
-				a.pendingUpdatingIDs = make(map[string]bool)
+				a.pendingUpdatingIDs = make(map[string]SessionState)
 			}
-			a.pendingUpdatingIDs[st.ID] = true
+			a.pendingUpdatingIDs[st.ID] = st
 		}
 		if !wasUpdating {
 			if wErr := a.writeSessionKV(st); wErr != nil {
@@ -437,6 +438,9 @@ func (a *Agent) dispatchCtl(jm jetstream.Msg) {
 // in "updating" state. Called after JetStream consumers are attached and the
 // agent is ready to process queued messages.
 func (a *Agent) clearUpdatingState() error {
+	now := time.Now().UTC()
+
+	// First pass: clear sessions that were successfully resumed (in a.sessions).
 	a.mu.RLock()
 	sessions := make([]*Session, 0, len(a.sessions))
 	for _, s := range a.sessions {
@@ -446,14 +450,27 @@ func (a *Agent) clearUpdatingState() error {
 
 	for _, sess := range sessions {
 		st := sess.getState()
-		if a.pendingUpdatingIDs[st.ID] {
+		if _, ok := a.pendingUpdatingIDs[st.ID]; ok {
 			st.State = StateIdle
-			st.StateSince = time.Now().UTC()
+			st.StateSince = now
 			if err := a.writeSessionKV(st); err != nil {
 				a.log.Warn().Err(err).Str("sessionId", st.ID).Msg("clearUpdatingState: KV write failed")
 			}
 			delete(a.pendingUpdatingIDs, st.ID)
 		}
+	}
+
+	// Second pass: clear orphaned sessions that failed to resume but are still
+	// stuck in "updating" state in KV. Without this, sessions whose Claude
+	// process couldn't restart stay in "updating" forever.
+	for id, st := range a.pendingUpdatingIDs {
+		st.State = StateIdle
+		st.StateSince = now
+		if err := a.writeSessionKV(st); err != nil {
+			a.log.Warn().Err(err).Str("sessionId", id).Msg("clearUpdatingState: orphaned KV write failed")
+		}
+		a.log.Info().Str("sessionId", id).Msg("clearUpdatingState: cleared orphaned updating session")
+		delete(a.pendingUpdatingIDs, id)
 	}
 	return nil
 }
