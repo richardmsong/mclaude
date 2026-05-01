@@ -32,11 +32,7 @@ spec:
         - -c
         - |
           set -e
-          echo "Smoke: Worker NATS monitoring endpoint"
-          curl --fail --silent --show-error --max-time 10 \
-            "http://{{ include "mclaude-worker.fullname" . }}-nats:{{ .Values.nats.service.monitorPort }}/healthz"
-          echo ""
-          echo "Smoke: Controller metrics endpoint"
+          echo "Smoke: Controller health endpoint"
           curl --fail --silent --show-error --max-time 10 \
             "http://{{ include "mclaude-worker.fullname" . }}-controller-metrics:{{ .Values.controller.service.metricsPort }}/healthz"
           echo ""

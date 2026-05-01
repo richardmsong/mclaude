@@ -1,17 +1,18 @@
 ## k3d local-preview values for worker chart.
 ## ghcr.io images; single-cluster degenerate install.
-
-clusterSlug: local
-jsDomain: local
-leafUrl: "nats://mclaude-cp-nats.mclaude-system.svc:7422"
-sessionAgentNatsUrl: "nats://mclaude-cp-nats.mclaude-system.svc.cluster.local:4222"
+## Ref: ADR-0063, docs/charts-mclaude/spec-helm.md
 
 controlPlane:
+  url: "https://dev.mclaude.richardmcsong.com"
   image:
     registry: ghcr.io
     repository: richardmsong/mclaude-control-plane
     tag: "main"
     pullPolicy: IfNotPresent
+
+host:
+  name: "local"
+  hubNatsUrl: "nats://mclaude-cp-nats.mclaude-system.svc:4222"
 
 controller:
   image:

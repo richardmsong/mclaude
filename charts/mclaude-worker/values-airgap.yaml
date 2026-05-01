@@ -1,16 +1,17 @@
 ## Air-gapped values for worker chart.
 ## All images from internal registry mirror.
+## Ref: ADR-0063, docs/charts-mclaude/spec-helm.md
 
 global:
   imageRegistry: "registry.internal.example.com"
   imagePullSecrets:
     - name: internal-registry-secret
 
-nats:
+controlPlane:
   image:
     registry: registry.internal.example.com
-    repository: mirror/nats
-    tag: "2.10.24-alpine"
+    repository: mclaude/mclaude-control-plane
+    tag: "0.1.0"
 
 controller:
   image:

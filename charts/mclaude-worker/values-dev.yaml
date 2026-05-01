@@ -1,14 +1,18 @@
 ## Dev values for local k3d cluster (worker chart).
-## Single-cluster degenerate install — leaf URL points at in-cluster hub.
+## Single-cluster degenerate install — hub NATS is the in-cluster cp NATS service.
+## Ref: ADR-0063, docs/charts-mclaude/spec-helm.md
 
-clusterSlug: "local"
-jsDomain: "local"
-leafUrl: "nats-leaf://mclaude-cp-nats.mclaude-system.svc:7422"
-sessionAgentNatsUrl: "nats://mclaude-cp-nats.mclaude-system.svc.cluster.local:4222"
+controlPlane:
+  url: "http://mclaude-cp-control-plane.mclaude-system.svc:8080"
+  image:
+    registry: ""
+    repository: mclaude-control-plane
+    tag: "dev"
+    pullPolicy: Never
 
-nats:
-  persistence:
-    enabled: false
+host:
+  name: "local"
+  hubNatsUrl: "nats://mclaude-cp-nats.mclaude-system.svc:4222"
 
 controller:
   image:

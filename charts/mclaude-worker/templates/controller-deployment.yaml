@@ -32,19 +32,12 @@ spec:
               containerPort: {{ .Values.controller.service.metricsPort }}
               protocol: TCP
           env:
-            - name: CLUSTER_SLUG
-              value: {{ required "clusterSlug is required" .Values.clusterSlug | quote }}
-            - name: JS_DOMAIN
-              value: {{ required "jsDomain is required" .Values.jsDomain | quote }}
-            - name: NATS_URL
-              value: "nats://{{ include "mclaude-worker.fullname" . }}-nats:{{ .Values.nats.service.clientPort }}"
-            - name: NATS_ACCOUNT_SEED
-              valueFrom:
-                secretKeyRef:
-                  name: operator-keys
-                  key: accountSeed
-            - name: NATS_CREDENTIALS_PATH
-              value: /etc/nats/leaf-creds/leaf.creds
+            - name: HUB_NATS_URL
+              value: {{ required "host.hubNatsUrl is required" .Values.host.hubNatsUrl | quote }}
+            - name: CONTROL_PLANE_URL
+              value: {{ required "controlPlane.url is required" .Values.controlPlane.url | quote }}
+            - name: HOST_NKEY_SEED_PATH
+              value: /etc/mclaude/host-creds/nkey_seed
             - name: METRICS_ADDR
               value: ":{{ .Values.controller.service.metricsPort }}"
             - name: HEALTH_PROBE_ADDR
@@ -55,15 +48,13 @@ spec:
               value: "true"
             - name: SESSION_AGENT_TEMPLATE_CM
               value: {{ include "mclaude-worker.fullname" . }}-session-agent-template
-            - name: SESSION_AGENT_NATS_URL
-              value: {{ .Values.sessionAgentNatsUrl | default (printf "nats://%s:4222" (trimPrefix "nats-leaf://" .Values.leafUrl | regexReplaceAll ":.*" "")) | quote }}
             {{- if .Values.controller.config.devOAuthToken }}
             - name: DEV_OAUTH_TOKEN
               value: {{ .Values.controller.config.devOAuthToken | quote }}
             {{- end }}
           volumeMounts:
-            - name: leaf-creds
-              mountPath: /etc/nats/leaf-creds
+            - name: host-creds
+              mountPath: /etc/mclaude/host-creds
               readOnly: true
           livenessProbe:
             httpGet:
@@ -82,11 +73,7 @@ spec:
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
       volumes:
-        - name: leaf-creds
+        - name: host-creds
           secret:
-            {{- if .Values.leafCreds.existingSecret }}
-            secretName: {{ .Values.leafCreds.existingSecret }}
-            {{- else }}
-            secretName: {{ include "mclaude-worker.fullname" . }}-nats-leaf-creds
-            {{- end }}
+            secretName: {{ include "mclaude-worker.fullname" . }}-host-creds
 {{- end }}

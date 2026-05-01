@@ -1,0 +1,101 @@
+## Pre-install hook Job: generates an NKey pair for the worker cluster host.
+## Writes the decorated seed string to Secret {release}-host-creds field nkey_seed.
+## Prints the public key to the Job log (also rendered into NOTES.txt).
+## Idempotent — skips if the Secret already exists.
+##
+## Ref: ADR-0063
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "mclaude-worker.fullname" . }}-gen-host-nkey
+  namespace: {{ include "mclaude-worker.namespace" . }}
+  labels:
+    {{- include "mclaude-worker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gen-host-nkey
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "mclaude-worker.fullname" . }}-gen-host-nkey
+  namespace: {{ include "mclaude-worker.namespace" . }}
+  labels:
+    {{- include "mclaude-worker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gen-host-nkey
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "mclaude-worker.fullname" . }}-gen-host-nkey
+  namespace: {{ include "mclaude-worker.namespace" . }}
+  labels:
+    {{- include "mclaude-worker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gen-host-nkey
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-20"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "mclaude-worker.fullname" . }}-gen-host-nkey
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mclaude-worker.fullname" . }}-gen-host-nkey
+    namespace: {{ include "mclaude-worker.namespace" . }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "mclaude-worker.fullname" . }}-gen-host-nkey
+  namespace: {{ include "mclaude-worker.namespace" . }}
+  labels:
+    {{- include "mclaude-worker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gen-host-nkey
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 120
+  template:
+    metadata:
+      labels:
+        {{- include "mclaude-worker.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: gen-host-nkey
+    spec:
+      restartPolicy: Never
+      {{- include "mclaude-worker.podSecurityContext" . | nindent 6 }}
+      {{- include "mclaude-worker.imagePullSecrets" . | nindent 6 }}
+      serviceAccountName: {{ include "mclaude-worker.fullname" . }}-gen-host-nkey
+      containers:
+        - name: gen-host-nkey
+          image: {{ include "mclaude-worker.image" (dict "imageValues" .Values.controlPlane.image "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.controlPlane.image.pullPolicy }}
+          {{- include "mclaude-worker.securityContext" . | nindent 10 }}
+          command: ["control-plane", "gen-host-nkey"]
+          env:
+            - name: NAMESPACE
+              value: {{ include "mclaude-worker.namespace" . | quote }}
+            - name: HOST_CREDS_SECRET
+              value: {{ include "mclaude-worker.fullname" . }}-host-creds
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

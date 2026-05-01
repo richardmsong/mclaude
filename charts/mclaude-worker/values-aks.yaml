@@ -1,19 +1,6 @@
 ## AKS Production values for worker chart.
 ## managed-csi-premium storage.
-
-nats:
-  config:
-    maxFileStoreSize: "53687091200"
-  persistence:
-    storageClass: managed-csi-premium
-    size: 50Gi
-  resources:
-    requests:
-      cpu: 250m
-      memory: 512Mi
-    limits:
-      cpu: 1000m
-      memory: 2Gi
+## Ref: ADR-0063, docs/charts-mclaude/spec-helm.md
 
 controller:
   resources:
