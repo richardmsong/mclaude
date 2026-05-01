@@ -315,7 +315,8 @@ func IssueSessionAgentJWT(publicKey string, uslug, hslug, pslug string, accountK
 }
 
 // IssueUserJWTLegacy is a backward-compatible wrapper that generates an NKey pair
-// and issues a user JWT with the OLD broad-wildcard permissions.
+// and issues a user JWT with the OLD broad-wildcard permissions PLUS per-user KV
+// bucket permissions required by ADR-0061.
 // DEPRECATED: Use IssueUserJWT with a client-provided public key.
 // Retained for the old /auth/login and /auth/refresh flows during migration.
 func IssueUserJWTLegacy(userID string, userSlug string, accountKP nkeys.KeyPair, expirySecs int64) (jwt string, seed []byte, err error) {
@@ -331,9 +332,47 @@ func IssueUserJWTLegacy(userID string, userSlug string, accountKP nkeys.KeyPair,
 	kvSessions := fmt.Sprintf("$KV.mclaude-sessions.%s.>", userID)
 	kvHosts := fmt.Sprintf("$KV.mclaude-hosts.%s.>", userSlug)
 	hostsPrefix := fmt.Sprintf("mclaude.users.%s.hosts.*.>", userSlug)
+
+	// ADR-0061: per-user KV bucket subjects required for the SPA to open the
+	// new per-user KV buckets (mclaude-sessions-{uslug}, mclaude-projects-{uslug}).
+	// The old shared-bucket $KV entries (kvSessions, kvProjects) used userID as a
+	// prefix; the new per-user buckets use userSlug in the bucket name itself.
+	sessBucket := userSessionsBucket(userSlug)
+	projBucket := userProjectsBucket(userSlug)
+	sessStreamName := kvStreamName(sessBucket)
+	projStreamName := kvStreamName(projBucket)
+	kvPerUserSessions := "$KV." + sessBucket + ".>"
+	kvPerUserProjects := "$KV." + projBucket + ".>"
+
 	perms := NATSPermissions{
-		PubAllow: []string{prefix, "_INBOX.>", "$JS.API.>", hostsPrefix},
-		SubAllow: []string{prefix, "_INBOX.>", kvProjects, kvSessions, kvHosts, "$JS.API.>", "$JS.API.DIRECT.GET.>", hostsPrefix},
+		PubAllow: []string{
+			prefix,
+			"_INBOX.>",
+			"$JS.API.>",
+			hostsPrefix,
+			// ADR-0061: stream info needed by NATS client for KV bucket init on per-user buckets.
+			"$JS.API.STREAM.INFO." + sessStreamName,
+			"$JS.API.STREAM.INFO." + projStreamName,
+			// ADR-0061: consumer create for KV watch on per-user buckets.
+			"$JS.API.CONSUMER.CREATE." + sessStreamName + ".>",
+			"$JS.API.CONSUMER.CREATE." + projStreamName + ".>",
+			// ADR-0061: KV put on per-user buckets (pub side of $KV subjects).
+			kvPerUserSessions,
+			kvPerUserProjects,
+		},
+		SubAllow: []string{
+			prefix,
+			"_INBOX.>",
+			kvProjects,
+			kvSessions,
+			kvHosts,
+			"$JS.API.>",
+			"$JS.API.DIRECT.GET.>",
+			hostsPrefix,
+			// ADR-0061: KV watch push delivery on per-user buckets (sub side of $KV subjects).
+			kvPerUserSessions,
+			kvPerUserProjects,
+		},
 	}
 
 	claims := natsjwt.NewUserClaims(userKP.PublicKey)

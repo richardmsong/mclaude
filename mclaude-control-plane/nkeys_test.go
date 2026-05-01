@@ -593,6 +593,47 @@ func TestIssueUserJWTLegacy_ClaimsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestIssueUserJWTLegacy_PerUserBucketPermissions(t *testing.T) {
+	// ADR-0061: IssueUserJWTLegacy must include per-user KV bucket permissions so
+	// the SPA can open mclaude-sessions-{uslug} and mclaude-projects-{uslug}.
+	accountKP, _ := nkeys.CreateAccount()
+	accountPub, _ := accountKP.PublicKey()
+
+	userID := "legacy-perm-user"
+	userSlug := "legacy-perm-slug"
+
+	jwtStr, _, err := IssueUserJWTLegacy(userID, userSlug, accountKP, 28800)
+	if err != nil {
+		t.Fatalf("IssueUserJWTLegacy: %v", err)
+	}
+
+	claims, err := DecodeUserJWT(jwtStr, accountPub)
+	if err != nil {
+		t.Fatalf("DecodeUserJWT: %v", err)
+	}
+
+	pub := claims.Permissions.Pub.Allow
+	sub := claims.Permissions.Sub.Allow
+
+	// Per-user sessions KV bucket (pub + sub).
+	sessBucket := "$KV.mclaude-sessions-" + userSlug + ".>"
+	mustContainStr(t, "pub allow", pub, sessBucket)
+	mustContainStr(t, "sub allow", sub, sessBucket)
+
+	// Per-user projects KV bucket (pub + sub).
+	projBucket := "$KV.mclaude-projects-" + userSlug + ".>"
+	mustContainStr(t, "pub allow", pub, projBucket)
+	mustContainStr(t, "sub allow", sub, projBucket)
+
+	// Stream info for KV bucket init (pub only).
+	mustContainStr(t, "pub allow", pub, "$JS.API.STREAM.INFO.KV_mclaude-sessions-"+userSlug)
+	mustContainStr(t, "pub allow", pub, "$JS.API.STREAM.INFO.KV_mclaude-projects-"+userSlug)
+
+	// Consumer create for KV watch on per-user buckets (pub only).
+	mustContainStr(t, "pub allow", pub, "$JS.API.CONSUMER.CREATE.KV_mclaude-sessions-"+userSlug+".>")
+	mustContainStr(t, "pub allow", pub, "$JS.API.CONSUMER.CREATE.KV_mclaude-projects-"+userSlug+".>")
+}
+
 // ---- NATSCredentials format ----
 
 func TestFormatNATSCredentials_Format(t *testing.T) {
