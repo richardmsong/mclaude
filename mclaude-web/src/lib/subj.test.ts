@@ -12,10 +12,11 @@ import {
   subjSessionsCreate,
   subjSessionsDelete,
   subjSessionsRestart,
+  subjSessionsApi,
   subjTerminal,
   subjTerminalWildcard,
   subjEvents,
-  subjEventsApi,
+  subjEventsWildcard,
   subjLifecycle,
   subjLifecycleWildcard,
   subjClusterProvision,
@@ -72,72 +73,78 @@ describe('NATS subject builders', () => {
     })
   })
 
-  describe('host+project-scoped API subjects (ADR-0035)', () => {
-    it('subjSessionsInput matches spec', () => {
-      expect(subjSessionsInput(U, H, P)).toBe(
-        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.api.sessions.input',
+  describe('host+project-scoped session subjects (ADR-0054)', () => {
+    it('subjSessionsInput matches spec (session slug in subject)', () => {
+      expect(subjSessionsInput(U, H, P, S)).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.sessions.s-42.input',
       )
     })
 
-    it('subjSessionsControl matches spec', () => {
-      expect(subjSessionsControl(U, H, P)).toBe(
-        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.api.sessions.control',
+    it('subjSessionsControl matches spec (session slug in subject)', () => {
+      expect(subjSessionsControl(U, H, P, S)).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.sessions.s-42.control',
       )
     })
 
-    it('subjSessionsCreate matches spec', () => {
+    it('subjSessionsCreate matches spec (no session slug)', () => {
       expect(subjSessionsCreate(U, H, P)).toBe(
-        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.api.sessions.create',
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.sessions.create',
       )
     })
 
-    it('subjSessionsDelete matches spec', () => {
-      expect(subjSessionsDelete(U, H, P)).toBe(
-        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.api.sessions.delete',
+    it('subjSessionsDelete matches spec (session slug in subject)', () => {
+      expect(subjSessionsDelete(U, H, P, S)).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.sessions.s-42.delete',
       )
     })
 
-    it('subjSessionsRestart matches spec', () => {
-      expect(subjSessionsRestart(U, H, P)).toBe(
-        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.api.sessions.restart',
+    it('subjSessionsRestart matches spec (session slug in subject)', () => {
+      expect(subjSessionsRestart(U, H, P, S)).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.sessions.s-42.restart',
       )
     })
 
-    it('subjTerminal(create) matches spec', () => {
+    it('subjSessionsApi matches spec (_api sentinel)', () => {
+      expect(subjSessionsApi(U, H, P)).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.sessions._api',
+      )
+    })
+
+    it('subjTerminal(create) matches spec (no .api. prefix)', () => {
       expect(subjTerminal(U, H, P, 'create')).toBe(
-        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.api.terminal.create',
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.terminal.create',
       )
     })
 
     it('subjTerminalWildcard matches spec wildcard pattern', () => {
       expect(subjTerminalWildcard(U, H, P)).toBe(
-        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.api.terminal.>',
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.terminal.>',
       )
     })
   })
 
-  describe('events and lifecycle subjects (ADR-0035)', () => {
-    it('subjEvents matches spec', () => {
+  describe('events and lifecycle subjects (ADR-0054)', () => {
+    it('subjEvents matches spec (under sessions.{sslug}.events)', () => {
       expect(subjEvents(U, H, P, S)).toBe(
-        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.events.s-42',
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.sessions.s-42.events',
       )
     })
 
-    it('subjEventsApi uses _api sentinel', () => {
-      expect(subjEventsApi(U, H, P)).toBe(
-        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.events._api',
+    it('subjEventsWildcard matches all sessions', () => {
+      expect(subjEventsWildcard(U, H, P)).toBe(
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.sessions.*.events',
       )
     })
 
-    it('subjLifecycle matches spec', () => {
+    it('subjLifecycle matches spec (under sessions.{sslug}.lifecycle)', () => {
       expect(subjLifecycle(U, H, P, S)).toBe(
-        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.lifecycle.s-42',
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.sessions.s-42.lifecycle.>',
       )
     })
 
     it('subjLifecycleWildcard matches spec wildcard pattern', () => {
       expect(subjLifecycleWildcard(U, H, P)).toBe(
-        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.lifecycle.>',
+        'mclaude.users.alice-gmail.hosts.mbp16.projects.mclaude.sessions.*.lifecycle.>',
       )
     })
   })
@@ -159,7 +166,7 @@ describe('NATS subject builders', () => {
   describe('typed-literal structure invariants', () => {
     it('user-scoped subjects always start with mclaude.users.{uslug}', () => {
       expect(subjProjectsCreate(U, H)).toMatch(/^mclaude\.users\.alice-gmail\./)
-      expect(subjSessionsInput(U, H, P)).toMatch(/^mclaude\.users\.alice-gmail\./)
+      expect(subjSessionsInput(U, H, P, S)).toMatch(/^mclaude\.users\.alice-gmail\./)
     })
 
     it('cluster-scoped subjects always start with mclaude.clusters.{cslug}', () => {
@@ -175,7 +182,7 @@ describe('NATS subject builders', () => {
     })
 
     it('host-scoped subjects contain .hosts.{hslug}. between user and project', () => {
-      const s = subjSessionsInput(U, H, P)
+      const s = subjSessionsInput(U, H, P, S)
       const tokens = s.split('.')
       expect(tokens[3]).toBe('hosts')
       expect(tokens[4]).toBe('mbp16')

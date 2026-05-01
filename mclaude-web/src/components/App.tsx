@@ -465,7 +465,7 @@ function AppInner() {
     const replayFromSeq = session?.replayFromSeq ?? undefined
     store.start(replayFromSeq)
     const resolvedSessionId = session?.id ?? route.sessionId
-    const vm = new ConversationVM(store, sessionStore, natsClient, authState.userId, resolvedProjectId, resolvedSessionId, resolvedUserSlug, resolvedHostSlug, resolvedProjectSlug ?? resolvedProjectId)
+    const vm = new ConversationVM(store, sessionStore, natsClient, authState.userId, resolvedProjectId, resolvedSessionId, resolvedUserSlug, resolvedHostSlug, resolvedProjectSlug ?? resolvedProjectId, resolvedSessionSlug)
     const lifecycle = new LifecycleStore(natsClient, authState.userId, resolvedProjectId, resolvedUserSlug, resolvedHostSlug, resolvedProjectSlug ?? resolvedProjectId)
     lifecycle.start()
     // Spec: wire lifecycle events to trigger session list refresh (e.g., session_created, session_failed)

@@ -6,7 +6,7 @@ import {
   subjSessionsInput,
   subjSessionsControl,
 } from '@/lib/subj'
-import type { UserSlug, HostSlug, ProjectSlug } from '@/lib/slug'
+import type { UserSlug, HostSlug, ProjectSlug, SessionSlug } from '@/lib/slug'
 
 export interface ConversationVMState {
   turns: ConversationModel['turns']
@@ -36,6 +36,8 @@ export class ConversationVM {
     private readonly hostSlug: string = 'local',
     /** Project slug for subject construction (ADR-0024). Falls back to projectId when absent. */
     private readonly projectSlug: string = projectId,
+    /** Session slug for subject construction (ADR-0054). Falls back to sessionId when absent. */
+    private readonly sessionSlug: string = sessionId,
   ) {
     const unsub = this.eventStore.onConversationChanged(() => this._notify())
     this._unsubscribers.push(unsub)
@@ -60,7 +62,7 @@ export class ConversationVM {
   sendMessage(text: string): void {
     const uuid = crypto.randomUUID()
     this.eventStore.addPendingMessage(uuid, text)
-    const subject = subjSessionsInput(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug)
+    const subject = subjSessionsInput(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug, this.sessionSlug as SessionSlug)
     const payload = {
       type: 'user',
       message: { role: 'user', content: text },
@@ -79,7 +81,7 @@ export class ConversationVM {
       { type: 'image', source: { type: 'base64', media_type: mimeType, data: imageBase64 } },
     ]
     this.eventStore.addPendingMessage(uuid, content)
-    const subject = subjSessionsInput(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug)
+    const subject = subjSessionsInput(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug, this.sessionSlug as SessionSlug)
     const payload = {
       type: 'user',
       message: {
@@ -94,7 +96,7 @@ export class ConversationVM {
   }
 
   approvePermission(requestId: string): void {
-    const subject = subjSessionsControl(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug)
+    const subject = subjSessionsControl(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug, this.sessionSlug as SessionSlug)
     const payload = {
       type: 'control_response',
       response: {
@@ -118,7 +120,7 @@ export class ConversationVM {
   }
 
   denyPermission(requestId: string): void {
-    const subject = subjSessionsControl(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug)
+    const subject = subjSessionsControl(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug, this.sessionSlug as SessionSlug)
     const payload = {
       type: 'control_response',
       response: {
@@ -140,13 +142,13 @@ export class ConversationVM {
   }
 
   interrupt(): void {
-    const subject = subjSessionsControl(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug)
+    const subject = subjSessionsControl(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug, this.sessionSlug as SessionSlug)
     const payload = { type: 'control_request', request: { subtype: 'interrupt' } }
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
   }
 
   switchModel(model: string): void {
-    const subject = subjSessionsControl(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug)
+    const subject = subjSessionsControl(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug, this.sessionSlug as SessionSlug)
     const payload = { type: 'control_request', request: { subtype: 'set_model', model } }
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
   }
@@ -157,13 +159,13 @@ export class ConversationVM {
   }
 
   setMaxThinkingTokens(budget: number): void {
-    const subject = subjSessionsControl(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug)
+    const subject = subjSessionsControl(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug, this.sessionSlug as SessionSlug)
     const payload = { type: 'control_request', request: { subtype: 'set_max_thinking_tokens', budget } }
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
   }
 
   reloadPlugins(): void {
-    const subject = subjSessionsControl(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug)
+    const subject = subjSessionsControl(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug, this.sessionSlug as SessionSlug)
     const payload = { type: 'control_request', request: { subtype: 'reload_plugins' } }
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
   }

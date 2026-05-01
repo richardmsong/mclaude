@@ -6,9 +6,9 @@ import {
   subjSessionsCreate,
   subjSessionsDelete,
   subjSessionsRestart,
-  subjEventsApi,
+  subjSessionsApi,
 } from '@/lib/subj'
-import type { UserSlug, HostSlug, ProjectSlug } from '@/lib/slug'
+import type { UserSlug, HostSlug, ProjectSlug, SessionSlug } from '@/lib/slug'
 
 const FILTER_PROJECT_KEY = 'mclaude.filterProjectId'
 
@@ -213,7 +213,7 @@ export class SessionListVM {
 
       // Error: temporary core NATS sub on project-level _api subject
       unsubErr = this.natsClient.subscribe(
-        subjEventsApi(this.userSlug as UserSlug, hslug, pslug),
+        subjSessionsApi(this.userSlug as UserSlug, hslug, pslug),
         (msg) => {
           try {
             const event = JSON.parse(new TextDecoder().decode(msg.data)) as { type?: string; request_id?: string; error?: string }
@@ -236,7 +236,8 @@ export class SessionListVM {
     const delProject = this.sessionStore.projects.get(session.projectId)
     const delPslug = (delProject?.slug ?? session.projectId) as ProjectSlug
     const delHslug = (delProject?.hostSlug ?? session.hostSlug ?? 'local') as HostSlug
-    const subject = subjSessionsDelete(this.userSlug as UserSlug, delHslug, delPslug)
+    const delSslug = (session.slug ?? sessionId) as SessionSlug
+    const subject = subjSessionsDelete(this.userSlug as UserSlug, delHslug, delPslug, delSslug)
     const deleteRequestId = crypto.randomUUID()
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify({ sessionId, requestId: deleteRequestId })))
   }
@@ -247,7 +248,8 @@ export class SessionListVM {
     const rstProject = this.sessionStore.projects.get(session.projectId)
     const rstPslug = (rstProject?.slug ?? session.projectId) as ProjectSlug
     const rstHslug = (rstProject?.hostSlug ?? session.hostSlug ?? 'local') as HostSlug
-    const subject = subjSessionsRestart(this.userSlug as UserSlug, rstHslug, rstPslug)
+    const rstSslug = (session.slug ?? sessionId) as SessionSlug
+    const subject = subjSessionsRestart(this.userSlug as UserSlug, rstHslug, rstPslug, rstSslug)
     const restartRequestId = crypto.randomUUID()
     const payload = {
       sessionId,

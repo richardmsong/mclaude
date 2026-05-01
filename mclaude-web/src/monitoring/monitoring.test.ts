@@ -232,7 +232,7 @@ describe('monitoring — structured pino logs', () => {
       // Simulate malformed JSON — use ADR-0024 subject format (typed slugs)
       // EventStore subscribes to mclaude.users.{uslug}.projects.{pslug}.events.{sslug}
       // When no slug opts provided, falls back to userId/projectId/sessionId as slug values
-      mockNats.publish('mclaude.users.user-1.hosts.local.projects.project-1.events.session-1', new TextEncoder().encode('not-json'))
+      mockNats.publish('mclaude.users.user-1.hosts.local.projects.project-1.sessions.session-1.events', new TextEncoder().encode('not-json'))
       const warnLogs = mockLogLines.filter(l => l['level'] === 'warn' && l['component'] === 'event-store')
       expect(warnLogs.length).toBeGreaterThan(0)
       store.stop()

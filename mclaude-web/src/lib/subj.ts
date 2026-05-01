@@ -49,56 +49,62 @@ export function subjProjectsDelete(uslug: UserSlug, hslug: HostSlug): string {
 }
 
 // --------------------------------------------------------------------------
-// User+host+project-scoped API subjects (ADR-0035)
-// All project-scoped subjects include .hosts.{hslug}. between user and project.
+// User+host+project-scoped session subjects (ADR-0054)
+// Format: mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.sessions.{...}
+// No .api. prefix — ADR-0054 consolidated all session subjects under sessions.>
 // --------------------------------------------------------------------------
 
-export function subjSessionsInput(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug): string {
-  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.api.sessions.input`
+export function subjSessionsInput(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug, sslug: SessionSlug): string {
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.sessions.${sslug}.input`
 }
 
-export function subjSessionsControl(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug): string {
-  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.api.sessions.control`
+export function subjSessionsControl(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug, sslug: SessionSlug): string {
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.sessions.${sslug}.control`
 }
 
 export function subjSessionsCreate(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug): string {
-  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.api.sessions.create`
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.sessions.create`
 }
 
-export function subjSessionsDelete(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug): string {
-  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.api.sessions.delete`
+export function subjSessionsDelete(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug, sslug: SessionSlug): string {
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.sessions.${sslug}.delete`
 }
 
-export function subjSessionsRestart(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug): string {
-  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.api.sessions.restart`
+export function subjSessionsRestart(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug, sslug: SessionSlug): string {
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.sessions.${sslug}.restart`
 }
 
 export function subjTerminal(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug, action: string): string {
-  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.api.terminal.${action}`
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.terminal.${action}`
 }
 
 export function subjTerminalWildcard(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug): string {
-  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.api.terminal.>`
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.terminal.>`
 }
 
 // --------------------------------------------------------------------------
-// Event and lifecycle subjects (ADR-0035)
+// Event and lifecycle subjects (ADR-0054)
+// Events and lifecycle are now under sessions.{sslug}.events / sessions.{sslug}.lifecycle.*
 // --------------------------------------------------------------------------
 
 export function subjEvents(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug, sslug: SessionSlug): string {
-  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.events.${sslug}`
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.sessions.${sslug}.events`
 }
 
-export function subjEventsApi(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug): string {
-  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.events._api`
+export function subjEventsWildcard(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug): string {
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.sessions.*.events`
+}
+
+export function subjSessionsApi(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug): string {
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.sessions._api`
 }
 
 export function subjLifecycle(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug, sslug: SessionSlug): string {
-  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.lifecycle.${sslug}`
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.sessions.${sslug}.lifecycle.>`
 }
 
 export function subjLifecycleWildcard(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug): string {
-  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.lifecycle.>`
+  return `${PREFIX}.users.${uslug}.hosts.${hslug}.projects.${pslug}.sessions.*.lifecycle.>`
 }
 
 // --------------------------------------------------------------------------

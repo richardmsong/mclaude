@@ -298,12 +298,12 @@ describe('SessionListVM', () => {
   })
 
   describe('createSession', () => {
-    it('publishes to mclaude.{userId}.{projectId}.api.sessions.create and resolves when session appears in KV', async () => {
+    it('publishes to sessions.create and resolves when session appears in KV', async () => {
       // Start the createSession call which publishes and waits for KV
       const createPromise = vm.createSession('project-1', 'main', 'My Session')
 
       // Verify publish happened
-      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.api.sessions.create')
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.sessions.create')
       expect(pub).toBeDefined()
       const payload = parsePublished(pub!.data) as Record<string, unknown>
       expect(payload).toMatchObject({ projectId: 'project-1', branch: 'main', name: 'My Session' })
@@ -324,7 +324,7 @@ describe('SessionListVM', () => {
         extraFlags: '--disallowedTools "Edit(src/**)" --model claude-opus-4-7',
       })
 
-      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.api.sessions.create')
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.sessions.create')
       expect(pub).toBeDefined()
       const payload = parsePublished(pub!.data) as Record<string, unknown>
       expect(payload['extraFlags']).toBe('--disallowedTools "Edit(src/**)" --model claude-opus-4-7')
@@ -340,7 +340,7 @@ describe('SessionListVM', () => {
     it('omits extraFlags from payload when not provided', async () => {
       const createPromise = vm.createSession('project-1', 'main', 'My Session')
 
-      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.api.sessions.create')
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.sessions.create')
       expect(pub).toBeDefined()
       const payload = parsePublished(pub!.data) as Record<string, unknown>
       expect('extraFlags' in payload).toBe(false)
@@ -357,13 +357,13 @@ describe('SessionListVM', () => {
       const createPromise = vm.createSession('project-1', 'main', 'My Session')
 
       // Get the requestId from the published message
-      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.api.sessions.create')
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.sessions.create')
       expect(pub).toBeDefined()
       const payload = parsePublished(pub!.data) as Record<string, unknown>
       const requestId = payload['requestId'] as string
 
       // Simulate api_error event on the _api subject
-      mockNats.simulateReceive('mclaude.users.user-1.hosts.local.projects.project-1.events._api', {
+      mockNats.simulateReceive('mclaude.users.user-1.hosts.local.projects.project-1.sessions._api', {
         type: 'api_error',
         request_id: requestId,
         operation: 'create',
@@ -378,7 +378,7 @@ describe('SessionListVM', () => {
       const createPromise = vm.createSession('project-1', 'main', 'My Session')
 
       // Send an error event for a DIFFERENT request
-      mockNats.simulateReceive('mclaude.users.user-1.hosts.local.projects.project-1.events._api', {
+      mockNats.simulateReceive('mclaude.users.user-1.hosts.local.projects.project-1.sessions._api', {
         type: 'api_error',
         request_id: 'other-request-id',
         operation: 'create',
@@ -397,7 +397,7 @@ describe('SessionListVM', () => {
   })
 
   describe('restartSession', () => {
-    it('publishes to mclaude.{userId}.{projectId}.api.sessions.restart with sessionId', async () => {
+    it('publishes to sessions.{sslug}.restart with sessionId', async () => {
       mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-abc', makeSessionKVState({
         id: 'session-abc', projectId: 'project-1',
       }))
@@ -405,7 +405,7 @@ describe('SessionListVM', () => {
 
       await vm.restartSession('session-abc')
 
-      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.api.sessions.restart')
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.sessions.session-abc.restart')
       expect(pub).toBeDefined()
       const payload = parsePublished(pub!.data) as Record<string, unknown>
       expect(payload['sessionId']).toBe('session-abc')
@@ -419,7 +419,7 @@ describe('SessionListVM', () => {
 
       await vm.restartSession('session-abc', { extraFlags: '--model claude-opus-4-7' })
 
-      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.api.sessions.restart')
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.sessions.session-abc.restart')
       expect(pub).toBeDefined()
       const payload = parsePublished(pub!.data) as Record<string, unknown>
       expect(payload['sessionId']).toBe('session-abc')
@@ -434,7 +434,7 @@ describe('SessionListVM', () => {
 
       await vm.restartSession('session-abc')
 
-      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.api.sessions.restart')
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.sessions.session-abc.restart')
       expect(pub).toBeDefined()
       const payload = parsePublished(pub!.data) as Record<string, unknown>
       expect('extraFlags' in payload).toBe(false)
@@ -448,7 +448,7 @@ describe('SessionListVM', () => {
 
       await vm.restartSession('session-abc', { extraFlags: undefined })
 
-      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.api.sessions.restart')
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.sessions.session-abc.restart')
       expect(pub).toBeDefined()
       const payload = parsePublished(pub!.data) as Record<string, unknown>
       expect('extraFlags' in payload).toBe(false)
@@ -471,14 +471,14 @@ describe('SessionListVM', () => {
 
       await vm.deleteSession('session-1')
 
-      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.api.sessions.delete')
+      const pub = mockNats.published.find(p => p.subject === 'mclaude.users.user-1.hosts.local.projects.project-1.sessions.session-1.delete')
       expect(pub).toBeDefined()
       expect(parsePublished(pub!.data)).toMatchObject({ sessionId: 'session-1' })
     })
 
     it('does nothing when session not found', async () => {
       await vm.deleteSession('nonexistent')
-      expect(mockNats.published.filter(p => p.subject.includes('.api.sessions.delete'))).toHaveLength(0)
+      expect(mockNats.published.filter(p => p.subject.includes('.delete'))).toHaveLength(0)
     })
   })
 

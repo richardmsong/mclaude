@@ -190,17 +190,15 @@ export class MockNATSClient implements INATSClient {
 
   private _matchSubject(pattern: string, subject: string): boolean {
     if (pattern === subject) return true
-    if (pattern.endsWith('>')) {
-      const prefix = pattern.slice(0, -1)
-      return subject.startsWith(prefix)
+    const patParts = pattern.split('.')
+    const subParts = subject.split('.')
+    for (let i = 0; i < patParts.length; i++) {
+      const pp = patParts[i]
+      if (pp === '>') return i <= subParts.length
+      if (i >= subParts.length) return false
+      if (pp !== '*' && pp !== subParts[i]) return false
     }
-    if (pattern.endsWith('*')) {
-      const parts = pattern.split('.')
-      const subParts = subject.split('.')
-      if (parts.length !== subParts.length) return false
-      return parts.every((p, i) => p === '*' || p === subParts[i])
-    }
-    return false
+    return patParts.length === subParts.length
   }
 
   private _matchKVKey(pattern: string, key: string): boolean {
