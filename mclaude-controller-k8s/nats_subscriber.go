@@ -46,16 +46,37 @@ type NATSProvisioner struct {
 	logger          zerolog.Logger
 }
 
-// StartNATSSubscriber subscribes to the provisioning subjects for this cluster.
-// Subject pattern: mclaude.users.*.hosts.{clusterSlug}.api.projects.>
+// StartNATSSubscriber subscribes to both provisioning subject patterns for this cluster
+// (dual subscription during ADR-0054 migration per ADR-0061):
+//
+//   - ADR-0054 host-scoped (primary): mclaude.hosts.{clusterSlug}.>
+//     Receives CP-initiated fan-out provisioning (dev-seed and production CP).
+//
+//   - Legacy ADR-0035 user-scoped (backward compatibility): mclaude.users.*.hosts.{clusterSlug}.api.projects.>
+//     Retained for SPA-initiated project creation until the old pattern is fully retired.
+//
+// Both subscriptions route to the same handleProvisionRequest handler, which reads
+// userSlug/projectSlug/projectID from the JSON payload — making it subject-pattern-agnostic.
 func (p *NATSProvisioner) StartNATSSubscriber() error {
-	subject := fmt.Sprintf("mclaude.users.*.hosts.%s.api.projects.>", p.clusterSlug)
-	p.logger.Info().Str("subject", subject).Msg("subscribing to provisioning requests")
-
-	_, err := p.nc.Subscribe(subject, func(msg *nats.Msg) {
+	// Legacy ADR-0035 user-scoped pattern (backward compatibility for SPA-initiated creation).
+	legacySubject := fmt.Sprintf("mclaude.users.*.hosts.%s.api.projects.>", p.clusterSlug)
+	p.logger.Info().Str("subject", legacySubject).Msg("subscribing to legacy provisioning requests (ADR-0035)")
+	if _, err := p.nc.Subscribe(legacySubject, func(msg *nats.Msg) {
 		p.handleProvisionRequest(msg)
-	})
-	return err
+	}); err != nil {
+		return fmt.Errorf("subscribe legacy subject: %w", err)
+	}
+
+	// ADR-0054 host-scoped pattern (primary: CP dev-seed fan-out provisioning).
+	hostSubject := fmt.Sprintf("mclaude.hosts.%s.>", p.clusterSlug)
+	p.logger.Info().Str("subject", hostSubject).Msg("subscribing to host-scoped provisioning requests (ADR-0054)")
+	if _, err := p.nc.Subscribe(hostSubject, func(msg *nats.Msg) {
+		p.handleProvisionRequest(msg)
+	}); err != nil {
+		return fmt.Errorf("subscribe host-scoped subject: %w", err)
+	}
+
+	return nil
 }
 
 // handleProvisionRequest processes a single provisioning NATS message.

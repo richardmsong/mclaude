@@ -108,7 +108,8 @@ func TestGap3_PendingPhaseTransition(t *testing.T) {
 }
 
 // TestGap2_JWTPermissionScoping verifies that generateNATSUserCreds produces
-// a JWT with cluster-scoped permissions.
+// a JWT with cluster-scoped permissions covering both the legacy ADR-0035 user-scoped
+// pattern and the ADR-0054 host-scoped pattern (dual subscription per ADR-0061).
 func TestGap2_JWTPermissionScoping(t *testing.T) {
 	accountKP, err := nkeys.CreateAccount()
 	if err != nil {
@@ -126,16 +127,17 @@ func TestGap2_JWTPermissionScoping(t *testing.T) {
 		t.Fatalf("decode user claims: %v", err)
 	}
 
-	// Verify publish permissions.
+	// Verify publish permissions — must include both legacy and host-scoped patterns (ADR-0061).
 	expectedPub := []string{
-		"mclaude.users.*.hosts.us-east.>",
+		"mclaude.users.*.hosts.us-east.>", // legacy ADR-0035
+		"mclaude.hosts.us-east.>",         // ADR-0054 host-scoped (ADR-0061)
 		"_INBOX.>",
 		"$JS.*.API.>",
 		"$SYS.ACCOUNT.*.CONNECT",
 		"$SYS.ACCOUNT.*.DISCONNECT",
 	}
 	if len(claims.Permissions.Pub.Allow) != len(expectedPub) {
-		t.Fatalf("pub.allow length: got %d, want %d", len(claims.Permissions.Pub.Allow), len(expectedPub))
+		t.Fatalf("pub.allow length: got %d, want %d\npub.allow: %v", len(claims.Permissions.Pub.Allow), len(expectedPub), claims.Permissions.Pub.Allow)
 	}
 	for i, v := range expectedPub {
 		if string(claims.Permissions.Pub.Allow[i]) != v {
@@ -143,14 +145,15 @@ func TestGap2_JWTPermissionScoping(t *testing.T) {
 		}
 	}
 
-	// Verify subscribe permissions.
+	// Verify subscribe permissions — must include both legacy and host-scoped patterns (ADR-0061).
 	expectedSub := []string{
-		"mclaude.users.*.hosts.us-east.>",
+		"mclaude.users.*.hosts.us-east.>", // legacy ADR-0035
+		"mclaude.hosts.us-east.>",         // ADR-0054 host-scoped (ADR-0061)
 		"_INBOX.>",
 		"$JS.*.API.>",
 	}
 	if len(claims.Permissions.Sub.Allow) != len(expectedSub) {
-		t.Fatalf("sub.allow length: got %d, want %d", len(claims.Permissions.Sub.Allow), len(expectedSub))
+		t.Fatalf("sub.allow length: got %d, want %d\nsub.allow: %v", len(claims.Permissions.Sub.Allow), len(expectedSub), claims.Permissions.Sub.Allow)
 	}
 	for i, v := range expectedSub {
 		if string(claims.Permissions.Sub.Allow[i]) != v {
@@ -288,16 +291,22 @@ func TestGap7_MultiOwner(t *testing.T) {
 	}
 }
 
-// TestExtractOperation verifies the subject operation extraction.
+// TestExtractOperation verifies the subject operation extraction for both the
+// legacy ADR-0035 user-scoped pattern and the ADR-0054 host-scoped pattern (ADR-0061).
 func TestExtractOperation(t *testing.T) {
 	tests := []struct {
 		subject string
 		want    string
 	}{
+		// Legacy ADR-0035 user-scoped pattern.
 		{"mclaude.users.alice.hosts.us-east.api.projects.create", "create"},
 		{"mclaude.users.bob.hosts.eu-west.api.projects.delete", "delete"},
 		{"mclaude.users.alice.hosts.us-east.api.projects.update", "update"},
 		{"mclaude.users.alice.hosts.us-east.api.projects.provision", "provision"},
+		// ADR-0054 host-scoped pattern (ADR-0061).
+		{"mclaude.hosts.us-east.users.alice.projects.billing.create", "create"},
+		{"mclaude.hosts.us-east.users.alice.projects.billing.delete", "delete"},
+		// Edge case.
 		{"singletoken", "singletoken"},
 	}
 	for _, tt := range tests {

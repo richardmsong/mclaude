@@ -170,16 +170,19 @@ func generateNATSUserCreds(accountKP nkeys.KeyPair, clusterSlug string) (userJWT
 	claims.Name = "controller-k8s"
 	claims.IssuerAccount, _ = accountKP.PublicKey()
 
-	// Gap 2: Scope controller JWT permissions to this cluster per spec-state-schema.md.
+	// Scope controller JWT permissions to this cluster per spec-state-schema.md.
+	// Dual subscription per ADR-0061: both host-scoped (ADR-0054) and legacy user-scoped (ADR-0035).
 	claims.Permissions.Pub.Allow = natsjwt.StringList{
-		fmt.Sprintf("mclaude.users.*.hosts.%s.>", clusterSlug),
+		fmt.Sprintf("mclaude.users.*.hosts.%s.>", clusterSlug), // legacy ADR-0035
+		fmt.Sprintf("mclaude.hosts.%s.>", clusterSlug),         // ADR-0054 host-scoped (ADR-0061)
 		"_INBOX.>",
 		"$JS.*.API.>",
 		"$SYS.ACCOUNT.*.CONNECT",
 		"$SYS.ACCOUNT.*.DISCONNECT",
 	}
 	claims.Permissions.Sub.Allow = natsjwt.StringList{
-		fmt.Sprintf("mclaude.users.*.hosts.%s.>", clusterSlug),
+		fmt.Sprintf("mclaude.users.*.hosts.%s.>", clusterSlug), // legacy ADR-0035
+		fmt.Sprintf("mclaude.hosts.%s.>", clusterSlug),         // ADR-0054 host-scoped (ADR-0061)
 		"_INBOX.>",
 		"$JS.*.API.>",
 	}
