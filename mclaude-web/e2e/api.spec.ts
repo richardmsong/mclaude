@@ -40,6 +40,12 @@ test.describe('Public API endpoints', () => {
     expect(res.status()).toBe(200)
   })
 
+  test('API-PUB-04: Readiness probe (DB down) → GET /readyz → 503', async () => {
+    // Requires Postgres to be down — cannot be triggered in the live dev deployment
+    // without intentionally stopping the database, which would disrupt other tests.
+    test.skip(true, 'Requires Postgres outage — cannot be triggered non-destructively in live dev')
+  })
+
   test('API-PUB-05: Version → GET /version → 200 with minClientVersion and serverVersion', async ({ request }) => {
     const res = await request.get(`${BASE_URL}/version`)
     expect(res.status()).toBe(200)

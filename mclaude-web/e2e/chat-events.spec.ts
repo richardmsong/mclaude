@@ -348,4 +348,14 @@ test.describe('Chat Events', () => {
       description: 'App handled nonexistent session URL gracefully (no crash)',
     })
   })
+
+  // SPA-CHAT-21: Backend-specific event rendering (Droid backend)
+  // Requires Droid backend to be configured — not available in standard dev deployment
+  test('SPA-CHAT-21: backend_specific events render per-backend (requires Droid backend)', async () => {
+    test.skip(true, 'Requires Droid backend binary and session configured with backend: "droid"')
+    // When implemented:
+    // 1. Create session with backend: "droid"
+    // 2. Verify backend_specific events render with Droid-specific UI (mission notifications)
+    // 3. Verify non-droid sessions do not show Droid-specific rendering
+  })
 })
