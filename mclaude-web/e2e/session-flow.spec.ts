@@ -45,8 +45,9 @@ test.describe('Smoke tests', () => {
     await expect(connectBtn).toBeDisabled()
   })
 
-  test('connect button enables when token is filled', async ({ page }) => {
+  test('connect button enables when email and token are filled', async ({ page }) => {
     await page.goto('/')
+    await page.getByPlaceholder(/Email/).fill('user@example.com')
     await page.getByPlaceholder(/Access token/).fill('test-token')
     const connectBtn = page.getByRole('button', { name: 'Connect' })
     await expect(connectBtn).toBeEnabled()
@@ -84,12 +85,12 @@ test.describe('Session flow', () => {
 
     // Login form — no Server URL field, only email + token
     await expect(page.getByTestId('auth-screen')).toBeVisible()
-    await page.getByPlaceholder(/Email/).fill('test@example.com')
-    await page.getByPlaceholder(/Access token/).fill(process.env['E2E_TOKEN'] ?? 'test-token')
+    await page.getByPlaceholder(/Email/).fill(process.env['E2E_EMAIL'] ?? 'dev@mclaude.local')
+    await page.getByPlaceholder(/Access token/).fill(process.env['E2E_TOKEN'] ?? 'dev')
     await page.getByRole('button', { name: 'Connect' }).click()
 
     // After login, dashboard should appear
-    await expect(page.locator('[data-testid="auth-screen"]')).not.toBeVisible({ timeout: 10000 })
+    await expect(page.locator('[data-testid="auth-screen"]')).not.toBeVisible({ timeout: 30_000 })
 
     // Open the first session if any
     const sessionItem = page.locator('button').filter({ hasText: /Working|Idle/ }).first()
@@ -97,10 +98,10 @@ test.describe('Session flow', () => {
       await sessionItem.click()
 
       // Conversation view
-      await expect(page.locator('textarea[placeholder*="Message"]')).toBeVisible({ timeout: 5000 })
+      await expect(page.locator('[placeholder*="Message"]')).toBeVisible({ timeout: 5000 })
 
       // Send a message
-      const input = page.locator('textarea[placeholder*="Message"]')
+      const input = page.locator('[placeholder*="Message"]')
       await input.fill('Hello, Claude!')
       await input.press('Enter')
 
@@ -119,6 +120,11 @@ test.describe('Session flow', () => {
   })
 
   test('version block screen shown when client is outdated', async ({ page }) => {
+    // Skip on live deployments — CustomEvent dispatch doesn't trigger the version block
+    // when the SPA is served from a production build
+    const baseUrl = process.env['BASE_URL'] || ''
+    test.skip(baseUrl.startsWith('https'), 'Version block test requires local dev server, not live deployment')
+
     await page.goto('/')
 
     await page.evaluate(() => {

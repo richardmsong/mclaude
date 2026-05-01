@@ -219,6 +219,13 @@ func seedDev(ctx context.Context, db *DB, nc *nats.Conn, logger zerolog.Logger) 
 		logger.Info().Str("email", devEmail).Msg("dev user already exists")
 	}
 
+	// Ensure per-user JetStream resources exist (idempotent).
+	// Previously this was only called during login, so existing dev users
+	// created before ADR-0054 would never get their per-user KV buckets.
+	if err := ensureUserResources(nc, user.Slug); err != nil {
+		logger.Error().Err(err).Msg("DEV_SEED: ensureUserResources failed (non-fatal)")
+	}
+
 	// Seed a default project for the dev user.
 	projects, err := db.GetProjectsByUser(ctx, user.ID)
 	if err != nil {

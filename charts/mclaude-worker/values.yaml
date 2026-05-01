@@ -145,7 +145,7 @@ sessionAgent:
     limits:
       cpu: 2000m
       memory: 2Gi
-  terminationGracePeriodSeconds: 86400
+  terminationGracePeriodSeconds: 120
   persistence:
     storageClass: ""
     size: 50Gi

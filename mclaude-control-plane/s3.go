@@ -15,7 +15,7 @@ import (
 )
 
 // awsV4Scheme is the AWS Signature V4 authorization header scheme identifier.
-const awsV4Scheme = "AWS4" + "-HMAC-" + "SHA256"
+const awsV4Scheme = "AWS4-HMAC-SHA256"
 
 // s3Config holds the S3-compatible storage configuration.
 // Loaded from environment variables on startup.
@@ -265,9 +265,8 @@ func (cfg *s3Config) s3ListObjectKeysPage(prefix, continuationToken string) (key
 	hmac4 := hmacSHA256(hmac3, []byte("aws4_request"))
 	signature := hex.EncodeToString(hmacSHA256(hmac4, []byte(stringToSign)))
 
-	credPart := "Cred" + "ential"
-	authorization := fmt.Sprintf("%s %s=%s/%s, SignedHeaders=%s, Signature=%s",
-		awsV4Scheme, credPart, cfg.AccessID, credentialScope, signedHeaders, signature)
+	authorization := fmt.Sprintf("%s Credential=%s/%s, SignedHeaders=%s, Signature=%s",
+		awsV4Scheme, cfg.AccessID, credentialScope, signedHeaders, signature)
 
 	reqURL := cfg.Endpoint + canonicalURI + "?" + canonicalQueryString
 	req, reqErr := http.NewRequest(http.MethodGet, reqURL, nil) //nolint:noctx
