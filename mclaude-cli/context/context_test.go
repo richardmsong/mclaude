@@ -283,3 +283,77 @@ func containsStr(s, sub string) bool {
 func endsWith(s, suffix string) bool {
 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }
+
+// ── Server field ──────────────────────────────────────────────────────────────
+
+func TestContextServerFieldRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "context.json")
+
+	want := &clicontext.Context{
+		UserSlug: "alice-test",
+		Server:   "https://api.example.com",
+	}
+	if err := clicontext.Save(path, want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := clicontext.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Server != "https://api.example.com" {
+		t.Errorf("Server = %q; want https://api.example.com", got.Server)
+	}
+}
+
+func TestContextServerOmittedWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "context.json")
+
+	ctx := &clicontext.Context{UserSlug: "alice-test"}
+	if err := clicontext.Save(path, ctx); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	// "server" must not appear in JSON when empty (omitempty).
+	if containsStr(string(data), `"server"`) {
+		t.Errorf("JSON contains 'server' field when it should be omitted: %s", data)
+	}
+}
+
+// ── ResolveServerURL ──────────────────────────────────────────────────────────
+
+func TestResolveServerURLOverrideTakesPriority(t *testing.T) {
+	ctx := &clicontext.Context{Server: "https://context.example.com"}
+	got := clicontext.ResolveServerURL("https://flag.example.com", ctx)
+	if got != "https://flag.example.com" {
+		t.Errorf("ResolveServerURL = %q; want flag override", got)
+	}
+}
+
+func TestResolveServerURLContextFallback(t *testing.T) {
+	ctx := &clicontext.Context{Server: "https://context.example.com"}
+	got := clicontext.ResolveServerURL("", ctx)
+	if got != "https://context.example.com" {
+		t.Errorf("ResolveServerURL = %q; want context value", got)
+	}
+}
+
+func TestResolveServerURLDefault(t *testing.T) {
+	ctx := &clicontext.Context{}
+	got := clicontext.ResolveServerURL("", ctx)
+	if got != clicontext.DefaultServerURL {
+		t.Errorf("ResolveServerURL = %q; want %q", got, clicontext.DefaultServerURL)
+	}
+}
+
+func TestResolveServerURLNilContext(t *testing.T) {
+	got := clicontext.ResolveServerURL("", nil)
+	if got != clicontext.DefaultServerURL {
+		t.Errorf("ResolveServerURL = %q; want %q", got, clicontext.DefaultServerURL)
+	}
+}

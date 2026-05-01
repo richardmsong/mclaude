@@ -17,9 +17,12 @@ type OperatorAccount struct {
 	AccountPublicKey  string
 	OperatorJWT       string
 	AccountJWT        string
-	// SysAccountPublicKey and SysAccountJWT are for the NATS system account.
-	// NATS requires a dedicated system account for internal subscriptions;
-	// JetStream cannot be enabled on the system account.
+	// SysAccountSeed is the system account NKey seed. Used by the control-plane
+	// to connect with system account credentials and publish
+	// $SYS.REQ.CLAIMS.UPDATE for runtime JWT revocation (ADR-0054).
+	// The full NATS resolver (resolver: nats) must be configured on the hub
+	// for revocation to take effect immediately.
+	SysAccountSeed      []byte
 	SysAccountPublicKey string
 	SysAccountJWT       string
 }
@@ -68,6 +71,10 @@ func GenerateOperatorAccount(operatorName, accountName string) (*OperatorAccount
 	if err != nil {
 		return nil, fmt.Errorf("sys account public key: %w", err)
 	}
+	sysSeed, err := sysKP.Seed()
+	if err != nil {
+		return nil, fmt.Errorf("sys account seed: %w", err)
+	}
 
 	// 4. Issue self-signed operator JWT with system account.
 	opClaims := natsjwt.NewOperatorClaims(opPub)
@@ -107,6 +114,7 @@ func GenerateOperatorAccount(operatorName, accountName string) (*OperatorAccount
 		AccountPublicKey:    acctPub,
 		OperatorJWT:         opJWT,
 		AccountJWT:          acctJWT,
+		SysAccountSeed:      sysSeed,
 		SysAccountPublicKey: sysPub,
 		SysAccountJWT:       sysJWT,
 	}, nil

@@ -47,6 +47,27 @@ type Context struct {
 	// HostSlug is the current host's slug (reserved for ADR-0004 BYOH;
 	// populated when the daemon registers the local host).
 	HostSlug string `json:"hostSlug,omitempty"`
+
+	// Server is the control-plane base URL (e.g. "https://api.mclaude.internal").
+	// Individual command --server flags override this value.
+	// Default when absent: "https://api.mclaude.internal".
+	Server string `json:"server,omitempty"`
+}
+
+// DefaultServerURL is the fallback control-plane URL used when context.Server
+// is empty and no --server flag is provided.
+const DefaultServerURL = "https://api.mclaude.internal"
+
+// ResolveServerURL returns the effective control-plane server URL.
+// Priority: explicit override > context file > DefaultServerURL.
+func ResolveServerURL(override string, ctx *Context) string {
+	if override != "" {
+		return override
+	}
+	if ctx != nil && ctx.Server != "" {
+		return ctx.Server
+	}
+	return DefaultServerURL
 }
 
 // Load reads the context file at path and returns the parsed Context.

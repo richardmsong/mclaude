@@ -9,21 +9,22 @@ import (
 )
 
 // TestKVKeyConstruction verifies the key format used for NATS KV lookups.
+// Per ADR-0054, keys are hierarchical with literal type-tokens; the user slug
+// is encoded in the per-user bucket name, NOT the key.
 func TestKVKeyConstruction(t *testing.T) {
 	cases := []struct {
-		userID    string
 		projectID string
 		sessionID string
 		want      string
 	}{
-		{"user-1", "proj-1", "sess-1", "user-1.local.proj-1.sess-1"},
-		{"alice", "myproject", "abc-123-def", "alice.local.myproject.abc-123-def"},
+		{"proj-1", "sess-1", "hosts.local.projects.proj-1.sessions.sess-1"},
+		{"myproject", "abc-123-def", "hosts.local.projects.myproject.sessions.abc-123-def"},
 	}
 	for _, tc := range cases {
-		got := sessionKVKey(slug.UserSlug(tc.userID), slug.HostSlug("local"), slug.ProjectSlug(tc.projectID), slug.SessionSlug(tc.sessionID))
+		got := sessionKVKey(slug.HostSlug("local"), slug.ProjectSlug(tc.projectID), slug.SessionSlug(tc.sessionID))
 		if got != tc.want {
-			t.Errorf("sessionKVKey(%q,%q,%q) = %q, want %q",
-				tc.userID, tc.projectID, tc.sessionID, got, tc.want)
+			t.Errorf("sessionKVKey(%q,%q) = %q, want %q",
+				tc.projectID, tc.sessionID, got, tc.want)
 		}
 	}
 }
@@ -82,6 +83,8 @@ func TestPendingControlsNilMapSafe(t *testing.T) {
 }
 
 // TestSessionStateSerialization verifies round-trip JSON for NATS KV.
+// Per spec-state-schema.md: tools, skills, agents are top-level fields;
+// capabilities holds CLICapabilities boolean flags.
 func TestSessionStateSerialization(t *testing.T) {
 	st := SessionState{
 		ID:        "abc-123",
@@ -92,11 +95,10 @@ func TestSessionStateSerialization(t *testing.T) {
 		StateSince: time.Now().UTC().Truncate(time.Second),
 		CreatedAt:  time.Now().UTC().Truncate(time.Second),
 		Model:     "claude-sonnet-4-6",
-		Capabilities: Capabilities{
-			Skills: []string{"commit", "review-pr"},
-			Tools:  []string{"Bash", "Read"},
-			Agents: []string{"general-purpose"},
-		},
+		// tools, skills, agents are top-level fields (spec-state-schema.md).
+		Skills: []string{"commit", "review-pr"},
+		Tools:  []string{"Bash", "Read"},
+		Agents: []string{"general-purpose"},
 		PendingControls: make(map[string]any),
 		Usage: UsageStats{
 			InputTokens:  100,
@@ -125,8 +127,29 @@ func TestSessionStateSerialization(t *testing.T) {
 	if got.ReplayFromSeq != st.ReplayFromSeq {
 		t.Errorf("ReplayFromSeq: got %d, want %d", got.ReplayFromSeq, st.ReplayFromSeq)
 	}
-	if len(got.Capabilities.Skills) != 2 {
-		t.Errorf("Skills: got %v", got.Capabilities.Skills)
+	// skills, tools, agents must be top-level.
+	if len(got.Skills) != 2 {
+		t.Errorf("Skills: got %v, want [commit review-pr]", got.Skills)
+	}
+	if len(got.Tools) != 2 {
+		t.Errorf("Tools: got %v, want [Bash Read]", got.Tools)
+	}
+	if len(got.Agents) != 1 {
+		t.Errorf("Agents: got %v, want [general-purpose]", got.Agents)
+	}
+	// Verify top-level keys in JSON output.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("raw unmarshal: %v", err)
+	}
+	if _, ok := raw["skills"]; !ok {
+		t.Error("skills must be a top-level JSON field")
+	}
+	if _, ok := raw["tools"]; !ok {
+		t.Error("tools must be a top-level JSON field")
+	}
+	if _, ok := raw["agents"]; !ok {
+		t.Error("agents must be a top-level JSON field")
 	}
 }
 

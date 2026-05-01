@@ -75,38 +75,42 @@ func StartDeps(t *testing.T) *Deps {
 		t.Fatalf("jetstream: %v", err)
 	}
 
-	for _, bucket := range []string{
-		"mclaude-sessions",
-		"mclaude-projects",
-		"mclaude-heartbeats",
-		"mclaude-laptops",
-	} {
-		if _, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
-			Bucket: bucket,
-		}); err != nil {
-			t.Fatalf("create KV bucket %s: %v", bucket, err)
-		}
-	}
-
-	for _, cfg := range []jetstream.StreamConfig{
-		{
-			Name:     "MCLAUDE_EVENTS",
-			Subjects: []string{"mclaude.users.*.hosts.*.projects.*.events.*"},
-		},
-		{
-			Name:     "MCLAUDE_LIFECYCLE",
-			Subjects: []string{"mclaude.users.*.hosts.*.projects.*.lifecycle.*"},
-		},
-	} {
-		if _, err := js.CreateOrUpdateStream(ctx, cfg); err != nil {
-			t.Fatalf("create stream %s: %v", cfg.Name, err)
-		}
-	}
-
 	return &Deps{
 		NATSConn:  nc,
 		JetStream: js,
 		NATSURL:   natsURL,
+	}
+}
+
+// CreateUserResources creates the per-user JetStream resources required by the
+// session-agent per ADR-0054: two KV buckets and one sessions stream.
+// Must be called before NewAgent for the given userSlug.
+func CreateUserResources(t *testing.T, js jetstream.JetStream, userSlug string) {
+	t.Helper()
+	ctx := context.Background()
+
+	for _, bucket := range []string{
+		"mclaude-sessions-" + userSlug,
+		"mclaude-projects-" + userSlug,
+	} {
+		if _, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+			Bucket: bucket,
+		}); err != nil {
+			t.Fatalf("CreateUserResources: create KV bucket %q: %v", bucket, err)
+		}
+	}
+
+	streamName := "MCLAUDE_SESSIONS_" + userSlug
+	subjects := []string{"mclaude.users." + userSlug + ".hosts.*.projects.*.sessions.>"}
+	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:      streamName,
+		Subjects:  subjects,
+		Retention: jetstream.LimitsPolicy,
+		MaxAge:    30 * 24 * time.Hour,
+		Storage:   jetstream.FileStorage,
+		Discard:   jetstream.DiscardOld,
+	}); err != nil {
+		t.Fatalf("CreateUserResources: create stream %q: %v", streamName, err)
 	}
 }
 

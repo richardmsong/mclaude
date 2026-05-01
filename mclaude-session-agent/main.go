@@ -87,6 +87,8 @@ func main() {
 		flagHostname   = flag.String("hostname", os.Getenv("HOSTNAME"), "Hostname for laptop collision detection (--daemon only)")
 		flagMachineID  = flag.String("machine-id", os.Getenv("MACHINE_ID"), "Machine ID for laptop collision detection (--daemon only)")
 		flagRefreshURL  = flag.String("refresh-url", os.Getenv("REFRESH_URL"), "POST /auth/refresh URL for JWT refresh (--daemon only)")
+		flagAuthURL     = flag.String("auth-url", os.Getenv("AUTH_URL"), "Control-plane base URL for HTTP challenge-response auth (ADR-0054); e.g. https://cp.example.com")
+		flagNKeyPubFile = flag.String("nkey-pub-file", os.Getenv("NKEY_PUB_FILE"), "Path to write the agent NKey public key (used by host controller for key registration)")
 		flagUserSlug    = flag.String("user-slug", os.Getenv("USER_SLUG"), "User slug (uslug) per ADR-0024 (required in standalone mode)")
 		flagProjectSlug = flag.String("project-slug", os.Getenv("PROJECT_SLUG"), "Project slug (pslug) per ADR-0024 (required in standalone mode)")
 		flagHostSlug    = flag.String("host", os.Getenv("HOST_SLUG"), "Host slug (hslug) per ADR-0035 (required)")
@@ -156,7 +158,51 @@ func main() {
 	metricsSrv := StartMetricsServer(metricsAddr, prometheus.DefaultGatherer)
 	defer metricsSrv.Shutdown(context.Background())
 
-	nc, err := natsConnect(natsURL, natsCredsFile)
+	authURL := *flagAuthURL
+	nkeyPubFile := *flagNKeyPubFile
+
+	// If an AUTH_URL is provided, use HTTP challenge-response auth (ADR-0054).
+	// Generate an NKey pair, optionally write the public key to a file for the
+	// host controller to read, then connect with nats.UserJWT() callbacks.
+	var agentAuth *AgentAuth
+	if authURL != "" {
+		aa, err := NewAgentAuth()
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to generate NKey pair")
+		}
+		agentAuth = aa
+
+		// Expose the public key to the host controller (BYOH: temp file).
+		if nkeyPubFile != "" {
+			if err := agentAuth.WritePublicKeyToFile(nkeyPubFile); err != nil {
+				log.Fatal().Err(err).Str("path", nkeyPubFile).Msg("failed to write NKey public key to file")
+			}
+			log.Info().Str("path", nkeyPubFile).Msg("NKey public key written; waiting for host controller registration")
+		} else {
+			// No file path: print the public key to stdout for the controller to read.
+			pubKey, _ := agentAuth.PublicKey()
+			log.Info().Str("nkey_public", pubKey).Msg("agent NKey public key (register this with CP via host controller)")
+		}
+
+		// Authenticate to get the initial JWT. Retry with backoff to give the host
+		// controller time to register the public key with CP (may take a few seconds).
+		var initJWT string
+		for attempt := 0; attempt < 10; attempt++ {
+			initJWT, err = agentAuth.Authenticate(context.Background(), authURL)
+			if err == nil {
+				break
+			}
+			wait := time.Duration(100*(1<<attempt)) * time.Millisecond
+			log.Warn().Err(err).Int("attempt", attempt+1).Dur("retry_in", wait).Msg("auth failed — retrying")
+			time.Sleep(wait)
+		}
+		if initJWT == "" {
+			log.Fatal().Err(err).Msg("failed to authenticate with control-plane after retries")
+		}
+		log.Info().Msg("agent authenticated with control-plane; connecting to NATS")
+	}
+
+	nc, err := natsConnectWithAuth(natsURL, natsCredsFile, agentAuth)
 	if err != nil {
 		log.Fatal().Err(err).Str("nats_url", natsURL).Msg("failed to connect to NATS")
 	}
@@ -164,6 +210,11 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// Start the JWT refresh loop after context is ready (ADR-0054).
+	if agentAuth != nil && authURL != "" {
+		agentAuth.StartRefreshLoop(ctx, authURL, nil)
+	}
 
 	if *flagDaemon {
 		// Laptop daemon mode: spawn one session-agent child per project.
@@ -285,11 +336,20 @@ func natsProbeConnect(natsURL, credsFile string) (*nats.Conn, error) {
 // Unlimited reconnects and retry-on-failed-connect ensure BYOH daemons never
 // permanently lose the NATS connection (spec: GAP-SA-K15).
 func natsConnect(natsURL, credsFile string) (*nats.Conn, error) {
+	return natsConnectWithAuth(natsURL, credsFile, nil)
+}
+
+// natsConnectWithAuth connects to NATS with optional HTTP challenge-response auth (ADR-0054).
+// If agentAuth is non-nil, uses nats.UserJWT() with the AgentAuth callbacks.
+// Otherwise falls back to nats.UserCredentials(credsFile) if credsFile is non-empty.
+func natsConnectWithAuth(natsURL, credsFile string, agentAuth *AgentAuth) (*nats.Conn, error) {
 	opts := []nats.Option{
 		nats.MaxReconnects(-1),
 		nats.RetryOnFailedConnect(true),
 	}
-	if credsFile != "" {
+	if agentAuth != nil {
+		opts = append(opts, nats.UserJWT(agentAuth.JWTFunc(), agentAuth.SignFunc()))
+	} else if credsFile != "" {
 		opts = append(opts, nats.UserCredentials(credsFile))
 	}
 	return nats.Connect(natsURL, opts...)

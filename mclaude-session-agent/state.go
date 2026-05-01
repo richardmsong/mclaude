@@ -6,6 +6,8 @@ import (
 
 	"mclaude.io/common/pkg/slug"
 	"mclaude.io/common/pkg/subj"
+
+	"mclaude-session-agent/internal/drivers"
 )
 
 // PermissionPolicy controls how the session agent responds to control_request
@@ -25,35 +27,58 @@ const (
 )
 
 // SessionState is the materialised view of a session stored in the
-// mclaude-sessions NATS KV bucket.
+// mclaude-sessions-{uslug} NATS KV bucket (per-user bucket per ADR-0054).
+//
+// The `status` JSON field (Go: State) was renamed from `state` per ADR-0044
+// to reflect the coarser lifecycle state tracked at the KV level. The full
+// status enum includes quota-managed states: pending, running, paused,
+// requires_action, completed, stopped, cancelled, needs_spec_fix, failed, error.
 type SessionState struct {
 	ID          string            `json:"id"`
-	Slug        string            `json:"slug,omitempty"`       // session slug (sslug) per ADR-0024
-	UserSlug    string            `json:"userSlug,omitempty"`   // user slug (uslug) per ADR-0024
-	HostSlug    string            `json:"hostSlug,omitempty"`   // host slug (hslug) per ADR-0035
+	Slug        string            `json:"slug,omitempty"`        // session slug (sslug) per ADR-0024
+	UserSlug    string            `json:"userSlug,omitempty"`    // user slug (uslug) per ADR-0024
+	HostSlug    string            `json:"hostSlug,omitempty"`    // host slug (hslug) per ADR-0035
 	ProjectSlug string            `json:"projectSlug,omitempty"` // project slug (pslug) per ADR-0024
 	ProjectID   string            `json:"projectId"`
 	Branch      string            `json:"branch"`
 	Worktree    string            `json:"worktree"`
 	CWD         string            `json:"cwd"`
 	Name        string            `json:"name"`
-	State       string            `json:"state"`
+	// State is the session lifecycle status, stored as `status` in KV JSON
+	// (renamed from `state` per ADR-0044). Full enum: pending, running, paused,
+	// requires_action, completed, stopped, cancelled, needs_spec_fix, failed, error.
+	State       string            `json:"status"`
 	StateSince  time.Time         `json:"stateSince"`
 	CreatedAt   time.Time         `json:"createdAt"`
-	Model       string            `json:"model"`
-	Capabilities Capabilities     `json:"capabilities"`
+	// Backend is the CLI backend type (e.g. "claude_code", "droid"). Set on session create.
+	Backend      string           `json:"backend,omitempty"`
+	Model        string                 `json:"model"`
+	// Capabilities holds the CLICapabilities boolean feature flags for the backend (ADR-0005).
+	// Populated from the driver's Capabilities() on init event.
+	// The SPA reads these to determine backend features (hasThinking, hasEventStream, etc.)
+	// without requiring event replay. JSON key is "capabilities" per spec-state-schema.md.
+	Capabilities drivers.CLICapabilities `json:"capabilities"`
+	// Tools, Skills, Agents are top-level arrays populated from the init event.
+	// Promoted from the old nested capabilities.{tools,skills,agents} struct per spec-state-schema.md.
+	Tools  []string `json:"tools,omitempty"`
+	Skills []string `json:"skills,omitempty"`
+	Agents []string `json:"agents,omitempty"`
 	PendingControls map[string]any `json:"pendingControls"`
-	Usage       UsageStats        `json:"usage"`
+	Usage        UsageStats       `json:"usage"`
 	ReplayFromSeq uint64          `json:"replayFromSeq,omitempty"`
 	JoinWorktree bool             `json:"joinWorktree"`
 	ExtraFlags   string           `json:"extraFlags,omitempty"`
-}
 
-// Capabilities are populated from the init event and refreshed on reload_plugins.
-type Capabilities struct {
-	Skills []string `json:"skills"`
-	Tools  []string `json:"tools"`
-	Agents []string `json:"agents"`
+	// Quota-managed session fields (ADR-0044). Zero values are omitted so
+	// interactive sessions remain backward-compatible.
+	SoftThreshold         int        `json:"softThreshold,omitempty"`
+	HardHeadroomTokens    int        `json:"hardHeadroomTokens,omitempty"`
+	AutoContinue          bool       `json:"autoContinue,omitempty"`
+	BranchSlug            string     `json:"branchSlug,omitempty"`
+	PausedVia             string     `json:"pausedVia,omitempty"`
+	ClaudeSessionID       string     `json:"claudeSessionId,omitempty"`
+	FailedTool            string     `json:"failedTool,omitempty"`
+	ResumeAt              *time.Time `json:"resumeAt,omitempty"`
 }
 
 // UsageStats accumulates token usage across all turns in a session.
@@ -65,10 +90,11 @@ type UsageStats struct {
 	CostUSD          float64 `json:"costUsd"`
 }
 
-// sessionKVKey returns the NATS KV key for a session per ADR-0024/ADR-0035.
-// Format: {uslug}.{hslug}.{pslug}.{sslug} — dot-separated typed slug tokens.
-func sessionKVKey(userSlug slug.UserSlug, hostSlug slug.HostSlug, projectSlug slug.ProjectSlug, sessionSlug slug.SessionSlug) string {
-	return subj.SessionsKVKey(userSlug, hostSlug, projectSlug, sessionSlug)
+// sessionKVKey returns the NATS KV key for a session per ADR-0054.
+// Format: hosts.{hslug}.projects.{pslug}.sessions.{sslug}
+// The user slug is NOT part of the key — it is encoded in the per-user bucket name.
+func sessionKVKey(hostSlug slug.HostSlug, projectSlug slug.ProjectSlug, sessionSlug slug.SessionSlug) string {
+	return subj.SessionsKVKey(hostSlug, projectSlug, sessionSlug)
 }
 
 // addPendingControl adds a control request to the session's pending map.

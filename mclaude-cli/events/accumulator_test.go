@@ -185,3 +185,114 @@ func TestAccumulatorResultUsageAccumulates(t *testing.T) {
 		t.Errorf("TotalUsage.OutputTokens = %d; want 13", acc.Model.TotalUsage.OutputTokens)
 	}
 }
+
+func TestAccumulatorClearEventResetsState(t *testing.T) {
+	acc := events.NewAccumulator()
+	// Build up some state.
+	acc.Feed(mustParse(t, `{"type":"assistant","content":[{"type":"text","text":"hello"}]}`))
+	if len(acc.Model.Turns) != 1 {
+		t.Fatalf("expected 1 turn before clear")
+	}
+	// Feed a clear event — turns must be wiped, no divider produced.
+	acc.Feed(mustParse(t, `{"type":"clear"}`))
+	if len(acc.Model.Turns) != 0 {
+		t.Errorf("Turns = %d; want 0 after clear", len(acc.Model.Turns))
+	}
+}
+
+func TestAccumulatorClearResetsStreamingBlock(t *testing.T) {
+	acc := events.NewAccumulator()
+	// Start a streaming text block.
+	acc.Feed(mustParse(t, `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}}`))
+	if len(acc.Model.Turns) != 1 {
+		t.Fatalf("expected 1 turn with streaming block")
+	}
+	// Clear must reset the streaming block so the next delta starts fresh.
+	acc.Feed(mustParse(t, `{"type":"clear"}`))
+	if len(acc.Model.Turns) != 0 {
+		t.Errorf("Turns after clear = %d; want 0", len(acc.Model.Turns))
+	}
+	// A new delta after clear should start a new turn (not append to nil).
+	acc.Feed(mustParse(t, `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"fresh"}}}`))
+	if len(acc.Model.Turns) != 1 {
+		t.Fatalf("expected 1 turn after new delta post-clear")
+	}
+	sb, ok := acc.Model.Turns[0].Blocks[0].(*events.StreamingTextBlock)
+	if !ok {
+		t.Fatalf("block = %T; want *StreamingTextBlock", acc.Model.Turns[0].Blocks[0])
+	}
+	if sb.Full() != "fresh" {
+		t.Errorf("Full() = %q; want \"fresh\"", sb.Full())
+	}
+}
+
+func TestAccumulatorParentToolUseIDNesting(t *testing.T) {
+	acc := events.NewAccumulator()
+
+	// Parent turn with a tool_use block.
+	acc.Feed(mustParse(t, `{"type":"assistant","content":[{"type":"tool_use","id":"tu_parent","name":"Agent","input":{}}]}`))
+	if len(acc.Model.Turns) != 1 {
+		t.Fatalf("Turns = %d; want 1 after parent assistant event", len(acc.Model.Turns))
+	}
+
+	// Subagent assistant message carrying parentToolUseId.
+	acc.Feed(mustParse(t, `{"type":"assistant","content":[{"type":"text","text":"subagent reply"}],"parent_tool_use_id":"tu_parent"}`))
+
+	// Top-level turns must not grow — subagent turn is nested under the parent tool_use block.
+	if len(acc.Model.Turns) != 1 {
+		t.Errorf("Turns = %d; want 1 (subagent turn must not be appended at top level)", len(acc.Model.Turns))
+	}
+	parentTurn := acc.Model.Turns[0]
+	tb, ok := parentTurn.Blocks[0].(*events.ToolUseBlock)
+	if !ok {
+		t.Fatalf("first block = %T; want *ToolUseBlock", parentTurn.Blocks[0])
+	}
+	if len(tb.AgentTurns) != 1 {
+		t.Fatalf("AgentTurns = %d; want 1", len(tb.AgentTurns))
+	}
+	agentTurn := tb.AgentTurns[0]
+	if agentTurn.Type != "assistant" {
+		t.Errorf("AgentTurn.Type = %q; want assistant", agentTurn.Type)
+	}
+	if len(agentTurn.Blocks) != 1 {
+		t.Fatalf("AgentTurn.Blocks = %d; want 1", len(agentTurn.Blocks))
+	}
+	txt, ok := agentTurn.Blocks[0].(*events.TextBlock)
+	if !ok {
+		t.Fatalf("AgentTurn block = %T; want *TextBlock", agentTurn.Blocks[0])
+	}
+	if txt.Text != "subagent reply" {
+		t.Errorf("TextBlock.Text = %q; want \"subagent reply\"", txt.Text)
+	}
+}
+
+func TestAccumulatorParentToolUseIDMultipleTurns(t *testing.T) {
+	acc := events.NewAccumulator()
+
+	// Parent turn.
+	acc.Feed(mustParse(t, `{"type":"assistant","content":[{"type":"tool_use","id":"tu_p","name":"Agent","input":{}}]}`))
+
+	// Two subagent turns nested under the same parent.
+	acc.Feed(mustParse(t, `{"type":"assistant","content":[{"type":"text","text":"first"}],"parent_tool_use_id":"tu_p"}`))
+	acc.Feed(mustParse(t, `{"type":"assistant","content":[{"type":"text","text":"second"}],"parent_tool_use_id":"tu_p"}`))
+
+	if len(acc.Model.Turns) != 1 {
+		t.Errorf("Turns = %d; want 1 (all subagent turns nested)", len(acc.Model.Turns))
+	}
+	tb := acc.Model.Turns[0].Blocks[0].(*events.ToolUseBlock)
+	if len(tb.AgentTurns) != 2 {
+		t.Errorf("AgentTurns = %d; want 2", len(tb.AgentTurns))
+	}
+}
+
+func TestAccumulatorParentToolUseIDUnknownParent(t *testing.T) {
+	acc := events.NewAccumulator()
+
+	// Subagent message with an unknown parent — falls through to top-level append.
+	acc.Feed(mustParse(t, `{"type":"assistant","content":[{"type":"text","text":"orphan"}],"parent_tool_use_id":"tu_unknown"}`))
+
+	// Unknown parent: fall back to top-level append so nothing is silently dropped.
+	if len(acc.Model.Turns) != 1 {
+		t.Errorf("Turns = %d; want 1 (orphan turn appended at top level)", len(acc.Model.Turns))
+	}
+}

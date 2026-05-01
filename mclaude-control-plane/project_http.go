@@ -159,7 +159,8 @@ func (s *Server) handleCreateProjectHTTP(w http.ResponseWriter, r *http.Request,
 			GitIdentityID: gitIdentityIDStr,
 		}
 		provData, _ := json.Marshal(provReq)
-		provSubject := subj.UserHostAPIProjectsProvision(slug.UserSlug(userSlug), slug.HostSlug(hostSlug))
+		// ADR-0054: publish to host-scoped fan-out subject.
+		provSubject := subj.HostUserProjectsCreate(slug.HostSlug(hostSlug), slug.UserSlug(userSlug), slug.ProjectSlug(proj.Slug))
 		provReply, provErr := s.nc.Request(provSubject, provData, provisionTimeoutSeconds())
 		if provErr != nil {
 			log.Error().Err(provErr).
@@ -241,9 +242,9 @@ func (s *Server) handleDeleteProjectHTTP(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Resolve user slug for NATS subjects.
+	// Resolve user slug for NATS subjects and S3 cleanup.
 	var userSlug string
-	if s.nc != nil {
+	if s.nc != nil || s.s3 != nil {
 		if user, uerr := s.db.GetUserByID(r.Context(), userID); uerr == nil && user != nil {
 			userSlug = user.Slug
 		}
@@ -252,7 +253,7 @@ func (s *Server) handleDeleteProjectHTTP(w http.ResponseWriter, r *http.Request,
 	// CP-04: Publish delete notification to controller so it tears down
 	// per-project K8s resources (namespace, Deployment, PVCs, RBAC).
 	if s.nc != nil && userSlug != "" && hostSlug != "" {
-		publishProjectsDeleteToHost(s.nc, userSlug, hostSlug, projectID)
+		publishProjectsDeleteToHost(s.nc, userSlug, hostSlug, pslug, projectID)
 	}
 
 	tag, err := s.db.pool.Exec(r.Context(),
@@ -264,6 +265,15 @@ func (s *Server) handleDeleteProjectHTTP(w http.ResponseWriter, r *http.Request,
 	if tag.RowsAffected() == 0 {
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
+	}
+
+	// ADR-0053: Delete S3 prefix for this project (best-effort).
+	// Removes all import archives and attachments under {uslug}/{hslug}/{pslug}/.
+	if s.s3 != nil && userSlug != "" && hostSlug != "" {
+		prefix := userSlug + "/" + hostSlug + "/" + pslug + "/"
+		if s3Err := s.s3.s3DeletePrefix(prefix); s3Err != nil {
+			log.Warn().Err(s3Err).Str("prefix", prefix).Msg("project delete: S3 cleanup failed (non-fatal)")
+		}
 	}
 
 	// CP-04: Broadcast projects.updated so SPA watchers refresh.

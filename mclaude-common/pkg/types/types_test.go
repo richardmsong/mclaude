@@ -85,6 +85,7 @@ func TestProjectStateRoundTrip(t *testing.T) {
 		Status:        "active",
 		CreatedAt:     time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC),
 		GitIdentityID: "conn-123",
+		ImportRef:     "imp-001",
 	}
 
 	data, err := json.Marshal(orig)
@@ -106,6 +107,32 @@ func TestProjectStateRoundTrip(t *testing.T) {
 	if decoded.HostSlug != orig.HostSlug {
 		t.Errorf("HostSlug: got %q, want %q", decoded.HostSlug, orig.HostSlug)
 	}
+	if decoded.ImportRef != orig.ImportRef {
+		t.Errorf("ImportRef: got %q, want %q", decoded.ImportRef, orig.ImportRef)
+	}
+}
+
+func TestProjectStateImportRefOmitsWhenEmpty(t *testing.T) {
+	// importRef must be omitted from JSON when empty (omitempty).
+	proj := ProjectState{
+		ID:       "770e8400-e29b-41d4-a716-446655440000",
+		Slug:     "myrepo",
+		UserSlug: "alice-gmail",
+		HostSlug: "mbp16",
+		Name:     "My Repo",
+		Status:   "active",
+	}
+	data, err := json.Marshal(proj)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal to map: %v", err)
+	}
+	if _, ok := raw["importRef"]; ok {
+		t.Errorf("importRef must be omitted from JSON when empty, but was present")
+	}
 }
 
 func TestHostStateRoundTrip(t *testing.T) {
@@ -113,7 +140,6 @@ func TestHostStateRoundTrip(t *testing.T) {
 		Slug:       "mbp16",
 		Type:       "machine",
 		Name:       "alice's MBP",
-		Role:       "owner",
 		Online:     true,
 		LastSeenAt: time.Date(2026, 4, 29, 10, 30, 0, 0, time.UTC),
 	}
@@ -136,6 +162,32 @@ func TestHostStateRoundTrip(t *testing.T) {
 	}
 	if decoded.Type != orig.Type {
 		t.Errorf("Type: got %q, want %q", decoded.Type, orig.Type)
+	}
+	if decoded.Name != orig.Name {
+		t.Errorf("Name: got %q, want %q", decoded.Name, orig.Name)
+	}
+}
+
+func TestHostStateHasNoRoleField(t *testing.T) {
+	// HostState must not contain a Role field per ADR-0054 HostKVState schema.
+	// The role column is removed from the hosts table; access is tracked in
+	// the host_access table.
+	orig := HostState{
+		Slug:   "mbp16",
+		Type:   "machine",
+		Name:   "alice's MBP",
+		Online: true,
+	}
+	data, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal to map: %v", err)
+	}
+	if _, ok := raw["role"]; ok {
+		t.Errorf("HostState must not have a 'role' field per ADR-0054")
 	}
 }
 
@@ -164,67 +216,6 @@ func TestQuotaStatusRoundTrip(t *testing.T) {
 	}
 	if decoded.HasData != orig.HasData {
 		t.Errorf("HasData: got %v, want %v", decoded.HasData, orig.HasData)
-	}
-}
-
-func TestJobEntryRoundTrip(t *testing.T) {
-	now := time.Date(2026, 4, 29, 10, 0, 0, 0, time.UTC)
-	started := time.Date(2026, 4, 29, 10, 5, 0, 0, time.UTC)
-	resumeAt := time.Date(2026, 4, 29, 15, 0, 0, 0, time.UTC)
-
-	orig := JobEntry{
-		ID:                 "880e8400-e29b-41d4-a716-446655440000",
-		UserID:             "990e8400-e29b-41d4-a716-446655440000",
-		UserSlug:           "alice-gmail",
-		HostSlug:           "mbp16",
-		ProjectID:          "aa0e8400-e29b-41d4-a716-446655440000",
-		ProjectSlug:        "myrepo",
-		SessionID:          "bb0e8400-e29b-41d4-a716-446655440000",
-		SessionSlug:        "fix-bug",
-		ClaudeSessionID:    "claude-sess-123",
-		Prompt:             "Fix the login bug",
-		Title:              "fix-login-bug",
-		BranchSlug:         "fix-login-bug",
-		ResumePrompt:       "Continue fixing the login bug",
-		Priority:           5,
-		SoftThreshold:      75,
-		HardHeadroomTokens: 50000,
-		AutoContinue:       true,
-		PermPolicy:         "managed",
-		AllowedTools:       []string{"Read", "Write"},
-		Status:             "running",
-		PausedVia:          "",
-		Branch:             "schedule/fix-login-bug",
-		RetryCount:         0,
-		ResumeAt:           &resumeAt,
-		CreatedAt:          now,
-		StartedAt:          &started,
-	}
-
-	data, err := json.Marshal(orig)
-	if err != nil {
-		t.Fatalf("marshal JobEntry: %v", err)
-	}
-
-	var decoded JobEntry
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("unmarshal JobEntry: %v", err)
-	}
-
-	if decoded.ID != orig.ID {
-		t.Errorf("ID: got %q, want %q", decoded.ID, orig.ID)
-	}
-	if decoded.ClaudeSessionID != orig.ClaudeSessionID {
-		t.Errorf("ClaudeSessionID: got %q, want %q", decoded.ClaudeSessionID, orig.ClaudeSessionID)
-	}
-	if decoded.SoftThreshold != orig.SoftThreshold {
-		t.Errorf("SoftThreshold: got %d, want %d", decoded.SoftThreshold, orig.SoftThreshold)
-	}
-	if decoded.ResumeAt == nil || !decoded.ResumeAt.Equal(resumeAt) {
-		t.Errorf("ResumeAt: got %v, want %v", decoded.ResumeAt, resumeAt)
-	}
-	if len(decoded.AllowedTools) != 2 {
-		t.Errorf("AllowedTools: got %d items, want 2", len(decoded.AllowedTools))
 	}
 }
 
@@ -393,5 +384,136 @@ func TestLifecycleEventTypeConstants(t *testing.T) {
 		if string(constant) != want {
 			t.Errorf("constant %q: got %q, want %q", want, string(constant), want)
 		}
+	}
+}
+
+// --------------------------------------------------------------------------
+// Import and attachment types (ADR-0053)
+// --------------------------------------------------------------------------
+
+func TestImportRequestRoundTrip(t *testing.T) {
+	orig := ImportRequest{
+		Slug:      "my-project",
+		SizeBytes: 1024 * 1024 * 5, // 5 MB
+	}
+
+	data, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("marshal ImportRequest: %v", err)
+	}
+
+	var decoded ImportRequest
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal ImportRequest: %v", err)
+	}
+
+	if decoded.Slug != orig.Slug {
+		t.Errorf("Slug: got %q, want %q", decoded.Slug, orig.Slug)
+	}
+	if decoded.SizeBytes != orig.SizeBytes {
+		t.Errorf("SizeBytes: got %d, want %d", decoded.SizeBytes, orig.SizeBytes)
+	}
+}
+
+func TestImportMetadataRoundTrip(t *testing.T) {
+	orig := ImportMetadata{
+		CWD:               "/home/alice/projects/myapp",
+		GitRemote:         "https://github.com/alice/myapp.git",
+		GitBranch:         "main",
+		ImportedAt:        time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC),
+		SessionIds:        []string{"sess-001", "sess-002"},
+		ClaudeCodeVersion: "1.2.3",
+	}
+
+	data, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("marshal ImportMetadata: %v", err)
+	}
+
+	var decoded ImportMetadata
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal ImportMetadata: %v", err)
+	}
+
+	if decoded.CWD != orig.CWD {
+		t.Errorf("CWD: got %q, want %q", decoded.CWD, orig.CWD)
+	}
+	if decoded.GitRemote != orig.GitRemote {
+		t.Errorf("GitRemote: got %q, want %q", decoded.GitRemote, orig.GitRemote)
+	}
+	if decoded.ClaudeCodeVersion != orig.ClaudeCodeVersion {
+		t.Errorf("ClaudeCodeVersion: got %q, want %q", decoded.ClaudeCodeVersion, orig.ClaudeCodeVersion)
+	}
+	if len(decoded.SessionIds) != 2 {
+		t.Errorf("SessionIds: got %d items, want 2", len(decoded.SessionIds))
+	}
+}
+
+func TestAttachmentRefRoundTrip(t *testing.T) {
+	orig := AttachmentRef{
+		ID:        "att-001",
+		Filename:  "screenshot.png",
+		MimeType:  "image/png",
+		SizeBytes: 204800,
+	}
+
+	data, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("marshal AttachmentRef: %v", err)
+	}
+
+	var decoded AttachmentRef
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal AttachmentRef: %v", err)
+	}
+
+	if decoded.ID != orig.ID {
+		t.Errorf("ID: got %q, want %q", decoded.ID, orig.ID)
+	}
+	if decoded.Filename != orig.Filename {
+		t.Errorf("Filename: got %q, want %q", decoded.Filename, orig.Filename)
+	}
+	if decoded.MimeType != orig.MimeType {
+		t.Errorf("MimeType: got %q, want %q", decoded.MimeType, orig.MimeType)
+	}
+	if decoded.SizeBytes != orig.SizeBytes {
+		t.Errorf("SizeBytes: got %d, want %d", decoded.SizeBytes, orig.SizeBytes)
+	}
+}
+
+func TestAttachmentMetaRoundTrip(t *testing.T) {
+	orig := AttachmentMeta{
+		ID:          "att-001",
+		S3Key:       "placeholder-key",
+		Filename:    "screenshot.png",
+		MimeType:    "image/png",
+		SizeBytes:   204800,
+		UserSlug:    "alice-gmail",
+		HostSlug:    "mbp16",
+		ProjectSlug: "myapp",
+		CreatedAt:   time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC),
+	}
+
+	data, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("marshal AttachmentMeta: %v", err)
+	}
+
+	var decoded AttachmentMeta
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal AttachmentMeta: %v", err)
+	}
+
+	if decoded.ID != orig.ID {
+		t.Errorf("ID: got %q, want %q", decoded.ID, orig.ID)
+	}
+	if decoded.S3Key != orig.S3Key {
+		t.Errorf("S3Key: got %q, want %q", decoded.S3Key, orig.S3Key)
+	}
+	if decoded.UserSlug != orig.UserSlug {
+		t.Errorf("UserSlug: got %q, want %q", decoded.UserSlug, orig.UserSlug)
+	}
+	if decoded.ProjectSlug != orig.ProjectSlug {
+		t.Errorf("ProjectSlug: got %q, want %q", decoded.ProjectSlug, orig.ProjectSlug)
 	}
 }

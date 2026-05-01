@@ -2,11 +2,11 @@
 
 ## Role
 
-mclaude-cli is a terminal client for the mclaude platform. It attaches to running session agents over unix sockets, provides an interactive REPL for sending messages and approving tool-use permission requests, and lists sessions for a given user/project. It reads default slug values from a local context file (`~/.mclaude/context.json`) so users do not need to pass identity flags on every invocation.
+mclaude-cli is a terminal client for the mclaude platform. It attaches to running session agents over unix sockets, provides an interactive REPL for sending messages and approving tool-use permission requests, lists sessions for a given user/project, and imports existing Claude Code session data into mclaude. It authenticates via a device-code flow and connects to NATS using JWT + NKey credentials for import operations. It reads default slug values from a local context file (`~/.mclaude/context.json`) so users do not need to pass identity flags on every invocation.
 
 ## Deployment
 
-Installed as a standalone Go binary (`mclaude-cli`). No container, no daemon -- invoked directly from the shell. Requires a running session agent exposing a unix socket to attach to.
+Installed as a standalone Go binary (`mclaude-cli`). No container, no daemon -- invoked directly from the shell. Requires a running session agent exposing a unix socket for the attach command. The import command communicates with the control-plane via NATS using JWT + NKey credentials.
 
 ## Interfaces
 
@@ -37,16 +37,60 @@ Flags:
 
 #### `mclaude login`
 
-Authenticates the user against the control-plane and persists a bearer token for subsequent admin / cluster CLI calls. Prompts for email + password (or opens an OAuth browser flow when the control-plane is configured for it), receives a token, and writes it to `~/.mclaude/auth.json` at mode `0600`. Subsequent `mclaude cluster …` and `mclaude admin …` commands read this file and send `Authorization: Bearer <token>` on every HTTP call.
+Authenticates the user against the control-plane using a device-code flow and persists NATS credentials for subsequent CLI operations (import, admin, cluster commands).
 
-The token is user-scoped (not host-scoped): a single login covers admin operations across all of the user's hosts. Re-running `mclaude login` overwrites the file.
+**Device-code flow:**
+
+1. CLI generates an NKey pair locally — the private seed never leaves the machine.
+2. CLI sends `POST /api/auth/device-code` to the control-plane with `{ publicKey }` (the NKey public key).
+3. Control-plane returns `{ deviceCode, userCode, verificationUrl, expiresIn, interval }`.
+4. CLI displays the verification URL and user code, instructing the user to open the URL in a browser and enter the code.
+5. CLI polls `POST /api/auth/device-code/poll` with `{ deviceCode }` at the specified interval until the user completes authentication or the code expires (15-minute TTL).
+6. On success, the poll response returns `{ jwt, userSlug }` — a signed NATS JWT and the user's slug. No seed or NKey material comes from the server.
+7. CLI writes credentials to `~/.mclaude/auth.json` (mode `0600`) in the format: `{ "jwt": "<nats-jwt>", "nkeySeed": "<local-nkey-seed>", "userSlug": "<uslug>" }`.
+
+The credentials are user-scoped (not host-scoped): a single login covers operations across all of the user's hosts. Re-running `mclaude login` regenerates the NKey pair and overwrites the file.
+
+**JWT refresh:** Deferred — JWT refresh before import operations will be implemented when NATS import operations are fully wired. For now, the user must re-run `mclaude login` if the JWT expires.
 
 Flags:
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--server <url>` | Control-plane base URL | Read from `~/.mclaude/context.json`'s `server` key, otherwise prompts |
-| `--email <email>` | Email (skips the prompt) | Prompts interactively |
+| `--server <url>` | Control-plane base URL | Read from `~/.mclaude/context.json`'s `server` key, otherwise `https://api.mclaude.internal` |
+
+#### `mclaude import [--host <hslug>]`
+
+Imports existing Claude Code session data from the local machine into mclaude. Creates a new project containing all historical sessions for the current working directory.
+
+**Prerequisites:** User must be logged in (`mclaude login`). An active host must be registered and selected (`mclaude host register` + `mclaude host use`).
+
+**CWD encoding algorithm:** The CLI derives an encoded CWD from the current directory using Claude Code's path encoding: take the absolute path (e.g. `/Users/rsong/work/mclaude`), replace every `/` with `-`, strip the leading `-` (e.g. `Users-rsong-work-mclaude`). This matches the directory names under `~/.claude/projects/`. The CLI verifies at runtime that the derived path exists under `~/.claude/projects/`; if it doesn't, the CLI lists available encoded directories and errors with a hint.
+
+**Flow:**
+
+1. Loads auth credentials from `~/.mclaude/auth.json` (errors if not logged in).
+2. Reads the active host from context (`~/.mclaude/context.json`); `--host <hslug>` overrides.
+3. Derives encoded CWD and discovers session data at `~/.claude/projects/{encoded-cwd}/`:
+   - JSONL transcripts: `{sessionId}.jsonl`
+   - Subagent data: `{sessionId}/subagents/`
+   - Memories: `memory/` directory
+   - Project CLAUDE.md (from CWD `.claude/CLAUDE.md` or `CLAUDE.md`)
+4. Connects to NATS using stored JWT + NKey seed from `~/.mclaude/auth.json`.
+5. Derives project name from the last path component of CWD. Checks slug availability via NATS request/reply to the control-plane (`mclaude.users.{uslug}.hosts.{hslug}.projects.check-slug`).
+6. If slug taken: prompts user for a new name, re-checks. Loops until available.
+7. Packages data into `import-{slug}.tar.gz` with `metadata.json` containing `{ cwd, gitRemote, gitBranch, importedAt, sessionIds, claudeCodeVersion }`.
+8. Requests pre-signed upload URL from CP via NATS request/reply (`mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.import.request`) with `{ slug, sizeBytes }`.
+9. Uploads archive directly to S3 using the signed URL.
+10. Confirms upload via NATS request/reply (`mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.import.confirm`) with `{ importId }`.
+11. Waits for provisioning acknowledgement, prints success message.
+
+Flags:
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--host <hslug>` | Host slug | Read from `~/.mclaude/active-host` symlink |
+| `--server <url>` | Control-plane base URL (for NATS bootstrap) | Read from `~/.mclaude/context.json`'s `server` key, otherwise `https://api.mclaude.internal` |
 
 #### `mclaude host register [--name <name>]`
 
@@ -102,17 +146,51 @@ Flags:
 
 ### Context file
 
-`~/.mclaude/context.json` stores `userSlug`, `projectSlug`, and `hostSlug` defaults. The path is overridable via the `MCLAUDE_CONTEXT_FILE` environment variable. If the file does not exist, all fields default to empty.
+`~/.mclaude/context.json` stores `userSlug`, `projectSlug`, `hostSlug`, and `server` defaults. The `server` key holds the control-plane base URL (e.g. `https://api.mclaude.internal`); `--server <url>` flags on individual commands override this value. Default when absent: `https://api.mclaude.internal`. The path is overridable via the `MCLAUDE_CONTEXT_FILE` environment variable. If the file does not exist, all fields default to empty.
 
 ### Wire protocol
 
-The attach REPL communicates over a newline-delimited JSON (JSONL) protocol on the unix socket. Outbound messages are either `user` (chat message) or `control_response` (permission allow/deny). Inbound events include types: `system`, `stream_event`, `assistant`, `user`, `control_request`, `tool_progress`, `result`, and `clear`.
+The attach REPL communicates over a newline-delimited JSON (JSONL) protocol on the unix socket. The unix socket currently carries Claude Code's native stream-json format (the session agent forwards raw backend output). The canonical `SessionEvent` types (defined in ADR-0005) are the NATS-layer schema; the CLI's accumulator handles the native stream-json types directly. The mapping between native and canonical types is shown below for reference.
+
+**Canonical SessionEvent types** (per ADR-0005):
+
+| Event type | Description |
+|------------|-------------|
+| `init` | Backend, model, tools, skills, agents, capabilities |
+| `state_change` | Driver state: `idle`, `running`, `requires_action` |
+| `text_delta` | Streaming text content (with `messageId`, `blockIndex`, `text`) |
+| `thinking_delta` | Streaming thinking content |
+| `message` | Complete assistant/user message with content blocks |
+| `tool_call` | Tool invocation started (`toolUseId`, `toolName`, `input`) |
+| `tool_progress` | Tool execution progress |
+| `tool_result` | Tool execution result (`content`, `isError`) |
+| `permission` | Permission request or resolution (`requestId`, `resolved`, `allowed`) |
+| `turn_complete` | Turn finished with token/cost metrics |
+| `error` | Error with `message`, `code`, `retryable` |
+| `backend_specific` | Opaque backend-unique events (e.g. Droid missions) |
+
+**Claude Code stream-json mapping:** When the backend is `claude_code`, the session agent's ClaudeCodeDriver translates Claude Code's native stream-json types to canonical events as follows:
+
+| Claude Code type | Canonical event |
+|-----------------|-----------------|
+| `system.init` | `init` |
+| `system.session_state_changed` | `state_change` |
+| `stream` (content_block_delta, text) | `text_delta` |
+| `stream` (content_block_delta, thinking) | `thinking_delta` |
+| `assistant` (complete message) | `message` + extracted `tool_call` per tool_use block |
+| `tool_progress` | `tool_progress` |
+| user message with `tool_result` blocks | `tool_result` per block |
+| `sdk_control_request.permission` | `permission` (resolved=false) |
+| `control_response` to permission | `permission` (resolved=true) |
+| `result` | `turn_complete` |
+
+Outbound messages from the CLI are `SessionInput` typed commands (per ADR-0005): `message` (chat message with optional `attachments`), `skill_invoke`, or `permission_response` (with `requestId`, `allowed`, `behavior`).
 
 ### Accumulator behavior
 
-The CLI accumulates inbound events into a conversation model for rendering. Block types rendered: `TextBlock`, `StreamingTextBlock`, `ToolUseBlock`, `ToolResultBlock`, `ControlRequestBlock`, `CompactionBlock`. Block types silently discarded: `ThinkingBlock`, `SkillInvocationBlock`, `SystemMessageBlock`.
+The CLI accumulates inbound canonical `SessionEvent` events into a conversation model for rendering. Events rendered: `text_delta` (streaming text), `message` (complete messages with content blocks), `tool_call` / `tool_result` (tool invocations and results), `permission` (permission requests/resolutions). Events used for state tracking: `state_change`, `turn_complete`, `init`. Events silently discarded: `thinking_delta`, `backend_specific`.
 
-When an event carries a non-null `parent_tool_use_id`, the resulting turn is nested under the parent ToolUseBlock's agent turn (subagent nesting).
+When a `message` event carries a non-null `parentToolUseId`, the resulting turn is nested under the parent tool_call's agent turn (subagent nesting).
 
 On `clear` event: the accumulator resets all turns to empty (no divider rendered, just a blank conversation state).
 
@@ -122,9 +200,20 @@ On `compact_boundary` system event: the accumulator resets all turns and renders
 
 No reconnection. If the unix socket drops, the CLI exits immediately. The user re-runs `mclaude-cli attach <session-id>` to reconnect.
 
+### NATS connection
+
+The CLI connects to NATS for import operations and slug availability checks. Connection uses the JWT + NKey seed stored in `~/.mclaude/auth.json` (written by `mclaude login`). The NATS server URL is derived from the control-plane server URL in `~/.mclaude/context.json` (or the `--server` flag).
+
+The CLI uses NATS request/reply for:
+- Slug availability checks (`mclaude.users.{uslug}.hosts.{hslug}.projects.check-slug`)
+- Import upload URL requests (`…projects.{pslug}.import.request`)
+- Import confirmation (`…projects.{pslug}.import.confirm`)
+
 ## Dependencies
 
 - **Session agent unix socket** -- the attach command connects to a session agent's socket at `/tmp/mclaude-session-{id}.sock` (or a custom path).
-- **`~/.mclaude/context.json`** -- optional; provides default user/project/host slugs.
+- **NATS** -- the import command connects to NATS using JWT + NKey credentials for request/reply operations with the control-plane.
+- **`~/.mclaude/context.json`** -- optional; provides default user/project/host slugs and control-plane server URL.
+- **`~/.mclaude/auth.json`** -- NATS credentials (`{ jwt, nkeySeed, userSlug }`) written by `mclaude login`. Required for import and admin operations.
 - **mclaude-common (`mclaude.io/common`)** -- shared slug validation (`pkg/slug`) and NATS subject construction (`pkg/subj`).
 - **zerolog** -- structured logging.

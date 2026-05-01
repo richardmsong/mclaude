@@ -135,10 +135,10 @@ func TestHandleRefresh_NilDB(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
 	srv := NewServer(nil, accountKP, "nats://localhost:4222", "", 8*time.Hour, "admin")
 
-	expiresAt := time.Now().Add(8 * time.Hour).Unix()
-	jwt, _, err := IssueUserJWT("refresh-user-uuid", "refresh-user-slug", accountKP, expiresAt)
+	expiresAt := int64(8 * 60 * 60) // 8 hours in seconds
+	jwt, _, err := IssueUserJWTLegacy("refresh-user-uuid", "refresh-user-slug", accountKP, expiresAt)
 	if err != nil {
-		t.Fatalf("IssueUserJWT: %v", err)
+		t.Fatalf("IssueUserJWTLegacy: %v", err)
 	}
 
 	rec := httptest.NewRecorder()
@@ -158,8 +158,7 @@ func TestHandleRefresh_WrongAccountKey(t *testing.T) {
 	accountB, _ := nkeys.CreateAccount()
 	srv := NewServer(nil, accountB, "nats://localhost:4222", "", time.Hour, "admin")
 
-	expiresAt := time.Now().Add(time.Hour).Unix()
-	jwt, _, _ := IssueUserJWT("user", "user-slug", accountA, expiresAt)
+	jwt, _, _ := IssueUserJWTLegacy("user", "user-slug", accountA, int64(time.Hour.Seconds()))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
@@ -195,8 +194,8 @@ func TestAuthMiddleware_ValidToken_InjectsUserID(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
 	srv := NewServer(nil, accountKP, "nats://test", "", time.Hour, "admin")
 
-	expiresAt := time.Now().Add(time.Hour).Unix()
-	jwt, _, _ := IssueUserJWT("middleware-user", "middleware-slug", accountKP, expiresAt)
+	// Use legacy JWT issuance to produce a JWT with userID in claims.Name.
+	jwt, _, _ := IssueUserJWTLegacy("middleware-user", "middleware-slug", accountKP, int64(time.Hour.Seconds()))
 
 	var gotUserID string
 	handler := srv.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

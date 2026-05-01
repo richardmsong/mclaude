@@ -230,11 +230,24 @@ func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request, userID
 		return
 	}
 
-	// Issue a per-host user JWT using user slug (KNOWN-04).
-	hostJWT, hostSeed, err := IssueHostJWT(user.Slug, req.Slug, s.accountKP)
-	if err != nil {
-		http.Error(w, "failed to issue host jwt", http.StatusInternalServerError)
-		return
+	// Issue a per-host JWT. Per ADR-0054, if the host provided its NKey public key,
+	// use the new scoped JWT (no seed returned). Otherwise, use legacy mode.
+	var hostJWT string
+	var hostSeed []byte
+	if req.PublicKey != "" {
+		var issueErr error
+		hostJWT, issueErr = IssueHostJWT(req.PublicKey, req.Slug, s.accountKP)
+		if issueErr != nil {
+			http.Error(w, "failed to issue host jwt", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		var legacyErr error
+		hostJWT, hostSeed, legacyErr = IssueHostJWTLegacy(user.Slug, req.Slug, s.accountKP)
+		if legacyErr != nil {
+			http.Error(w, "failed to issue host jwt", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	hostID := uuid.NewString()
@@ -309,17 +322,29 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request, userID
 	// GAP-CP-04: Before deleting the host (which cascades to projects),
 	// publish delete notifications for each project on this host so controllers
 	// can tear down per-project resources (namespaces, Deployments, PVCs, RBAC).
-	if s.nc != nil {
+	// ADR-0053: Also delete S3 prefixes for each project (best-effort).
+	if s.nc != nil || s.s3 != nil {
 		user, userErr := s.db.GetUserByID(r.Context(), userID)
 		if userErr == nil && user != nil {
 			projects, projErr := s.db.GetProjectsByHostSlug(r.Context(), userID, hslug)
 			if projErr == nil {
 				for _, p := range projects {
-					publishProjectsDeleteToHost(s.nc, user.Slug, hslug, p.ID)
+					if s.nc != nil {
+						publishProjectsDeleteToHost(s.nc, user.Slug, hslug, p.Slug, p.ID)
+					}
+					// ADR-0053: Delete S3 prefix for this project (best-effort).
+					if s.s3 != nil && p.Slug != "" {
+						prefix := user.Slug + "/" + hslug + "/" + p.Slug + "/"
+						if s3Err := s.s3.s3DeletePrefix(prefix); s3Err != nil {
+							log.Warn().Err(s3Err).Str("prefix", prefix).Msg("host delete: S3 cleanup failed (non-fatal)")
+						}
+					}
 				}
 			}
 			// Broadcast user-level projects.updated so SPA refreshes.
-			publishProjectsUpdated(s.nc, user.Slug)
+			if s.nc != nil {
+				publishProjectsUpdated(s.nc, user.Slug)
+			}
 		}
 	}
 
@@ -466,21 +491,33 @@ func (s *Server) handleHostRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Issue a per-host user JWT using user slug (KNOWN-04).
-	hostJWT, _, err := IssueHostJWT(regUser.Slug, hostSlug, s.accountKP)
-	if err != nil {
-		http.Error(w, "failed to issue host jwt", http.StatusInternalServerError)
-		return
+	// Issue a per-host JWT. Per ADR-0054, if the host provided its NKey public key
+	// (stored in the device code entry), use the new scoped JWT (no seed returned).
+	var hostJWT string
+	if entry.PublicKey != "" {
+		var issueErr error
+		hostJWT, issueErr = IssueHostJWT(entry.PublicKey, hostSlug, s.accountKP)
+		if issueErr != nil {
+			http.Error(w, "failed to issue host jwt", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		// Legacy mode: no public key provided — use legacy function.
+		var legacyErr error
+		hostJWT, _, legacyErr = IssueHostJWTLegacy(regUser.Slug, hostSlug, s.accountKP)
+		if legacyErr != nil {
+			http.Error(w, "failed to issue host jwt", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	hostID := uuid.NewString()
-	_, err = s.db.pool.Exec(context.Background(), `
+	if _, execErr := s.db.pool.Exec(context.Background(), `
 		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key, user_jwt)
 		VALUES ($1, $2, $3, $4, 'machine', 'owner', $5, $6)
 		ON CONFLICT (user_id, slug) DO UPDATE SET name = EXCLUDED.name, public_key = EXCLUDED.public_key, user_jwt = EXCLUDED.user_jwt`,
-		hostID, entry.UserID, hostSlug, req.Name, entry.PublicKey, hostJWT)
-	if err != nil {
-		log.Error().Err(err).Msg("create host from device code")
+		hostID, entry.UserID, hostSlug, req.Name, entry.PublicKey, hostJWT); execErr != nil {
+		log.Error().Err(execErr).Msg("create host from device code")
 		http.Error(w, "failed to register host", http.StatusInternalServerError)
 		return
 	}

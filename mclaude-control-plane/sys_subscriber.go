@@ -3,21 +3,20 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
 )
 
-// HostKVState is the value written to the mclaude-hosts JetStream KV bucket (ADR-0046).
-// Key format: {uslug}.{hslug}
+// HostKVState is the value written to the mclaude-hosts JetStream KV bucket (ADR-0054).
+// Key format: {hslug} (flat — hosts are globally unique).
 // Must match the TypeScript HostKVState in mclaude-web.
+// Per spec-state-schema.md: {slug, type, name, online, lastSeenAt} — no Role field.
 type HostKVState struct {
 	Slug       string  `json:"slug"`
 	Type       string  `json:"type"`
 	Name       string  `json:"name"`
-	Role       string  `json:"role"`
 	Online     bool    `json:"online"`
 	LastSeenAt *string `json:"lastSeenAt,omitempty"`
 }
@@ -93,26 +92,25 @@ func (s *Server) handleSysEvent(msg *nats.Msg, isConnect bool) {
 				log.Warn().Err(err).Str("nkey", nkeyPub).Msg("$SYS CONNECT: update machine host last_seen_at")
 			}
 
-			// KV write: {uslug}.{hslug} → online=true (ADR-0046).
+			// KV write: {hslug} → online=true (ADR-0054: flat key).
 			if s.hostsKV != nil {
-				var hslug, hname, htype, hrole, uslug string
+				var hslug, hname, htype string
 				qerr := s.db.pool.QueryRow(ctx, `
-					SELECT h.slug AS hslug, h.name, h.type, h.role, u.slug AS uslug
-					FROM hosts h JOIN users u ON h.user_id = u.id
+					SELECT h.slug AS hslug, h.name, h.type
+					FROM hosts h
 					WHERE h.public_key = $1 AND h.type = 'machine'`,
-					nkeyPub).Scan(&hslug, &hname, &htype, &hrole, &uslug)
+					nkeyPub).Scan(&hslug, &hname, &htype)
 				if qerr == nil {
 					nowStr := now.Format(time.RFC3339)
 					state := HostKVState{
 						Slug:       hslug,
 						Type:       htype,
 						Name:       hname,
-						Role:       hrole,
 						Online:     true,
 						LastSeenAt: &nowStr,
 					}
 					if val, merr := json.Marshal(state); merr == nil {
-						key := fmt.Sprintf("%s.%s", uslug, hslug)
+						key := hslug
 						if _, perr := s.hostsKV.Put(key, val); perr != nil {
 							log.Warn().Err(perr).Str("key", key).Msg("$SYS CONNECT: hostsKV put failed")
 						}
@@ -122,21 +120,21 @@ func (s *Server) handleSysEvent(msg *nats.Msg, isConnect bool) {
 		} else {
 			// DISCONNECT: no last_seen_at update per ADR-0035; set online=false in KV.
 			if s.hostsKV != nil {
-				var hslug, hname, htype, hrole, uslug string
+				var hslug, hname, htype string
 				qerr := s.db.pool.QueryRow(ctx, `
-					SELECT h.slug AS hslug, h.name, h.type, h.role, u.slug AS uslug
-					FROM hosts h JOIN users u ON h.user_id = u.id
+					SELECT h.slug AS hslug, h.name, h.type
+					FROM hosts h
 					WHERE h.public_key = $1 AND h.type = 'machine'`,
-					nkeyPub).Scan(&hslug, &hname, &htype, &hrole, &uslug)
+					nkeyPub).Scan(&hslug, &hname, &htype)
 				if qerr == nil {
-					key := fmt.Sprintf("%s.%s", uslug, hslug)
+					key := hslug
 					// Read-modify-write: preserve lastSeenAt from existing entry.
 					// If no existing entry, skip the write.
 					existing, gerr := s.hostsKV.Get(key)
 					if gerr == nil {
 						var state HostKVState
 						if jerr := json.Unmarshal(existing.Value(), &state); jerr != nil {
-							state = HostKVState{Slug: hslug, Type: htype, Name: hname, Role: hrole}
+							state = HostKVState{Slug: hslug, Type: htype, Name: hname}
 						}
 						state.Online = false
 						if val, merr := json.Marshal(state); merr == nil {
@@ -171,31 +169,30 @@ func (s *Server) handleSysEvent(msg *nats.Msg, isConnect bool) {
 				log.Warn().Err(err).Str("slug", clusterSlug).Msg("$SYS CONNECT: update cluster host last_seen_at")
 			}
 
-			// KV write: {uslug}.{hslug} → online=true for each user row (ADR-0046).
+			// KV write: {hslug} → online=true (ADR-0054: flat key).
 			if s.hostsKV != nil {
 				rows, qerr := s.db.pool.Query(ctx, `
-					SELECT u.slug AS uslug, h.slug AS hslug, h.name, h.type, h.role
-					FROM hosts h JOIN users u ON h.user_id = u.id
+					SELECT h.slug AS hslug, h.name, h.type
+					FROM hosts h
 					WHERE h.slug = $1 AND h.type = 'cluster'`,
 					clusterSlug)
 				if qerr == nil {
 					defer rows.Close()
 					nowStr := now.Format(time.RFC3339)
 					for rows.Next() {
-						var uslug, hslug, hname, htype, hrole string
-						if serr := rows.Scan(&uslug, &hslug, &hname, &htype, &hrole); serr != nil {
+						var hslug, hname, htype string
+						if serr := rows.Scan(&hslug, &hname, &htype); serr != nil {
 							continue
 						}
 						state := HostKVState{
 							Slug:       hslug,
 							Type:       htype,
 							Name:       hname,
-							Role:       hrole,
 							Online:     true,
 							LastSeenAt: &nowStr,
 						}
 						if val, merr := json.Marshal(state); merr == nil {
-							key := fmt.Sprintf("%s.%s", uslug, hslug)
+							key := hslug
 							if _, perr := s.hostsKV.Put(key, val); perr != nil {
 								log.Warn().Err(perr).Str("key", key).Msg("$SYS CONNECT: hostsKV cluster put failed")
 							}
@@ -207,18 +204,18 @@ func (s *Server) handleSysEvent(msg *nats.Msg, isConnect bool) {
 			// DISCONNECT: no last_seen_at update per ADR-0035; set online=false in KV.
 			if s.hostsKV != nil {
 				rows, qerr := s.db.pool.Query(ctx, `
-					SELECT u.slug AS uslug, h.slug AS hslug, h.name, h.type, h.role
-					FROM hosts h JOIN users u ON h.user_id = u.id
+					SELECT h.slug AS hslug, h.name, h.type
+					FROM hosts h
 					WHERE h.slug = $1 AND h.type = 'cluster'`,
 					clusterSlug)
 				if qerr == nil {
 					defer rows.Close()
 					for rows.Next() {
-						var uslug, hslug, hname, htype, hrole string
-						if serr := rows.Scan(&uslug, &hslug, &hname, &htype, &hrole); serr != nil {
+						var hslug, hname, htype string
+						if serr := rows.Scan(&hslug, &hname, &htype); serr != nil {
 							continue
 						}
-						key := fmt.Sprintf("%s.%s", uslug, hslug)
+						key := hslug
 						// Read-modify-write: preserve lastSeenAt from existing entry.
 						existing, gerr := s.hostsKV.Get(key)
 						if gerr != nil {
@@ -227,7 +224,7 @@ func (s *Server) handleSysEvent(msg *nats.Msg, isConnect bool) {
 						}
 						var state HostKVState
 						if jerr := json.Unmarshal(existing.Value(), &state); jerr != nil {
-							state = HostKVState{Slug: hslug, Type: htype, Name: hname, Role: hrole}
+							state = HostKVState{Slug: hslug, Type: htype, Name: hname}
 						}
 						state.Online = false
 						if val, merr := json.Marshal(state); merr == nil {

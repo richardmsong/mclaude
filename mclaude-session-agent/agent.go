@@ -18,12 +18,12 @@ import (
 
 	"mclaude.io/common/pkg/slug"
 	"mclaude.io/common/pkg/subj"
+
+	"mclaude-session-agent/internal/drivers"
 )
 
 const (
 	sessionDeleteTimeout = 10 * time.Second
-	kvBucketSessions     = "mclaude-sessions"
-	kvBucketProjects     = "mclaude-projects"
 )
 
 // Agent manages all sessions for a single (userId, projectId) pair and owns
@@ -36,6 +36,14 @@ type Agent struct {
 	js         jetstream.JetStream
 	sessKV     jetstream.KeyValue
 	projKV     jetstream.KeyValue
+	// hostsKV provides read-only access to the shared mclaude-hosts KV bucket.
+	// Used to read the host's own key (`{hslug}`) for host configuration.
+	// Access is read-only per ADR-0054; CP is the sole writer (sourced from $SYS events).
+	// Per ADR-0054: "Agent must use raw JetStream API (direct-get + consumer-create)
+	// for the hosts bucket, not the high-level KV client which requires STREAM.INFO."
+	// Therefore, hostsKV is nil when the agent JWT lacks STREAM.INFO for KV_mclaude-hosts.
+	// The agent accesses the hosts bucket via direct-get using hostsKVRaw when hostsKV is nil.
+	hostsKV    jetstream.KeyValue
 	hostSlug    slug.HostSlug
 	userID      string
 	userSlug    slug.UserSlug
@@ -51,13 +59,15 @@ type Agent struct {
 	// subs holds all active core NATS subscriptions (terminal API) so they can
 	// be drained on graceful shutdown.
 	subs       []*nats.Subscription
-	// cmdConsumer and ctlConsumer are the JetStream pull consumers for API subjects.
-	cmdConsumer jetstream.Consumer
-	ctlConsumer jetstream.Consumer
-	// cmdCancel cancels the command consumer fetch loop.
-	cmdCancel context.CancelFunc
-	// ctlCancel cancels the control consumer fetch loop.
-	ctlCancel context.CancelFunc
+	// cmdMsgs and ctlMsgs are MessagesContext handles for the ordered push consumers.
+	// cmdMsgs is stopped early in graceful shutdown (step 2) so new commands queue
+	// in JetStream for the replacement pod.  ctlMsgs stays running until step 7 so
+	// interrupts and permission responses keep working during draining.
+	cmdMsgs     jetstream.MessagesContext
+	ctlMsgs     jetstream.MessagesContext
+	// sessKVBucket is the name of the per-user sessions KV bucket (ADR-0054).
+	// Stored so KVWriteSpan and error messages can reference the bucket name.
+	sessKVBucket string
 	// doExit is called at the end of gracefulShutdown. Defaults to os.Exit(0).
 	// Overridable in tests to prevent process exit.
 	doExit func(code int)
@@ -72,6 +82,15 @@ type Agent struct {
 	credMgr *CredentialManager
 	// gitIdentityID is the GIT_IDENTITY_ID for credential identity selection.
 	gitIdentityID string
+	// quotaPublisherMu guards quotaPublisherCancel.
+	quotaPublisherMu sync.Mutex
+	// quotaPublisherCancel, if non-nil, cancels the running quota publisher goroutine.
+	// Set when the agent is designated as the quota publisher (ADR-0044).
+	quotaPublisherCancel context.CancelFunc
+	// driverRegistry maps CLIBackend enum values to driver instances (ADR-0005).
+	// Session create requests specify the backend; the registry looks up the driver.
+	// Populated in NewAgent with the ClaudeCodeDriver and any other registered drivers.
+	driverRegistry *drivers.DriverRegistry
 }
 
 // NewAgent creates an Agent connected to the given NATS server.
@@ -86,58 +105,36 @@ func NewAgent(nc *nats.Conn, userID string, userSlug slug.UserSlug, hostSlug slu
 
 	ctx := context.Background()
 
-	// Session agents fail fast if buckets don't exist — bucket creation is
-	// owned by the control-plane.  Presence of buckets confirms the
-	// control-plane has started successfully.
-	sessKV, err := js.KeyValue(ctx, kvBucketSessions)
+	// Per ADR-0054, KV buckets are per-user. The control-plane creates them on
+	// user registration. Session agents fail fast if buckets don't exist —
+	// their presence confirms the control-plane has started successfully.
+	sessKVBucket := "mclaude-sessions-" + string(userSlug)
+	sessKV, err := js.KeyValue(ctx, sessKVBucket)
 	if err != nil {
-		return nil, fmt.Errorf("sessions KV bucket not found (control-plane not started?): %w", err)
+		return nil, fmt.Errorf("sessions KV bucket %q not found (control-plane not started?): %w", sessKVBucket, err)
 	}
-	projKV, err := js.KeyValue(ctx, kvBucketProjects)
+	projKVBucket := "mclaude-projects-" + string(userSlug)
+	projKV, err := js.KeyValue(ctx, projKVBucket)
 	if err != nil {
-		return nil, fmt.Errorf("projects KV bucket not found (control-plane not started?): %w", err)
+		return nil, fmt.Errorf("projects KV bucket %q not found (control-plane not started?): %w", projKVBucket, err)
 	}
 
-	// Ensure the MCLAUDE_EVENTS stream exists. CreateOrUpdateStream is
-	// idempotent: if the stream already exists with compatible config it is a
-	// no-op; if it exists with different config it is updated; if it does not
-	// exist it is created. The session-agent is authoritative for this stream.
-	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:      "MCLAUDE_EVENTS",
-		Subjects:  []string{subj.FilterMclaudeEvents},
-		Retention: jetstream.LimitsPolicy,
-		MaxAge:    30 * 24 * time.Hour,
-		Storage:   jetstream.FileStorage,
-		Discard:   jetstream.DiscardOld,
-	}); err != nil {
-		return nil, fmt.Errorf("ensure MCLAUDE_EVENTS stream: %w", err)
+	// Per ADR-0054, agents access the shared mclaude-hosts bucket in read-only mode.
+	// The agent JWT may lack $JS.API.STREAM.INFO.KV_mclaude-hosts permission (to prevent
+	// host enumeration via SubjectFilter). If the high-level KV client fails, we skip the
+	// hosts bucket — the agent can still function without it (host config is optional).
+	hostsKV, hostsKVErr := js.KeyValue(ctx, "mclaude-hosts")
+	if hostsKVErr != nil {
+		// Non-fatal: JWT may not include STREAM.INFO for the hosts bucket.
+		// Use nil to indicate unavailability; code that reads host config
+		// checks for nil before using hostsKV.
+		log.Warn().Err(hostsKVErr).Msg("hosts KV bucket unavailable (non-fatal — host config reads disabled)")
+		hostsKV = nil
 	}
 
-	// Ensure the MCLAUDE_API stream exists. This stream captures all session API
-	// subjects for at-least-once delivery. Created idempotently by each agent.
-	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:      "MCLAUDE_API",
-		Subjects:  []string{subj.FilterMclaudeAPI},
-		Retention: jetstream.LimitsPolicy,
-		MaxAge:    1 * time.Hour,
-		Storage:   jetstream.FileStorage,
-		Discard:   jetstream.DiscardOld,
-	}); err != nil {
-		return nil, fmt.Errorf("ensure MCLAUDE_API stream: %w", err)
-	}
-
-	// Ensure the MCLAUDE_LIFECYCLE stream exists (spec: GAP-SA-K8).
-	// Lifecycle events are published to core NATS and now also persisted.
-	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:      "MCLAUDE_LIFECYCLE",
-		Subjects:  []string{subj.FilterMclaudeLifecycle},
-		Retention: jetstream.LimitsPolicy,
-		MaxAge:    30 * 24 * time.Hour,
-		Storage:   jetstream.FileStorage,
-		Discard:   jetstream.DiscardOld,
-	}); err != nil {
-		return nil, fmt.Errorf("ensure MCLAUDE_LIFECYCLE stream: %w", err)
-	}
+	// Per ADR-0054, the agent does NOT create streams. The control-plane creates
+	// the consolidated per-user MCLAUDE_SESSIONS_{uslug} stream on user registration.
+	// The agent only creates ordered push consumers on the pre-existing stream.
 
 	agent := &Agent{
 		sessions:      make(map[string]*Session),
@@ -146,6 +143,8 @@ func NewAgent(nc *nats.Conn, userID string, userSlug slug.UserSlug, hostSlug slu
 		js:            js,
 		sessKV:        sessKV,
 		projKV:        projKV,
+		hostsKV:       hostsKV,
+		sessKVBucket:  sessKVBucket,
 		hostSlug:      hostSlug,
 		userID:        userID,
 		userSlug:      userSlug,
@@ -159,6 +158,17 @@ func NewAgent(nc *nats.Conn, userID string, userSlug slug.UserSlug, hostSlug slu
 		gitIdentityID: gitIdentityID,
 	}
 
+	// Initialize the DriverRegistry and register all supported CLI drivers (ADR-0005).
+	// DroidDriver, DevinACPDriver, and GenericTerminalDriver are stub implementations
+	// that return "not yet implemented" from Launch/Resume. Full protocol implementations
+	// will be added in ADR-0005 Phases 4-7.
+	reg := drivers.NewDriverRegistry()
+	reg.Register(drivers.NewClaudeCodeDriver(claudePath))
+	reg.Register(drivers.NewDroidDriver())
+	reg.Register(drivers.NewDevinACPDriver())
+	reg.Register(drivers.NewGenericTerminalDriver())
+	agent.driverRegistry = reg
+
 	// Wire NATS reconnect counter.
 	nc.SetReconnectHandler(func(_ *nats.Conn) {
 		log.Warn().Str("component", "session-agent").Msg("NATS reconnected")
@@ -171,8 +181,15 @@ func NewAgent(nc *nats.Conn, userID string, userSlug slug.UserSlug, hostSlug slu
 }
 
 // Run starts session recovery, JetStream consumers, terminal NATS subscriptions,
-// the heartbeat loop, and waits for ctx cancellation before graceful shutdown.
+// the manage API subscriptions, the fsnotify watcher, and waits for ctx cancellation
+// before graceful shutdown.
 func (a *Agent) Run(ctx context.Context) error {
+	// Check for pending session import BEFORE recovery (ADR-0053).
+	// If importRef is set in project KV, download and unpack before starting sessions.
+	if err := a.checkImport(ctx); err != nil {
+		a.log.Warn().Err(err).Msg("import check failed — continuing without import")
+	}
+
 	if err := a.recoverSessions(); err != nil {
 		a.log.Warn().Err(err).Msg("session recovery failed — continuing without recovery")
 	}
@@ -182,9 +199,21 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.subscribeTerminalAPI(); err != nil {
 		return err
 	}
+	if err := a.subscribeManageAPI(); err != nil {
+		return err
+	}
 	if err := a.clearUpdatingState(); err != nil {
 		a.log.Warn().Err(err).Msg("clearUpdatingState failed — continuing")
 	}
+
+	// Start fsnotify watcher on session data directory (ADR-0053).
+	// Discovers new JSONL session files from imports or manual placement.
+	go a.watchSessionDataDir(ctx)
+
+	// Start daily JSONL cleanup goroutine.
+	// Deletes JSONL files older than 90 days from the session data directory.
+	go a.runJSONLCleanup(ctx)
+
 	<-ctx.Done()
 	a.gracefulShutdown()
 	return nil
@@ -196,9 +225,13 @@ func (a *Agent) Run(ctx context.Context) error {
 // (the "updating" banner stays visible in the UI until clearUpdatingState() runs).
 func (a *Agent) recoverSessions() error {
 	ctx := context.Background()
-	watcher, err := a.sessKV.WatchAll(ctx)
+	// Per ADR-0054, watch only this project's session keys (filtered by host+project prefix).
+	// The per-user bucket (mclaude-sessions-{uslug}) contains all users' sessions;
+	// filtering to this project avoids processing unrelated sessions on recovery.
+	projectKeyPrefix := "hosts." + string(a.hostSlug) + ".projects." + string(a.projectSlug) + ".sessions.>"
+	watcher, err := a.sessKV.Watch(ctx, projectKeyPrefix)
 	if err != nil {
-		return fmt.Errorf("KV watchAll: %w", err)
+		return fmt.Errorf("KV watch(%s): %w", projectKeyPrefix, err)
 	}
 	defer watcher.Stop()
 
@@ -285,95 +318,74 @@ func (a *Agent) recoverSessions() error {
 	return nil
 }
 
-// createJetStreamConsumers creates (or attaches to existing) durable pull consumers
-// for the command and control API subjects, then starts their fetch goroutines.
+// createJetStreamConsumers creates ordered push consumers on the per-user
+// MCLAUDE_SESSIONS_{uslug} stream (ADR-0054). Two consumers are created:
+//   - cmdMsgs: sessions.create + sessions.*.{input,delete,config} — stopped early in
+//     graceful shutdown so new commands queue for the replacement pod.
+//   - ctlMsgs: sessions.*.control.> — stopped late in graceful shutdown so
+//     interrupts and permission responses keep working while sessions drain.
 func (a *Agent) createJetStreamConsumers() error {
 	ctx := context.Background()
-	stream, err := a.js.Stream(ctx, "MCLAUDE_API")
-	if err != nil {
-		return fmt.Errorf("MCLAUDE_API stream lookup: %w", err)
-	}
+	streamName := "MCLAUDE_SESSIONS_" + string(a.userSlug)
 
-	cmdName := fmt.Sprintf("sa-cmd-%s-%s", string(a.userSlug), string(a.projectSlug))
-	ctlName := fmt.Sprintf("sa-ctl-%s-%s", string(a.userSlug), string(a.projectSlug))
-	prefix := subj.UserHostProjectAPISessionsCreate(a.userSlug, a.hostSlug, a.projectSlug)
-	prefix = prefix[:len(prefix)-len("create")] // strip the trailing "create" to get the common prefix
+	// Build the project-scoped subject prefix.
+	projBase := "mclaude.users." + string(a.userSlug) +
+		".hosts." + string(a.hostSlug) +
+		".projects." + string(a.projectSlug) + "."
 
-	cmdCons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-		Durable:        cmdName,
-		AckPolicy:      jetstream.AckExplicitPolicy,
-		AckWait:        60 * time.Second,
-		MaxDeliver:     5,
+	// Command consumer: sessions.create + per-session command subjects.
+	cmdCons, err := a.js.OrderedConsumer(ctx, streamName, jetstream.OrderedConsumerConfig{
 		FilterSubjects: []string{
-			prefix + "create",
-			prefix + "delete",
-			prefix + "input",
-			prefix + "restart",
+			projBase + "sessions.create",
+			projBase + "sessions.*.input",
+			projBase + "sessions.*.delete",
+			projBase + "sessions.*.config",
 		},
+		DeliverPolicy: jetstream.DeliverNewPolicy,
 	})
 	if err != nil {
-		return fmt.Errorf("create cmd consumer: %w", err)
+		return fmt.Errorf("create cmd consumer on %s: %w", streamName, err)
 	}
 
-	ctlCons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-		Durable:        ctlName,
-		AckPolicy:      jetstream.AckExplicitPolicy,
-		AckWait:        60 * time.Second,
-		MaxDeliver:     5,
-		FilterSubjects: []string{prefix + "control"},
+	// Control consumer: per-session control subjects (interrupt, restart).
+	ctlCons, err := a.js.OrderedConsumer(ctx, streamName, jetstream.OrderedConsumerConfig{
+		FilterSubjects: []string{
+			projBase + "sessions.*.control.>",
+		},
+		DeliverPolicy: jetstream.DeliverNewPolicy,
 	})
 	if err != nil {
-		return fmt.Errorf("create ctl consumer: %w", err)
+		return fmt.Errorf("create ctl consumer on %s: %w", streamName, err)
 	}
 
-	a.cmdConsumer = cmdCons
-	a.ctlConsumer = ctlCons
+	cmdMsgs, err := cmdCons.Messages()
+	if err != nil {
+		return fmt.Errorf("cmd consumer Messages: %w", err)
+	}
+	ctlMsgs, err := ctlCons.Messages()
+	if err != nil {
+		return fmt.Errorf("ctl consumer Messages: %w", err)
+	}
 
-	cmdCtx, cmdCancel := context.WithCancel(context.Background())
-	ctlCtx, ctlCancel := context.WithCancel(context.Background())
-	a.cmdCancel = cmdCancel
-	a.ctlCancel = ctlCancel
+	a.cmdMsgs = cmdMsgs
+	a.ctlMsgs = ctlMsgs
 
-	go a.runConsumer(cmdCtx, cmdCons, a.dispatchCmd)
-	go a.runConsumer(ctlCtx, ctlCons, a.dispatchCtl)
+	go a.runConsumer(cmdMsgs, a.dispatchCmd)
+	go a.runConsumer(ctlMsgs, a.dispatchCtl)
 
 	return nil
 }
 
-// runConsumer runs a pull-based JetStream fetch loop, dispatching each message.
-// Stops when ctx is cancelled.
-func (a *Agent) runConsumer(ctx context.Context, cons jetstream.Consumer, dispatch func(jetstream.Msg)) {
-	backoff := 100 * time.Millisecond
+// runConsumer iterates a MessagesContext sequentially, dispatching each message.
+// Stops when the MessagesContext is stopped (Stop() is called externally).
+func (a *Agent) runConsumer(msgs jetstream.MessagesContext, dispatch func(jetstream.Msg)) {
 	for {
-		if ctx.Err() != nil {
-			return
-		}
-		msgs, err := cons.Fetch(10, jetstream.FetchMaxWait(5*time.Second))
-		if ctx.Err() != nil {
-			return
-		}
+		msg, err := msgs.Next()
 		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			a.log.Warn().Err(err).Msg("JetStream fetch error — backing off")
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(backoff):
-			}
-			if backoff < 5*time.Second {
-				backoff *= 2
-			}
-			continue
+			// MessagesContext was stopped — exit goroutine cleanly.
+			return
 		}
-		backoff = 100 * time.Millisecond
-		for msg := range msgs.Messages() {
-			dispatch(msg)
-			if err := msg.Ack(); err != nil {
-				a.log.Warn().Err(err).Str("subject", msg.Subject()).Msg("JetStream ack failed")
-			}
-		}
+		dispatch(msg)
 	}
 }
 
@@ -390,25 +402,35 @@ func jsToNatsMsg(jm jetstream.Msg) *nats.Msg {
 }
 
 // dispatchCmd routes a command consumer message to the appropriate handler.
+// Routing is by subject suffix within the ADR-0054 sessions.> hierarchy.
 func (a *Agent) dispatchCmd(jm jetstream.Msg) {
 	msg := jsToNatsMsg(jm)
+	s := jm.Subject()
 	switch {
-	case strings.HasSuffix(jm.Subject(), ".create"):
+	case strings.HasSuffix(s, ".sessions.create"):
 		a.handleCreate(msg)
-	case strings.HasSuffix(jm.Subject(), ".delete"):
+	case strings.HasSuffix(s, ".delete"):
 		a.handleDelete(msg)
-	case strings.HasSuffix(jm.Subject(), ".input"):
+	case strings.HasSuffix(s, ".input"):
 		a.handleInput(msg)
-	case strings.HasSuffix(jm.Subject(), ".restart"):
-		a.handleRestart(msg)
+	case strings.HasSuffix(s, ".config"):
+		a.handleConfig(msg)
 	default:
-		a.log.Warn().Str("subject", jm.Subject()).Msg("dispatchCmd: unrecognised subject")
+		a.log.Warn().Str("subject", s).Msg("dispatchCmd: unrecognised subject")
 	}
 }
 
-// dispatchCtl routes a control consumer message to the handleControl handler.
+// dispatchCtl routes a control consumer message to the appropriate handler.
+// sessions.*.control.restart → handleRestart; all others → handleControl.
 func (a *Agent) dispatchCtl(jm jetstream.Msg) {
-	a.handleControl(jsToNatsMsg(jm))
+	msg := jsToNatsMsg(jm)
+	s := jm.Subject()
+	switch {
+	case strings.HasSuffix(s, ".control.restart"):
+		a.handleRestart(msg)
+	default:
+		a.handleControl(msg)
+	}
 }
 
 // clearUpdatingState writes state:"idle" to KV for all sessions currently
@@ -482,9 +504,9 @@ func (a *Agent) gracefulShutdown() {
 		}
 	}
 
-	// Step 2: stop the command consumer (new work queues in JetStream).
-	if a.cmdCancel != nil {
-		a.cmdCancel()
+	// Step 2: stop the command consumer (new work queues in JetStream for the replacement pod).
+	if a.cmdMsgs != nil {
+		a.cmdMsgs.Stop()
 	}
 
 	// Step 3: drain core NATS subscriptions (terminal API).
@@ -542,8 +564,8 @@ func (a *Agent) gracefulShutdown() {
 	a.publishShellKilledNotifications(ids)
 
 	// Step 7: stop the control consumer.
-	if a.ctlCancel != nil {
-		a.ctlCancel()
+	if a.ctlMsgs != nil {
+		a.ctlMsgs.Stop()
 	}
 
 	// Step 8: publish lifecycle "session_upgrading" for each session.
@@ -562,11 +584,9 @@ func (a *Agent) gracefulShutdown() {
 // publishShellKilledNotifications publishes synthetic <task-notification status=killed>
 // messages for each in-flight background shell across all sessions. Called during
 // graceful shutdown (step 6) after the drain predicate is satisfied and BEFORE
-// stopping the ctl consumer. Messages are published to the JetStream
-// api.sessions.input subject so they queue for the new pod.
+// stopping the ctl consumer. Messages are published to the per-session
+// sessions.{sslug}.input subject so they queue in JetStream for the new pod.
 func (a *Agent) publishShellKilledNotifications(sessionIDs []string) {
-	inputSubject := subj.UserHostProjectAPISessionsInput(a.userSlug, a.hostSlug, a.projectSlug)
-
 	for _, id := range sessionIDs {
 		a.mu.RLock()
 		sess, ok := a.sessions[id]
@@ -581,6 +601,14 @@ func (a *Agent) publishShellKilledNotifications(sessionIDs []string) {
 			shells = append(shells, sh)
 		}
 		sess.mu.Unlock()
+
+		// Determine the per-session input subject (ADR-0054).
+		st := sess.getState()
+		sessSlug := slug.SessionSlug(id)
+		if st.Slug != "" {
+			sessSlug = slug.SessionSlug(st.Slug)
+		}
+		inputSubject := subj.UserHostProjectSessionsInput(a.userSlug, a.hostSlug, a.projectSlug, sessSlug)
 
 		for _, sh := range shells {
 			xml := fmt.Sprintf(
@@ -613,6 +641,108 @@ func (a *Agent) publishShellKilledNotifications(sessionIDs []string) {
 	}
 }
 
+// subscribeManageAPI subscribes to project-scoped management subjects:
+//   - manage.designate-quota-publisher — CP designates or de-designates this agent
+//     as the quota publisher for the user (ADR-0044).
+//
+// Core NATS subscriptions (not JetStream) because management signals are ephemeral.
+func (a *Agent) subscribeManageAPI() error {
+	managePrefix := "mclaude.users." + string(a.userSlug) +
+		".hosts." + string(a.hostSlug) +
+		".projects." + string(a.projectSlug) + ".manage."
+
+	sub, err := a.nc.Subscribe(managePrefix+"designate-quota-publisher", a.handleDesignateQuotaPublisher)
+	if err != nil {
+		return fmt.Errorf("subscribe manage.designate-quota-publisher: %w", err)
+	}
+	a.mu.Lock()
+	a.subs = append(a.subs, sub)
+	a.mu.Unlock()
+	return nil
+}
+
+// handleDesignateQuotaPublisher processes a manage.designate-quota-publisher message.
+// Payload: {quotaPublisher: bool}
+// When true: this agent starts running the quota publisher goroutine.
+// When false: this agent stops its quota publisher (another agent has taken over).
+// Per ADR-0044, CP sends this on $SYS DISCONNECT of the previously designated agent.
+func (a *Agent) handleDesignateQuotaPublisher(msg *nats.Msg) {
+	var req struct {
+		QuotaPublisher bool `json:"quotaPublisher"`
+	}
+	if err := json.Unmarshal(msg.Data, &req); err != nil {
+		a.log.Warn().Err(err).Msg("designate-quota-publisher: failed to parse payload")
+		return
+	}
+
+	a.quotaPublisherMu.Lock()
+	defer a.quotaPublisherMu.Unlock()
+
+	if req.QuotaPublisher {
+		if a.quotaPublisherCancel != nil {
+			// Already running — no-op.
+			a.log.Debug().Msg("quota publisher already running; ignoring duplicate designation")
+			return
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		a.quotaPublisherCancel = cancel
+		go a.runQuotaPublisher(ctx)
+		a.log.Info().Msg("quota publisher started — designated by CP")
+	} else {
+		if a.quotaPublisherCancel == nil {
+			return // not running
+		}
+		a.quotaPublisherCancel()
+		a.quotaPublisherCancel = nil
+		a.log.Info().Msg("quota publisher stopped — de-designated by CP")
+	}
+}
+
+// startQuotaPublisher starts the quota publisher goroutine if not already running.
+// Called when CP's agents.register response contains quotaPublisher: true.
+// External callers (main.go) use this to honour the initial designation.
+func (a *Agent) startQuotaPublisher() {
+	a.quotaPublisherMu.Lock()
+	defer a.quotaPublisherMu.Unlock()
+	if a.quotaPublisherCancel != nil {
+		return // already running
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	a.quotaPublisherCancel = cancel
+	go a.runQuotaPublisher(ctx)
+	a.log.Info().Msg("quota publisher started — initial designation")
+}
+
+// runQuotaPublisher polls the Anthropic OAuth usage API every 60s and publishes
+// QuotaStatus to mclaude.users.{uslug}.quota (core NATS, no JetStream retention).
+// Only runs on the designated agent per user (ADR-0044).
+// Reads OAuth token from ~/.claude/.credentials.json.
+func (a *Agent) runQuotaPublisher(ctx context.Context) {
+	quotaSubject := subj.UserQuota(a.userSlug)
+
+	publishOnce := func() {
+		qs := fetchQuotaStatus("") // empty path = use default ~/.claude/.credentials.json
+		data, _ := json.Marshal(qs)
+		if err := a.nc.Publish(quotaSubject, data); err != nil {
+			a.log.Warn().Err(err).Msg("quota publisher: failed to publish QuotaStatus")
+		}
+	}
+
+	// Publish immediately on startup.
+	publishOnce()
+
+	ticker := time.NewTicker(quotaPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			publishOnce()
+		}
+	}
+}
+
 // subscribeTerminalAPI sets up core NATS subscriptions for terminal management.
 // Terminal I/O is latency-sensitive and stays on core NATS (ephemeral).
 func (a *Agent) subscribeTerminalAPI() error {
@@ -640,10 +770,10 @@ func (a *Agent) subscribeTerminalAPI() error {
 	return nil
 }
 
-// publishAPIError publishes an api_error event to the project-level _api subject.
+// publishAPIError publishes an api_error event to the project-level sessions._api subject.
 // Used when a create/delete/restart handler encounters an error.
 func (a *Agent) publishAPIError(requestID, operation, errMsg string) {
-	subject := "mclaude.users." + string(a.userSlug) + ".hosts." + string(a.hostSlug) + ".projects." + string(a.projectSlug) + ".events._api"
+	subject := "mclaude.users." + string(a.userSlug) + ".hosts." + string(a.hostSlug) + ".projects." + string(a.projectSlug) + ".sessions._api"
 	payload, _ := json.Marshal(map[string]string{
 		"type":       "api_error",
 		"request_id": requestID,
@@ -653,17 +783,22 @@ func (a *Agent) publishAPIError(requestID, operation, errMsg string) {
 	_ = a.nc.Publish(subject, payload)
 }
 
-// defaultDevHarnessAllowlist is the set of tools auto-approved in strict-allowlist
-// sessions when no explicit AllowedTools list is provided.
+// defaultDevHarnessAllowlist is retained as a convenience constant for callers
+// that want to reference the canonical tool set. The session-agent no longer
+// applies it as a default — callers must pass AllowedTools explicitly.
+// Per ADR-0044: if AllowedTools is empty on a strict-allowlist session, the
+// agent rejects the create request.
 var defaultDevHarnessAllowlist = []string{
 	"Read", "Write", "Edit", "Glob", "Grep", "Bash",
 	"Agent", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop",
 }
 
 // handleCreate processes a sessions.create request.
-// Payload: {name, branch, cwd, joinWorktree, requestId, permPolicy, allowedTools, quotaMonitor}
+// Payload: {name, branch, cwd, joinWorktree, requestId, permPolicy, allowedTools,
+//           backend, prompt, branchSlug, softThreshold, hardHeadroomTokens,
+//           autoContinue, resumePrompt, quotaMonitor (deprecated)}
 // Success: session appears in KV (SPA watches KV).
-// Error: publish api_error event to mclaude.{userId}.{projectId}.events._api.
+// Error: publish api_error event to mclaude.{userId}.{projectId}.sessions._api.
 func (a *Agent) handleCreate(msg *nats.Msg) {
 	var req struct {
 		Name         string             `json:"name"`
@@ -674,6 +809,15 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 		PermPolicy   string             `json:"permPolicy"`
 		AllowedTools []string           `json:"allowedTools"`
 		ExtraFlags   string             `json:"extraFlags"`
+		Backend      string             `json:"backend"`
+		// ADR-0044 top-level quota fields (supersede nested quotaMonitor).
+		Prompt             string `json:"prompt"`
+		BranchSlug         string `json:"branchSlug"`
+		SoftThreshold      int    `json:"softThreshold"`
+		HardHeadroomTokens int    `json:"hardHeadroomTokens"`
+		AutoContinue       bool   `json:"autoContinue"`
+		ResumePrompt       string `json:"resumePrompt"`
+		// QuotaMonitor is the deprecated nested form; still accepted for backward-compat.
 		QuotaMonitor *QuotaMonitorConfig `json:"quotaMonitor"`
 	}
 	if len(msg.Data) > 0 {
@@ -744,6 +888,25 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 	if sessionSlug == "" {
 		sessionSlug = "s-" + sessionID[:8]
 	}
+
+	// Determine effective branchSlug: explicit req.BranchSlug, then slugified branch.
+	effectiveBranchSlug := req.BranchSlug
+	if effectiveBranchSlug == "" {
+		effectiveBranchSlug = branchSlug
+	}
+
+	// Determine initial lifecycle state: quota-managed sessions start as "pending"
+	// (prompt held until quota allows), interactive sessions start as "idle".
+	initialState := StateIdle
+	if req.SoftThreshold > 0 {
+		initialState = StatusPending
+	}
+
+	backend := req.Backend
+	if backend == "" {
+		backend = "claude_code"
+	}
+
 	state := SessionState{
 		ID:              sessionID,
 		Slug:            sessionSlug,
@@ -755,12 +918,18 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 		Worktree:        branchSlug,
 		CWD:             cwd,
 		Name:            req.Name,
-		State:           StateIdle,
+		State:           initialState,
 		StateSince:      now,
 		CreatedAt:       now,
 		JoinWorktree:    req.JoinWorktree,
 		ExtraFlags:      req.ExtraFlags,
+		Backend:         backend,
 		PendingControls: make(map[string]any),
+		// Quota fields — zero values omitted for interactive sessions.
+		SoftThreshold:      req.SoftThreshold,
+		HardHeadroomTokens: req.HardHeadroomTokens,
+		AutoContinue:       req.AutoContinue,
+		BranchSlug:         effectiveBranchSlug,
 	}
 
 	if err := a.writeSessionKV(state); err != nil {
@@ -779,14 +948,30 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 	sess.metrics = a.metrics
 	sess.log = a.log
 
+	// Look up the CLIDriver from the DriverRegistry (ADR-0005).
+	// The driver is used by sess.start() to launch/resume the CLI process.
+	// Falls back to auto-creating ClaudeCodeDriver(claudePath) if not found.
+	if a.driverRegistry != nil {
+		if drv, ok := a.driverRegistry.GetOrDefault(drivers.CLIBackend(backend)); ok {
+			sess.driver = drv
+		}
+	}
+
 	// Apply permission policy from request (backward-compatible: absent = managed).
 	if req.PermPolicy != "" {
 		sess.permPolicy = PermissionPolicy(req.PermPolicy)
 	}
 	// Build allowedTools set.
+	// Per ADR-0044: if allowedTools is empty on a strict-allowlist session, reject.
+	// There is no default allowlist — callers must explicitly declare their tool scope.
 	toolList := req.AllowedTools
-	if len(toolList) == 0 && (req.PermPolicy == string(PermissionPolicyAllowlist) || req.PermPolicy == string(PermissionPolicyStrictAllowlist)) {
-		toolList = defaultDevHarnessAllowlist
+	if len(toolList) == 0 && req.PermPolicy == string(PermissionPolicyStrictAllowlist) {
+		errMsg := "strict-allowlist sessions require an explicit allowedTools list"
+		a.log.Warn().Str("sessionId", sessionID).Msg(errMsg)
+		a.publishLifecycleError(sessionID, errMsg)
+		a.reply(msg, nil, errMsg)
+		a.publishAPIError(req.RequestID, "create", errMsg)
+		return
 	}
 	if len(toolList) > 0 {
 		set := make(map[string]bool, len(toolList))
@@ -814,19 +999,31 @@ func (a *Agent) handleCreate(msg *nats.Msg) {
 		a.updateReplayFromSeq(sessIDForCB)
 	}
 
-	// Wire quota monitor if requested.
+	// Wire quota monitor if requested (ADR-0044).
+	// Activated by top-level softThreshold > 0. The deprecated nested quotaMonitor
+	// field is no longer supported; callers must use top-level quota fields.
 	// Must be set before sess.start() so the goroutine can read the fields.
 	var monitor *QuotaMonitor
-	if req.QuotaMonitor != nil && req.QuotaMonitor.JobID != "" {
+	if req.SoftThreshold > 0 {
+		// ADR-0044 top-level quota fields (supersede deprecated nested quotaMonitor shape).
 		var monErr error
-		monitor, monErr = newQuotaMonitor(sessionID, string(a.userSlug), a.projectID, req.Branch, *req.QuotaMonitor, a.nc, sess, a.publishLifecycleExtra)
+		monitor, monErr = newQuotaMonitor(
+			sessionID, sessionSlug,
+			string(a.userSlug), string(a.hostSlug), string(a.projectSlug),
+			req.SoftThreshold, req.HardHeadroomTokens,
+			req.AutoContinue,
+			req.Prompt, req.ResumePrompt,
+			a.nc, sess,
+			a.publishLifecycleExtra,
+			a.writeSessionKV,
+		)
 		if monErr != nil {
 			a.log.Warn().Err(monErr).Str("sessionId", sessionID).Msg("quota monitor setup failed (non-fatal)")
 		} else {
-			jobID := req.QuotaMonitor.JobID
 			sess.mu.Lock()
+			sess.monitor = monitor
 			sess.onStrictDeny = func(toolName string) {
-				a.publishPermDenied(sessionID, toolName, jobID)
+				a.publishPermDenied(sessionID, toolName, sessionID)
 				monitor.signalPermDenied(toolName)
 			}
 			sess.onRawOutput = monitor.onRawOutput
@@ -915,16 +1112,25 @@ func (a *Agent) handleDelete(msg *nats.Msg) {
 		return
 	}
 
+	// Stop QuotaMonitor before stopping the process (ADR-0044).
+	sess.mu.Lock()
+	monitor := sess.monitor
+	sess.mu.Unlock()
+	if monitor != nil {
+		monitor.stop()
+	}
+
 	if err := sess.stopAndWait(sessionDeleteTimeout); err != nil {
 		a.log.Warn().Err(err).Str("sessionId", req.SessionID).Msg("session did not stop cleanly")
 	}
 
-	// Remove git worktree if /data/repo exists and this was the last session
-	// using the branch.  Scratch projects (no bare repo) have no worktree to
-	// remove; the worktree field will be empty in that case, so the guard on
-	// st.Worktree also covers them — but we additionally check that /data/repo
-	// exists to be explicit.
 	st := sess.getState()
+	isQuotaManaged := st.SoftThreshold > 0
+
+	// Worktree removal — branches on quota-managed vs interactive sessions.
+	// Quota-managed sessions: skip removal if Branch starts with "schedule/"
+	// (worktree persists for potential re-use). Interactive sessions: always
+	// remove if this was the last session on the branch.
 	if st.Worktree != "" {
 		effectiveDataDir := a.dataDir
 		if effectiveDataDir == "" {
@@ -934,7 +1140,10 @@ func (a *Agent) handleDelete(msg *nats.Msg) {
 		a.mu.RLock()
 		lastUser := !a.worktreeInUse(st.Worktree)
 		a.mu.RUnlock()
-		if lastUser {
+
+		// For quota-managed sessions on schedule/ branches, skip worktree removal.
+		skipRemoval := isQuotaManaged && strings.HasPrefix(st.Branch, "schedule/")
+		if lastUser && !skipRemoval {
 			worktreePath := filepath.Join(effectiveDataDir, "worktrees", st.Worktree)
 			if err := a.gitWorktreeRemove(repoPath, worktreePath); err != nil {
 				a.log.Warn().Err(err).
@@ -944,19 +1153,26 @@ func (a *Agent) handleDelete(msg *nats.Msg) {
 		}
 	}
 
-	// Delete from KV. Use slug fields from session state if available.
-	delState := sess.getState()
+	// KV and lifecycle event differ between interactive and quota-managed sessions.
 	delSessSlug := slug.SessionSlug(req.SessionID)
-	if delState.Slug != "" {
-		delSessSlug = slug.SessionSlug(delState.Slug)
+	if st.Slug != "" {
+		delSessSlug = slug.SessionSlug(st.Slug)
 	}
-	key := sessionKVKey(a.userSlug, a.hostSlug, a.projectSlug, delSessSlug)
-	_ = a.sessKV.Delete(context.Background(), key)
+	key := sessionKVKey(a.hostSlug, a.projectSlug, delSessSlug)
 
-	a.publishLifecycleWithExitCode(req.SessionID, "session_stopped", sess.exitCode())
+	if isQuotaManaged {
+		// Quota-managed: tombstone KV entry (disappears from SPA), emit cancelled event.
+		_ = a.sessKV.Delete(context.Background(), key)
+		a.publishLifecycle(req.SessionID, "session_job_cancelled")
+	} else {
+		// Interactive: delete KV entry, emit stopped event.
+		_ = a.sessKV.Delete(context.Background(), key)
+		a.publishLifecycleWithExitCode(req.SessionID, "session_stopped", sess.exitCode())
+	}
 
 	a.log.Info().
 		Str("sessionId", req.SessionID).
+		Bool("quotaManaged", isQuotaManaged).
 		Msg("session deleted")
 
 	if a.metrics != nil {
@@ -966,66 +1182,187 @@ func (a *Agent) handleDelete(msg *nats.Msg) {
 	a.reply(msg, map[string]string{}, "")
 }
 
-// handleInput routes a user message to the target session's stdin.
-// Payload: stream-json user message with an added session_id routing field.
+// handleInput routes a user message to the target session.
+// Per ADR-0054, input is published to sessions.{sslug}.input (per-session subject).
+// The session_id UUID field in the payload is still supported for routing
+// (backward-compatible with SPA/CLI that include it). If session_id is absent,
+// the session slug extracted from the subject is used as a fallback.
+//
+// Routing is type-based per the spec's "Event Routing / Input routing" section:
+//   - type: "message"           → driver.SendMessage(proc, msg)
+//   - type: "skill_invoke"      → driver.SendMessage(proc, /skill-name prefixed)
+//   - type: "permission_response" / "control_response" → driver.SendPermissionResponse
+//   - other (incl. legacy type:"user" stream-json) → strip session_id, sendInput
+//
 // The session_id field is stripped before forwarding to Claude's stdin because
-// Claude Code's --input-format stream-json does not accept unknown top-level
-// fields and would reject or mishandle a message containing session_id.
+// Claude Code's --input-format stream-json does not accept unknown top-level fields.
 func (a *Agent) handleInput(msg *nats.Msg) {
-	// Parse the payload into a generic map so we can extract session_id and
-	// then remove it before forwarding the rest to Claude's stdin.
+	// Parse the payload into a generic map so we can extract session_id and type.
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(msg.Data, &fields); err != nil {
 		a.log.Warn().Err(err).Msg("sessions.input: failed to parse payload")
 		return
 	}
 
-	sessionIDRaw, ok := fields["session_id"]
-	if !ok || string(sessionIDRaw) == `""` || string(sessionIDRaw) == "null" {
-		a.log.Warn().Msg("sessions.input: missing session_id")
-		return
+	var sess *Session
+
+	// Prefer session_id (UUID) from payload for routing (backward-compatible).
+	sessionIDRaw, hasSessionID := fields["session_id"]
+	if hasSessionID && string(sessionIDRaw) != `""` && string(sessionIDRaw) != "null" {
+		var sessionID string
+		if err := json.Unmarshal(sessionIDRaw, &sessionID); err == nil && sessionID != "" {
+			a.mu.RLock()
+			sess = a.sessions[sessionID]
+			a.mu.RUnlock()
+		}
 	}
 
-	// Unquote the JSON string value.
-	var sessionID string
-	if err := json.Unmarshal(sessionIDRaw, &sessionID); err != nil || sessionID == "" {
-		a.log.Warn().Msg("sessions.input: session_id not a non-empty string")
-		return
+	// Fallback: extract session slug from the subject.
+	// Subject: mclaude.users.{u}.hosts.{h}.projects.{p}.sessions.{sslug}.input
+	if sess == nil {
+		parts := strings.SplitN(msg.Subject, ".sessions.", 2)
+		if len(parts) == 2 {
+			sslugAndSuffix := parts[1]
+			// sslugAndSuffix is "{sslug}.input" — extract the slug.
+			if dotIdx := strings.Index(sslugAndSuffix, "."); dotIdx > 0 {
+				sslug := sslugAndSuffix[:dotIdx]
+				sess = a.sessionBySlug(sslug)
+			}
+		}
+		if sess == nil {
+			a.log.Warn().Str("subject", msg.Subject).Msg("sessions.input: session not found")
+			return
+		}
 	}
 
-	a.mu.RLock()
-	sess, ok2 := a.sessions[sessionID]
-	a.mu.RUnlock()
-
-	if !ok2 {
-		a.log.Warn().Str("sessionId", sessionID).Msg("sessions.input: session not found")
-		return
+	// Extract the type field to determine routing.
+	var msgType string
+	if typeRaw, ok := fields["type"]; ok {
+		_ = json.Unmarshal(typeRaw, &msgType)
 	}
 
-	// Remove the routing field before forwarding to Claude's stdin and publishing
-	// to the events stream.
-	delete(fields, "session_id")
+	switch msgType {
+	case "message":
+		// SessionInput envelope: {type:"message", text:"...", attachments:[...]}
+		// Route through driver.SendMessage so the driver formats the native protocol.
+		var text string
+		if textRaw, ok := fields["text"]; ok {
+			_ = json.Unmarshal(textRaw, &text)
+		}
+		// Process attachments: download from S3 to temp files, convert to ResolvedAttachment.
+		var attachments []drivers.ResolvedAttachment
+		tmpPaths, err := a.processInputAttachments(context.Background(), msg.Data)
+		if err != nil {
+			a.log.Warn().Err(err).Msg("sessions.input: attachment processing failed")
+		}
+		for filename, path := range tmpPaths {
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				a.log.Warn().Err(readErr).Str("path", path).Msg("failed to read attachment temp file")
+				continue
+			}
+			attachments = append(attachments, drivers.ResolvedAttachment{Filename: filename, Data: data})
+			_ = os.Remove(path)
+		}
+		userMsg := drivers.UserMessage{Text: text, Attachments: attachments}
+		sess.sendViaDriver(func(drv drivers.CLIDriver, proc *drivers.Process) error {
+			return drv.SendMessage(proc, userMsg)
+		})
 
-	cleaned, err := json.Marshal(fields)
-	if err != nil {
-		a.log.Warn().Err(err).Msg("sessions.input: failed to re-marshal payload without session_id")
-		return
+	case "skill_invoke":
+		// Skill invocations are sent as /skill-name prefixed messages.
+		var skillName string
+		if snRaw, ok := fields["skillName"]; ok {
+			_ = json.Unmarshal(snRaw, &skillName)
+		}
+		var args string
+		if argsRaw, ok := fields["args"]; ok {
+			_ = json.Unmarshal(argsRaw, &args)
+		}
+		text := "/" + skillName
+		if args != "" {
+			text += " " + args
+		}
+		userMsg := drivers.UserMessage{Text: text}
+		sess.sendViaDriver(func(drv drivers.CLIDriver, proc *drivers.Process) error {
+			return drv.SendMessage(proc, userMsg)
+		})
+
+	case "permission_response", "control_response":
+		// Permission response: route through driver.SendPermissionResponse.
+		// Also clear the pending control from KV.
+		var envelope struct {
+			Type     string          `json:"type"`
+			Response controlResponse `json:"response"`
+			// SessionInput format fields:
+			RequestID string `json:"requestId"`
+			Allowed   bool   `json:"allowed"`
+		}
+		_ = json.Unmarshal(msg.Data, &envelope)
+
+		// Support both control_response (old) and permission_response (new) fields.
+		requestID := envelope.Response.RequestID
+		allowed := true // default allow for control_response
+		if envelope.RequestID != "" {
+			requestID = envelope.RequestID
+			allowed = envelope.Allowed
+		}
+
+		if requestID != "" {
+			sess.clearPendingControl(requestID, a.writeSessionKV)
+		}
+		rID := requestID
+		all := allowed
+		sess.sendViaDriver(func(drv drivers.CLIDriver, proc *drivers.Process) error {
+			return drv.SendPermissionResponse(proc, rID, all)
+		})
+
+	default:
+		// Legacy / passthrough path: includes type:"user" (old stream-json format) and
+		// any other unrecognised type. Strip session_id, forward raw bytes to stdinCh.
+		// This maintains backward compatibility with SPAs/CLIs that send stream-json
+		// directly on the input subject.
+		//
+		// Also handles old-style control_response (type:"control_response") that arrived
+		// before permission_response routing was added.
+		if msgType == "control_response" {
+			var envelope struct {
+				Type     string          `json:"type"`
+				Response controlResponse `json:"response"`
+			}
+			if err := json.Unmarshal(msg.Data, &envelope); err == nil {
+				if envelope.Response.RequestID != "" {
+					sess.clearPendingControl(envelope.Response.RequestID, a.writeSessionKV)
+				}
+			}
+		}
+
+		delete(fields, "session_id")
+		cleaned, err := json.Marshal(fields)
+		if err != nil {
+			a.log.Warn().Err(err).Msg("sessions.input: failed to re-marshal payload without session_id")
+			return
+		}
+		sess.sendInput(cleaned)
 	}
-
-	sess.sendInput(cleaned)
 }
 
 // handleControl routes a control message (permission response, interrupt, model
-// change) to the appropriate session's stdin.
+// change) to the appropriate session.
 // Payload: {type: "control_response", response: {request_id, ...}} or
 //
 //	{type: "control_request", request: {subtype: "interrupt"/"set_model"}}
 //
+// Interrupts from sessions.{sslug}.control.interrupt are routed to
+// driver.Interrupt(proc) per the spec "Event Routing / Input routing" section.
 // No reply — fire and forget.
 func (a *Agent) handleControl(msg *nats.Msg) {
 	var envelope struct {
-		Type     string          `json:"type"`
+		Type    string          `json:"type"`
 		Response controlResponse `json:"response"`
+		Request struct {
+			Subtype string `json:"subtype"`
+		} `json:"request"`
 	}
 	if err := json.Unmarshal(msg.Data, &envelope); err != nil {
 		a.log.Warn().Err(err).Msg("sessions.control: failed to parse envelope")
@@ -1045,12 +1382,42 @@ func (a *Agent) handleControl(msg *nats.Msg) {
 			a.log.Warn().Str("requestId", requestID).Msg("sessions.control: no session owns request_id")
 			return
 		}
-		sess.sendInput(msg.Data)
 		sess.clearPendingControl(requestID, a.writeSessionKV)
+		rID := requestID
+		sess.sendViaDriver(func(drv drivers.CLIDriver, proc *drivers.Process) error {
+			return drv.SendPermissionResponse(proc, rID, true)
+		})
+
+	case "control_request":
+		// Interrupts from sessions.{sslug}.control.interrupt → driver.Interrupt(proc).
+		// Other control_requests (set_model, etc.) → broadcast raw to all sessions.
+		if envelope.Request.Subtype == "interrupt" {
+			a.mu.RLock()
+			sessions := make([]*Session, 0, len(a.sessions))
+			for _, s := range a.sessions {
+				sessions = append(sessions, s)
+			}
+			a.mu.RUnlock()
+			for _, s := range sessions {
+				s.sendViaDriver(func(drv drivers.CLIDriver, proc *drivers.Process) error {
+					return drv.Interrupt(proc)
+				})
+			}
+		} else {
+			// Non-interrupt control_requests (e.g. set_model) — broadcast raw.
+			a.mu.RLock()
+			sessions := make([]*Session, 0, len(a.sessions))
+			for _, s := range a.sessions {
+				sessions = append(sessions, s)
+			}
+			a.mu.RUnlock()
+			for _, s := range sessions {
+				s.sendInput(msg.Data)
+			}
+		}
 
 	default:
-		// control_request (interrupt, set_model, etc.) — broadcast to all sessions.
-		// In the common case there is exactly one active session per project.
+		// Unknown type — broadcast raw to all sessions for forward compatibility.
 		a.mu.RLock()
 		sessions := make([]*Session, 0, len(a.sessions))
 		for _, s := range a.sessions {
@@ -1061,6 +1428,68 @@ func (a *Agent) handleControl(msg *nats.Msg) {
 			s.sendInput(msg.Data)
 		}
 	}
+}
+
+// handleConfig routes a config update message to the appropriate session's driver.
+// Per ADR-0054, config updates arrive on sessions.{sslug}.config.
+// Payload: {sessionId, model, permissionMode, systemPrompt, ...}
+// Routes to driver.UpdateConfig(proc, cfg) per the spec "Event Routing" section.
+func (a *Agent) handleConfig(msg *nats.Msg) {
+	var req struct {
+		SessionID      string  `json:"sessionId"`
+		Model          *string `json:"model,omitempty"`
+		PermissionMode *string `json:"permissionMode,omitempty"`
+		SystemPrompt   *string `json:"systemPrompt,omitempty"`
+	}
+	if len(msg.Data) > 0 {
+		_ = json.Unmarshal(msg.Data, &req)
+	}
+
+	var sess *Session
+	if req.SessionID != "" {
+		a.mu.RLock()
+		sess = a.sessions[req.SessionID]
+		a.mu.RUnlock()
+	}
+	// Fallback: extract from subject (sessions.{sslug}.config).
+	if sess == nil {
+		parts := strings.SplitN(msg.Subject, ".sessions.", 2)
+		if len(parts) == 2 {
+			sslugAndSuffix := parts[1]
+			if dotIdx := strings.Index(sslugAndSuffix, "."); dotIdx > 0 {
+				sslug := sslugAndSuffix[:dotIdx]
+				sess = a.sessionBySlug(sslug)
+			}
+		}
+	}
+	if sess == nil {
+		a.log.Warn().Str("subject", msg.Subject).Msg("sessions.config: session not found")
+		return
+	}
+
+	// Route to driver.UpdateConfig per spec §Event Routing "Config updates".
+	cfg := drivers.SessionConfig{
+		Model:          req.Model,
+		PermissionMode: req.PermissionMode,
+		SystemPrompt:   req.SystemPrompt,
+	}
+	sess.sendViaDriver(func(drv drivers.CLIDriver, proc *drivers.Process) error {
+		return drv.UpdateConfig(proc, cfg)
+	})
+}
+
+// sessionBySlug returns the session whose state.Slug matches sslug, or nil.
+// Used for subject-based routing in handlers that receive per-session subjects.
+func (a *Agent) sessionBySlug(sslug string) *Session {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	for _, s := range a.sessions {
+		st := s.getState()
+		if st.Slug == sslug {
+			return s
+		}
+	}
+	return nil
 }
 
 // handleRestart stops a session and relaunches it with --resume.
@@ -1168,12 +1597,9 @@ func (a *Agent) writeSessionKV(state SessionState) error {
 	}
 	// Prefer slug fields when available; fall back to casting IDs so sessions
 	// created before the slug migration are still reachable.
-	uSlug := a.userSlug
+	// Per ADR-0054, the user slug is NOT in the key — it is the per-user bucket name.
 	pSlug := a.projectSlug
 	sSlug := slug.SessionSlug(state.ID)
-	if state.UserSlug != "" {
-		uSlug = slug.UserSlug(state.UserSlug)
-	}
 	if state.ProjectSlug != "" {
 		pSlug = slug.ProjectSlug(state.ProjectSlug)
 	}
@@ -1184,23 +1610,41 @@ func (a *Agent) writeSessionKV(state SessionState) error {
 	if state.HostSlug != "" {
 		hSlug = slug.HostSlug(state.HostSlug)
 	}
-	key := sessionKVKey(uSlug, hSlug, pSlug, sSlug)
-	_, span := KVWriteSpan(context.Background(), kvBucketSessions, key)
+	key := sessionKVKey(hSlug, pSlug, sSlug)
+	_, span := KVWriteSpan(context.Background(), a.sessKVBucket, key)
 	_, err = a.sessKV.Put(context.Background(), key, data)
 	span.End()
 	return err
 }
 
-// publishLifecycle publishes a lifecycle event on the project's lifecycle subject.
+// publishLifecycle publishes a lifecycle event on the per-session lifecycle subject.
+// Per ADR-0054, the event type is part of the subject: sessions.{sslug}.lifecycle.{eventType}.
 // No-op when a.nc is nil (unit tests that don't need a real NATS connection).
 func (a *Agent) publishLifecycle(sessionID, eventType string) {
 	if a.nc == nil {
 		return
 	}
-	subject := subj.UserHostProjectLifecycle(a.userSlug, a.hostSlug, a.projectSlug, slug.SessionSlug(sessionID))
+	subject := subj.UserHostProjectSessionsLifecycle(a.userSlug, a.hostSlug, a.projectSlug, slug.SessionSlug(sessionID), eventType)
 	payload, _ := json.Marshal(map[string]string{
 		"type":      eventType,
 		"sessionId": sessionID,
+		"ts":        time.Now().UTC().Format(time.RFC3339),
+	})
+	_ = a.nc.Publish(subject, payload)
+}
+
+// publishLifecycleError publishes a lifecycle.error event with an error message.
+// Per ADR-0044, used to report create-time validation failures such as empty
+// allowedTools on strict-allowlist sessions.
+func (a *Agent) publishLifecycleError(sessionID, errMsg string) {
+	if a.nc == nil {
+		return
+	}
+	subject := subj.UserHostProjectSessionsLifecycle(a.userSlug, a.hostSlug, a.projectSlug, slug.SessionSlug(sessionID), "error")
+	payload, _ := json.Marshal(map[string]string{
+		"type":      "error",
+		"sessionId": sessionID,
+		"error":     errMsg,
 		"ts":        time.Now().UTC().Format(time.RFC3339),
 	})
 	_ = a.nc.Publish(subject, payload)
@@ -1210,7 +1654,10 @@ func (a *Agent) publishLifecycle(sessionID, eventType string) {
 // error message.  Called when sess.start() returns an error so clients know
 // the session will never become active.
 func (a *Agent) publishLifecycleFailed(sessionID, errMsg string) {
-	subject := subj.UserHostProjectLifecycle(a.userSlug, a.hostSlug, a.projectSlug, slug.SessionSlug(sessionID))
+	if a.nc == nil {
+		return
+	}
+	subject := subj.UserHostProjectSessionsLifecycle(a.userSlug, a.hostSlug, a.projectSlug, slug.SessionSlug(sessionID), "session_failed")
 	payload, _ := json.Marshal(map[string]string{
 		"type":      "session_failed",
 		"sessionId": sessionID,
@@ -1224,7 +1671,10 @@ func (a *Agent) publishLifecycleFailed(sessionID, errMsg string) {
 // beyond type/sessionId/ts. Used by QuotaMonitor for events like
 // session_job_complete, session_quota_interrupted, session_job_failed.
 func (a *Agent) publishLifecycleExtra(sessionID, eventType string, extra map[string]string) {
-	subject := subj.UserHostProjectLifecycle(a.userSlug, a.hostSlug, a.projectSlug, slug.SessionSlug(sessionID))
+	if a.nc == nil {
+		return
+	}
+	subject := subj.UserHostProjectSessionsLifecycle(a.userSlug, a.hostSlug, a.projectSlug, slug.SessionSlug(sessionID), eventType)
 	payload := map[string]string{
 		"type":      eventType,
 		"sessionId": sessionID,
@@ -1240,7 +1690,10 @@ func (a *Agent) publishLifecycleExtra(sessionID, eventType string, extra map[str
 // publishPermDenied publishes a session_permission_denied lifecycle event.
 // Called when a strict-allowlist session auto-denies a tool request.
 func (a *Agent) publishPermDenied(sessionID, toolName, jobID string) {
-	subject := subj.UserHostProjectLifecycle(a.userSlug, a.hostSlug, a.projectSlug, slug.SessionSlug(sessionID))
+	if a.nc == nil {
+		return
+	}
+	subject := subj.UserHostProjectSessionsLifecycle(a.userSlug, a.hostSlug, a.projectSlug, slug.SessionSlug(sessionID), "session_permission_denied")
 	payload, _ := json.Marshal(map[string]string{
 		"type":      "session_permission_denied",
 		"sessionId": sessionID,
@@ -1257,7 +1710,7 @@ func (a *Agent) publishLifecycleWithBranch(sessionID, eventType, branch string) 
 	if a.nc == nil {
 		return
 	}
-	subject := subj.UserHostProjectLifecycle(a.userSlug, a.hostSlug, a.projectSlug, slug.SessionSlug(sessionID))
+	subject := subj.UserHostProjectSessionsLifecycle(a.userSlug, a.hostSlug, a.projectSlug, slug.SessionSlug(sessionID), eventType)
 	payload, _ := json.Marshal(map[string]string{
 		"type":      eventType,
 		"sessionId": sessionID,
@@ -1273,7 +1726,7 @@ func (a *Agent) publishLifecycleWithExitCode(sessionID, eventType string, exitCo
 	if a.nc == nil {
 		return
 	}
-	subject := subj.UserHostProjectLifecycle(a.userSlug, a.hostSlug, a.projectSlug, slug.SessionSlug(sessionID))
+	subject := subj.UserHostProjectSessionsLifecycle(a.userSlug, a.hostSlug, a.projectSlug, slug.SessionSlug(sessionID), eventType)
 	payload, _ := json.Marshal(map[string]interface{}{
 		"type":      eventType,
 		"sessionId": sessionID,
@@ -1364,14 +1817,15 @@ func (a *Agent) watchSessionCrash(sessionID string, sess *Session) {
 }
 
 // updateReplayFromSeq queries JetStream for the last sequence number of the
-// events stream and writes it to KV as replayFromSeq for the given session.
+// per-user sessions stream and writes it to KV as replayFromSeq for the given session.
 // Called after a compact_boundary event is published so that new subscribers
 // skip already-compacted history.
 func (a *Agent) updateReplayFromSeq(sessionID string) {
 	ctx := context.Background()
 
-	// Get the stream handle, then query its current state for the last seq.
-	stream, err := a.js.Stream(ctx, "MCLAUDE_EVENTS")
+	// Get the per-user sessions stream handle, then query its current state for the last seq.
+	streamName := "MCLAUDE_SESSIONS_" + string(a.userSlug)
+	stream, err := a.js.Stream(ctx, streamName)
 	if err != nil {
 		a.log.Warn().Err(err).Str("sessionId", sessionID).Msg("updateReplayFromSeq: Stream lookup failed")
 		return

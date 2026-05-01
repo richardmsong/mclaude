@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,6 +14,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+
+	"mclaude-session-agent/internal/drivers"
 )
 
 // startupTimeout is the maximum time to wait for Claude to emit an init event
@@ -71,11 +72,23 @@ func shellOutputPath(tmpDir, sanitizedCwd, sessionId, taskId string) string {
 		sanitizedCwd, sessionId, "tasks", taskId+".output")
 }
 
-// Session manages a single Claude Code child process and its NATS routing.
+// Session manages a single CLI backend process and its NATS routing.
+// The actual process spawning is delegated to the CLIDriver interface (ADR-0005).
+// If driver is nil when start() is called, a ClaudeCodeDriver is created
+// automatically using claudePath (backward-compat with tests and callers that
+// don't set the driver field directly).
 type Session struct {
 	mu       sync.Mutex
 	state    SessionState
 	userID   string
+	// driver is the CLIDriver for this session (ADR-0005). Set by the agent
+	// from the DriverRegistry before calling start(). May be nil for tests;
+	// a ClaudeCodeDriver is auto-created in that case using claudePath.
+	driver   drivers.CLIDriver
+	// proc is the running CLI process handle returned by driver.Launch/Resume.
+	// After spawning, cmd is set from proc.Cmd and stdin from proc.Stdin so
+	// existing code (stopAndWait, exitCode, etc.) continues to work unchanged.
+	proc     *drivers.Process
 	cmd      *exec.Cmd
 	stdin    io.WriteCloser
 	stdinCh  chan []byte
@@ -140,6 +153,10 @@ type Session struct {
 	// publish synthetic <task-notification status=killed> XML messages.
 	// Guarded by mu. Phase 2 of two-phase shell tracking.
 	inFlightShells map[string]*inFlightShell
+	// monitor, if non-nil, is the QuotaMonitor goroutine managing this quota-managed
+	// session. Set in handleCreate when SoftThreshold > 0. handleDelete calls
+	// monitor.stop() before stopping the process (ADR-0044).
+	monitor *QuotaMonitor
 }
 
 // newSession creates a Session but does not start the Claude process yet.
@@ -233,99 +250,93 @@ func (s *Session) sendInterrupt() {
 // If the init event is not received within that window, the process is killed
 // and an error is returned (spec: "30s startup timeout → failed state").
 func (s *Session) start(claudePath string, resume bool, publish func(subject string, data []byte) error, writeKV func(state SessionState) error) error {
-	var args []string
-	if resume {
-		args = []string{
-			"--print", "--verbose",
-			"--output-format", "stream-json",
-			"--input-format", "stream-json",
-			"--include-partial-messages",
-			"--replay-user-messages",
-			"--resume", s.state.ID,
-		}
-	} else {
-		args = []string{
-			"--print", "--verbose",
-			"--output-format", "stream-json",
-			"--input-format", "stream-json",
-			"--include-partial-messages",
-			"--replay-user-messages",
-			"--session-id", s.state.ID,
-		}
-	}
-
-	// Append shell-parsed extraFlags if set.
-	if s.extraFlags != "" {
-		extra, err := shellSplit(s.extraFlags)
-		if err != nil {
-			return fmt.Errorf("extraFlags shell parse: %w", err)
-		}
-		args = append(args, extra...)
-	}
-
-	cmd := exec.Command(claudePath, args...)
-	if s.state.CWD != "" {
-		cmd.Dir = s.state.CWD
-	}
-	if len(s.extraEnv) > 0 {
-		cmd.Env = append(append([]string{}, os.Environ()...), s.extraEnv...)
-	}
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("stdin pipe: %w", err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("stdout pipe: %w", err)
-	}
-
+	// Resolve the CLIDriver: use s.driver if set (by the agent from DriverRegistry),
+	// otherwise create a ClaudeCodeDriver with claudePath (backward-compat with tests).
 	s.mu.Lock()
-	s.cmd = cmd
-	s.stdin = stdin
+	drv := s.driver
 	s.mu.Unlock()
+	if drv == nil {
+		drv = drivers.NewClaudeCodeDriver(claudePath)
+		s.mu.Lock()
+		s.driver = drv
+		s.mu.Unlock()
+	}
 
-	// Emit a point-in-time span for the Claude process spawn.
+	// Launch or resume the process via the driver.
+	opts := drivers.LaunchOptions{
+		SessionID:  s.state.ID,
+		CWD:        s.state.CWD,
+		ExtraFlags: s.extraFlags,
+		ExtraEnv:   s.extraEnv,
+	}
+
 	_, spawnSpan := ClaudeSpawnSpan(context.Background(), s.state.ID, false)
-	if err := cmd.Start(); err != nil {
-		spawnSpan.End()
-		return fmt.Errorf("start claude: %w", err)
+	var proc *drivers.Process
+	var err error
+	if resume {
+		proc, err = drv.Resume(context.Background(), s.state.ID, opts)
+	} else {
+		proc, err = drv.Launch(context.Background(), opts)
 	}
 	spawnSpan.End()
+	if err != nil {
+		return fmt.Errorf("start claude: %w", err)
+	}
 
-	// Stdin serializer: drains stdinCh to the pipe sequentially so NDJSON
-	// lines never interleave.
+	// Save the underlying pipe stdin before replacing proc.Stdin.
+	// The stdinCh goroutine writes to underlyingStdin (the real pipe).
+	// CLIDriver methods write to proc.Stdin = stdinChWriter, which queues
+	// to stdinCh. This keeps the single-writer invariant on the underlying pipe.
+	underlyingStdin := proc.Stdin
+	proc.Stdin = &stdinChWriter{ch: s.stdinCh}
+
+	s.mu.Lock()
+	s.proc = proc
+	s.cmd = proc.Cmd   // keep cmd for backward-compat (stopAndWait, exitCode)
+	s.stdin = underlyingStdin
+	s.mu.Unlock()
+
+	// Stdin serializer: drains stdinCh to the underlying pipe sequentially
+	// so NDJSON lines never interleave. CLIDriver methods write to the
+	// stdinChWriter (which queues here) rather than directly to the pipe.
 	go func() {
 		for msg := range s.stdinCh {
-			_, _ = stdin.Write(msg)
-			_, _ = stdin.Write([]byte("\n"))
+			_, _ = underlyingStdin.Write(msg)
+			_, _ = underlyingStdin.Write([]byte("\n"))
 		}
 	}()
 
-	// Stdout router: reads stream-json lines and publishes to NATS and debug clients.
+	// Start the driver's ReadEvents goroutine. It reads proc.Stdout and sends
+	// DriverEvents on the eventsCh channel until stdout closes (process exits).
+	eventsCh := make(chan drivers.DriverEvent, 256)
+	go func() {
+		defer close(eventsCh)
+		_ = drv.ReadEvents(proc, eventsCh)
+	}()
+
+	// Stdout router: reads DriverEvents from the driver and publishes to NATS
+	// and debug clients. Uses the native event type and raw bytes from DriverEvent
+	// for backward-compatible processing (handleSideEffect, onRawOutput, etc.).
 	go func() {
 		defer close(s.doneCh)
-		scanner := bufio.NewScanner(stdout)
-		scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 
-		// Build event subject using slug fields (ADR-0024 / ADR-0035).
-		// ADR-0035 requires .hosts.{hslug}. between user and project segments.
+		// Build event subject using slug fields (ADR-0024 / ADR-0035 / ADR-0054).
+		// Subject format: mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.sessions.{sslug}.events
 		var eventSubject string
 		if s.state.UserSlug != "" && s.state.HostSlug != "" && s.state.ProjectSlug != "" && s.state.Slug != "" {
-			eventSubject = "mclaude.users." + s.state.UserSlug + ".hosts." + s.state.HostSlug + ".projects." + s.state.ProjectSlug + ".events." + s.state.Slug
+			eventSubject = "mclaude.users." + s.state.UserSlug + ".hosts." + s.state.HostSlug +
+				".projects." + s.state.ProjectSlug + ".sessions." + s.state.Slug + ".events"
 		} else {
-			eventSubject = fmt.Sprintf("mclaude.users.%s.hosts.%s.projects.%s.events.%s",
+			eventSubject = fmt.Sprintf("mclaude.users.%s.hosts.%s.projects.%s.sessions.%s.events",
 				s.userID,
 				s.state.HostSlug,
 				s.state.ProjectID,
 				s.state.ID)
 		}
 
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			lineCopy := make([]byte, len(line))
-			copy(lineCopy, line)
-
-			evType, _ := parseEventType(lineCopy)
+		for event := range eventsCh {
+			evType := event.NativeType
+			lineCopy := event.Raw
 
 			// Update in-flight background agent counter based on stdout events.
 			// +1 when an assistant message contains an Agent tool_use with run_in_background:true.
@@ -359,7 +370,7 @@ func (s *Session) start(claudePath string, resume bool, publish func(subject str
 				notify(evType, 0)
 			}
 
-			// Notify the quota monitor of raw output (scans for SESSION_JOB_COMPLETE marker).
+			// Notify the quota monitor of raw output (token counting + turn-end detection).
 			s.mu.Lock()
 			rawNotify := s.onRawOutput
 			s.mu.Unlock()
@@ -667,10 +678,15 @@ func (s *Session) handleSideEffect(line []byte, writeKV func(state SessionState)
 			if err := json.Unmarshal(line, &init); err == nil {
 				s.mu.Lock()
 				s.state.Model = init.Model
-				s.state.Capabilities = Capabilities{
-					Skills: init.Skills,
-					Tools:  init.Tools,
-					Agents: init.Agents,
+				// ADR-0005: tools, skills, agents are top-level fields per spec-state-schema.md.
+				s.state.Tools = init.Tools
+				s.state.Skills = init.Skills
+				s.state.Agents = init.Agents
+				// ADR-0005: capabilities holds CLICapabilities boolean flags (hasThinking, etc.)
+				// from the driver. The SPA reads these to toggle backend UI features without
+				// requiring event replay.
+				if s.driver != nil {
+					s.state.Capabilities = s.driver.Capabilities()
 				}
 				// ADR-0051: set state to idle on init so KV reflects a
 				// successful resume, correcting stale "failed"/"restarting"
@@ -834,9 +850,67 @@ func (s *Session) flushKV(writeKV func(state SessionState) error) {
 	}
 }
 
+// stdinChWriter is an io.WriteCloser backed by the session's stdinCh channel.
+// It is used as proc.Stdin so that CLIDriver interface methods (SendMessage,
+// Interrupt, etc.) write through the stdinCh serializer goroutine rather than
+// directly to the underlying pipe. This preserves the single-writer invariant
+// and prevents line interleaving on concurrent writes.
+//
+// writeLine in the driver appends '\n' to its payload before calling Write.
+// stdinChWriter strips the trailing '\n' before queuing so the stdinCh goroutine
+// (which appends '\n' itself) produces the correct output.
+type stdinChWriter struct {
+	ch chan<- []byte
+}
+
+func (w *stdinChWriter) Write(p []byte) (n int, err error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	// Make a copy so the caller can reuse its buffer immediately.
+	data := make([]byte, len(p))
+	copy(data, p)
+	// Strip the trailing newline added by driver.writeLine; the stdinCh goroutine
+	// adds it back, so the underlying pipe always receives exactly one '\n'.
+	if len(data) > 0 && data[len(data)-1] == '\n' {
+		data = data[:len(data)-1]
+	}
+	w.ch <- data
+	return len(p), nil
+}
+
+func (w *stdinChWriter) Close() error {
+	// The stdinCh channel lifetime is owned by the Session, not the writer.
+	// Do not close the channel here.
+	return nil
+}
+
 // sendInput queues a stream-json input line for delivery to Claude's stdin.
 func (s *Session) sendInput(data []byte) {
 	s.stdinCh <- data
+}
+
+// sendViaDriver routes a payload to the session's driver. It is used by agent
+// handlers that receive SessionInput envelopes from NATS and need to deliver
+// them to the CLI backend via the CLIDriver interface.
+//
+// If the session has no active driver/process (e.g. not yet started), it falls
+// back to sendInput so the message is queued until start() is called.
+func (s *Session) sendViaDriver(fn func(drv drivers.CLIDriver, proc *drivers.Process) error) {
+	s.mu.Lock()
+	drv := s.driver
+	proc := s.proc
+	s.mu.Unlock()
+
+	if drv == nil || proc == nil {
+		// Session not started yet — cannot route via driver. Log and drop.
+		s.log.Warn().Msg("sendViaDriver: driver/proc not ready; dropping message")
+		return
+	}
+
+	if err := fn(drv, proc); err != nil {
+		s.log.Warn().Err(err).Msg("sendViaDriver: driver call failed")
+	}
 }
 
 // clearPendingControl removes a control request after it has been answered.

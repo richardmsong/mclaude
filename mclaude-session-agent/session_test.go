@@ -187,9 +187,10 @@ func TestSimpleMessageLifecycle(t *testing.T) {
 		t.Error("KV usage never incremented")
 	}
 
-	// All events should be on the correct NATS subject.
+	// All events should be on the correct NATS subject per ADR-0054/ADR-0035.
+	// Format: mclaude.users.{u}.hosts.{h}.projects.{p}.sessions.{sslug}.events
 	for _, m := range msgs {
-		want := "mclaude.users.test-user.hosts.test-host.projects.test-proj.events.sess-simple"
+		want := "mclaude.users.test-user.hosts.test-host.projects.test-proj.sessions.sess-simple.events"
 		if m.subject != want {
 			t.Errorf("event on wrong subject: got %q, want %q", m.subject, want)
 			break
@@ -390,7 +391,8 @@ func TestCompactionBoundary(t *testing.T) {
 }
 
 // TestEventSubjectFormat verifies all events are published on the correct
-// hierarchical NATS subject.
+// hierarchical NATS subject per ADR-0054/ADR-0035.
+// Format: mclaude.users.{u}.hosts.{h}.projects.{p}.sessions.{sslug}.events
 func TestEventSubjectFormat(t *testing.T) {
 	_, pc, _ := startTestSession(t, "simple_message.jsonl", "sess-subject-check")
 	pc.waitForN(2, 5*time.Second)
@@ -399,9 +401,14 @@ func TestEventSubjectFormat(t *testing.T) {
 	if len(msgs) == 0 {
 		t.Fatal("no messages published")
 	}
+	// The new format puts the session slug BEFORE "events" in the subject.
+	// Old (wrong): ...projects.{p}.events.{sslug}
+	// New (correct): ...projects.{p}.sessions.{sslug}.events
+	expectedPrefix := "mclaude.users.test-user.hosts.test-host.projects.test-proj.sessions."
+	expectedSuffix := ".events"
 	for _, m := range msgs {
-		if !strings.HasPrefix(m.subject, "mclaude.users.test-user.hosts.test-host.projects.test-proj.events.") {
-			t.Errorf("unexpected subject prefix: %q", m.subject)
+		if !strings.HasPrefix(m.subject, expectedPrefix) || !strings.HasSuffix(m.subject, expectedSuffix) {
+			t.Errorf("unexpected subject format: %q (want prefix %q and suffix %q)", m.subject, expectedPrefix, expectedSuffix)
 		}
 	}
 }

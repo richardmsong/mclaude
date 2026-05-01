@@ -1,48 +1,79 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 )
 
-// QuotaMonitor watches the mclaude.{userId}.quota subject for quota status
+// QuotaMonitor watches the mclaude.users.{uslug}.quota subject for quota status
 // updates and gracefully stops a session when the 5h utilization threshold is
 // exceeded. One goroutine per session; created in handleCreate when the
-// sessions.create request includes a QuotaMonitor config.
+// sessions.create request includes softThreshold > 0 (ADR-0044).
+//
+// Two-tier quota enforcement:
+//  1. Soft threshold: injects "MCLAUDE_STOP: quota_soft" via sessions.input (NATS)
+//     and waits for Claude to end its turn naturally.
+//  2. Hard budget: after soft stop is injected, counts output tokens via onRawOutput.
+//     When outputTokensSinceSoftMark >= hardHeadroomTokens, sends a control_request
+//     interrupt directly to sess.stdinCh.
+//
+// Turn-end detection uses the turnEndedCh channel, which is signalled by
+// onRawOutput on EventTypeResult. handleTurnEnd() has priority over
+// handleSubprocessExit() via a nested non-blocking select.
 type QuotaMonitor struct {
-	sessionID    string
-	userID       string
-	projectID    string
-	branch       string // git branch (e.g. "schedule/spa-abc12345")
-	cfg          QuotaMonitorConfig
-	nc           *nats.Conn
-	session      *Session
+	// Identity
+	sessionID   string
+	sessionSlug string
+	userSlug    string
+	hostSlug    string
+	projectSlug string
+
+	// Config
+	softThreshold      int
+	hardHeadroomTokens int
+	autoContinue       bool
+	prompt             string // initial prompt; held until quota allows delivery
+	resumePrompt       string
+
+	// Infrastructure
+	nc      *nats.Conn
+	session *Session
+
+	// Callbacks
 	publishLifec func(sessionID, evType string, extra map[string]string)
-	permDeniedCh chan string          // receives toolName on strict-allowlist deny
-	quotaCh      chan *nats.Msg       // receives quota status updates from NATS
-	quotaSub     *nats.Subscription  // subscription to mclaude.{userID}.quota
+	writeKV      func(state SessionState) error
+
+	// Channels
+	permDeniedCh chan string         // receives toolName on strict-allowlist deny
+	quotaCh      chan *nats.Msg      // receives quota status updates from NATS
+	quotaSub     *nats.Subscription  // subscription to mclaude.users.{uslug}.quota
 	stopCh       chan struct{}        // closed to exit the monitor goroutine
-	lastU5                   int       // last 5h utilization %
-	lastR5                   time.Time // last 5h reset time
-	outputTokensAtSoftMark   int       // outputTokens snapshot when soft threshold was reached
-	completionPR             string    // set by onRawOutput when SESSION_JOB_COMPLETE detected
-	stopTimeout              time.Duration // timeout before hard interrupt; 0 = use default (30 min)
+	turnEndedCh  chan struct{}        // 1-buffered; signalled by onRawOutput on result event
+
+	// State (accessed only from the monitor goroutine, so no mutex needed)
+	lastU5                    int
+	lastR5                    time.Time
+	stopReason                string // "" | "quota_soft" | "quota_hard" | "permDenied"
+	outputTokensAtSoftMark    int    // cumulative outputTokens snapshot when soft marker injected
+	outputTokensSinceSoftMark int    // token estimate since soft mark
+	terminalEventPublished    bool   // true once handleTurnEnd or handleSubprocessExit published
 }
 
 // newQuotaMonitor creates a QuotaMonitor, subscribes to quota updates,
-// starts the monitor goroutine, and returns. Called from handleCreate.
-// userSlug is used (not UUID) so the subscription subject matches the slug-based
-// subject the daemon publishes to (spec: GAP-SA-K11).
+// starts the monitor goroutine, and returns.
 func newQuotaMonitor(
-	sessionID, userSlug, projectID, branch string,
-	cfg QuotaMonitorConfig,
+	sessionID, sessionSlug, userSlug, hostSlug, projectSlug string,
+	softThreshold, hardHeadroomTokens int,
+	autoContinue bool,
+	prompt, resumePrompt string,
 	nc *nats.Conn,
 	sess *Session,
 	publishLifec func(sessionID, evType string, extra map[string]string),
+	writeKV func(state SessionState) error,
 ) (*QuotaMonitor, error) {
 	quotaCh := make(chan *nats.Msg, 16)
 	subject := "mclaude.users." + userSlug + ".quota"
@@ -52,18 +83,25 @@ func newQuotaMonitor(
 	}
 
 	m := &QuotaMonitor{
-		sessionID:    sessionID,
-		userID:       userSlug,
-		projectID:    projectID,
-		branch:       branch,
-		cfg:          cfg,
-		nc:           nc,
-		session:      sess,
-		publishLifec: publishLifec,
-		permDeniedCh: make(chan string, 1),
-		quotaCh:      quotaCh,
-		quotaSub:     quotaSub,
-		stopCh:       make(chan struct{}),
+		sessionID:          sessionID,
+		sessionSlug:        sessionSlug,
+		userSlug:           userSlug,
+		hostSlug:           hostSlug,
+		projectSlug:        projectSlug,
+		softThreshold:      softThreshold,
+		hardHeadroomTokens: hardHeadroomTokens,
+		autoContinue:       autoContinue,
+		prompt:             prompt,
+		resumePrompt:       resumePrompt,
+		nc:                 nc,
+		session:            sess,
+		publishLifec:       publishLifec,
+		writeKV:            writeKV,
+		permDeniedCh:       make(chan string, 1),
+		quotaCh:            quotaCh,
+		quotaSub:           quotaSub,
+		stopCh:             make(chan struct{}),
+		turnEndedCh:        make(chan struct{}, 1),
 	}
 
 	go m.run()
@@ -91,49 +129,56 @@ func (m *QuotaMonitor) signalPermDenied(toolName string) {
 	}
 }
 
-// onRawOutput is called for each raw stdout line from Claude (via
-// Session.onRawOutput). Scans assistant events for the SESSION_JOB_COMPLETE
-// marker and records the PR URL.
-func (m *QuotaMonitor) onRawOutput(evType string, raw []byte) {
-	if evType != EventTypeAssistant {
-		return
-	}
-	const marker = "SESSION_JOB_COMPLETE:"
-	idx := bytes.Index(raw, []byte(marker))
-	if idx == -1 {
-		return
-	}
-	// Extract the PR URL: everything after the marker until whitespace or end
-	// of string value. Take up to 200 bytes to be safe.
-	rest := raw[idx+len(marker):]
-	end := bytes.IndexAny(rest, " \t\n\r\"}")
-	if end == -1 {
-		end = len(rest)
-	}
-	if end > 200 {
-		end = 200
-	}
-	m.completionPR = string(rest[:end])
+// sessionsInputSubject returns the NATS subject for the session's input.
+// Format: mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.sessions.{sslug}.input
+func (m *QuotaMonitor) sessionsInputSubject() string {
+	return "mclaude.users." + m.userSlug +
+		".hosts." + m.hostSlug +
+		".projects." + m.projectSlug +
+		".sessions." + m.sessionSlug + ".input"
 }
 
-// sendGracefulStop queues the quota threshold message on the session's
-// stdin channel. This tells Claude to finish its current task and stop.
-func (m *QuotaMonitor) sendGracefulStop() {
-	msg, _ := json.Marshal(map[string]any{
-		"type": "user",
-		"message": map[string]any{
-			"role":    "user",
-			"content": "QUOTA_THRESHOLD_REACHED: The 5-hour API quota threshold has been reached. Please finish your current task and commit all changes, run --audit-only to generate a gap report and output the full results, then stop. Do not start any new tasks.",
-		},
+// publishToSessionsInput publishes a message text to the session's NATS input
+// subject using the standard sessions.input JSON envelope (ADR-0044).
+// Format: {"id":"<uuid>","ts":<unix_ms>,"type":"message","text":"<text>"}
+func (m *QuotaMonitor) publishToSessionsInput(text string) {
+	payload, _ := json.Marshal(map[string]interface{}{
+		"id":   uuid.NewString(),
+		"ts":   time.Now().UnixMilli(),
+		"type": "message",
+		"text": text,
 	})
-	select {
-	case m.session.stdinCh <- msg:
-	default:
-	}
+	subject := m.sessionsInputSubject()
+	_ = m.nc.Publish(subject, payload)
 }
 
-// sendHardInterrupt queues an interrupt control_request on the session's
-// stdin channel. Called after the graceful stop timeout expires.
+// sendGracefulStop publishes the MCLAUDE_STOP: quota_soft marker to the
+// session's NATS input subject (sessions.{sslug}.input). The session agent's
+// input handler picks this up and forwards it to Claude as a user message.
+// This replaces the old approach of writing directly to sess.stdinCh.
+func (m *QuotaMonitor) sendGracefulStop() {
+	m.publishToSessionsInput("MCLAUDE_STOP: quota_soft")
+}
+
+// sendInitialPrompt delivers the caller-supplied prompt to the session's NATS
+// input subject. Called when quota permits (u5 < softThreshold and pending).
+func (m *QuotaMonitor) sendInitialPrompt() {
+	m.publishToSessionsInput(m.prompt)
+}
+
+// sendResumeNudge delivers the resume nudge message when quota recovers
+// and the session was paused.
+func (m *QuotaMonitor) sendResumeNudge() {
+	text := m.resumePrompt
+	if text == "" {
+		text = "Resuming — continue where you left off."
+	}
+	m.publishToSessionsInput(text)
+}
+
+// sendHardInterrupt queues an interrupt control_request directly on the
+// session's stdin channel (bypassing NATS — interrupts bypass Stop hooks).
+// Only called from the monitor goroutine via onRawOutput.
 func (m *QuotaMonitor) sendHardInterrupt() {
 	interrupt := []byte(`{"type":"control_request","request":{"subtype":"interrupt"}}`)
 	select {
@@ -142,63 +187,204 @@ func (m *QuotaMonitor) sendHardInterrupt() {
 	}
 }
 
-// publishExitLifecycle determines the exit reason and publishes the
-// appropriate lifecycle event. Called when session.doneCh is closed.
-func (m *QuotaMonitor) publishExitLifecycle(stopReason string) {
-	switch {
-	case m.completionPR != "":
-		m.publishLifec(m.sessionID, "session_job_complete", map[string]string{
-			"jobId":  m.cfg.JobID,
-			"branch": m.branch,
-		})
-	case stopReason == "quota":
-		// Compute actual output tokens since the soft mark was set.
-		currentOutputTokens := m.session.getState().Usage.OutputTokens
-		tokensSinceSoftMark := currentOutputTokens - m.outputTokensAtSoftMark
-		if tokensSinceSoftMark < 0 {
-			tokensSinceSoftMark = 0
+// onRawOutput is called for each raw stdout line from Claude (via
+// Session.onRawOutput). Handles:
+//  1. Token counting: byte estimate for assistant events; authoritative count
+//     from result event usage.output_tokens (ADR-0044).
+//  2. Hard budget check: fires interrupt when outputTokensSinceSoftMark >=
+//     hardHeadroomTokens (only when stopReason == "quota_soft").
+//  3. Turn-end detection: signals turnEndedCh when EventTypeResult arrives.
+//
+// This method is called from a separate goroutine (the session stdout router).
+// It must not block and must not access the monitor's internal state (except
+// turnEndedCh, which is goroutine-safe as a buffered channel).
+func (m *QuotaMonitor) onRawOutput(evType string, raw []byte) {
+	switch evType {
+	case EventTypeAssistant:
+		// Primary (byte estimate): count tokens during a running assistant turn.
+		// Only count when a soft stop has been injected and we're tracking budget.
+		if m.stopReason == "quota_soft" || m.stopReason == "quota_hard" {
+			estimate := len(raw) / 4
+			m.outputTokensSinceSoftMark += estimate
+			// Hard budget check (after byte estimate update).
+			if m.stopReason == "quota_soft" && m.hardHeadroomTokens > 0 &&
+				m.outputTokensSinceSoftMark >= m.hardHeadroomTokens {
+				m.stopReason = "quota_hard"
+				m.sendHardInterrupt()
+			}
 		}
-		m.publishLifec(m.sessionID, "session_job_paused", map[string]string{
-			"jobId":                    m.cfg.JobID,
-			"pausedVia":               "quota_threshold",
-			"r5":                      m.lastR5.UTC().Format(time.RFC3339),
-			"outputTokensSinceSoftMark": fmt.Sprintf("%d", tokensSinceSoftMark),
+
+	case EventTypeResult:
+		// Authoritative token count from result event.
+		if m.stopReason == "quota_soft" || m.stopReason == "quota_hard" {
+			var r resultEvent
+			if err := json.Unmarshal(raw, &r); err == nil && r.Usage.OutputTokens > 0 {
+				// Replace estimate with authoritative cumulative count.
+				m.outputTokensSinceSoftMark = r.Usage.OutputTokens - m.outputTokensAtSoftMark
+				if m.outputTokensSinceSoftMark < 0 {
+					m.outputTokensSinceSoftMark = 0
+				}
+				// Hard budget check (after authoritative update).
+				if m.stopReason == "quota_soft" && m.hardHeadroomTokens > 0 &&
+					m.outputTokensSinceSoftMark >= m.hardHeadroomTokens {
+					m.stopReason = "quota_hard"
+					m.sendHardInterrupt()
+				}
+			}
+		}
+		// Signal turn-end (non-blocking; if buffer is full, the event is already queued).
+		select {
+		case m.turnEndedCh <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// handleTurnEnd is called when a result event is received (turn ended).
+// Inspects stopReason to distinguish pause vs completion.
+// Sets terminalEventPublished = true so handleSubprocessExit knows not to publish
+// a session_job_failed event.
+func (m *QuotaMonitor) handleTurnEnd() {
+	m.terminalEventPublished = true
+
+	switch m.stopReason {
+	case "quota_soft":
+		// Soft-paused: publish session_job_paused with pausedVia=quota_soft.
+		extra := map[string]string{
+			"pausedVia": "quota_soft",
+			"r5":        m.lastR5.UTC().Format(time.RFC3339),
+		}
+		m.publishLifec(m.sessionID, "session_job_paused", extra)
+		// Update session KV → status: paused.
+		m.session.mu.Lock()
+		m.session.state.State = StatusPaused
+		m.session.state.PausedVia = "quota_soft"
+		m.session.state.StateSince = time.Now().UTC()
+		if m.autoContinue && !m.lastR5.IsZero() {
+			resumeAt := m.lastR5
+			m.session.state.ResumeAt = &resumeAt
+		}
+		st := m.session.state
+		m.session.mu.Unlock()
+		if m.writeKV != nil {
+			_ = m.writeKV(st)
+		}
+		// Reset for next turn.
+		m.stopReason = ""
+		m.outputTokensSinceSoftMark = 0
+
+	case "quota_hard":
+		// Hard-paused: publish session_job_paused with pausedVia=quota_hard.
+		extra := map[string]string{
+			"pausedVia":                 "quota_hard",
+			"r5":                        m.lastR5.UTC().Format(time.RFC3339),
+			"outputTokensSinceSoftMark": fmt.Sprintf("%d", m.outputTokensSinceSoftMark),
+		}
+		m.publishLifec(m.sessionID, "session_job_paused", extra)
+		// Update session KV → status: paused.
+		m.session.mu.Lock()
+		m.session.state.State = StatusPaused
+		m.session.state.PausedVia = "quota_hard"
+		m.session.state.StateSince = time.Now().UTC()
+		if m.autoContinue && !m.lastR5.IsZero() {
+			resumeAt := m.lastR5
+			m.session.state.ResumeAt = &resumeAt
+		}
+		st := m.session.state
+		m.session.mu.Unlock()
+		if m.writeKV != nil {
+			_ = m.writeKV(st)
+		}
+		// Reset for next turn.
+		m.stopReason = ""
+		m.outputTokensSinceSoftMark = 0
+
+	case "":
+		// Natural completion: Claude ended its turn without a platform-injected stop.
+		m.publishLifec(m.sessionID, "session_job_complete", map[string]string{
+			"sessionId": m.sessionID,
 		})
-	case stopReason == "permDenied":
-		// session_permission_denied was already published synchronously by
-		// onStrictDeny. Publishing a second event would overwrite the
-		// needs_spec_fix status in KV.
+		// Update session KV → status: completed.
+		m.session.mu.Lock()
+		m.session.state.State = StatusCompleted
+		m.session.state.StateSince = time.Now().UTC()
+		st := m.session.state
+		m.session.mu.Unlock()
+		if m.writeKV != nil {
+			_ = m.writeKV(st)
+		}
+
+	case "permDenied":
+		// session_permission_denied was already published by onStrictDeny.
+		// KV → needs_spec_fix was set there too. Nothing more to publish here.
+
 	default:
-		m.publishLifec(m.sessionID, "session_job_failed", map[string]string{
-			"jobId": m.cfg.JobID,
-			"error": "session exited without completion marker",
+		// Unknown stopReason; treat as completion.
+		m.publishLifec(m.sessionID, "session_job_complete", map[string]string{
+			"sessionId": m.sessionID,
 		})
 	}
 }
 
+// handleSubprocessExit is called when session.doneCh closes (subprocess exited).
+// If terminalEventPublished is true, the exit was expected (after completion or
+// cancellation). Otherwise, publish session_job_failed.
+func (m *QuotaMonitor) handleSubprocessExit() {
+	if m.terminalEventPublished {
+		// Expected cleanup after natural completion, quota pause, or cancel.
+		return
+	}
+	// Subprocess exited without a turn-end signal → unexpected failure.
+	m.publishLifec(m.sessionID, "session_job_failed", map[string]string{
+		"error": "subprocess exited without turn-end signal",
+	})
+	// Update session KV → status: failed.
+	m.session.mu.Lock()
+	m.session.state.State = StateFailed
+	m.session.state.StateSince = time.Now().UTC()
+	st := m.session.state
+	m.session.mu.Unlock()
+	if m.writeKV != nil {
+		_ = m.writeKV(st)
+	}
+}
+
 // run is the main monitor goroutine. It selects on quota updates,
-// permission-denied signals, and the session done channel.
+// permission-denied signals, turn-end signals, and the session done channel.
+// Priority: turnEndedCh is checked before session.doneCh using a nested
+// non-blocking select to ensure handleTurnEnd fires before handleSubprocessExit
+// on natural completion (where both channels may become ready simultaneously).
 func (m *QuotaMonitor) run() {
 	defer m.quotaSub.Unsubscribe() //nolint:errcheck
 
-	stopReason := ""
-	var stopTimer <-chan time.Time
-
 	for {
+		// Priority check: non-blockingly drain turnEndedCh before entering
+		// the full select. This ensures that if both turnEndedCh and doneCh
+		// are ready, we always handle turn-end first.
+		select {
+		case <-m.turnEndedCh:
+			m.handleTurnEnd()
+			continue
+		default:
+		}
+
 		select {
 		case <-m.stopCh:
 			return
 
 		case toolName := <-m.permDeniedCh:
-			if stopReason == "" {
-				stopReason = "permDenied"
-				_ = toolName // already published by onStrictDeny
-				m.sendGracefulStop()
-				d := m.stopTimeout
-				if d == 0 {
-					d = 30 * time.Minute
+			if m.stopReason == "" {
+				m.stopReason = "permDenied"
+				// Update session KV → needs_spec_fix.
+				m.session.mu.Lock()
+				m.session.state.State = StatusNeedsSpecFix
+				m.session.state.FailedTool = toolName
+				m.session.state.StateSince = time.Now().UTC()
+				st := m.session.state
+				m.session.mu.Unlock()
+				if m.writeKV != nil {
+					_ = m.writeKV(st)
 				}
-				stopTimer = time.After(d)
 			}
 
 		case msg := <-m.quotaCh:
@@ -211,24 +397,85 @@ func (m *QuotaMonitor) run() {
 			}
 			m.lastU5 = qs.U5
 			m.lastR5 = qs.R5
-			if qs.HasData && m.cfg.Threshold > 0 && qs.U5 >= m.cfg.Threshold && stopReason == "" {
-				stopReason = "quota"
-				m.outputTokensAtSoftMark = m.session.getState().Usage.OutputTokens
-				m.sendGracefulStop()
-				d := m.stopTimeout
-				if d == 0 {
-					d = 30 * time.Minute
-				}
-				stopTimer = time.After(d)
+
+			if !qs.HasData {
+				// No data: do not trigger stop or start sessions.
+				continue
 			}
 
-		case <-stopTimer:
-			m.sendHardInterrupt()
-			// Reset the timer to nil so we don't fire again.
-			stopTimer = nil
+			// Soft threshold breached: inject quota_soft marker.
+			if qs.U5 >= m.softThreshold && m.stopReason == "" {
+				m.stopReason = "quota_soft"
+				// Capture token count at soft mark.
+				m.session.mu.Lock()
+				m.outputTokensAtSoftMark = m.session.state.Usage.OutputTokens
+				m.session.mu.Unlock()
+				m.outputTokensSinceSoftMark = 0
+				m.sendGracefulStop()
+
+				// If hardHeadroomTokens == 0, fire hard interrupt immediately.
+				if m.hardHeadroomTokens == 0 {
+					m.stopReason = "quota_hard"
+					m.sendHardInterrupt()
+				}
+				continue
+			}
+
+			// Quota available for pending session: send initial prompt.
+			m.session.mu.Lock()
+			sessionState := m.session.state.State
+			m.session.mu.Unlock()
+			if sessionState == StatusPending && qs.U5 < m.softThreshold {
+				m.sendInitialPrompt()
+				m.session.mu.Lock()
+				m.session.state.State = StateRunning
+				m.session.state.StateSince = time.Now().UTC()
+				st := m.session.state
+				m.session.mu.Unlock()
+				if m.writeKV != nil {
+					_ = m.writeKV(st)
+				}
+				continue
+			}
+
+			// Quota recovered for paused session: send resume nudge.
+			if sessionState == StatusPaused && qs.U5 < m.softThreshold {
+				if m.autoContinue {
+					// For autoContinue sessions, check if resumeAt has passed.
+					m.session.mu.Lock()
+					resumeAt := m.session.state.ResumeAt
+					m.session.mu.Unlock()
+					if resumeAt != nil && time.Now().Before(*resumeAt) {
+						// Not yet time to resume.
+						continue
+					}
+				}
+				m.sendResumeNudge()
+				m.session.mu.Lock()
+				m.session.state.State = StateRunning
+				m.session.state.PausedVia = ""
+				m.session.state.ResumeAt = nil
+				m.session.state.StateSince = time.Now().UTC()
+				st := m.session.state
+				m.session.mu.Unlock()
+				if m.writeKV != nil {
+					_ = m.writeKV(st)
+				}
+			}
+
+		case <-m.turnEndedCh:
+			m.handleTurnEnd()
 
 		case <-m.session.doneCh:
-			m.publishExitLifecycle(stopReason)
+			// Priority: check turnEndedCh one more time before handling exit.
+			// This covers the race where the result event fires and doneCh
+			// closes at nearly the same time.
+			select {
+			case <-m.turnEndedCh:
+				m.handleTurnEnd()
+			default:
+			}
+			m.handleSubprocessExit()
 			close(m.stopCh)
 			return
 		}

@@ -19,6 +19,27 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	// ADR-0054: NKey challenge-response auth endpoints (all identity types).
+	mux.HandleFunc("/api/auth/challenge", s.handleAuthChallenge)
+	mux.HandleFunc("/api/auth/verify", s.handleAuthVerify)
+
+	// ADR-0054: CLI device-code auth flow.
+	mux.HandleFunc("/api/auth/device-code", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			s.handleCLIDeviceCodeCreate(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	mux.HandleFunc("/api/auth/device-code/poll", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			s.handleCLIDeviceCodePoll(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	mux.HandleFunc("/api/auth/device-code/verify", s.handleCLIDeviceCodeVerify)
+
 	// Health probes (Kubernetes liveness + readiness)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -92,6 +113,10 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 		}
 		http.NotFound(w, r)
 	})))
+
+	// ADR-0053: Attachment endpoints (POST upload-url, POST confirm, GET download).
+	mux.Handle("/api/attachments/", s.authMiddleware(http.HandlerFunc(s.handleAttachmentRoutes)))
+	mux.Handle("/api/attachments", s.authMiddleware(http.HandlerFunc(s.handleAttachmentRoutes)))
 
 	// Host and Project CRUD endpoints (ADR-0035)
 	mux.Handle("/api/users/", s.authMiddleware(http.HandlerFunc(s.handleUserAPIRoutes)))

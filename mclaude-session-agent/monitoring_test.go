@@ -283,14 +283,17 @@ func TestMonitoringLogs(t *testing.T) {
 	}
 
 	// At least one log line should have the events subject.
+	// ADR-0054 format: ...sessions.{sslug}.events (ends in ".events", not ".events.")
 	var foundEventsSubject bool
 	for _, line := range lines {
-		if s, ok := line["subject"].(string); ok && strings.Contains(s, ".events.") {
-			foundEventsSubject = true
+		if s, ok := line["subject"].(string); ok {
+			if strings.Contains(s, ".sessions.") && strings.HasSuffix(s, ".events") {
+				foundEventsSubject = true
+			}
 		}
 	}
 	if !foundEventsSubject {
-		t.Error("no log line with events subject")
+		t.Error("no log line with events subject (expected format: ...sessions.{sslug}.events)")
 	}
 }
 
@@ -389,13 +392,16 @@ func TestSessionStartEmitsSpans(t *testing.T) {
 	}
 	var foundEventsSubject bool
 	for _, s := range pubSpans {
-		if strings.Contains(spanAttr(s, "nats.subject"), ".events.") {
+		subj := spanAttr(s, "nats.subject")
+		// ADR-0054/ADR-0035 subject format: ...sessions.{sslug}.events
+		// (ends in ".events", no trailing dot)
+		if strings.Contains(subj, ".sessions.") && strings.HasSuffix(subj, ".events") {
 			foundEventsSubject = true
 			break
 		}
 	}
 	if !foundEventsSubject {
-		t.Error("no nats.publish span with events subject")
+		t.Error("no nats.publish span with events subject (expected format: ...sessions.{sslug}.events)")
 	}
 }
 

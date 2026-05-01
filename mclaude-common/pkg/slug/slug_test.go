@@ -150,6 +150,12 @@ func TestValidate(t *testing.T) {
 		{"reserved: lifecycle", "lifecycle", "ErrReserved"},
 		{"reserved: quota", "quota", "ErrReserved"},
 		{"reserved: terminal", "terminal", "ErrReserved"},
+		// ADR-0054 reserved words — session subject verb tokens
+		{"reserved: create", "create", "ErrReserved"},
+		{"reserved: delete", "delete", "ErrReserved"},
+		{"reserved: input", "input", "ErrReserved"},
+		{"reserved: config", "config", "ErrReserved"},
+		{"reserved: control", "control", "ErrReserved"},
 		{"contains slash", "hello/world", "ErrCharset"},
 		{"contains wildcard *", "hello*", "ErrCharset"},
 		{"contains >", "hello>", "ErrCharset"},

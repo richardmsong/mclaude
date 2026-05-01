@@ -10,14 +10,13 @@ import (
 // GAP-CP-06: Provisioning subject uses .provision not .create
 // ---------------------------------------------------------------------------
 
-func TestProvisionSubjectUsesProvision(t *testing.T) {
-	// The provisioning subject should use .api.projects.provision, not .create.
-	// This is a source-level check since the NATS handler assembles the subject inline.
-	// We verify by checking that the subject format is correct in the helper constant check.
-	userSlug := "alice"
+func TestProvisionSubjectFormat(t *testing.T) {
+	// ADR-0054: provision (create) subject uses host-scoped fan-out format.
 	hostSlug := "dev-box"
-	expected := "mclaude.users.alice.hosts.dev-box.api.projects.provision"
-	got := "mclaude.users." + userSlug + ".hosts." + hostSlug + ".api.projects.provision"
+	userSlug := "alice"
+	projectSlug := "myapp"
+	expected := "mclaude.hosts.dev-box.users.alice.projects.myapp.create"
+	got := "mclaude.hosts." + hostSlug + ".users." + userSlug + ".projects." + projectSlug + ".create"
 	if got != expected {
 		t.Errorf("provision subject: got %q, want %q", got, expected)
 	}
@@ -90,10 +89,12 @@ func TestPublishProjectsUpdateToHostSubject(t *testing.T) {
 }
 
 func TestPublishProjectsDeleteToHostSubject(t *testing.T) {
-	userSlug := "alice"
+	// ADR-0054: fan-out delete subject is host-scoped.
 	hostSlug := "dev-box"
-	expected := "mclaude.users.alice.hosts.dev-box.api.projects.delete"
-	got := "mclaude.users." + userSlug + ".hosts." + hostSlug + ".api.projects.delete"
+	userSlug := "alice"
+	projectSlug := "myapp"
+	expected := "mclaude.hosts.dev-box.users.alice.projects.myapp.delete"
+	got := "mclaude.hosts." + hostSlug + ".users." + userSlug + ".projects." + projectSlug + ".delete"
 	if got != expected {
 		t.Errorf("projects.delete subject: got %q, want %q", got, expected)
 	}
@@ -123,12 +124,12 @@ func TestPublishProjectsUpdateToHost_EmptySlug(t *testing.T) {
 }
 
 func TestPublishProjectsDeleteToHost_NilConn(t *testing.T) {
-	publishProjectsDeleteToHost(nil, "alice", "dev-box", "proj-1")
+	publishProjectsDeleteToHost(nil, "alice", "dev-box", "myapp", "proj-id-1")
 }
 
 func TestPublishProjectsDeleteToHost_EmptySlug(t *testing.T) {
-	publishProjectsDeleteToHost(nil, "", "dev-box", "proj-1")
-	publishProjectsDeleteToHost(nil, "alice", "", "proj-1")
+	publishProjectsDeleteToHost(nil, "", "dev-box", "myapp", "proj-id-1")
+	publishProjectsDeleteToHost(nil, "alice", "", "myapp", "proj-id-1")
 }
 
 // ---------------------------------------------------------------------------

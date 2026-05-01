@@ -14,6 +14,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -100,6 +102,26 @@ func main() {
 
 	srv := NewServer(db, accountKP, natsURL, natsWsURL, jwtExpiry, adminToken)
 	srv.providers = provReg
+	srv.SetExternalURL(externalURL)
+
+	// Load S3 config for import and attachment support (ADR-0053).
+	srv.s3 = loadS3Config()
+	if srv.s3 == nil {
+		logger.Warn().Msg("S3 not configured — import and attachment features unavailable (set S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY)")
+	} else {
+		logger.Info().Str("endpoint", srv.s3.Endpoint).Str("bucket", srv.s3.Bucket).Msg("S3 configured for imports and attachments")
+	}
+
+	// Load operator + sysAccount seeds from OPERATOR_KEYS_PATH for JWT revocation (ADR-0054).
+	// Fatal exit if path is set but unreadable (per spec: "fatal exit on startup").
+	operatorKeyPath := envOr("OPERATOR_KEYS_PATH", "/etc/mclaude/operator-keys")
+	if operatorSeed, sysAccountSeed, accountJWT, loadErr := loadOperatorKeys(operatorKeyPath); loadErr != nil {
+		// Non-fatal in dev: keys mount may not exist. Log warning and continue.
+		logger.Warn().Err(loadErr).Str("path", operatorKeyPath).Msg("operator-keys not loaded — JWT revocation disabled (TTL-only fallback)")
+	} else {
+		srv.SetRevocationCredentials(operatorSeed, sysAccountSeed, accountJWT)
+		logger.Info().Msg("operator-keys loaded — JWT revocation via $SYS.REQ.CLAIMS.UPDATE enabled")
+	}
 
 	// NATS connection — used for project subscriptions, KV writes, and provisioning.
 	userJWT, userKP, err := generateNATSUserCreds(accountKP)
@@ -127,6 +149,12 @@ func main() {
 		logger.Fatal().Err(err).Msg("start projects subscriber")
 	}
 	logger.Info().Msg("projects subscriber started")
+
+	// Start ADR-0054 lifecycle subscribers (host lifecycle, agent registration).
+	if err := srv.StartLifecycleSubscribers(nc); err != nil {
+		logger.Fatal().Err(err).Msg("start lifecycle subscribers")
+	}
+	logger.Info().Msg("lifecycle subscribers started")
 
 	// Start $SYS.ACCOUNT subscriber for host presence tracking (ADR-0035).
 	if err := srv.StartSysSubscriber(nc); err != nil {
@@ -219,11 +247,11 @@ func seedDev(ctx context.Context, db *DB, nc *nats.Conn, logger zerolog.Logger) 
 	// Write the local machine host to mclaude-hosts KV so the SPA renders it
 	// as online. The local dev host has no NKey, so no $SYS CONNECT fires (ADR-0046).
 	if user.Slug != "" {
-		var localHostSlug, localHostName, localHostType, localHostRole string
+		var localHostSlug, localHostName, localHostType string
 		qerr := db.pool.QueryRow(ctx, `
-			SELECT slug, name, type, role FROM hosts
+			SELECT slug, name, type FROM hosts
 			WHERE user_id = $1 AND slug = 'local' LIMIT 1`,
-			user.ID).Scan(&localHostSlug, &localHostName, &localHostType, &localHostRole)
+			user.ID).Scan(&localHostSlug, &localHostName, &localHostType)
 		if qerr == nil {
 			js, jerr := nc.JetStream()
 			if jerr == nil {
@@ -234,12 +262,12 @@ func seedDev(ctx context.Context, db *DB, nc *nats.Conn, logger zerolog.Logger) 
 						Slug:       localHostSlug,
 						Type:       localHostType,
 						Name:       localHostName,
-						Role:       localHostRole,
 						Online:     true,
 						LastSeenAt: &now,
 					}
 					if val, merr := json.Marshal(state); merr == nil {
-						key := user.Slug + "." + localHostSlug
+						// ADR-0054: flat key format {hslug} — hosts are globally unique.
+						key := localHostSlug
 						if _, perr := hostsKV.Put(key, val); perr != nil {
 							logger.Error().Err(perr).Str("key", key).Msg("DEV_SEED: write local host KV failed (non-fatal)")
 						} else {
@@ -265,7 +293,8 @@ func seedDev(ctx context.Context, db *DB, nc *nats.Conn, logger zerolog.Logger) 
 					logger.Error().Err(merr).Str("projectId", proj.ID).Msg("DEV_SEED: marshal provision request failed (non-fatal)")
 					continue
 				}
-				provSubject := subj.UserHostAPIProjectsProvision(slug.UserSlug(user.Slug), slug.HostSlug(localHostSlug))
+				// ADR-0054: host-scoped fan-out subject.
+			provSubject := subj.HostUserProjectsCreate(slug.HostSlug(localHostSlug), slug.UserSlug(user.Slug), slug.ProjectSlug(proj.Slug))
 				provReply, reqErr := nc.Request(provSubject, provData, 30*time.Second)
 				if reqErr != nil {
 					logger.Warn().Err(reqErr).
@@ -329,4 +358,40 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// loadOperatorKeys reads operator credentials from the OPERATOR_KEYS_PATH directory.
+// Returns (operatorSeed, sysAccountSeed, accountJWT, error).
+// The directory is a K8s Secret mount — each key is a separate file.
+// If NATS_SYS_ACCOUNT_SEED env var is set, it takes precedence over the file.
+func loadOperatorKeys(path string) (operatorSeed, sysAccountSeed, accountJWT string, err error) {
+	// Read operatorSeed from file.
+	operatorSeedFile := filepath.Join(path, "operatorSeed")
+	data, err := os.ReadFile(operatorSeedFile)
+	if err != nil {
+		return "", "", "", fmt.Errorf("read operatorSeed: %w", err)
+	}
+	operatorSeed = strings.TrimSpace(string(data))
+
+	// Read accountJWT from file.
+	accountJWTFile := filepath.Join(path, "accountJwt")
+	data, err = os.ReadFile(accountJWTFile)
+	if err != nil {
+		return "", "", "", fmt.Errorf("read accountJwt: %w", err)
+	}
+	accountJWT = strings.TrimSpace(string(data))
+
+	// Read sysAccountSeed: env var takes precedence over file.
+	if v := os.Getenv("NATS_SYS_ACCOUNT_SEED"); v != "" {
+		sysAccountSeed = v
+	} else {
+		sysAccountSeedFile := filepath.Join(path, "sysAccountSeed")
+		data, err = os.ReadFile(sysAccountSeedFile)
+		if err != nil {
+			return "", "", "", fmt.Errorf("read sysAccountSeed: %w", err)
+		}
+		sysAccountSeed = strings.TrimSpace(string(data))
+	}
+
+	return operatorSeed, sysAccountSeed, accountJWT, nil
 }

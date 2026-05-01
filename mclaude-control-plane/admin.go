@@ -212,7 +212,7 @@ func (s *Server) adminDeleteUser(w http.ResponseWriter, r *http.Request, userID 
 					projects, projErr := s.db.GetProjectsByHostSlug(r.Context(), userID, h.Slug)
 					if projErr == nil {
 						for _, p := range projects {
-							publishProjectsDeleteToHost(s.nc, user.Slug, h.Slug, p.ID)
+							publishProjectsDeleteToHost(s.nc, user.Slug, h.Slug, p.Slug, p.ID)
 						}
 					}
 				}
@@ -303,10 +303,11 @@ func (s *Server) adminStopSession(w http.ResponseWriter, r *http.Request) {
 				"sessionId":   req.SessionID,
 				"requestId":   uuid.NewString(),
 			})
-			subject := subj.UserHostProjectAPISessionsDelete(
+			subject := subj.UserHostProjectSessionsDelete(
 				slug.UserSlug(userSlug),
 				slug.HostSlug(hostSlug),
 				slug.ProjectSlug(projectSlug),
+				slug.SessionSlug(req.SessionID),
 			)
 			if err := s.nc.Publish(subject, stopPayload); err != nil {
 				log.Warn().Err(err).Str("subject", subject).Msg("admin stop session: NATS publish failed")
@@ -361,12 +362,14 @@ func (s *Server) adminRegisterCluster(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Issue a cluster controller JWT scoped to mclaude.users.*.hosts.{cslug}.>
-	clusterJWT, clusterSeed, err := IssueHostJWT("*", req.Slug, s.accountKP)
+	// Issue a cluster controller JWT scoped to mclaude.hosts.{cslug}.> (ADR-0054).
+	// Use the generated cluster NKey public key.
+	clusterJWT, clusterSeed, err := IssueHostJWTLegacy("*", req.Slug, s.accountKP)
 	if err != nil {
 		http.Error(w, "failed to issue cluster jwt", http.StatusInternalServerError)
 		return
 	}
+	_ = clusterNKey // The generated NKey public key is embedded in clusterJWT; use the seed to reconnect.
 
 	// KNOWN-06: Look up owner user properly instead of arbitrary (SELECT id FROM users LIMIT 1).
 	var ownerUserID string
@@ -501,8 +504,9 @@ func (s *Server) adminGrantCluster(w http.ResponseWriter, r *http.Request, cslug
 		return
 	}
 
-	// KNOWN-04: Issue per-user JWT using user slug (not UUID) as first argument.
-	userJWT, _, err := IssueHostJWT(user.Slug, cslug, s.accountKP)
+	// KNOWN-04: Issue per-user host JWT. Use legacy function since this path
+	// doesn't have a client-provided public key (admin grant operation).
+	userJWT, _, err := IssueHostJWTLegacy(user.Slug, cslug, s.accountKP)
 	if err != nil {
 		http.Error(w, "failed to issue user jwt", http.StatusInternalServerError)
 		return

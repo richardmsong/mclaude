@@ -137,24 +137,24 @@ func TestDispatchCmdRouting(t *testing.T) {
 		log:        zerolog.Nop(),
 	}
 
-	// Override handlers via reflection is not possible; instead test routing
-	// by checking the dispatcher correctly selects based on HasSuffix.
-	// We verify the dispatch logic by routing to minimal test agents.
+	// Verify dispatchCmd routes by subject suffix per ADR-0054 sessions.> hierarchy.
+	// These match the routing logic in dispatchCmd.
 
-	cases := []struct {
-		suffix string
-		want   string
+	prefix := "mclaude.users.u1.hosts.local.projects.p1.sessions."
+	cmdCases := []struct {
+		subject string
+		want    string
 	}{
-		{".create", "create"},
-		{".delete", "delete"},
-		{".input", "input"},
-		{".restart", "restart"},
+		{prefix + "create", "create"},
+		{prefix + "sess-1.delete", "delete"},
+		{prefix + "sess-1.input", "input"},
+		{prefix + "sess-1.config", "config"},
 	}
 
-	for _, tc := range cases {
-		subject := "mclaude.users.u1.hosts.local.projects.p1.api.sessions" + tc.suffix
+	for _, tc := range cmdCases {
+		subject := tc.subject
 		switch {
-		case strings.HasSuffix(subject, ".create"):
+		case strings.HasSuffix(subject, ".sessions.create"):
 			if tc.want != "create" {
 				t.Errorf("subject %s routed to create, want %s", subject, tc.want)
 			}
@@ -166,12 +166,34 @@ func TestDispatchCmdRouting(t *testing.T) {
 			if tc.want != "input" {
 				t.Errorf("subject %s routed to input, want %s", subject, tc.want)
 			}
-		case strings.HasSuffix(subject, ".restart"):
-			if tc.want != "restart" {
-				t.Errorf("subject %s routed to restart, want %s", subject, tc.want)
+		case strings.HasSuffix(subject, ".config"):
+			if tc.want != "config" {
+				t.Errorf("subject %s routed to config, want %s", subject, tc.want)
 			}
 		default:
 			t.Errorf("subject %s not routed", subject)
+		}
+	}
+
+	// Verify dispatchCtl routes by suffix for control subjects.
+	ctlCases := []struct {
+		subject string
+		want    string
+	}{
+		{prefix + "sess-1.control.restart", "restart"},
+		{prefix + "sess-1.control.interrupt", "control"},
+	}
+	for _, tc := range ctlCases {
+		subject := tc.subject
+		switch {
+		case strings.HasSuffix(subject, ".control.restart"):
+			if tc.want != "restart" {
+				t.Errorf("subject %s routed to restart, want %s", subject, tc.want)
+			}
+		default: // handleControl for interrupt and others
+			if tc.want != "control" {
+				t.Errorf("subject %s routed to control, want %s", subject, tc.want)
+			}
 		}
 	}
 	_ = cd
@@ -179,16 +201,18 @@ func TestDispatchCmdRouting(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 5. MCLAUDE_API stream created on NewAgent (integration)
+// 5. Agent does NOT create streams — per-user MCLAUDE_SESSIONS_{uslug} must
+//    be pre-created by the control-plane (ADR-0054).
 // ---------------------------------------------------------------------------
 
-func TestMCLAUDE_APIStreamCreated(t *testing.T) {
+func TestAgentDoesNotCreateStreams(t *testing.T) {
 	skipIfNoDockerJS(t)
 	deps := testutil.StartDeps(t)
+	testutil.CreateUserResources(t, deps.JetStream, "test-user")
 
 	ctx := context.Background()
 
-	// NewAgent creates both MCLAUDE_EVENTS and MCLAUDE_API streams.
+	// NewAgent must succeed when per-user resources exist.
 	agent, err := NewAgent(
 		deps.NATSConn,
 		"test-user", slug.UserSlug("test-user"), slug.HostSlug("local"),
@@ -203,45 +227,35 @@ func TestMCLAUDE_APIStreamCreated(t *testing.T) {
 	}
 	_ = agent
 
-	// Verify MCLAUDE_API stream exists with correct config.
-	stream, err := deps.JetStream.Stream(ctx, "MCLAUDE_API")
+	// The agent must NOT create any legacy streams.
+	for _, stale := range []string{"MCLAUDE_EVENTS", "MCLAUDE_API", "MCLAUDE_LIFECYCLE"} {
+		if _, err := deps.JetStream.Stream(ctx, stale); err == nil {
+			t.Errorf("agent must not create stream %q (ADR-0054: CP owns streams)", stale)
+		}
+	}
+
+	// The per-user stream must still exist (created by CreateUserResources above).
+	stream, err := deps.JetStream.Stream(ctx, "MCLAUDE_SESSIONS_test-user")
 	if err != nil {
-		t.Fatalf("MCLAUDE_API stream not found: %v", err)
+		t.Fatalf("MCLAUDE_SESSIONS_test-user not found: %v", err)
 	}
 	info, err := stream.Info(ctx)
 	if err != nil {
 		t.Fatalf("stream.Info: %v", err)
 	}
-
-	if info.Config.Name != "MCLAUDE_API" {
-		t.Errorf("stream name: got %q, want MCLAUDE_API", info.Config.Name)
-	}
-	if len(info.Config.Subjects) != 1 || info.Config.Subjects[0] != "mclaude.users.*.hosts.*.projects.*.api.sessions.>" {
-		t.Errorf("subjects: got %v, want [mclaude.users.*.hosts.*.projects.*.api.sessions.>]", info.Config.Subjects)
-	}
-	if info.Config.Retention != jetstream.LimitsPolicy {
-		t.Errorf("retention: got %v, want LimitsPolicy", info.Config.Retention)
-	}
-	if info.Config.MaxAge != time.Hour {
-		t.Errorf("MaxAge: got %v, want 1h", info.Config.MaxAge)
-	}
-	if info.Config.Storage != jetstream.FileStorage {
-		t.Errorf("storage: got %v, want FileStorage", info.Config.Storage)
-	}
-	if info.Config.Discard != jetstream.DiscardOld {
-		t.Errorf("discard: got %v, want DiscardOld", info.Config.Discard)
+	if info.Config.MaxAge != 30*24*time.Hour {
+		t.Errorf("MaxAge: got %v, want 30d", info.Config.MaxAge)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// 6. Two durable consumers created by createJetStreamConsumers (integration)
+// 6. Ordered push consumers created on MCLAUDE_SESSIONS_{uslug} (ADR-0054).
 // ---------------------------------------------------------------------------
 
 func TestJetStreamConsumersCreated(t *testing.T) {
 	skipIfNoDockerJS(t)
 	deps := testutil.StartDeps(t)
-
-	ctx := context.Background()
+	testutil.CreateUserResources(t, deps.JetStream, "u2")
 
 	agent, err := NewAgent(
 		deps.NATSConn,
@@ -259,88 +273,31 @@ func TestJetStreamConsumersCreated(t *testing.T) {
 	if err := agent.createJetStreamConsumers(); err != nil {
 		t.Fatalf("createJetStreamConsumers: %v", err)
 	}
-	// Cancel the fetch goroutines to avoid goroutine leak.
-	if agent.cmdCancel != nil {
-		agent.cmdCancel()
+	// Stop the consumers to avoid goroutine leak.
+	if agent.cmdMsgs != nil {
+		agent.cmdMsgs.Stop()
 	}
-	if agent.ctlCancel != nil {
-		agent.ctlCancel()
-	}
-
-	stream, err := deps.JetStream.Stream(ctx, "MCLAUDE_API")
-	if err != nil {
-		t.Fatalf("MCLAUDE_API stream: %v", err)
+	if agent.ctlMsgs != nil {
+		agent.ctlMsgs.Stop()
 	}
 
-	cmdName := "sa-cmd-u2-p2"
-	ctlName := "sa-ctl-u2-p2"
-
-	cmdCons, err := stream.Consumer(ctx, cmdName)
-	if err != nil {
-		t.Fatalf("cmd consumer %q not found: %v", cmdName, err)
+	// Ordered consumers are ephemeral — we verify the MessagesContext is set.
+	if agent.cmdMsgs == nil {
+		t.Error("agent.cmdMsgs should be set after createJetStreamConsumers")
 	}
-	ctlCons, err := stream.Consumer(ctx, ctlName)
-	if err != nil {
-		t.Fatalf("ctl consumer %q not found: %v", ctlName, err)
-	}
-
-	// Verify cmd consumer filter subjects.
-	cmdInfo, err := cmdCons.Info(ctx)
-	if err != nil {
-		t.Fatalf("cmd consumer info: %v", err)
-	}
-	prefix := "mclaude.users.u2.hosts.local.projects.p2.api.sessions."
-	wantCmdSubjects := []string{
-		prefix + "create",
-		prefix + "delete",
-		prefix + "input",
-		prefix + "restart",
-	}
-	if len(cmdInfo.Config.FilterSubjects) != len(wantCmdSubjects) {
-		t.Errorf("cmd filter subjects: got %v, want %v", cmdInfo.Config.FilterSubjects, wantCmdSubjects)
-	}
-	for i, s := range wantCmdSubjects {
-		if i < len(cmdInfo.Config.FilterSubjects) && cmdInfo.Config.FilterSubjects[i] != s {
-			t.Errorf("cmd filter[%d]: got %q, want %q", i, cmdInfo.Config.FilterSubjects[i], s)
-		}
-	}
-
-	// Verify ctl consumer filter subject.
-	ctlInfo, err := ctlCons.Info(ctx)
-	if err != nil {
-		t.Fatalf("ctl consumer info: %v", err)
-	}
-	if len(ctlInfo.Config.FilterSubjects) != 1 || ctlInfo.Config.FilterSubjects[0] != prefix+"control" {
-		t.Errorf("ctl filter: got %v, want [%s]", ctlInfo.Config.FilterSubjects, prefix+"control")
-	}
-
-	// Verify both consumers are durable.
-	if cmdInfo.Config.Durable != cmdName {
-		t.Errorf("cmd consumer durable: got %q, want %q", cmdInfo.Config.Durable, cmdName)
-	}
-	if ctlInfo.Config.Durable != ctlName {
-		t.Errorf("ctl consumer durable: got %q, want %q", ctlInfo.Config.Durable, ctlName)
-	}
-
-	// Verify AckPolicy, AckWait, MaxDeliver.
-	if cmdInfo.Config.AckPolicy != jetstream.AckExplicitPolicy {
-		t.Errorf("cmd AckPolicy: got %v, want Explicit", cmdInfo.Config.AckPolicy)
-	}
-	if cmdInfo.Config.AckWait != 60*time.Second {
-		t.Errorf("cmd AckWait: got %v, want 60s", cmdInfo.Config.AckWait)
-	}
-	if cmdInfo.Config.MaxDeliver != 5 {
-		t.Errorf("cmd MaxDeliver: got %d, want 5", cmdInfo.Config.MaxDeliver)
+	if agent.ctlMsgs == nil {
+		t.Error("agent.ctlMsgs should be set after createJetStreamConsumers")
 	}
 }
 
 // ---------------------------------------------------------------------------
-// 7. runConsumer dispatches messages via fetch loop (integration)
+// 7. runConsumer dispatches messages via ordered push consumer (ADR-0054).
 // ---------------------------------------------------------------------------
 
 func TestRunConsumerDispatchesMessages(t *testing.T) {
 	skipIfNoDockerJS(t)
 	deps := testutil.StartDeps(t)
+	testutil.CreateUserResources(t, deps.JetStream, "u3")
 
 	ctx := context.Background()
 
@@ -357,37 +314,34 @@ func TestRunConsumerDispatchesMessages(t *testing.T) {
 		t.Fatalf("NewAgent: %v", err)
 	}
 
-	// Create a consumer on the MCLAUDE_API stream.
-	stream, err := deps.JetStream.Stream(ctx, "MCLAUDE_API")
-	if err != nil {
-		t.Fatalf("stream: %v", err)
-	}
-
-	consumerName := "test-run-consumer-u3-p3"
-	cons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-		Durable:       consumerName,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		FilterSubjects: []string{"mclaude.users.u3.hosts.local.projects.p3.api.sessions.input"},
+	// Create an ordered consumer on the per-user sessions stream.
+	inputSubject := "mclaude.users.u3.hosts.local.projects.p3.sessions.test-sess.input"
+	cons, err := deps.JetStream.OrderedConsumer(ctx, "MCLAUDE_SESSIONS_u3", jetstream.OrderedConsumerConfig{
+		FilterSubjects: []string{inputSubject},
+		DeliverPolicy:  jetstream.DeliverNewPolicy,
 	})
 	if err != nil {
-		t.Fatalf("create consumer: %v", err)
+		t.Fatalf("create ordered consumer: %v", err)
+	}
+
+	msgs, err := cons.Messages()
+	if err != nil {
+		t.Fatalf("consumer.Messages: %v", err)
 	}
 
 	// Track dispatched messages.
 	var mu sync.Mutex
 	var dispatched []string
 
-	consCtx, consCancel := context.WithCancel(context.Background())
-
-	go agent.runConsumer(consCtx, cons, func(jm jetstream.Msg) {
+	go agent.runConsumer(msgs, func(jm jetstream.Msg) {
 		mu.Lock()
 		dispatched = append(dispatched, string(jm.Data()))
 		mu.Unlock()
 	})
 
 	// Publish a message to the stream.
-	payload := `{"session_id":"s1","type":"user","message":{}}`
-	if _, err := deps.JetStream.Publish(ctx, "mclaude.users.u3.hosts.local.projects.p3.api.sessions.input", []byte(payload)); err != nil {
+	payload := `{"session_id":"test-sess","type":"user","message":{}}`
+	if _, err := deps.JetStream.Publish(ctx, inputSubject, []byte(payload)); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 
@@ -403,6 +357,8 @@ func TestRunConsumerDispatchesMessages(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
+	msgs.Stop()
+
 	mu.Lock()
 	n := len(dispatched)
 	mu.Unlock()
@@ -412,9 +368,6 @@ func TestRunConsumerDispatchesMessages(t *testing.T) {
 	if dispatched[0] != payload {
 		t.Errorf("dispatched payload: got %q, want %q", dispatched[0], payload)
 	}
-
-	// Stop the consumer.
-	consCancel()
 }
 
 // ---------------------------------------------------------------------------
@@ -679,6 +632,7 @@ func TestGracefulShutdownInterruptsRequiresAction(t *testing.T) {
 func TestClearUpdatingState(t *testing.T) {
 	skipIfNoDockerJS(t)
 	deps := testutil.StartDeps(t)
+	testutil.CreateUserResources(t, deps.JetStream, "u4")
 
 	ctx := context.Background()
 	_ = ctx
@@ -733,7 +687,7 @@ func TestClearUpdatingState(t *testing.T) {
 	}
 
 	// Verify KV was written with idle state.
-	key := sessionKVKey(slug.UserSlug("u4"), slug.HostSlug("local"), slug.ProjectSlug("p4"), slug.SessionSlug("sess-upd-1"))
+	key := sessionKVKey(slug.HostSlug("local"), slug.ProjectSlug("p4"), slug.SessionSlug("sess-upd-1"))
 	entry, err := agent.sessKV.Get(ctx, key)
 	if err != nil {
 		t.Fatalf("KV get: %v", err)
@@ -798,6 +752,7 @@ func TestClearUpdatingStateIgnoresNonUpdating(t *testing.T) {
 func TestRecoverSessionsSkipsKVWriteForUpdating(t *testing.T) {
 	skipIfNoDockerJS(t)
 	deps := testutil.StartDeps(t)
+	testutil.CreateUserResources(t, deps.JetStream, "u5")
 
 	ctx := context.Background()
 
@@ -824,7 +779,7 @@ func TestRecoverSessionsSkipsKVWriteForUpdating(t *testing.T) {
 		CreatedAt:       now,
 		PendingControls: make(map[string]any),
 	}
-	key := sessionKVKey(slug.UserSlug("u5"), slug.HostSlug("local"), slug.ProjectSlug("p5"), slug.SessionSlug("sess-recovering"))
+	key := sessionKVKey(slug.HostSlug("local"), slug.ProjectSlug("p5"), slug.SessionSlug("sess-recovering"))
 	data, _ := json.Marshal(st)
 	if _, err := agent.sessKV.Put(ctx, key, data); err != nil {
 		t.Fatalf("seed KV: %v", err)
@@ -839,7 +794,7 @@ func TestRecoverSessionsSkipsKVWriteForUpdating(t *testing.T) {
 		CreatedAt:       now,
 		PendingControls: make(map[string]any),
 	}
-	idleKey := sessionKVKey(slug.UserSlug("u5"), slug.HostSlug("local"), slug.ProjectSlug("p5"), slug.SessionSlug("sess-idle-recovering"))
+	idleKey := sessionKVKey(slug.HostSlug("local"), slug.ProjectSlug("p5"), slug.SessionSlug("sess-idle-recovering"))
 	idleData, _ := json.Marshal(idleSt)
 	if _, err := agent.sessKV.Put(ctx, idleKey, idleData); err != nil {
 		t.Fatalf("seed idle KV: %v", err)
@@ -887,11 +842,12 @@ func TestRecoverSessionsSkipsKVWriteForUpdating(t *testing.T) {
 func TestPublishAPIError(t *testing.T) {
 	skipIfNoDockerJS(t)
 	deps := testutil.StartDeps(t)
+	testutil.CreateUserResources(t, deps.JetStream, "u6")
 
 	ctx := context.Background()
 
-	// Subscribe to the _api events subject before publishing.
-	apiSubject := "mclaude.users.u6.hosts.local.projects.p6.events._api"
+	// Subscribe to the sessions._api subject per ADR-0054.
+	apiSubject := "mclaude.users.u6.hosts.local.projects.p6.sessions._api"
 	sub, err := deps.NATSConn.SubscribeSync(apiSubject)
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
@@ -953,8 +909,9 @@ func TestPublishAPIError(t *testing.T) {
 func TestHandleCreateErrorPublishesAPIError(t *testing.T) {
 	skipIfNoDockerJS(t)
 	deps := testutil.StartDeps(t)
+	testutil.CreateUserResources(t, deps.JetStream, "u7")
 
-	apiSubject := "mclaude.users.u7.hosts.local.projects.p7.events._api"
+	apiSubject := "mclaude.users.u7.hosts.local.projects.p7.sessions._api"
 	sub, err := deps.NATSConn.SubscribeSync(apiSubject)
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
@@ -1008,8 +965,9 @@ func TestHandleCreateErrorPublishesAPIError(t *testing.T) {
 func TestHandleRestartErrorPublishesAPIError(t *testing.T) {
 	skipIfNoDockerJS(t)
 	deps := testutil.StartDeps(t)
+	testutil.CreateUserResources(t, deps.JetStream, "u8")
 
-	apiSubject := "mclaude.users.u8.hosts.local.projects.p8.events._api"
+	apiSubject := "mclaude.users.u8.hosts.local.projects.p8.sessions._api"
 	sub, err := deps.NATSConn.SubscribeSync(apiSubject)
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
@@ -1083,6 +1041,7 @@ func TestReplyNoOpWhenReplyEmpty(t *testing.T) {
 func TestSubscribeTerminalAPIOnlyTerminal(t *testing.T) {
 	skipIfNoDockerJS(t)
 	deps := testutil.StartDeps(t)
+	testutil.CreateUserResources(t, deps.JetStream, "u9")
 
 	agent, err := NewAgent(
 		deps.NATSConn,

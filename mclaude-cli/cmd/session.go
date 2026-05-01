@@ -39,8 +39,8 @@ type SessionListResult struct {
 	ProjectSlug string
 	// HostSlug is the resolved host slug (from flags or context).
 	HostSlug string
-	// KVKeyPrefix is the mclaude-sessions KV key prefix that would be watched:
-	// "{uslug}.{hslug}.{pslug}" — written using pkg/subj helpers.
+	// KVKeyPrefix is the KV key prefix in the per-user mclaude-projects-{uslug} bucket:
+	// "hosts.{hslug}.projects.{pslug}" (ADR-0054: user slug in bucket name, not key).
 	KVKeyPrefix string
 	// EventsSubject is the NATS subject wildcard for events on this project.
 	EventsSubject string
@@ -113,13 +113,14 @@ func RunSessionList(flags SessionListFlags, out io.Writer) (*SessionListResult, 
 	typedHost := slug.HostSlug(hslug)
 	typedProject := slug.ProjectSlug(pslug)
 
-	// Compute the KV key prefix: "{uslug}.{hslug}.{pslug}" (all sessions for the project).
-	// The wildcard session slug is appended by the caller when watching KV.
-	kvKey := subj.ProjectsKVKey(typedUser, typedHost, typedProject)
+	// Compute the KV key prefix in the per-user mclaude-projects-{uslug} bucket.
+	// Format: "hosts.{hslug}.projects.{pslug}" (ADR-0054: user slug is in bucket name).
+	kvKey := subj.ProjectsKVKey(typedHost, typedProject)
 
 	// Compute the NATS events subject wildcard for all sessions in this project.
-	// Per ADR-0004, host slug is inserted between user and project levels.
-	eventsSubj := "mclaude.users." + uslug + ".hosts." + hslug + ".projects." + pslug + ".events.*"
+	// Per ADR-0054, sessions live under .sessions.{sslug}.events.
+	typedSession := slug.SessionSlug("*")
+	eventsSubj := subj.UserHostProjectSessionsEvents(typedUser, typedHost, typedProject, typedSession)
 
 	result := &SessionListResult{
 		UserSlug:      uslug,

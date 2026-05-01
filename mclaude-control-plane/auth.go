@@ -15,8 +15,9 @@ import (
 
 // LoginRequest is the body for POST /auth/login.
 type LoginRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email      string `json:"email"`
+	Password   string `json:"password"`
+	NKeyPublic string `json:"nkey_public,omitempty"` // ADR-0054: client-generated NKey public key
 }
 
 // LoginHostEntry is a host in the login response hosts[] array.
@@ -42,11 +43,13 @@ type LoginResponse struct {
 	// NATSUrl is the WebSocket URL the client should connect to for NATS.
 	// Empty string means the client should derive it from its own origin.
 	NATSUrl string `json:"natsUrl,omitempty"`
-	// JWT is the NATS user JWT scoped to mclaude.{userId}.>
+	// JWT is the NATS user JWT signed by the account key.
 	JWT string `json:"jwt"`
-	// NKeySeed is the user's NKey seed. The client uses it to sign NATS
-	// connection nonce challenges.
-	NKeySeed string `json:"nkeySeed"`
+	// NKeySeed is the user's NKey seed. Returned only in legacy mode (when
+	// the client did not provide nkey_public in the login request).
+	// Per ADR-0054, new clients generate their own NKey pairs and do not
+	// receive seeds from the server.
+	NKeySeed string `json:"nkeySeed,omitempty"`
 	// UserID is the authenticated user's UUID.
 	UserID string `json:"userId"`
 	// UserSlug is the authenticated user's URL-safe slug (ADR-0046).
@@ -63,15 +66,24 @@ type LoginResponse struct {
 // Per ADR-0035: zero K8s client. Project provisioning is delegated to
 // controllers via NATS request/reply.
 type Server struct {
-	db         *DB
-	accountKP  nkeys.KeyPair
-	natsURL    string // internal broker URL (used by session-agent, not returned to browser clients)
-	natsWsURL  string // external WebSocket URL returned to browser clients on login; empty = client derives from origin
-	jwtExpiry  time.Duration
-	adminToken string          // break-glass admin bearer token
-	providers  *providerRegistry // OAuth provider config and state store; nil when no providers configured
-	nc         *nats.Conn      // NATS connection for KV writes from HTTP handlers; nil when NATS unavailable
-	hostsKV    nats.KeyValue   // mclaude-hosts KV bucket; nil until StartProjectsSubscriber sets it (ADR-0046)
+	db          *DB
+	accountKP   nkeys.KeyPair
+	natsURL     string // internal broker URL (used by session-agent, not returned to browser clients)
+	natsWsURL   string // external WebSocket URL returned to browser clients on login; empty = client derives from origin
+	externalURL string // externally-accessible base URL for device-code verification links
+	jwtExpiry   time.Duration
+	adminToken  string          // break-glass admin bearer token
+	providers   *providerRegistry // OAuth provider config and state store; nil when no providers configured
+	nc          *nats.Conn      // NATS connection for KV writes from HTTP handlers; nil when NATS unavailable
+	hostsKV     nats.KeyValue   // mclaude-hosts KV bucket; nil until StartProjectsSubscriber sets it (ADR-0046)
+	s3          *s3Config       // S3-compatible storage config; nil when S3 not configured (ADR-0053)
+
+	// ADR-0054: JWT revocation support.
+	// operatorSeed is used to re-sign the account JWT when adding revocation entries.
+	// sysAccountSeed is used to authenticate $SYS.REQ.CLAIMS.UPDATE publishes.
+	operatorSeed    string
+	sysAccountSeed  string
+	accountJWTCache string // current account JWT (decoded/modified/re-signed for revocation)
 }
 
 // NewServer constructs a Server. accountKP must be an account-level NKey pair —
@@ -86,6 +98,18 @@ func NewServer(db *DB, accountKP nkeys.KeyPair, natsURL, natsWsURL string, jwtEx
 		jwtExpiry:  jwtExpiry,
 		adminToken: adminToken,
 	}
+}
+
+// SetExternalURL sets the externally-accessible base URL used in device-code verification links.
+func (s *Server) SetExternalURL(url string) {
+	s.externalURL = url
+}
+
+// SetRevocationCredentials loads operator and system account seeds for JWT revocation.
+func (s *Server) SetRevocationCredentials(operatorSeed, sysAccountSeed, accountJWT string) {
+	s.operatorSeed = operatorSeed
+	s.sysAccountSeed = sysAccountSeed
+	s.accountJWTCache = accountJWT
 }
 
 // SetNATSConn attaches the NATS connection to the server after startup.
@@ -131,27 +155,67 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	expirySecs := int64(s.jwtExpiry.Seconds())
 	expiresAt := time.Now().Add(s.jwtExpiry).Unix()
 
-	jwt, seed, err := IssueUserJWT(user.ID, user.Slug, s.accountKP, expirySecs)
-	if err != nil {
-		http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
-		return
+	var jwtStr string
+	var seed []byte
+
+	if req.NKeyPublic != "" {
+		// ADR-0054: client provided its own NKey public key.
+		// Store it in the DB for future challenge-response auth.
+		if s.db != nil {
+			if setErr := s.db.SetUserNKeyPublic(r.Context(), user.ID, req.NKeyPublic); setErr != nil {
+				// Non-fatal: log but continue (challenge-response may not work until next login)
+				_ = setErr
+			}
+		}
+		// Resolve host slugs for scoped JWT.
+		hostSlugs := s.getUserHostSlugs(r.Context(), user.ID)
+		var issueErr error
+		jwtStr, issueErr = IssueUserJWT(req.NKeyPublic, user.ID, user.Slug, hostSlugs, s.accountKP, expirySecs)
+		if issueErr != nil {
+			http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
+			return
+		}
+		// No seed returned — client already has its NKey seed.
+
+		// ADR-0054: ensure per-user JetStream resources exist on login.
+		if s.nc != nil {
+			if resErr := ensureUserResources(s.nc, user.Slug); resErr != nil {
+				// Non-fatal: log and continue; resources are created on demand.
+				_ = resErr
+			}
+		}
+	} else {
+		// ADR-0054: CP never generates NKey pairs for clients.
+		// Backward compatibility: if a client does not provide nkey_public, use the
+		// legacy path so old SPA/CLI versions continue to work during migration.
+		// DEPRECATED: will be removed once all clients support nkey_public.
+		var legacyErr error
+		jwtStr, seed, legacyErr = IssueUserJWTLegacy(user.ID, user.Slug, s.accountKP, expirySecs)
+		if legacyErr != nil {
+			http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// KNOWN-17: Populate hosts[] and projects[].
 	loginHosts := s.getLoginHosts(r.Context(), user.ID)
 	loginProjects := s.getLoginProjects(r.Context(), user.ID)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(LoginResponse{ //nolint:errcheck
+	resp := LoginResponse{
 		NATSUrl:   s.natsWsURL,
-		JWT:       jwt,
-		NKeySeed:  string(seed),
+		JWT:       jwtStr,
 		UserID:    user.ID,
 		UserSlug:  user.Slug,
 		ExpiresAt: expiresAt,
 		Hosts:     loginHosts,
 		Projects:  loginProjects,
-	})
+	}
+	if len(seed) > 0 {
+		resp.NKeySeed = string(seed)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck
 }
 
 // handleRefresh handles POST /auth/refresh.
@@ -193,27 +257,47 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	expirySecs := int64(s.jwtExpiry.Seconds())
 	expiresAt := time.Now().Add(s.jwtExpiry).Unix()
 
-	newJWT, seed, err := IssueUserJWT(user.ID, user.Slug, s.accountKP, expirySecs)
-	if err != nil {
-		http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
-		return
+	var newJWT string
+	var seed []byte
+
+	if user.NKeyPublic != nil && *user.NKeyPublic != "" {
+		// ADR-0054: user has a stored NKey public key. Issue scoped JWT.
+		hostSlugs := s.getUserHostSlugs(r.Context(), user.ID)
+		var issueErr error
+		newJWT, issueErr = IssueUserJWT(*user.NKeyPublic, user.ID, user.Slug, hostSlugs, s.accountKP, expirySecs)
+		if issueErr != nil {
+			http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		// Legacy mode: generate NKey pair and return seed.
+		var legacyErr error
+		newJWT, seed, legacyErr = IssueUserJWTLegacy(user.ID, user.Slug, s.accountKP, expirySecs)
+		if legacyErr != nil {
+			http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// KNOWN-17: Populate hosts[] and projects[].
 	loginHosts := s.getLoginHosts(r.Context(), user.ID)
 	loginProjects := s.getLoginProjects(r.Context(), user.ID)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(LoginResponse{ //nolint:errcheck
+	resp := LoginResponse{
 		NATSUrl:   s.natsWsURL,
 		JWT:       newJWT,
-		NKeySeed:  string(seed),
 		UserID:    user.ID,
 		UserSlug:  user.Slug,
 		ExpiresAt: expiresAt,
 		Hosts:     loginHosts,
 		Projects:  loginProjects,
-	})
+	}
+	if len(seed) > 0 {
+		resp.NKeySeed = string(seed)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck
 }
 
 // connectedProviderEntry is one entry in the connectedProviders array on /auth/me.
@@ -358,6 +442,19 @@ func HashPassword(password string) (string, error) {
 // bcryptCheck compares a plaintext password against its bcrypt hash.
 var bcryptCheck = func(password, hash string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+}
+
+// getUserHostSlugs returns the list of host slugs the user has access to
+// (owned + granted via host_access table). Used for JWT issuance (ADR-0054).
+func (s *Server) getUserHostSlugs(ctx context.Context, userID string) []string {
+	if s.db == nil {
+		return nil
+	}
+	slugs, err := s.db.GetHostAccessSlugs(ctx, userID)
+	if err != nil {
+		return nil
+	}
+	return slugs
 }
 
 // getLoginHosts returns the hosts[] array for LoginResponse (KNOWN-17).

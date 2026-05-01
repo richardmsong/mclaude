@@ -83,6 +83,14 @@ const (
 	reservedLifecycle reservedWord = "lifecycle"
 	reservedQuota     reservedWord = "quota"
 	reservedTerminal  reservedWord = "terminal"
+	// ADR-0054: session subject verb tokens added to prevent slug/verb
+	// ambiguity in the consolidated sessions.> hierarchy.
+	// e.g. sessions.create must never collide with a session slug "create".
+	reservedCreate  reservedWord = "create"
+	reservedDelete  reservedWord = "delete"
+	reservedInput   reservedWord = "input"
+	reservedConfig  reservedWord = "config"
+	reservedControl reservedWord = "control"
 )
 
 // reservedSet is the complete blocklist for fast lookup.
@@ -97,6 +105,11 @@ var reservedSet = map[string]struct{}{
 	string(reservedLifecycle): {},
 	string(reservedQuota):     {},
 	string(reservedTerminal):  {},
+	string(reservedCreate):    {},
+	string(reservedDelete):    {},
+	string(reservedInput):     {},
+	string(reservedConfig):    {},
+	string(reservedControl):   {},
 }
 
 // --------------------------------------------------------------------------

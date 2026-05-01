@@ -43,11 +43,12 @@ func (b *StreamingTextBlock) Full() string { return strings.Join(b.Chunks, "") }
 
 // ToolUseBlock represents one tool invocation.
 type ToolUseBlock struct {
-	ID      string
-	Name    string
-	Input   json.RawMessage
-	Elapsed float64
-	Result  *ToolResultBlock
+	ID         string
+	Name       string
+	Input      json.RawMessage
+	Elapsed    float64
+	Result     *ToolResultBlock
+	AgentTurns []*Turn // nested subagent turns (parentToolUseId nesting)
 }
 
 func (b *ToolUseBlock) BlockType() string { return "tool_use" }
@@ -92,6 +93,8 @@ func (a *Accumulator) Feed(evt *Event) {
 	switch evt.Type {
 	case "system":
 		a.handleSystem(evt)
+	case "clear":
+		a.handleClear()
 	case "stream_event":
 		a.handleStreamEvent(evt)
 	case "assistant":
@@ -118,6 +121,12 @@ func (a *Accumulator) handleSystem(evt *Event) {
 		a.Model.Turns = nil
 		a.streaming = nil
 	}
+}
+
+// handleClear resets all accumulated turns to empty with no divider rendered.
+func (a *Accumulator) handleClear() {
+	a.Model.Turns = nil
+	a.streaming = nil
 }
 
 func (a *Accumulator) handleStreamEvent(evt *Event) {
@@ -160,6 +169,16 @@ func (a *Accumulator) handleAssistant(evt *Event) {
 		a.Model.TotalUsage.InputTokens += evt.Usage.InputTokens
 		a.Model.TotalUsage.OutputTokens += evt.Usage.OutputTokens
 	}
+
+	// When parentToolUseId is set, nest this turn under the parent tool_call's
+	// agent turns (subagent nesting) rather than appending to the top-level turns.
+	if evt.ParentToolUseID != "" {
+		if parent, ok := a.pendingTools[evt.ParentToolUseID]; ok {
+			parent.AgentTurns = append(parent.AgentTurns, t)
+			return
+		}
+	}
+
 	a.Model.Turns = append(a.Model.Turns, t)
 }
 

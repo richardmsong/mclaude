@@ -12,116 +12,160 @@ import (
 	mclnats "mclaude.io/common/pkg/nats"
 )
 
-// ---- Subject permission construction ----
+// ---- Subject permission construction (ADR-0054) ----
 
-func TestUserSubjectPermissions(t *testing.T) {
-	perm := UserSubjectPermissions("alice123", "alice-slug")
-	// PubAllow includes the host-scoped prefix per ADR-0049.
-	wantPub := []string{"mclaude.alice123.>", "_INBOX.>", "$JS.API.>", "mclaude.users.alice-slug.hosts.*.>"}
-	// SubAllow includes KV bucket subjects, JetStream API, and host-scoped prefix (ADR-0049).
-	wantSub := []string{
-		"mclaude.alice123.>",
-		"_INBOX.>",
-		"$KV.mclaude-projects.alice123.>",
-		"$KV.mclaude-sessions.alice123.>",
-		"$KV.mclaude-hosts.alice-slug.>",
-		"$JS.API.>",
-		"$JS.API.DIRECT.GET.>",
-		"mclaude.users.alice-slug.hosts.*.>",
-	}
+func TestUserSubjectPermissions_ADR0054(t *testing.T) {
+	// ADR-0054: per-user-resource scoped permissions, no broad wildcards.
+	hostSlugs := []string{"laptop-a", "cluster-a"}
+	perm := UserSubjectPermissions("alice", hostSlugs)
 
-	if !slicesEqual(perm.PubAllow, wantPub) {
-		t.Errorf("PubAllow = %v; want %v", perm.PubAllow, wantPub)
-	}
-	if !slicesEqual(perm.SubAllow, wantSub) {
-		t.Errorf("SubAllow = %v; want %v", perm.SubAllow, wantSub)
-	}
-}
+	// Must have core user subjects
+	mustContain(t, "PubAllow", perm.PubAllow, "mclaude.users.alice.hosts.*.>")
+	mustContain(t, "PubAllow", perm.PubAllow, "_INBOX.>")
+	mustContain(t, "SubAllow", perm.SubAllow, "mclaude.users.alice.hosts.*.>")
+	mustContain(t, "SubAllow", perm.SubAllow, "_INBOX.>")
 
-func TestUserSubjectPermissions_SpecialChars(t *testing.T) {
-	// User IDs are UUIDs — no special chars — but confirm format is stable.
-	perm := UserSubjectPermissions("550e8400-e29b-41d4-a716-446655440000", "dev.local")
+	// Must have per-user KV stream info
+	mustContain(t, "PubAllow", perm.PubAllow, "$JS.API.STREAM.INFO.KV_mclaude-sessions-alice")
+	mustContain(t, "PubAllow", perm.PubAllow, "$JS.API.STREAM.INFO.KV_mclaude-projects-alice")
+	mustContain(t, "PubAllow", perm.PubAllow, "$JS.API.STREAM.INFO.MCLAUDE_SESSIONS_alice")
+
+	// Must have per-host entries for accessible hosts
+	mustContain(t, "PubAllow", perm.PubAllow, "$JS.API.DIRECT.GET.KV_mclaude-hosts.$KV.mclaude-hosts.laptop-a")
+	mustContain(t, "PubAllow", perm.PubAllow, "$JS.API.DIRECT.GET.KV_mclaude-hosts.$KV.mclaude-hosts.cluster-a")
+	mustContain(t, "SubAllow", perm.SubAllow, "$KV.mclaude-hosts.laptop-a")
+	mustContain(t, "SubAllow", perm.SubAllow, "$KV.mclaude-hosts.cluster-a")
+
+	// Must NOT have broad JetStream wildcards (ADR-0054 security requirement)
+	mustNotContain(t, "PubAllow", perm.PubAllow, "$JS.API.>")
+	mustNotContain(t, "SubAllow", perm.SubAllow, "$JS.API.>")
+	mustNotContain(t, "PubAllow", perm.PubAllow, "$JS.*.API.>")
+
+	// Must not reference other users' resources
 	for _, s := range append(perm.PubAllow, perm.SubAllow...) {
-		if !strings.HasPrefix(s, "mclaude.") && s != "_INBOX.>" && !strings.HasPrefix(s, "$KV.") && !strings.HasPrefix(s, "$JS.") {
-			t.Errorf("unexpected subject: %q", s)
+		if strings.Contains(s, "bob") {
+			t.Errorf("alice permission unexpectedly contains 'bob': %q", s)
 		}
 	}
 }
 
-func TestSessionAgentSubjectPermissions(t *testing.T) {
-	perm := SessionAgentSubjectPermissions("bob456", "bob-slug")
-	// Per ADR-0050 Decision 5: session agents must have _INBOX.>, $JS.API.>,
-	// $JS.*.API.>, the UUID-prefixed subject, and the host-scoped slug subject.
-	// Additionally: KV bucket permissions, JetStream ACK/FC, and direct KV gets.
-	allSubjects := append(perm.PubAllow, perm.SubAllow...)
-
-	required := []struct {
-		subject string
-		desc    string
-	}{
-		{"_INBOX.>", "_INBOX.>"},
-		{"$JS.API.>", "$JS.API.> (direct worker NATS)"},
-		{"$JS.*.API.>", "$JS.*.API.> (hub domain-prefixed)"},
-		{"mclaude.bob456.>", "mclaude.bob456.> (UUID prefix)"},
-		{"mclaude.users.bob-slug.hosts.*.>", "mclaude.users.bob-slug.hosts.*.> (host-scoped slug)"},
-		{"$KV.mclaude-sessions.>", "$KV.mclaude-sessions.> (session KV)"},
-		{"$KV.mclaude-projects.>", "$KV.mclaude-projects.> (project KV)"},
-		{"$KV.mclaude-hosts.>", "$KV.mclaude-hosts.> (host KV)"},
-		{"$KV.mclaude-job-queue.>", "$KV.mclaude-job-queue.> (job queue KV)"},
-		{"$JS.ACK.>", "$JS.ACK.> (JetStream message acknowledgements)"},
-		{"$JS.FC.>", "$JS.FC.> (JetStream flow control)"},
-		{"$JS.API.DIRECT.GET.>", "$JS.API.DIRECT.GET.> (direct KV gets)"},
-	}
-
-	for _, r := range required {
-		found := false
-		for _, s := range allSubjects {
-			if s == r.subject {
-				found = true
-				break
-			}
+func TestUserSubjectPermissions_NoHostSlugs(t *testing.T) {
+	// A user with no accessible hosts should still get base permissions but no host-specific entries.
+	perm := UserSubjectPermissions("alice", nil)
+	mustContain(t, "PubAllow", perm.PubAllow, "mclaude.users.alice.hosts.*.>")
+	// No per-host KV entries
+	for _, s := range append(perm.PubAllow, perm.SubAllow...) {
+		if strings.Contains(s, "$KV.mclaude-hosts.laptop-a") {
+			t.Errorf("no-host user permission contains host-specific entry: %q", s)
 		}
-		if !found {
-			t.Errorf("session agent should have %s", r.desc)
-		}
-	}
-
-	// PubAllow and SubAllow must be identical per ADR-0050 Decision 5.
-	if len(perm.PubAllow) != len(perm.SubAllow) {
-		t.Errorf("PubAllow and SubAllow should have same length: pub=%d sub=%d", len(perm.PubAllow), len(perm.SubAllow))
 	}
 }
 
-func TestSubjectIsolation(t *testing.T) {
-	// Permissions for alice must not match bob's namespace.
-	alice := UserSubjectPermissions("alice", "alice-slug")
-	for _, s := range append(alice.PubAllow, alice.SubAllow...) {
-		if s == "_INBOX.>" || s == "$JS.API.>" || s == "$JS.API.DIRECT.GET.>" {
-			continue
+func TestUserSubjectPermissions_CrossUserIsolation(t *testing.T) {
+	alicePerm := UserSubjectPermissions("alice", []string{"host-1"})
+	// Alice's permissions must not reference bob's resources
+	for _, s := range append(alicePerm.PubAllow, alicePerm.SubAllow...) {
+		if strings.Contains(s, "mclaude-sessions-bob") || strings.Contains(s, "mclaude-projects-bob") {
+			t.Errorf("alice permission references bob resource: %q", s)
 		}
-		// KV subjects are scoped to alice's user ID — they must not reference bob.
-		if strings.HasPrefix(s, "$KV.") {
-			if strings.Contains(s, "bob") {
-				t.Errorf("alice permission contains bob subject: %q", s)
-			}
-			if !strings.Contains(s, "alice") {
-				t.Errorf("alice KV permission doesn't contain alice ID: %q", s)
-			}
-			continue
+		if strings.Contains(s, "MCLAUDE_SESSIONS_bob") {
+			t.Errorf("alice permission references bob stream: %q", s)
 		}
-		// Host-scoped subjects use the slug (ADR-0049) — they start with mclaude.users.{slug}.
-		if strings.HasPrefix(s, "mclaude.users.") {
-			if strings.Contains(s, "bob") {
-				t.Errorf("alice permission contains bob subject: %q", s)
-			}
-			if !strings.Contains(s, "alice") {
-				t.Errorf("alice host-scoped permission doesn't contain alice slug: %q", s)
-			}
-			continue
+	}
+}
+
+func TestSessionAgentSubjectPermissions_ADR0054(t *testing.T) {
+	// ADR-0054: per-project scoped agent permissions.
+	perm := SessionAgentSubjectPermissions("alice", "laptop-a", "myapp")
+
+	// Must be scoped to one project only
+	mustContain(t, "PubAllow", perm.PubAllow, "mclaude.users.alice.hosts.laptop-a.projects.myapp.>")
+	mustContain(t, "SubAllow", perm.SubAllow, "mclaude.users.alice.hosts.laptop-a.projects.myapp.>")
+
+	// Must have KV write for sessions and project state
+	mustContain(t, "PubAllow", perm.PubAllow, "$KV.mclaude-sessions-alice.hosts.laptop-a.projects.myapp.sessions.>")
+	mustContain(t, "PubAllow", perm.PubAllow, "$KV.mclaude-projects-alice.hosts.laptop-a.projects.myapp")
+
+	// Must have per-project consumer create (filtered form)
+	if !permHasPrefix(perm.PubAllow, "$JS.API.CONSUMER.CREATE.KV_mclaude-sessions-alice.*.$KV.mclaude-sessions-alice.hosts.laptop-a.projects.myapp") {
+		t.Error("session agent missing filtered consumer create for sessions KV")
+	}
+
+	// Must have direct-get (subject-form) for its project
+	if !permHasPrefix(perm.PubAllow, "$JS.API.DIRECT.GET.KV_mclaude-sessions-alice.$KV.mclaude-sessions-alice.hosts.laptop-a.projects.myapp") {
+		t.Error("session agent missing direct-get for its sessions")
+	}
+
+	// Must have quota pub/sub (ADR-0044)
+	mustContain(t, "PubAllow", perm.PubAllow, "mclaude.users.alice.quota")
+	mustContain(t, "SubAllow", perm.SubAllow, "mclaude.users.alice.quota")
+
+	// Must NOT have access to another project's KV keys
+	mustNotContain(t, "PubAllow", perm.PubAllow, "$KV.mclaude-sessions-alice.hosts.laptop-a.projects.other-project.sessions.>")
+
+	// Must NOT have broad wildcards
+	mustNotContain(t, "PubAllow", perm.PubAllow, "$JS.API.>")
+	mustNotContain(t, "PubAllow", perm.PubAllow, "$JS.*.API.>")
+
+	// Must NOT have broad KV bucket access
+	mustNotContain(t, "PubAllow", perm.PubAllow, "$KV.mclaude-sessions-alice.>")
+}
+
+func TestSessionAgentSubjectPermissions_CrossUserIsolation(t *testing.T) {
+	// Agent for alice's project must not have access to bob's resources.
+	aliceAgent := SessionAgentSubjectPermissions("alice", "laptop-a", "myapp")
+	for _, s := range append(aliceAgent.PubAllow, aliceAgent.SubAllow...) {
+		if strings.Contains(s, "bob") {
+			t.Errorf("alice agent permission unexpectedly references bob: %q", s)
 		}
-		if !strings.HasPrefix(s, "mclaude.alice.") {
-			t.Errorf("alice permission contains non-alice subject: %q", s)
+		if strings.Contains(s, "mclaude-sessions-bob") || strings.Contains(s, "mclaude-projects-bob") {
+			t.Errorf("alice agent permission references bob bucket: %q", s)
 		}
+	}
+}
+
+func TestHostSubjectPermissions_ADR0054(t *testing.T) {
+	// ADR-0054: host has only host-scoped subjects, zero JetStream.
+	perm := HostSubjectPermissions("laptop-a")
+
+	// Must have host-scoped pub/sub
+	mustContain(t, "PubAllow", perm.PubAllow, "mclaude.hosts.laptop-a.>")
+	mustContain(t, "SubAllow", perm.SubAllow, "mclaude.hosts.laptop-a.>")
+	mustContain(t, "PubAllow", perm.PubAllow, "_INBOX.>")
+
+	// Must have system event subscriptions for liveness (ADR-0054)
+	mustContain(t, "SubAllow", perm.SubAllow, "$SYS.ACCOUNT.*.CONNECT")
+	mustContain(t, "SubAllow", perm.SubAllow, "$SYS.ACCOUNT.*.DISCONNECT")
+
+	// Must NOT have any JetStream permissions (zero JS for hosts per ADR-0054)
+	for _, s := range append(perm.PubAllow, perm.SubAllow...) {
+		if strings.HasPrefix(s, "$JS.") || strings.HasPrefix(s, "$KV.") || strings.HasPrefix(s, "$O.") {
+			t.Errorf("host permission has JetStream/KV/ObjectStore subject (should be zero): %q", s)
+		}
+	}
+
+	// Must NOT have user-scoped subjects
+	for _, s := range append(perm.PubAllow, perm.SubAllow...) {
+		if strings.Contains(s, "mclaude.users.") {
+			t.Errorf("host permission contains user-scoped subject: %q", s)
+		}
+	}
+}
+
+func TestHostSubjectPermissions_ConstantSize(t *testing.T) {
+	// The host JWT must be constant-size regardless of how many users share the host.
+	// One entry in Pub+Sub, not one per user.
+	perm := HostSubjectPermissions("shared-host")
+
+	// Exactly one host-scoped entry (mclaude.hosts.shared-host.>)
+	hostEntries := 0
+	for _, s := range perm.PubAllow {
+		if s == "mclaude.hosts.shared-host.>" {
+			hostEntries++
+		}
+	}
+	if hostEntries != 1 {
+		t.Errorf("host JWT should have exactly 1 host-scoped pub entry, got %d", hostEntries)
 	}
 }
 
@@ -180,45 +224,60 @@ func TestNKeysAreUnique(t *testing.T) {
 	}
 }
 
-// ---- JWT issuance and claim validation ----
+// ---- JWT issuance (ADR-0054: external public key) ----
 
-func TestIssueUserJWT_ClaimsRoundTrip(t *testing.T) {
+func TestIssueUserJWT_ADR0054_ClaimsRoundTrip(t *testing.T) {
 	accountKP, err := nkeys.CreateAccount()
 	if err != nil {
 		t.Fatalf("create account key: %v", err)
 	}
 	accountPub, _ := accountKP.PublicKey()
 
-	userID := "test-user-001"
-	expiry := time.Now().Add(8 * time.Hour).Unix()
+	// Generate a user NKey pair (simulating what the client would do)
+	userKP, _, _ := GenerateUserNKey()
 
-	jwt, seed, err := IssueUserJWT(userID, "test-slug", accountKP, expiry)
+	userID := "test-user-uuid-001"
+	userSlug := "test-user"
+	hostSlugs := []string{"laptop-a"}
+
+	jwt, err := IssueUserJWT(userKP.PublicKey, userID, userSlug, hostSlugs, accountKP, 28800)
 	if err != nil {
 		t.Fatalf("IssueUserJWT: %v", err)
 	}
 	if jwt == "" {
 		t.Error("empty jwt")
 	}
-	if len(seed) == 0 {
-		t.Error("empty seed")
-	}
 
+	// JWT should decode successfully
 	claims, err := DecodeUserJWT(jwt, accountPub)
 	if err != nil {
 		t.Fatalf("DecodeUserJWT: %v", err)
 	}
+
+	// claims.Name must be userID (UUID) for auth middleware
 	if claims.Name != userID {
-		t.Errorf("claims.Name = %q; want %q", claims.Name, userID)
+		t.Errorf("claims.Name = %q; want userID %q", claims.Name, userID)
+	}
+
+	// IssuerAccount must be set
+	if claims.IssuerAccount != accountPub {
+		t.Errorf("IssuerAccount = %q; want %q", claims.IssuerAccount, accountPub)
+	}
+
+	// JWT should be associated with the user's NKey public key, not a CP-generated one
+	if claims.Subject != userKP.PublicKey {
+		t.Errorf("JWT subject = %q; want user's public key %q", claims.Subject, userKP.PublicKey)
 	}
 }
 
-func TestIssueUserJWT_SubjectScopes(t *testing.T) {
+func TestIssueUserJWT_ADR0054_ScopedPermissions(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
 	accountPub, _ := accountKP.PublicKey()
 
-	userID := "scoped-user"
-	expiry := time.Now().Add(8 * time.Hour).Unix()
-	jwt, _, err := IssueUserJWT(userID, "scoped-slug", accountKP, expiry)
+	userKP, _, _ := GenerateUserNKey()
+	hostSlugs := []string{"laptop-a", "cluster-a"}
+
+	jwt, err := IssueUserJWT(userKP.PublicKey, "user-id", "alice", hostSlugs, accountKP, 28800)
 	if err != nil {
 		t.Fatalf("IssueUserJWT: %v", err)
 	}
@@ -228,17 +287,171 @@ func TestIssueUserJWT_SubjectScopes(t *testing.T) {
 		t.Fatalf("DecodeUserJWT: %v", err)
 	}
 
-	expectedSubject := fmt.Sprintf("mclaude.%s.>", userID)
-	if !containsStr(claims.Permissions.Pub.Allow, expectedSubject) {
-		t.Errorf("pub allow missing %q, got %v", expectedSubject, claims.Permissions.Pub.Allow)
-	}
-	if !containsStr(claims.Permissions.Sub.Allow, expectedSubject) {
-		t.Errorf("sub allow missing %q, got %v", expectedSubject, claims.Permissions.Sub.Allow)
-	}
-	if !containsStr(claims.Permissions.Pub.Allow, "_INBOX.>") {
-		t.Errorf("pub allow missing _INBOX.>")
+	// Must have user-scoped subjects
+	mustContainStr(t, "pub allow", claims.Permissions.Pub.Allow, "mclaude.users.alice.hosts.*.>")
+
+	// Must have per-user bucket stream info
+	mustContainStr(t, "pub allow", claims.Permissions.Pub.Allow, "$JS.API.STREAM.INFO.KV_mclaude-sessions-alice")
+
+	// Must have per-host entries
+	mustContainStr(t, "pub allow", claims.Permissions.Pub.Allow, "$JS.API.DIRECT.GET.KV_mclaude-hosts.$KV.mclaude-hosts.laptop-a")
+	mustContainStr(t, "sub allow", claims.Permissions.Sub.Allow, "$KV.mclaude-hosts.laptop-a")
+	mustContainStr(t, "sub allow", claims.Permissions.Sub.Allow, "$KV.mclaude-hosts.cluster-a")
+
+	// Must NOT have broad wildcards
+	if containsStr(claims.Permissions.Pub.Allow, "$JS.API.>") {
+		t.Error("user JWT must not have broad $JS.API.> wildcard (ADR-0054)")
 	}
 }
+
+func TestIssueHostJWT_ADR0054(t *testing.T) {
+	accountKP, _ := nkeys.CreateAccount()
+	accountPub, _ := accountKP.PublicKey()
+
+	// Simulate host generating its own NKey pair
+	hostKP, _, _ := GenerateUserNKey()
+
+	jwt, err := IssueHostJWT(hostKP.PublicKey, "laptop-a", accountKP)
+	if err != nil {
+		t.Fatalf("IssueHostJWT: %v", err)
+	}
+
+	claims, err := DecodeUserJWT(jwt, accountPub)
+	if err != nil {
+		t.Fatalf("DecodeUserJWT: %v", err)
+	}
+
+	// Must use host's NKey public key
+	if claims.Subject != hostKP.PublicKey {
+		t.Errorf("JWT subject = %q; want host's public key", claims.Subject)
+	}
+
+	// Must have host-scoped subjects only
+	mustContainStr(t, "pub allow", claims.Permissions.Pub.Allow, "mclaude.hosts.laptop-a.>")
+	mustContainStr(t, "sub allow", claims.Permissions.Sub.Allow, "mclaude.hosts.laptop-a.>")
+
+	// Must have system event subscriptions
+	mustContainStr(t, "sub allow", claims.Permissions.Sub.Allow, "$SYS.ACCOUNT.*.CONNECT")
+	mustContainStr(t, "sub allow", claims.Permissions.Sub.Allow, "$SYS.ACCOUNT.*.DISCONNECT")
+
+	// Must NOT have JetStream (zero JS for hosts)
+	for _, s := range append(claims.Permissions.Pub.Allow, claims.Permissions.Sub.Allow...) {
+		if strings.HasPrefix(s, "$JS.") || strings.HasPrefix(s, "$KV.") {
+			t.Errorf("host JWT has JetStream/KV permission (must be zero): %q", s)
+		}
+	}
+
+	// Must have 5-minute TTL
+	if claims.Expires == 0 {
+		t.Error("host JWT should have expiry (5-minute TTL)")
+	}
+	remaining := claims.Expires - time.Now().Unix()
+	if remaining < 250 || remaining > 310 {
+		t.Errorf("host JWT TTL = %ds; want ~300s (5 min)", remaining)
+	}
+}
+
+func TestIssueSessionAgentJWT_ADR0054(t *testing.T) {
+	accountKP, _ := nkeys.CreateAccount()
+	accountPub, _ := accountKP.PublicKey()
+
+	// Simulate agent generating its own NKey pair
+	agentKP, _, _ := GenerateUserNKey()
+
+	jwt, err := IssueSessionAgentJWT(agentKP.PublicKey, "alice", "laptop-a", "myapp", accountKP)
+	if err != nil {
+		t.Fatalf("IssueSessionAgentJWT: %v", err)
+	}
+
+	claims, err := DecodeUserJWT(jwt, accountPub)
+	if err != nil {
+		t.Fatalf("DecodeUserJWT: %v", err)
+	}
+
+	// Must use agent's NKey public key
+	if claims.Subject != agentKP.PublicKey {
+		t.Errorf("JWT subject = %q; want agent's public key", claims.Subject)
+	}
+
+	// Must be project-scoped
+	mustContainStr(t, "pub allow", claims.Permissions.Pub.Allow, "mclaude.users.alice.hosts.laptop-a.projects.myapp.>")
+	mustContainStr(t, "sub allow", claims.Permissions.Sub.Allow, "mclaude.users.alice.hosts.laptop-a.projects.myapp.>")
+
+	// Must have KV write for this project's sessions
+	mustContainStr(t, "pub allow", claims.Permissions.Pub.Allow, "$KV.mclaude-sessions-alice.hosts.laptop-a.projects.myapp.sessions.>")
+
+	// Must have quota pub/sub (ADR-0044)
+	mustContainStr(t, "pub allow", claims.Permissions.Pub.Allow, "mclaude.users.alice.quota")
+	mustContainStr(t, "sub allow", claims.Permissions.Sub.Allow, "mclaude.users.alice.quota")
+
+	// Must NOT have broad wildcards
+	if containsStr(claims.Permissions.Pub.Allow, "$JS.API.>") {
+		t.Error("agent JWT must not have broad $JS.API.> wildcard (ADR-0054)")
+	}
+	if containsStr(claims.Permissions.Pub.Allow, "$JS.*.API.>") {
+		t.Error("agent JWT must not have broad $JS.*.API.> wildcard (ADR-0054)")
+	}
+
+	// Must NOT have access to other projects
+	for _, s := range append(claims.Permissions.Pub.Allow, claims.Permissions.Sub.Allow...) {
+		if strings.Contains(s, "other-project") {
+			t.Errorf("agent JWT has access to other-project: %q", s)
+		}
+	}
+
+	// Must have 5-minute TTL
+	if claims.Expires == 0 {
+		t.Error("agent JWT should have expiry (5-minute TTL)")
+	}
+	remaining := claims.Expires - time.Now().Unix()
+	if remaining < 250 || remaining > 310 {
+		t.Errorf("agent JWT TTL = %ds; want ~300s (5 min)", remaining)
+	}
+}
+
+// ---- NKey signature verification ----
+
+func TestVerifyNKeySignature_Valid(t *testing.T) {
+	kp, _ := nkeys.CreateUser()
+	pub, _ := kp.PublicKey()
+	challenge := []byte("random-challenge-nonce-abc123")
+	sig, err := kp.Sign(challenge)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if err := VerifyNKeySignature(pub, challenge, sig); err != nil {
+		t.Errorf("VerifyNKeySignature: %v", err)
+	}
+}
+
+func TestVerifyNKeySignature_Invalid(t *testing.T) {
+	kp1, _ := nkeys.CreateUser()
+	kp2, _ := nkeys.CreateUser()
+	pub2, _ := kp2.PublicKey()
+
+	challenge := []byte("challenge-nonce")
+	sig, _ := kp1.Sign(challenge) // signed by kp1
+
+	// Verify against kp2's public key — should fail
+	if err := VerifyNKeySignature(pub2, challenge, sig); err == nil {
+		t.Error("expected signature verification to fail for wrong key pair")
+	}
+}
+
+func TestVerifyNKeySignature_TamperedChallenge(t *testing.T) {
+	kp, _ := nkeys.CreateUser()
+	pub, _ := kp.PublicKey()
+	challenge := []byte("original-challenge")
+	sig, _ := kp.Sign(challenge)
+
+	// Tampered challenge — should fail
+	tampered := []byte("tampered-challenge")
+	if err := VerifyNKeySignature(pub, tampered, sig); err == nil {
+		t.Error("expected verification to fail for tampered challenge")
+	}
+}
+
+// ---- DecodeUserJWT ----
 
 func TestDecodeUserJWT_InvalidSignature(t *testing.T) {
 	// Sign with key A, validate with key B → should fail.
@@ -246,7 +459,8 @@ func TestDecodeUserJWT_InvalidSignature(t *testing.T) {
 	accountB, _ := nkeys.CreateAccount()
 	accountBPub, _ := accountB.PublicKey()
 
-	jwt, _, _ := IssueUserJWT("user", "user-slug", accountA, time.Now().Add(time.Hour).Unix())
+	userKP, _, _ := GenerateUserNKey()
+	jwt, _ := IssueUserJWT(userKP.PublicKey, "user-id", "user-slug", nil, accountA, 28800)
 	_, err := DecodeUserJWT(jwt, accountBPub)
 	if err == nil {
 		t.Error("expected error validating JWT signed by different key; got nil")
@@ -260,65 +474,154 @@ func TestDecodeUserJWT_Malformed(t *testing.T) {
 	}
 }
 
-func TestIssueUserJWT_UUIDInClaimsName(t *testing.T) {
-	// ADR-0046 (updated): IssueUserJWT receives a UUID and stores it in claims.Name
-	// so authMiddleware can pass it to db.GetUserByID. LoginResponse carries
-	// UserSlug separately.
+// ---- IssuerAccount ----
+
+func TestIssueUserJWT_IssuerAccountSet(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
 	accountPub, _ := accountKP.PublicKey()
 
-	userID := "550e8400-e29b-41d4-a716-446655440000" // UUID
-	expiry := time.Now().Add(8 * time.Hour).Unix()
-
-	jwt, _, err := IssueUserJWT(userID, "dev.local", accountKP, expiry)
+	userKP, _, _ := GenerateUserNKey()
+	jwtStr, err := IssueUserJWT(userKP.PublicKey, "user-ia", "user-ia-slug", nil, accountKP, 28800)
 	if err != nil {
 		t.Fatalf("IssueUserJWT: %v", err)
+	}
+
+	claims, err := DecodeUserJWT(jwtStr, accountPub)
+	if err != nil {
+		t.Fatalf("DecodeUserJWT: %v", err)
+	}
+
+	if claims.IssuerAccount != accountPub {
+		t.Errorf("IssuerAccount = %q; want %q", claims.IssuerAccount, accountPub)
+	}
+}
+
+func TestIssueHostJWT_IssuerAccountSet(t *testing.T) {
+	accountKP, _ := nkeys.CreateAccount()
+	accountPub, _ := accountKP.PublicKey()
+
+	hostKP, _, _ := GenerateUserNKey()
+	jwtStr, err := IssueHostJWT(hostKP.PublicKey, "hslug", accountKP)
+	if err != nil {
+		t.Fatalf("IssueHostJWT: %v", err)
+	}
+
+	claims, err := DecodeUserJWT(jwtStr, accountPub)
+	if err != nil {
+		t.Fatalf("DecodeUserJWT: %v", err)
+	}
+
+	if claims.IssuerAccount != accountPub {
+		t.Errorf("IssuerAccount = %q; want %q", claims.IssuerAccount, accountPub)
+	}
+}
+
+func TestIssueSessionAgentJWT_IssuerAccountSet(t *testing.T) {
+	accountKP, _ := nkeys.CreateAccount()
+	accountPub, _ := accountKP.PublicKey()
+
+	agentKP, _, _ := GenerateUserNKey()
+	jwtStr, err := IssueSessionAgentJWT(agentKP.PublicKey, "sa-user-ia", "host-a", "proj-a", accountKP)
+	if err != nil {
+		t.Fatalf("IssueSessionAgentJWT: %v", err)
+	}
+
+	claims, err := DecodeUserJWT(jwtStr, accountPub)
+	if err != nil {
+		t.Fatalf("DecodeUserJWT: %v", err)
+	}
+
+	if claims.IssuerAccount != accountPub {
+		t.Errorf("IssuerAccount = %q; want %q", claims.IssuerAccount, accountPub)
+	}
+}
+
+// ---- Expiry tests ----
+
+func TestIssueUserJWT_ExpirySet(t *testing.T) {
+	accountKP, _ := nkeys.CreateAccount()
+	accountPub, _ := accountKP.PublicKey()
+
+	userKP, _, _ := GenerateUserNKey()
+	var expirySecs int64 = 28800 // 8 hours
+	before := time.Now().Unix()
+	jwtStr, err := IssueUserJWT(userKP.PublicKey, "expiry-user", "expiry-slug", nil, accountKP, expirySecs)
+	if err != nil {
+		t.Fatalf("IssueUserJWT: %v", err)
+	}
+	after := time.Now().Unix()
+
+	claims, err := DecodeUserJWT(jwtStr, accountPub)
+	if err != nil {
+		t.Fatalf("DecodeUserJWT: %v", err)
+	}
+
+	wantMin := before + expirySecs
+	wantMax := after + expirySecs
+	if claims.Expires < wantMin || claims.Expires > wantMax {
+		t.Errorf("claims.Expires = %d; want between %d and %d (now + %ds)",
+			claims.Expires, wantMin, wantMax, expirySecs)
+	}
+}
+
+// ---- Legacy functions (backward compat) ----
+
+func TestIssueUserJWTLegacy_ClaimsRoundTrip(t *testing.T) {
+	accountKP, _ := nkeys.CreateAccount()
+	accountPub, _ := accountKP.PublicKey()
+
+	userID := "legacy-user-001"
+	expiry := int64(8 * 60 * 60)
+
+	jwt, seed, err := IssueUserJWTLegacy(userID, "legacy-slug", accountKP, expiry)
+	if err != nil {
+		t.Fatalf("IssueUserJWTLegacy: %v", err)
+	}
+	if jwt == "" {
+		t.Error("empty jwt")
+	}
+	if len(seed) == 0 {
+		t.Error("empty seed (legacy should return seed)")
 	}
 
 	claims, err := DecodeUserJWT(jwt, accountPub)
 	if err != nil {
 		t.Fatalf("DecodeUserJWT: %v", err)
 	}
-
 	if claims.Name != userID {
-		t.Errorf("claims.Name = %q; want UUID %q (ADR-0046)", claims.Name, userID)
-	}
-
-	// The subject permissions must reference the UUID.
-	expectedSubject := fmt.Sprintf("mclaude.%s.>", userID)
-	if !containsStr(claims.Permissions.Pub.Allow, expectedSubject) {
-		t.Errorf("pub allow missing %q (UUID-scoped subject)", expectedSubject)
-	}
-	if !containsStr(claims.Permissions.Sub.Allow, expectedSubject) {
-		t.Errorf("sub allow missing %q (UUID-scoped subject)", expectedSubject)
-	}
-	// The hosts KV permission must use the slug, not the UUID.
-	expectedHostsKV := "$KV.mclaude-hosts.dev.local.>"
-	if !containsStr(claims.Permissions.Sub.Allow, expectedHostsKV) {
-		t.Errorf("sub allow missing %q (slug-scoped hosts KV subject)", expectedHostsKV)
-	}
-	// ADR-0049: host-scoped subject prefix must appear in both pub and sub allow lists.
-	expectedHostsPrefix := "mclaude.users.dev.local.hosts.*.>"
-	if !containsStr(claims.Permissions.Pub.Allow, expectedHostsPrefix) {
-		t.Errorf("pub allow missing %q (ADR-0049 host-scoped prefix)", expectedHostsPrefix)
-	}
-	if !containsStr(claims.Permissions.Sub.Allow, expectedHostsPrefix) {
-		t.Errorf("sub allow missing %q (ADR-0049 host-scoped prefix)", expectedHostsPrefix)
+		t.Errorf("claims.Name = %q; want %q", claims.Name, userID)
 	}
 }
 
-func TestIssueUserJWT_EachCallUniqueKeys(t *testing.T) {
+// ---- NATSCredentials format ----
+
+func TestFormatNATSCredentials_Format(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
-	expiry := time.Now().Add(time.Hour).Unix()
 
-	jwt1, seed1, _ := IssueUserJWT("user", "user-slug", accountKP, expiry)
-	jwt2, seed2, _ := IssueUserJWT("user", "user-slug", accountKP, expiry)
-
-	if jwt1 == jwt2 {
-		t.Error("two IssueUserJWT calls produced identical JWTs (should use fresh user NKeys)")
+	agentKP, _, _ := GenerateUserNKey()
+	jwtStr, err := IssueSessionAgentJWT(agentKP.PublicKey, "format-user", "host-a", "proj-a", accountKP)
+	if err != nil {
+		t.Fatalf("IssueSessionAgentJWT: %v", err)
 	}
-	if string(seed1) == string(seed2) {
-		t.Error("two IssueUserJWT calls produced identical seeds")
+	agentSeed, _ := agentKP.KeyPair.Seed()
+
+	creds := mclnats.FormatNATSCredentials(jwtStr, agentSeed)
+	credsStr := string(creds)
+
+	if !strings.Contains(credsStr, "-----BEGIN NATS USER JWT-----") {
+		t.Error("creds missing BEGIN NATS USER JWT header")
+	}
+	if !strings.Contains(credsStr, "------END NATS USER JWT------") {
+		t.Error("creds missing END NATS USER JWT trailer")
+	}
+	if !strings.Contains(credsStr, "-----BEGIN USER NKEY SEED-----") {
+		t.Error("creds missing BEGIN USER NKEY SEED header")
+	}
+	if !strings.Contains(credsStr, "------END USER NKEY SEED------") {
+		t.Error("creds missing END USER NKEY SEED trailer")
+	}
+	if !strings.Contains(credsStr, jwtStr) {
+		t.Error("creds does not contain the JWT")
 	}
 }
 
@@ -349,281 +652,57 @@ func TestVersionResponse_ConfiguredVersion(t *testing.T) {
 	}
 }
 
+// ---- Resource naming helpers ----
 
-// ---- Session-agent JWT and credentials ----
-
-func TestIssueSessionAgentJWT_SubjectScopes(t *testing.T) {
-	accountKP, err := nkeys.CreateAccount()
-	if err != nil {
-		t.Fatalf("create account key: %v", err)
+func TestUserSessionsBucket(t *testing.T) {
+	if got := userSessionsBucket("alice"); got != "mclaude-sessions-alice" {
+		t.Errorf("userSessionsBucket = %q; want mclaude-sessions-alice", got)
 	}
-	accountPub, _ := accountKP.PublicKey()
-
-	userID := "agent-user-001"
-	userSlug := "agent-user-slug"
-	jwtStr, seed, err := IssueSessionAgentJWT(userID, userSlug, accountKP)
-	if err != nil {
-		t.Fatalf("IssueSessionAgentJWT: %v", err)
-	}
-	if jwtStr == "" {
-		t.Error("empty jwt")
-	}
-	if len(seed) == 0 {
-		t.Error("empty seed")
-	}
-
-	claims, err := DecodeUserJWT(jwtStr, accountPub)
-	if err != nil {
-		t.Fatalf("DecodeUserJWT: %v", err)
-	}
-
-	// Per ADR-0050 Decision 5: UUID prefix, host-scoped prefix, _INBOX.>, $JS.API.>, $JS.*.API.>
-	uuidSubject := fmt.Sprintf("mclaude.%s.>", userID)
-	if !containsStr(claims.Permissions.Pub.Allow, uuidSubject) {
-		t.Errorf("pub allow missing %q, got %v", uuidSubject, claims.Permissions.Pub.Allow)
-	}
-	if !containsStr(claims.Permissions.Sub.Allow, uuidSubject) {
-		t.Errorf("sub allow missing %q, got %v", uuidSubject, claims.Permissions.Sub.Allow)
-	}
-
-	hostScopedSubject := fmt.Sprintf("mclaude.users.%s.hosts.*.>", userSlug)
-	if !containsStr(claims.Permissions.Pub.Allow, hostScopedSubject) {
-		t.Errorf("pub allow missing %q, got %v", hostScopedSubject, claims.Permissions.Pub.Allow)
-	}
-	if !containsStr(claims.Permissions.Sub.Allow, hostScopedSubject) {
-		t.Errorf("sub allow missing %q, got %v", hostScopedSubject, claims.Permissions.Sub.Allow)
-	}
-
-	// Session-agent must have _INBOX.> (ADR-0050 Decision 5)
-	if !containsStr(claims.Permissions.Pub.Allow, "_INBOX.>") {
-		t.Error("session-agent pub should have _INBOX.>")
-	}
-	if !containsStr(claims.Permissions.Sub.Allow, "_INBOX.>") {
-		t.Error("session-agent sub should have _INBOX.>")
-	}
-
-	// Session-agent must have $JS.API.> and $JS.*.API.> (ADR-0050 Decision 5)
-	if !containsStr(claims.Permissions.Pub.Allow, "$JS.API.>") {
-		t.Error("session-agent pub should have $JS.API.> (direct worker NATS)")
-	}
-	if !containsStr(claims.Permissions.Sub.Allow, "$JS.API.>") {
-		t.Error("session-agent sub should have $JS.API.> (direct worker NATS)")
-	}
-	if !containsStr(claims.Permissions.Pub.Allow, "$JS.*.API.>") {
-		t.Error("session-agent pub should have $JS.*.API.> (hub domain-prefixed)")
-	}
-	if !containsStr(claims.Permissions.Sub.Allow, "$JS.*.API.>") {
-		t.Error("session-agent sub should have $JS.*.API.> (hub domain-prefixed)")
-	}
-
-	// Session-agent must have KV bucket permissions for session data read/write
-	kvSubjects := []string{
-		"$KV.mclaude-sessions.>",
-		"$KV.mclaude-projects.>",
-		"$KV.mclaude-hosts.>",
-		"$KV.mclaude-job-queue.>",
-	}
-	for _, kv := range kvSubjects {
-		if !containsStr(claims.Permissions.Pub.Allow, kv) {
-			t.Errorf("session-agent pub should have %s", kv)
-		}
-		if !containsStr(claims.Permissions.Sub.Allow, kv) {
-			t.Errorf("session-agent sub should have %s", kv)
-		}
-	}
-
-	// Session-agent must have JetStream ACK, flow control, and direct KV gets
-	jsSubjects := []string{"$JS.ACK.>", "$JS.FC.>", "$JS.API.DIRECT.GET.>"}
-	for _, js := range jsSubjects {
-		if !containsStr(claims.Permissions.Pub.Allow, js) {
-			t.Errorf("session-agent pub should have %s", js)
-		}
-		if !containsStr(claims.Permissions.Sub.Allow, js) {
-			t.Errorf("session-agent sub should have %s", js)
-		}
+	if got := userSessionsBucket("alice-gmail"); got != "mclaude-sessions-alice-gmail" {
+		t.Errorf("userSessionsBucket = %q; want mclaude-sessions-alice-gmail", got)
 	}
 }
 
-func TestIssueSessionAgentJWT_NoExpiry(t *testing.T) {
-	accountKP, _ := nkeys.CreateAccount()
-	accountPub, _ := accountKP.PublicKey()
-
-	jwtStr, _, err := IssueSessionAgentJWT("sa-user", "sa-user-slug", accountKP)
-	if err != nil {
-		t.Fatalf("IssueSessionAgentJWT: %v", err)
-	}
-
-	claims, err := DecodeUserJWT(jwtStr, accountPub)
-	if err != nil {
-		t.Fatalf("DecodeUserJWT: %v", err)
-	}
-
-	// Expires = 0 means no expiry.
-	if claims.Expires != 0 {
-		t.Errorf("session-agent JWT should have no expiry; got Expires=%d", claims.Expires)
+func TestUserProjectsBucket(t *testing.T) {
+	if got := userProjectsBucket("alice"); got != "mclaude-projects-alice" {
+		t.Errorf("userProjectsBucket = %q; want mclaude-projects-alice", got)
 	}
 }
 
-func TestFormatNATSCredentials_Format(t *testing.T) {
-	accountKP, _ := nkeys.CreateAccount()
-
-	jwtStr, seed, err := IssueSessionAgentJWT("format-user", "format-user-slug", accountKP)
-	if err != nil {
-		t.Fatalf("IssueSessionAgentJWT: %v", err)
-	}
-
-	creds := mclnats.FormatNATSCredentials(jwtStr, seed)
-	credsStr := string(creds)
-
-	if !strings.Contains(credsStr, "-----BEGIN NATS USER JWT-----") {
-		t.Error("creds missing BEGIN NATS USER JWT header")
-	}
-	if !strings.Contains(credsStr, "------END NATS USER JWT------") {
-		t.Error("creds missing END NATS USER JWT trailer")
-	}
-	if !strings.Contains(credsStr, "-----BEGIN USER NKEY SEED-----") {
-		t.Error("creds missing BEGIN USER NKEY SEED header")
-	}
-	if !strings.Contains(credsStr, "------END USER NKEY SEED------") {
-		t.Error("creds missing END USER NKEY SEED trailer")
-	}
-	if !strings.Contains(credsStr, jwtStr) {
-		t.Error("creds does not contain the JWT")
-	}
-	if !strings.Contains(credsStr, string(seed)) {
-		t.Error("creds does not contain the seed")
+func TestUserSessionsStream(t *testing.T) {
+	if got := userSessionsStream("alice"); got != "MCLAUDE_SESSIONS_alice" {
+		t.Errorf("userSessionsStream = %q; want MCLAUDE_SESSIONS_alice", got)
 	}
 }
 
-func TestFormatNATSCredentials_SeedInBody(t *testing.T) {
-	accountKP, _ := nkeys.CreateAccount()
-
-	jwtStr, seed, _ := IssueSessionAgentJWT("seed-check-user", "seed-check-user-slug", accountKP)
-	creds := mclnats.FormatNATSCredentials(jwtStr, seed)
-	credsStr := string(creds)
-
-	// Verify the seed appears in the creds file and round-trips correctly.
-	// We don't parse the exact line positions — just verify it's parseable by nkeys.
-	if !strings.Contains(credsStr, string(seed)) {
-		t.Error("creds does not contain the seed bytes")
-	}
-
-	// Verify the seed from the creds file round-trips to the same key pair.
-	originalKP, err := nkeys.FromSeed(seed)
-	if err != nil {
-		t.Fatalf("FromSeed original: %v", err)
-	}
-	originalPub, _ := originalKP.PublicKey()
-
-	// The seed appears verbatim in the file, so we can round-trip it directly.
-	restoredKP, err := nkeys.FromSeed(seed)
-	if err != nil {
-		t.Fatalf("FromSeed round-trip: %v", err)
-	}
-	restoredPub, _ := restoredKP.PublicKey()
-	if restoredPub != originalPub {
-		t.Errorf("seed round-trip mismatch: got %q, want %q", restoredPub, originalPub)
+func TestKVStreamName(t *testing.T) {
+	if got := kvStreamName("mclaude-sessions-alice"); got != "KV_mclaude-sessions-alice" {
+		t.Errorf("kvStreamName = %q; want KV_mclaude-sessions-alice", got)
 	}
 }
 
-// ---- IssuerAccount tests (GAP-CP-12) ----
+// ---- Helpers ----
 
-func TestIssueUserJWT_IssuerAccountSet(t *testing.T) {
-	accountKP, _ := nkeys.CreateAccount()
-	accountPub, _ := accountKP.PublicKey()
-
-	expiry := time.Now().Add(8 * time.Hour).Unix()
-	jwtStr, _, err := IssueUserJWT("user-ia", "user-ia-slug", accountKP, expiry)
-	if err != nil {
-		t.Fatalf("IssueUserJWT: %v", err)
-	}
-
-	claims, err := DecodeUserJWT(jwtStr, accountPub)
-	if err != nil {
-		t.Fatalf("DecodeUserJWT: %v", err)
-	}
-
-	if claims.IssuerAccount != accountPub {
-		t.Errorf("IssuerAccount = %q; want %q", claims.IssuerAccount, accountPub)
+func mustContain(t *testing.T, name string, perms []string, subject string) {
+	t.Helper()
+	if !containsStr(perms, subject) {
+		t.Errorf("%s missing required subject %q", name, subject)
 	}
 }
 
-func TestIssueHostJWT_IssuerAccountSet(t *testing.T) {
-	accountKP, _ := nkeys.CreateAccount()
-	accountPub, _ := accountKP.PublicKey()
-
-	jwtStr, _, err := IssueHostJWT("uslug", "hslug", accountKP)
-	if err != nil {
-		t.Fatalf("IssueHostJWT: %v", err)
-	}
-
-	claims, err := DecodeUserJWT(jwtStr, accountPub)
-	if err != nil {
-		t.Fatalf("DecodeUserJWT: %v", err)
-	}
-
-	if claims.IssuerAccount != accountPub {
-		t.Errorf("IssuerAccount = %q; want %q", claims.IssuerAccount, accountPub)
+func mustNotContain(t *testing.T, name string, perms []string, subject string) {
+	t.Helper()
+	if containsStr(perms, subject) {
+		t.Errorf("%s must NOT contain %q (ADR-0054 security requirement)", name, subject)
 	}
 }
 
-func TestIssueSessionAgentJWT_IssuerAccountSet(t *testing.T) {
-	accountKP, _ := nkeys.CreateAccount()
-	accountPub, _ := accountKP.PublicKey()
-
-	jwtStr, _, err := IssueSessionAgentJWT("sa-user-ia", "sa-user-ia-slug", accountKP)
-	if err != nil {
-		t.Fatalf("IssueSessionAgentJWT: %v", err)
-	}
-
-	claims, err := DecodeUserJWT(jwtStr, accountPub)
-	if err != nil {
-		t.Fatalf("DecodeUserJWT: %v", err)
-	}
-
-	if claims.IssuerAccount != accountPub {
-		t.Errorf("IssuerAccount = %q; want %q", claims.IssuerAccount, accountPub)
+func mustContainStr(t *testing.T, name string, perms []string, subject string) {
+	t.Helper()
+	if !containsStr(perms, subject) {
+		t.Errorf("%s missing required subject %q\ngot: %v", name, subject, perms)
 	}
 }
-
-// ---- Expiry tests (KNOWN-01 double-expiry fix) ----
-
-func TestIssueUserJWT_ExpiryNotDoubled(t *testing.T) {
-	accountKP, _ := nkeys.CreateAccount()
-	accountPub, _ := accountKP.PublicKey()
-
-	// Pass raw expiry seconds (e.g. 28800 for 8 hours).
-	// Before the fix, the caller passed expiresAt+expirySecs which doubled the value.
-	var expirySecs int64 = 28800
-	before := time.Now().Unix()
-	jwtStr, _, err := IssueUserJWT("expiry-user", "expiry-slug", accountKP, expirySecs)
-	if err != nil {
-		t.Fatalf("IssueUserJWT: %v", err)
-	}
-	after := time.Now().Unix()
-
-	claims, err := DecodeUserJWT(jwtStr, accountPub)
-	if err != nil {
-		t.Fatalf("DecodeUserJWT: %v", err)
-	}
-
-	// claims.Expires should be approximately now + expirySecs (not doubled).
-	wantMin := before + expirySecs
-	wantMax := after + expirySecs
-	if claims.Expires < wantMin || claims.Expires > wantMax {
-		t.Errorf("claims.Expires = %d; want between %d and %d (now + %ds, not doubled)",
-			claims.Expires, wantMin, wantMax, expirySecs)
-	}
-
-	// Verify it's NOT doubled (the old bug would produce ~now + 16h = ~now + 57600).
-	doubledMin := before + 2*expirySecs
-	if claims.Expires >= doubledMin {
-		t.Errorf("claims.Expires = %d looks doubled (>= %d); double-expiry bug not fixed",
-			claims.Expires, doubledMin)
-	}
-}
-
-// ---- helpers ----
 
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
@@ -645,3 +724,6 @@ func containsStr(ss []string, s string) bool {
 	}
 	return false
 }
+
+// Intentional reference to avoid "imported and not used" error
+var _ = fmt.Sprintf

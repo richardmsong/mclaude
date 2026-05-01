@@ -66,13 +66,49 @@ The SPA sends `set_model`, `set_max_thinking_tokens`, and `reload_plugins` contr
 
 `result` events include `usage` (input/output/cache tokens, cost). The session agent accumulates usage in NATS KV. The SPA displays per-session and per-project cost.
 
-## File/Image Uploads
+## Device-Code Verification Page
 
-Files and images are sent as base64 in the user message content array (standard Anthropic content format). Max ~20MB per image.
+The SPA serves a device-code verification page at `/auth/device-code/verify`. This is the page users visit when `mclaude login` displays a verification URL. The page:
+
+1. Accepts the user code (pre-filled from the URL query parameter `?code=...` or entered manually)
+2. Authenticates the user (reuses the existing SPA auth session — if not logged in, redirects to login first)
+3. Calls `POST /api/auth/device-code/poll` (or a dedicated approval endpoint) to bind the device code to the authenticated user
+4. Displays a success screen confirming the CLI is now authorized
+
+The page is minimal: a code-entry field, an "Approve" button, and success/error states. No navigation chrome — it's a standalone flow.
+
+## File/Image Uploads (Attachments)
+
+Files and images are uploaded via S3 pre-signed URLs and referenced in messages as `AttachmentRef` (ADR-0053). The flow:
+
+1. User selects a file (file picker) or pastes an image (paste handler)
+2. SPA requests a pre-signed upload URL from the control-plane: `POST /api/attachments/upload-url` with `{filename, mimeType, sizeBytes, projectSlug, hostSlug}`
+3. CP returns `{id, uploadUrl}` — the upload URL is scoped to a single S3 object, valid for 5 minutes
+4. SPA uploads the file directly to S3 using the signed URL
+5. SPA confirms the upload: `POST /api/attachments/{id}/confirm`
+6. SPA attaches an `AttachmentRef` (`{id, filename, mimeType, sizeBytes}`) to the outgoing user message — no binary data flows through NATS
+
+Max file size: 50MB (enforced by CP when generating upload URLs).
+
+## Attachment Rendering
+
+When session events contain `AttachmentRef` content blocks (user-uploaded or agent-generated attachments), the SPA resolves them to renderable content:
+
+1. SPA encounters an `attachment_ref` content block in a session event
+2. SPA requests a pre-signed download URL from the control-plane: `GET /api/attachments/{id}` — CP validates the user owns the project and returns `{id, filename, mimeType, sizeBytes, downloadUrl}`
+3. SPA renders the attachment based on MIME type:
+   - Images (`image/*`): inline `<img>` with the download URL as `src`
+   - Other files: download link with filename and size
+
+Download URLs are time-limited (5 minutes). The SPA re-requests a fresh URL if the previous one has expired.
+
+## Imported Sessions
+
+Imported sessions (created via `mclaude import`) are treated identically to native sessions in the SPA. No "imported" badge, no visual distinction. They appear in the session list and project views like any other session. Import metadata is stored internally but not surfaced in the UI (ADR-0053).
 
 ## Routing
 
-React Router v6 with parametric segments: `/api/users/{uslug}/projects/{pslug}/sessions/{sslug}`. Display names render in UI; slugs in the URL path.
+React Router v6 with parametric segments: `/api/users/{uslug}/projects/{pslug}/sessions/{sslug}`. Display names render in UI; slugs in the URL path. The device-code verification page is served at `/auth/device-code/verify`.
 
 ## TypeScript Slug/Subject Mirrors
 

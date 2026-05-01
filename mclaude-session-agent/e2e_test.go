@@ -79,33 +79,37 @@ func TestE2ESessionLifecycle(t *testing.T) {
 	}
 
 	const (
-		userID    = "e2e-user"
-		projectID = "e2e-proj"
-		sessionID = "e2e-session-1"
+		userID      = "e2e-user"
+		projectID   = "e2e-proj"
+		sessionSlug = "e2e-session-1"
+		hostSlug    = "local"
 	)
 
-	eventsSubject := fmt.Sprintf("mclaude.users.%s.hosts.local.projects.%s.events.%s", userID, projectID, sessionID)
+	// Per ADR-0054, events go to the per-user MCLAUDE_SESSIONS_{uslug} stream.
+	streamName := "MCLAUDE_SESSIONS_" + userID
+	eventsSubject := fmt.Sprintf("mclaude.users.%s.hosts.%s.projects.%s.sessions.%s.events",
+		userID, hostSlug, projectID, sessionSlug)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	// Subscribe to the events stream before issuing create.
-	cons, err := js.CreateOrUpdateConsumer(ctx, "MCLAUDE_EVENTS", jetstream.ConsumerConfig{
+	// Subscribe to the sessions events stream before issuing create.
+	cons, err := js.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
 		FilterSubject: eventsSubject,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 	})
 	if err != nil {
-		t.Fatalf("create consumer: %v", err)
+		t.Fatalf("create consumer on %s: %v", streamName, err)
 	}
 
-	// Publish session create.
+	// Publish session create (per ADR-0054: sessions.create subject).
 	createReq := map[string]any{
-		"sessionId":    sessionID,
 		"branch":       "main",
 		"cwd":          "/workspace",
 		"joinWorktree": false,
 	}
 	data, _ := json.Marshal(createReq)
-	createSubject := fmt.Sprintf("mclaude.users.%s.hosts.local.projects.%s.api.sessions.create", userID, projectID)
+	createSubject := fmt.Sprintf("mclaude.users.%s.hosts.%s.projects.%s.sessions.create",
+		userID, hostSlug, projectID)
 	if _, err := nc.Request(createSubject, data, 15*time.Second); err != nil {
 		t.Fatalf("session create request: %v", err)
 	}
@@ -127,10 +131,11 @@ func TestE2ESessionLifecycle(t *testing.T) {
 		t.Error("init event not received on events stream")
 	}
 
-	// Send a user message.
-	inputSubject := fmt.Sprintf("mclaude.users.%s.hosts.local.projects.%s.api.sessions.input", userID, projectID)
+	// Send a user message (per ADR-0054: sessions.{sslug}.input subject).
+	inputSubject := fmt.Sprintf("mclaude.users.%s.hosts.%s.projects.%s.sessions.%s.input",
+		userID, hostSlug, projectID, sessionSlug)
 	inputMsg := map[string]any{
-		"sessionId": sessionID,
+		"type": "message",
 		"message": map[string]any{
 			"role":    "user",
 			"content": "say hello in one word",
@@ -158,9 +163,10 @@ func TestE2ESessionLifecycle(t *testing.T) {
 		t.Error("assistant event not received")
 	}
 
-	// Clean up: delete the session.
-	deleteSubject := fmt.Sprintf("mclaude.users.%s.hosts.local.projects.%s.api.sessions.delete", userID, projectID)
-	deleteReq, _ := json.Marshal(map[string]string{"sessionId": sessionID})
+	// Clean up: delete the session (per ADR-0054: sessions.{sslug}.delete subject).
+	deleteSubject := fmt.Sprintf("mclaude.users.%s.hosts.%s.projects.%s.sessions.%s.delete",
+		userID, hostSlug, projectID, sessionSlug)
+	deleteReq, _ := json.Marshal(map[string]string{})
 	if _, err := nc.Request(deleteSubject, deleteReq, 15*time.Second); err != nil {
 		t.Logf("session delete request: %v (non-fatal)", err)
 	}

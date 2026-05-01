@@ -1,23 +1,45 @@
-## Run: 2026-04-30T00:00:00Z
+## Audit: 2026-04-30T12:00:00Z
 
-**Gaps found: 5**
+**Document:** docs/adr-0054-nats-jetstream-permission-tightening.md
 
-1. **Postgres type mismatch in `groups` / `group_members` DDL** — The `groups` table DDL specifies `id UUID PRIMARY KEY`, `owner_id UUID NOT NULL REFERENCES users(id)`, and `group_members` specifies `member_id UUID NOT NULL REFERENCES users(id)`. The existing `users` table uses `TEXT` for its `id` column (confirmed in `mclaude-control-plane/db.go:505-513`). PostgreSQL cannot create a foreign key constraint between `UUID` and `TEXT` columns — the migration DDL as written will fail on execution.
-   - **Doc**: "Postgres Schema Changes → New tables" — `groups.owner_id UUID NOT NULL REFERENCES users(id)`, `group_members.member_id UUID NOT NULL REFERENCES users(id)`
-   - **Code**: `db.go:505-506` — `CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, ...)`. Also `hosts.id TEXT PRIMARY KEY` (db.go:517), `projects.id TEXT PRIMARY KEY` (db.go:536). The entire schema uses TEXT for ID columns. The `groups` DDL must use TEXT to match.
+### Round 1
 
-2. **`HostKVState` value schema not defined** — The ADR changes the `mclaude-hosts` KV key format from `{uslug}.{hslug}` to `{hslug}` and says HostKVState "no longer includes `user_id`" with the presence handler writing "host slug + online status + last_seen_at." But it never provides a concrete JSON schema for the new value. The current schema (spec-state-schema.md) defines 6 fields: `{slug, type, name, role, online, lastSeenAt}`. The ADR removes `role` from the hosts table and says "group, type" are "looked up from Postgres, not stored in KV." A developer doesn't know: (a) which exact fields remain in the KV value — is it `{slug, online, lastSeenAt}` only, or does `name`/`type` persist? (b) what the SPA reads from KV vs. the login response for host rendering.
-   - **Doc**: Data Model → "Shared KV bucket (retained as shared)" and hosts table → "HostKVState (the KV value written on $SYS CONNECT/DISCONNECT): updated to reflect the new host model. It no longer includes user_id — the presence subscriber writes host slug + online status + last_seen_at. Other host metadata (group, type) is looked up from Postgres, not stored in KV."
-   - **Code**: spec-state-schema.md `mclaude-hosts` section defines the current value as `{slug, type, name, role, online, lastSeenAt}`. The ADR's prose implies a reduction to ~3 fields but never provides a replacement JSON schema or states explicitly which fields survive.
+**Gaps found: 4**
 
-3. **SPA host list rendering and runtime discovery with group model** — The ADR says "Visibility controlled at application layer (SPA filters by group membership)" but does not specify how the SPA obtains group membership data at runtime. The login response provides the initial host list (per ADR-0035), but `POST /auth/refresh` only returns a new JWT + natsWsURL — not the full host list. When group membership changes at runtime (user added to a group, new host bound to a group), the SPA has no specified mechanism to discover the change. The mclaude-web Component Changes section lists "Update KV bucket names" and "Update stream references" but does not address: (a) how the SPA transitions from KV-based host list rendering to login-response-based + KV-presence-only, (b) how the SPA discovers new hosts at runtime.
-   - **Doc**: Decisions table → "Host binding model: Every host is bound to a group; groups have members" and Data Model → shared `mclaude-hosts` bucket. Component Changes → mclaude-web: "Update KV bucket names in `nats-client.ts` / `subj.ts`"
-   - **Code**: The SPA currently renders host lists from `$KV.mclaude-hosts.{userSlug}.>` watches (spec-state-schema.md, mclaude-hosts section). With the key format changing to `{hslug}` (all hosts visible in shared bucket) and the value reduced to presence-only data, the SPA's current approach breaks. `GET /api/users/{uslug}/hosts` exists (spec-control-plane.md) and could serve as a polling fallback, but the ADR's mclaude-web section doesn't mention this behavioral change.
+1. **Agent JWT TTL contradiction** — Decisions says 5 min, Error Handling says 24h.
+2. **Agent credential refresh NKey problem** — No mechanism to obtain the agent's NKey public key for re-signing the refresh JWT. ADR assumed CP generates the keypair, but the correct design is client-generated keypairs.
+3. **Missing pull consumer permission** — `$JS.API.CONSUMER.MSG.NEXT` not in agent Pub.Allow; current code uses pull consumers.
+4. **No group deletion endpoint** — ADR mentions groups "can be deleted" but specifies no DELETE API.
 
-4. **Group creation authorization not specified** — `POST /groups` endpoint and `mclaude group create <name>` CLI command are listed, but the authorization rule for creating a group is not stated. The ADR specifies authorization for membership modification ("only group owner can modify group membership") and host rebinding ("current group owner can rebind the host; platform operator can rebind any host"), but is silent on who can create new groups. A developer implementing the endpoint must decide: any authenticated user? Only admins? Only users who own at least one host?
-   - **Doc**: Component Changes → mclaude-control-plane: "New: REST API endpoints: `POST /groups`" and "Authorization: only group owner can modify group membership (add/remove members). Platform operator can modify any group." — this covers modification, not creation.
-   - **Code**: No existing group infrastructure in the codebase (grep for `groups|group_members|group_id` in mclaude-control-plane returns no matches). This is entirely new — the developer has no existing pattern to follow.
+#### Fixes applied
 
-5. **Provisioning subject helpers not addressed in mclaude-common Component Changes** — The ADR changes provisioning subjects from `mclaude.users.{uslug}.hosts.{hslug}.api.projects.*` to `mclaude.hosts.{hslug}.api.projects.*` (host-scoped scheme). The control-plane and controller sections mention the subject change. But the mclaude-common Component Changes section does not mention updating the existing subject helper functions: `UserHostAPIProjectsProvision(u, h)`, `UserHostAPIProjectsCreate(u, h)`, `UserHostAPIProjectsUpdate(u, h)`, `UserHostAPIProjectsDelete(u, h)` — all of which currently produce the old user-prefixed form.
-   - **Doc**: Component Changes → mclaude-common: Lists updates for "subject constants (`FilterMclaudeEvents`, `FilterMclaudeAPI`, `FilterMclaudeLifecycle`)", `subj.JobQueueKVKey()`, `subj.ProjectsKVKey()`, and `HostsKVKey()`. Does not mention the four provisioning subject helpers.
-   - **Code**: `mclaude-common/pkg/subj/subj.go:84-115` — `UserHostAPIProjectsProvision`, `UserHostAPIProjectsCreate`, `UserHostAPIProjectsUpdate`, `UserHostAPIProjectsDelete` all produce `mclaude.users.{u}.hosts.{h}.api.projects.*`. These must be replaced with host-scoped equivalents (`mclaude.hosts.{h}.api.projects.*`), and callers in control-plane and controllers must be updated accordingly.
+| # | Gap | Cause | Resolution | Type |
+|---|-----|-------|-----------|------|
+| 1 | Agent JWT TTL contradiction | Error handling table had stale "24h" example from before TTL was decided | Changed to "5 min" matching the Decisions table | factual |
+| 2 | Agent NKey refresh | ADR assumed CP generates NKey pairs and returns seeds; correct design is client generates keypair, sends public key to CP | Rewrote all credential issuance/refresh wire formats: client sends `nkey_public` in request, CP returns only JWT. Updated host refresh, agent refresh, and agent issuance. Updated controller component changes. | factual |
+| 3 | Pull consumer permission | ADR permission spec was designed for push consumers but didn't state the change from current pull consumer code | User decided: switch to ordered push consumers (better ordering guarantees for chat interface). Added explicit note in session-agent component changes. No MSG.NEXT permission needed. | decision |
+| 4 | No group deletion endpoint | ADR defined group CRUD but omitted DELETE | User decided: defer group deletion to a dedicated groups ADR. Updated re-binding text to say old group is left in place. | decision |
+
+### Round 2
+
+**Gaps found: 3**
+
+1. **`SessionAgentSubjectPermissions()` parameter list incomplete** — missing `uslug` parameter; every permission entry references `{uslug}`.
+2. **Credential issuance response missing import JWT** — one-shot import JWT section describes "host controller receives both JWTs" but wire format only has one `jwt` field.
+3. **`nkeys.go` JWT issuance functions under-scoped** — Component Changes only listed SubjectPermissions rewrites, not the fundamental change to IssueHostJWT/IssueSessionAgentJWT (accept external public key, return only JWT).
+
+#### Fixes applied
+
+| # | Gap | Cause | Resolution | Type |
+|---|-----|-------|-----------|------|
+| 1 | SessionAgentSubjectPermissions params | Component Changes text was abbreviated; "project slug + host slug" omitted the user slug that appears in every permission entry | Changed to `SessionAgentSubjectPermissions(uslug, hslug, pslug string)` with all three parameters listed | factual |
+| 2 | Missing import JWT in response | Credential issuance wire format was written before one-shot import JWT section; the two were never reconciled | Added `import_jwt` field to issuance response with explanation of when it's present (project has pending import) | factual |
+| 3 | nkeys.go Issue functions | Component Changes focused on SubjectPermissions helpers but didn't mention the Issue functions needed the same NKey externalization change | Added explicit `IssueHostJWT(publicKey, hslug)` and `IssueSessionAgentJWT(publicKey, uslug, hslug, pslug)` rewrite note — accept external public key, return only JWT | factual |
+
+### Round 3
+
+CLEAN — no blocking gaps found.
+
+### Result
+
+**CLEAN** after 3 rounds, 7 total gaps resolved (5 factual fixes, 2 design decisions).

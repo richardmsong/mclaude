@@ -21,7 +21,7 @@ const (
 	SubtypeCompactBoundary    = "compact_boundary"
 )
 
-// Session states from session_state_changed events.
+// Session states from session_state_changed events (driver-reported fine-grained states).
 const (
 	StateIdle            = "idle"
 	StateRunning         = "running"
@@ -32,6 +32,17 @@ const (
 	StatePlanMode        = "plan_mode"
 	StateWaitingForInput = "waiting_for_input"
 	StateUnknown         = "unknown"
+)
+
+// KV lifecycle status constants for quota-managed sessions (ADR-0044).
+// These supplement the driver-reported states above with lifecycle states
+// that the session-agent sets explicitly (not derived from driver events).
+const (
+	StatusPending       = "pending"        // CLI subprocess warm, prompt not yet sent
+	StatusPaused        = "paused"         // quota threshold breached; subprocess still alive
+	StatusCompleted     = "completed"      // session_job_complete turn-end with stopReason==""
+	StatusCancelled     = "cancelled"      // explicit sessions.delete on quota-managed session
+	StatusNeedsSpecFix  = "needs_spec_fix" // strict-allowlist denied an out-of-scope tool
 )
 
 // eventHeader holds the minimum fields needed to dispatch an event.

@@ -1,7 +1,5 @@
 module mclaude-control-plane
-
 go 1.25.5
-
 require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.1
@@ -22,7 +20,6 @@ require (
 	k8s.io/client-go v0.35.2
 	sigs.k8s.io/controller-runtime v0.23.3
 )
-
 require (
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
@@ -211,3 +208,4 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 	tags.cncf.io/container-device-interface v1.1.0 // indirect
 )
+

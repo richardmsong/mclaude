@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/creack/pty v1.1.24
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
 	github.com/nats-io/nats.go v1.50.0

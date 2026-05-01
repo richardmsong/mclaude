@@ -56,9 +56,10 @@ func TestSessionListContextDefaults(t *testing.T) {
 	if result.HostSlug != "my-laptop" {
 		t.Errorf("HostSlug = %q; want my-laptop", result.HostSlug)
 	}
-	// KV prefix should be "{uslug}.{hslug}.{pslug}" per ADR-0004.
-	if result.KVKeyPrefix != "alice-gmail.my-laptop.my-project" {
-		t.Errorf("KVKeyPrefix = %q; want alice-gmail.my-laptop.my-project", result.KVKeyPrefix)
+	// KV prefix should be "hosts.{hslug}.projects.{pslug}" per ADR-0054
+	// (user slug is in the bucket name mclaude-projects-{uslug}, not the key).
+	if result.KVKeyPrefix != "hosts.my-laptop.projects.my-project" {
+		t.Errorf("KVKeyPrefix = %q; want hosts.my-laptop.projects.my-project", result.KVKeyPrefix)
 	}
 }
 
@@ -210,16 +211,17 @@ func TestSessionListKVKeyPrefixShape(t *testing.T) {
 		t.Fatalf("RunSessionList: %v", err)
 	}
 
-	// KV key must match the ADR-0004 format: {uslug}.{hslug}.{pslug}
-	wantKV := "richard-rbc.richards-mac.mclaude"
+	// KV key must match the ADR-0054 format: "hosts.{hslug}.projects.{pslug}"
+	// (user slug is in the per-user bucket name, not the key).
+	wantKV := "hosts.richards-mac.projects.mclaude"
 	if result.KVKeyPrefix != wantKV {
 		t.Errorf("KVKeyPrefix = %q; want %q", result.KVKeyPrefix, wantKV)
 	}
 
-	// Events subject must include host slug per ADR-0004.
-	wantEventsPrefix := "mclaude.users.richard-rbc.hosts.richards-mac.projects.mclaude.events."
-	if !strings.HasPrefix(result.EventsSubject, wantEventsPrefix) {
-		t.Errorf("EventsSubject = %q; want prefix %q", result.EventsSubject, wantEventsPrefix)
+	// Events subject must use the ADR-0054 sessions.{sslug}.events hierarchy.
+	wantEventsContains := "mclaude.users.richard-rbc.hosts.richards-mac.projects.mclaude.sessions."
+	if !strings.Contains(result.EventsSubject, wantEventsContains) {
+		t.Errorf("EventsSubject = %q; want to contain %q", result.EventsSubject, wantEventsContains)
 	}
 }
 

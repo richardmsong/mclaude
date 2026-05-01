@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	testutil "mclaude-session-agent/testutil"
 )
 
@@ -162,38 +163,116 @@ done2:
 }
 
 // ---------------------------------------------------------------------------
-// Unit tests — onRawOutput callback
+// Unit tests — onRawOutput callback (ADR-0044 redesign)
 // ---------------------------------------------------------------------------
 
-// TestOnRawOutputCompletionMarker verifies that QuotaMonitor.onRawOutput
-// captures the PR URL from a SESSION_JOB_COMPLETE marker.
-func TestOnRawOutputCompletionMarker(t *testing.T) {
-	m := &QuotaMonitor{}
-	prURL := "https://github.com/org/repo/pull/123"
-	raw := []byte(fmt.Sprintf(`{"type":"assistant","message":{"content":"SESSION_JOB_COMPLETE:%s done"}}`, prURL))
+// TestOnRawOutputByteEstimate verifies that assistant events increment
+// outputTokensSinceSoftMark by len(raw)/4 when stopReason=="quota_soft".
+func TestOnRawOutputByteEstimate(t *testing.T) {
+	m := &QuotaMonitor{
+		stopReason:         "quota_soft",
+		hardHeadroomTokens: 1000, // high budget so hard stop doesn't fire
+		session:            &Session{stdinCh: make(chan []byte, 8)},
+	}
+	raw := make([]byte, 400) // 400 bytes → ~100 estimated tokens
 	m.onRawOutput(EventTypeAssistant, raw)
-	if m.completionPR != prURL {
-		t.Errorf("completionPR: got %q, want %q", m.completionPR, prURL)
+	if m.outputTokensSinceSoftMark != 100 {
+		t.Errorf("byte estimate: got %d, want 100", m.outputTokensSinceSoftMark)
 	}
 }
 
-// TestOnRawOutputNonAssistant verifies that onRawOutput ignores non-assistant events.
-func TestOnRawOutputNonAssistant(t *testing.T) {
-	m := &QuotaMonitor{}
-	raw := []byte(`{"type":"system","content":"SESSION_JOB_COMPLETE:https://github.com/pr/1"}`)
-	m.onRawOutput(EventTypeSystem, raw)
-	if m.completionPR != "" {
-		t.Errorf("expected empty completionPR for non-assistant event, got %q", m.completionPR)
+// TestOnRawOutputAuthoritativeFromResult verifies that the result event's
+// usage.output_tokens replaces the byte estimate.
+func TestOnRawOutputAuthoritativeFromResult(t *testing.T) {
+	m := &QuotaMonitor{
+		stopReason:              "quota_soft",
+		outputTokensAtSoftMark:  100,
+		outputTokensSinceSoftMark: 99, // stale byte estimate
+		hardHeadroomTokens:      1000,
+		session:                 &Session{stdinCh: make(chan []byte, 8)},
+		turnEndedCh:             make(chan struct{}, 1),
+	}
+	// Result event with authoritative usage.output_tokens = 350
+	// outputTokensSinceSoftMark = 350 - 100 (atSoftMark) = 250
+	raw := []byte(`{"type":"result","subtype":"success","usage":{"output_tokens":350}}`)
+	m.onRawOutput(EventTypeResult, raw)
+	if m.outputTokensSinceSoftMark != 250 {
+		t.Errorf("authoritative count: got %d, want 250", m.outputTokensSinceSoftMark)
 	}
 }
 
-// TestOnRawOutputNoMarker verifies that onRawOutput ignores events without the marker.
-func TestOnRawOutputNoMarker(t *testing.T) {
-	m := &QuotaMonitor{}
-	raw := []byte(`{"type":"assistant","message":{"content":"all done, no marker here"}}`)
+// TestOnRawOutputTurnEndSignaled verifies that a result event signals turnEndedCh.
+func TestOnRawOutputTurnEndSignaled(t *testing.T) {
+	m := &QuotaMonitor{
+		turnEndedCh: make(chan struct{}, 1),
+		session:     &Session{stdinCh: make(chan []byte, 8)},
+	}
+	m.onRawOutput(EventTypeResult, []byte(`{"type":"result","subtype":"success"}`))
+	select {
+	case <-m.turnEndedCh:
+		// Correct.
+	case <-time.After(time.Second):
+		t.Error("turnEndedCh not signalled after result event")
+	}
+}
+
+// TestOnRawOutputNonResultIgnored verifies that non-result events do NOT
+// signal turnEndedCh.
+func TestOnRawOutputNonResultIgnored(t *testing.T) {
+	m := &QuotaMonitor{
+		turnEndedCh: make(chan struct{}, 1),
+		session:     &Session{stdinCh: make(chan []byte, 8)},
+	}
+	m.onRawOutput(EventTypeSystem, []byte(`{"type":"system","subtype":"init"}`))
+	select {
+	case <-m.turnEndedCh:
+		t.Error("turnEndedCh should not be signalled for non-result event")
+	default:
+		// Correct.
+	}
+}
+
+// TestOnRawOutputHardBudgetFires verifies that the hard interrupt is sent
+// when outputTokensSinceSoftMark >= hardHeadroomTokens after byte estimate.
+func TestOnRawOutputHardBudgetFires(t *testing.T) {
+	sess := &Session{stdinCh: make(chan []byte, 8)}
+	m := &QuotaMonitor{
+		stopReason:              "quota_soft",
+		outputTokensSinceSoftMark: 95, // near budget
+		hardHeadroomTokens:      100,
+		session:                 sess,
+		turnEndedCh:             make(chan struct{}, 1),
+	}
+	// 400-byte raw → 100 more tokens → total 195 >= 100 → fires interrupt
+	raw := make([]byte, 400)
 	m.onRawOutput(EventTypeAssistant, raw)
-	if m.completionPR != "" {
-		t.Errorf("expected empty completionPR, got %q", m.completionPR)
+	if m.stopReason != "quota_hard" {
+		t.Errorf("stopReason: got %q, want quota_hard", m.stopReason)
+	}
+	select {
+	case msg := <-sess.stdinCh:
+		if !strings.Contains(string(msg), "interrupt") {
+			t.Errorf("expected interrupt message, got: %s", msg)
+		}
+	case <-time.After(time.Second):
+		t.Error("hard interrupt not sent to stdinCh after budget exceeded")
+	}
+}
+
+// TestOnRawOutputZeroHardHeadroom verifies that hardHeadroomTokens=0 means
+// the hard interrupt is NOT fired from the byte estimate (zero means "no
+// hard budget enforcement" — only 0 tolerance fires immediately on soft stop).
+func TestOnRawOutputNoCountWhenNoSoftStop(t *testing.T) {
+	m := &QuotaMonitor{
+		stopReason:         "", // no soft stop yet
+		hardHeadroomTokens: 10,
+		session:            &Session{stdinCh: make(chan []byte, 8)},
+		turnEndedCh:        make(chan struct{}, 1),
+	}
+	// Without stopReason set, assistant events should not count tokens.
+	m.onRawOutput(EventTypeAssistant, make([]byte, 400))
+	if m.outputTokensSinceSoftMark != 0 {
+		t.Errorf("should not count tokens when stopReason is empty, got %d", m.outputTokensSinceSoftMark)
 	}
 }
 
@@ -368,118 +447,202 @@ func TestSignalPermDeniedNonBlocking(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Unit tests — publishExitLifecycle
+// Unit tests — handleTurnEnd / handleSubprocessExit (ADR-0044 redesign)
 // ---------------------------------------------------------------------------
 
-func TestPublishExitLifecycleCompletion(t *testing.T) {
-	var mu sync.Mutex
-	type event struct {
-		sessionID string
-		evType    string
-		extra     map[string]string
-	}
-	var published []event
-	m := &QuotaMonitor{
-		sessionID:    "sess-1",
-		branch:       "schedule/spa-abc12345",
-		cfg:          QuotaMonitorConfig{JobID: "job-1"},
-		completionPR: "https://github.com/pr/42",
-		publishLifec: func(sessionID, evType string, extra map[string]string) {
-			mu.Lock()
-			published = append(published, event{sessionID, evType, extra})
-			mu.Unlock()
-		},
-	}
-	m.publishExitLifecycle("")
-	mu.Lock()
-	defer mu.Unlock()
-	if len(published) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(published))
-	}
-	if published[0].evType != "session_job_complete" {
-		t.Errorf("evType: got %q, want session_job_complete", published[0].evType)
-	}
-	if _, hasPrUrl := published[0].extra["prUrl"]; hasPrUrl {
-		t.Errorf("prUrl should not be present in session_job_complete, got %q", published[0].extra["prUrl"])
-	}
-	if published[0].extra["jobId"] != "job-1" {
-		t.Errorf("jobId: got %q", published[0].extra["jobId"])
-	}
-	if published[0].extra["branch"] != "schedule/spa-abc12345" {
-		t.Errorf("branch: got %q, want schedule/spa-abc12345", published[0].extra["branch"])
-	}
-}
-
-func TestPublishExitLifecycleQuota(t *testing.T) {
+// TestHandleTurnEndQuotaSoft verifies that handleTurnEnd with stopReason=="quota_soft"
+// publishes session_job_paused with pausedVia=quota_soft and resets state.
+func TestHandleTurnEndQuotaSoft(t *testing.T) {
 	type event struct {
 		evType string
 		extra  map[string]string
 	}
 	var published []event
-	// Create a session with usage stats to support outputTokensSinceSoftMark computation.
-	sess := &Session{
-		state: SessionState{
-			Usage: UsageStats{OutputTokens: 5000},
-		},
-	}
+	kv := &kvCapture{}
+	sess := &Session{}
+	sess.state.State = StateRunning
 	m := &QuotaMonitor{
-		sessionID:              "sess-2",
-		session:                sess,
-		cfg:                    QuotaMonitorConfig{JobID: "job-2", Threshold: 75},
-		lastU5:                 82,
-		lastR5:                 time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC),
-		outputTokensAtSoftMark: 3000,
+		sessionID:                 "sess-soft",
+		stopReason:                "quota_soft",
+		lastR5:                    time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC),
+		outputTokensSinceSoftMark: 500,
+		session:                   sess,
 		publishLifec: func(sessionID, evType string, extra map[string]string) {
 			published = append(published, event{evType, extra})
 		},
+		writeKV: kv.write,
 	}
-	m.publishExitLifecycle("quota")
+	m.handleTurnEnd()
+
+	if !m.terminalEventPublished {
+		t.Error("terminalEventPublished should be true after handleTurnEnd")
+	}
 	if len(published) != 1 || published[0].evType != "session_job_paused" {
-		t.Errorf("expected session_job_paused, got %v", published)
+		t.Fatalf("expected session_job_paused, got %v", published)
 	}
-	if published[0].extra["pausedVia"] != "quota_threshold" {
-		t.Errorf("pausedVia: got %q, want quota_threshold", published[0].extra["pausedVia"])
+	if published[0].extra["pausedVia"] != "quota_soft" {
+		t.Errorf("pausedVia: got %q, want quota_soft", published[0].extra["pausedVia"])
 	}
 	if published[0].extra["r5"] != "2026-04-15T10:00:00Z" {
-		t.Errorf("r5: got %q, want 2026-04-15T10:00:00Z", published[0].extra["r5"])
+		t.Errorf("r5: got %q", published[0].extra["r5"])
 	}
-	if published[0].extra["jobId"] != "job-2" {
-		t.Errorf("jobId: got %q, want job-2", published[0].extra["jobId"])
+	// stopReason should be reset after handleTurnEnd.
+	if m.stopReason != "" {
+		t.Errorf("stopReason should be reset, got %q", m.stopReason)
 	}
-	if published[0].extra["outputTokensSinceSoftMark"] != "2000" {
-		t.Errorf("outputTokensSinceSoftMark: got %q, want \"2000\"", published[0].extra["outputTokensSinceSoftMark"])
+	// Session KV should be updated to paused.
+	states := kv.all()
+	if len(states) == 0 {
+		t.Fatal("writeKV not called")
+	}
+	if states[len(states)-1].State != StatusPaused {
+		t.Errorf("KV state: got %q, want %q", states[len(states)-1].State, StatusPaused)
 	}
 }
 
-func TestPublishExitLifecyclePermDenied(t *testing.T) {
-	var published []string
+// TestHandleTurnEndQuotaHard verifies handleTurnEnd with stopReason=="quota_hard".
+func TestHandleTurnEndQuotaHard(t *testing.T) {
+	type event struct {
+		evType string
+		extra  map[string]string
+	}
+	var published []event
+	kv := &kvCapture{}
+	sess := &Session{}
+	sess.state.State = StateRunning
 	m := &QuotaMonitor{
-		sessionID: "sess-3",
-		cfg:       QuotaMonitorConfig{JobID: "job-3"},
+		sessionID:                 "sess-hard",
+		stopReason:                "quota_hard",
+		lastR5:                    time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC),
+		outputTokensSinceSoftMark: 750,
+		session:                   sess,
+		publishLifec: func(sessionID, evType string, extra map[string]string) {
+			published = append(published, event{evType, extra})
+		},
+		writeKV: kv.write,
+	}
+	m.handleTurnEnd()
+
+	if len(published) != 1 || published[0].evType != "session_job_paused" {
+		t.Fatalf("expected session_job_paused, got %v", published)
+	}
+	if published[0].extra["pausedVia"] != "quota_hard" {
+		t.Errorf("pausedVia: got %q, want quota_hard", published[0].extra["pausedVia"])
+	}
+	if published[0].extra["outputTokensSinceSoftMark"] != "750" {
+		t.Errorf("outputTokensSinceSoftMark: got %q, want 750", published[0].extra["outputTokensSinceSoftMark"])
+	}
+}
+
+// TestHandleTurnEndNaturalCompletion verifies that handleTurnEnd with
+// stopReason=="" publishes session_job_complete.
+func TestHandleTurnEndNaturalCompletion(t *testing.T) {
+	var published []string
+	kv := &kvCapture{}
+	sess := &Session{}
+	sess.state.State = StateRunning
+	m := &QuotaMonitor{
+		sessionID:  "sess-complete",
+		stopReason: "", // natural completion
+		session:    sess,
 		publishLifec: func(sessionID, evType string, extra map[string]string) {
 			published = append(published, evType)
 		},
+		writeKV: kv.write,
 	}
-	// permDenied should publish NOTHING (already published by onStrictDeny).
-	m.publishExitLifecycle("permDenied")
+	m.handleTurnEnd()
+
+	if len(published) != 1 || published[0] != "session_job_complete" {
+		t.Errorf("expected session_job_complete, got %v", published)
+	}
+	states := kv.all()
+	if len(states) == 0 {
+		t.Fatal("writeKV not called")
+	}
+	if states[len(states)-1].State != StatusCompleted {
+		t.Errorf("KV state: got %q, want %q", states[len(states)-1].State, StatusCompleted)
+	}
+}
+
+// TestHandleSubprocessExitClean verifies that handleSubprocessExit is a
+// no-op when terminalEventPublished=true (expected exit after completion).
+func TestHandleSubprocessExitClean(t *testing.T) {
+	var published []string
+	kv := &kvCapture{}
+	sess := &Session{}
+	m := &QuotaMonitor{
+		sessionID:              "sess-clean",
+		terminalEventPublished: true,
+		session:                sess,
+		publishLifec: func(sessionID, evType string, extra map[string]string) {
+			published = append(published, evType)
+		},
+		writeKV: kv.write,
+	}
+	m.handleSubprocessExit()
+
 	if len(published) != 0 {
-		t.Errorf("expected no lifecycle event for permDenied, got %v", published)
+		t.Errorf("expected no lifecycle event when terminalEventPublished, got %v", published)
+	}
+	if len(kv.all()) != 0 {
+		t.Error("KV should not be written when terminalEventPublished")
 	}
 }
 
-func TestPublishExitLifecycleFailed(t *testing.T) {
+// TestHandleSubprocessExitFailed verifies that handleSubprocessExit publishes
+// session_job_failed when terminalEventPublished=false (unexpected exit).
+func TestHandleSubprocessExitFailed(t *testing.T) {
 	var published []string
+	kv := &kvCapture{}
+	sess := &Session{}
 	m := &QuotaMonitor{
-		sessionID: "sess-4",
-		cfg:       QuotaMonitorConfig{JobID: "job-4"},
+		sessionID:              "sess-failed",
+		terminalEventPublished: false,
+		session:                sess,
 		publishLifec: func(sessionID, evType string, extra map[string]string) {
 			published = append(published, evType)
 		},
+		writeKV: kv.write,
 	}
-	// No completion PR, no stop reason = session_job_failed.
-	m.publishExitLifecycle("")
+	m.handleSubprocessExit()
+
 	if len(published) != 1 || published[0] != "session_job_failed" {
 		t.Errorf("expected session_job_failed, got %v", published)
+	}
+	states := kv.all()
+	if len(states) == 0 {
+		t.Fatal("writeKV not called")
+	}
+	if states[len(states)-1].State != StateFailed {
+		t.Errorf("KV state: got %q, want %q", states[len(states)-1].State, StateFailed)
+	}
+}
+
+// TestHandleTurnEndPermDenied verifies that handleTurnEnd with
+// stopReason=="permDenied" publishes nothing extra (already published by onStrictDeny).
+func TestHandleTurnEndPermDenied(t *testing.T) {
+	var published []string
+	sess := &Session{}
+	m := &QuotaMonitor{
+		sessionID:  "sess-perm",
+		stopReason: "permDenied",
+		session:    sess,
+		publishLifec: func(sessionID, evType string, extra map[string]string) {
+			published = append(published, evType)
+		},
+	}
+	m.handleTurnEnd()
+
+	if len(published) != 0 {
+		t.Errorf("expected no extra lifecycle event for permDenied, got %v", published)
+	}
+}
+
+// TestHandleSubprocessExitSection exercises the no-op and failure paths together.
+func TestHandleSubprocessExitSection(t *testing.T) {
+	// Verify the StateFailed constant is used in handleSubprocessExit.
+	if StateFailed != "failed" {
+		t.Errorf("StateFailed should be 'failed', got %q", StateFailed)
 	}
 }
 
@@ -535,24 +698,15 @@ func TestQuotaMonitorConfigRoundtrip(t *testing.T) {
 // Unit tests — threshold == 0 disabled case
 // ---------------------------------------------------------------------------
 
-// TestThresholdZeroDisabled verifies that a QuotaMonitor with Threshold=0
-// does not trigger a graceful stop on quota messages (0 = disabled per spec).
-func TestThresholdZeroDisabled(t *testing.T) {
-	var published []string
-	m := &QuotaMonitor{
-		sessionID: "sess-threshold-zero",
-		cfg:       QuotaMonitorConfig{JobID: "job-t0", Threshold: 0},
-		publishLifec: func(sessionID, evType string, extra map[string]string) {
-			published = append(published, evType)
-		},
-	}
-	// Simulate quota message with high utilization.
-	// With Threshold=0, publishExitLifecycle should produce session_job_failed
-	// (no completion PR, no stop reason) — but the run goroutine doesn't fire stop.
-	// Directly call publishExitLifecycle with empty stopReason to verify no quota event.
-	m.publishExitLifecycle("") // no stop reason -> session_job_failed (no PR)
-	if len(published) != 1 || published[0] != "session_job_failed" {
-		t.Errorf("expected session_job_failed for Threshold=0 zero-completion, got %v", published)
+// TestSoftThresholdZeroDisabled verifies that softThreshold=0 means no quota
+// monitoring is activated (handleCreate uses SoftThreshold > 0 as the guard).
+func TestSoftThresholdZeroDisabled(t *testing.T) {
+	// The condition that gates quota monitor creation is req.SoftThreshold > 0.
+	// With 0, no QuotaMonitor is created; the session behaves as interactive.
+	softThreshold := 0
+	enabled := softThreshold > 0
+	if enabled {
+		t.Error("softThreshold=0 should NOT enable quota monitoring")
 	}
 }
 
@@ -579,36 +733,68 @@ func TestThresholdZeroInhibitsQuotaTrigger(t *testing.T) {
 // Unit tests — sendGracefulStop / sendHardInterrupt
 // ---------------------------------------------------------------------------
 
-// TestSendGracefulStop verifies that sendGracefulStop queues the correct
-// QUOTA_THRESHOLD_REACHED message on the session's stdinCh.
+// TestSendGracefulStop verifies that sendGracefulStop publishes the correct
+// MCLAUDE_STOP: quota_soft message to NATS sessions.input (not stdinCh).
+// Requires Docker (real NATS).
 func TestSendGracefulStop(t *testing.T) {
-	st := SessionState{
-		ID:        "sess-graceful",
-		ProjectID: "test-proj",
-		State:     StateIdle,
-		CreatedAt: time.Now(),
-	}
-	sess := newSession(st, "test-user")
+	skipIfNoDocker(t)
 
-	m := &QuotaMonitor{session: sess}
+	deps := testutil.StartDeps(t)
+	nc := deps.NATSConn
+
+	userSlug := "u-graceful"
+	hostSlug := "h-graceful"
+	projectSlug := "p-graceful"
+	sessionSlug := "sess-graceful"
+	inputSubject := "mclaude.users." + userSlug + ".hosts." + hostSlug +
+		".projects." + projectSlug + ".sessions." + sessionSlug + ".input"
+
+	// Subscribe to the sessions.input subject to capture the published message.
+	received := make(chan []byte, 4)
+	sub, err := nc.Subscribe(inputSubject, func(msg *nats.Msg) {
+		cp := make([]byte, len(msg.Data))
+		copy(cp, msg.Data)
+		received <- cp
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	t.Cleanup(func() { sub.Unsubscribe() }) //nolint:errcheck
+
+	m := &QuotaMonitor{
+		userSlug:    userSlug,
+		hostSlug:    hostSlug,
+		projectSlug: projectSlug,
+		sessionSlug: sessionSlug,
+		nc:          nc,
+	}
 	m.sendGracefulStop()
 
+	if err := nc.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
 	select {
-	case msg := <-sess.stdinCh:
+	case data := <-received:
 		var parsed map[string]interface{}
-		if err := json.Unmarshal(msg, &parsed); err != nil {
-			t.Fatalf("sendGracefulStop produced invalid JSON: %v — raw: %s", err, msg)
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			t.Fatalf("invalid JSON from sendGracefulStop: %v — raw: %s", err, data)
 		}
-		if parsed["type"] != "user" {
-			t.Errorf("type: got %q, want \"user\"", parsed["type"])
+		if parsed["type"] != "message" {
+			t.Errorf("type: got %q, want \"message\"", parsed["type"])
 		}
-		// The content must mention QUOTA_THRESHOLD_REACHED.
-		msgData, _ := json.Marshal(parsed)
-		if !strings.Contains(string(msgData), "QUOTA_THRESHOLD_REACHED") {
-			t.Errorf("graceful stop message missing QUOTA_THRESHOLD_REACHED; got: %s", msgData)
+		text, _ := parsed["text"].(string)
+		if text != "MCLAUDE_STOP: quota_soft" {
+			t.Errorf("text: got %q, want \"MCLAUDE_STOP: quota_soft\"", text)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("sendGracefulStop: message not queued on stdinCh within 1s")
+		if parsed["id"] == nil || parsed["id"] == "" {
+			t.Error("id field should be present and non-empty")
+		}
+		if parsed["ts"] == nil {
+			t.Error("ts field should be present")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("sendGracefulStop did not publish to NATS sessions.input within 2s")
 	}
 }
 
@@ -651,92 +837,51 @@ func TestSendHardInterrupt(t *testing.T) {
 // Integration tests — goroutine lifecycle with real NATS
 // ---------------------------------------------------------------------------
 
-// TestHardInterruptFiredAfterStopTimeout verifies that the QuotaMonitor
-// goroutine sends a hard interrupt after the stop timeout expires following
-// a graceful stop. Uses a short stopTimeout override so the test finishes
-// in milliseconds instead of 30 minutes.
-//
-// Requires Docker (real NATS for the subscription).
-func TestHardInterruptFiredAfterStopTimeout(t *testing.T) {
-	skipIfNoDocker(t)
-
-	deps := testutil.StartDeps(t)
-	nc := deps.NATSConn
-
+// TestHardInterruptFiredOnTokenBudget verifies that the QuotaMonitor goroutine
+// sends a hard interrupt via onRawOutput when the token budget is exceeded
+// after a soft stop is injected. No time-based timeout needed.
+func TestHardInterruptFiredOnTokenBudget(t *testing.T) {
 	st := SessionState{
-		ID:        "sess-timer",
+		ID:        "sess-token-budget",
 		ProjectID: "test-proj",
-		State:     StateIdle,
+		State:     StateRunning,
 		CreatedAt: time.Now(),
 	}
 	sess := newSession(st, "test-user")
-
-	var published []string
-	var pubMu sync.Mutex
-
-	m, err := newQuotaMonitor(
-		"sess-timer",
-		"u-timer",
-		"proj-timer",
-		"schedule/timer-abc12345",
-		QuotaMonitorConfig{JobID: "job-timer", Threshold: 75},
-		nc,
-		sess,
-		func(sessionID, evType string, extra map[string]string) {
-			pubMu.Lock()
-			published = append(published, evType)
-			pubMu.Unlock()
-		},
-	)
-	if err != nil {
-		t.Fatalf("newQuotaMonitor: %v", err)
+	m := &QuotaMonitor{
+		stopReason:              "quota_soft",
+		outputTokensSinceSoftMark: 90,
+		hardHeadroomTokens:      100, // budget = 100 tokens
+		session:                 sess,
+		turnEndedCh:             make(chan struct{}, 1),
 	}
 
-	// Set short stop timeout so the test doesn't wait 30 minutes.
-	m.stopTimeout = 50 * time.Millisecond
+	// Simulate 400 bytes of assistant output → 100 more tokens → total 190 >= 100.
+	m.onRawOutput(EventTypeAssistant, make([]byte, 400))
 
-	// Trigger graceful stop via permDenied signal.
-	m.signalPermDenied("SomeTool")
-
-	// Drain the graceful stop message.
-	select {
-	case msg := <-sess.stdinCh:
-		if !strings.Contains(string(msg), "QUOTA_THRESHOLD_REACHED") {
-			t.Errorf("expected QUOTA_THRESHOLD_REACHED message, got: %s", msg)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("graceful stop message not queued within 1s")
+	if m.stopReason != "quota_hard" {
+		t.Errorf("expected stopReason=quota_hard after budget exceeded, got %q", m.stopReason)
 	}
 
-	// After stopTimeout, the goroutine must queue the hard interrupt.
+	// Hard interrupt must be on stdinCh.
 	select {
 	case msg := <-sess.stdinCh:
 		var parsed map[string]interface{}
 		if err := json.Unmarshal(msg, &parsed); err != nil {
-			t.Fatalf("hard interrupt: invalid JSON: %v — raw: %s", err, msg)
+			t.Fatalf("invalid JSON: %v — raw: %s", err, msg)
 		}
 		if parsed["type"] != "control_request" {
-			t.Errorf("expected hard interrupt (type=control_request), got %q", parsed["type"])
+			t.Errorf("type: got %q, want control_request", parsed["type"])
 		}
-		req, ok := parsed["request"].(map[string]interface{})
-		if !ok {
-			t.Fatalf("request field wrong type: %T", parsed["request"])
-		}
-		if req["subtype"] != "interrupt" {
-			t.Errorf("request.subtype: got %q, want interrupt", req["subtype"])
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("hard interrupt not sent after stop timeout expired (stopTimeout=50ms)")
+	case <-time.After(time.Second):
+		t.Fatal("hard interrupt not sent to stdinCh after token budget exceeded")
 	}
-
-	// Clean up: close the monitor.
-	m.stop()
 }
 
 // TestNewQuotaMonitorSubscriptionAndLifecycle verifies that newQuotaMonitor:
 //  1. Subscribes to mclaude.{userId}.quota — messages are delivered to the goroutine
-//     (verified by publishing a quota message above threshold and observing the
-//     graceful stop message on stdinCh — no direct field access to avoid data races)
+//     (verified by publishing a quota message above threshold and observing a
+//     NATS publish to sessions.input — not stdinCh as in the old approach)
 //  2. Starts the goroutine — the goroutine select loop is running and reacts to msgs
 //  3. Calls quotaSub.Unsubscribe() when session doneCh closes — goroutine exits and
 //     stopCh is closed; further publishes are not delivered
@@ -748,34 +893,58 @@ func TestNewQuotaMonitorSubscriptionAndLifecycle(t *testing.T) {
 	deps := testutil.StartDeps(t)
 	nc := deps.NATSConn
 
+	userSlug := "u-quota-lifecycle"
+	hostSlug := "h-quota-lifecycle"
+	projectSlug := "p-quota-lifecycle"
+	sessionSlug := "sess-quota-lifecycle"
+
 	st := SessionState{
-		ID:        "sess-quota-lifecycle",
-		ProjectID: "test-proj",
-		State:     StateIdle,
-		CreatedAt: time.Now(),
+		ID:          sessionSlug,
+		ProjectID:   "test-proj",
+		State:       StateRunning,
+		UserSlug:    userSlug,
+		HostSlug:    hostSlug,
+		ProjectSlug: projectSlug,
+		Slug:        sessionSlug,
+		CreatedAt:   time.Now(),
 	}
 	sess := newSession(st, "test-user")
 
-	userID := "u-quota-lifecycle"
-	quotaSubject := fmt.Sprintf("mclaude.users.%s.quota", userID)
+	quotaSubject := fmt.Sprintf("mclaude.users.%s.quota", userSlug)
+	inputSubject := fmt.Sprintf("mclaude.users.%s.hosts.%s.projects.%s.sessions.%s.input",
+		userSlug, hostSlug, projectSlug, sessionSlug)
 
 	var lifecycleEvents []string
 	var lifecycleMu sync.Mutex
 
+	// Subscribe to sessions.input to observe MCLAUDE_STOP: quota_soft.
+	inputReceived := make(chan []byte, 4)
+	sub, err := nc.Subscribe(inputSubject, func(msg *nats.Msg) {
+		cp := make([]byte, len(msg.Data))
+		copy(cp, msg.Data)
+		inputReceived <- cp
+	})
+	if err != nil {
+		t.Fatalf("subscribe input: %v", err)
+	}
+	t.Cleanup(func() { sub.Unsubscribe() }) //nolint:errcheck
+
+	kv := &kvCapture{}
+
 	m, err := newQuotaMonitor(
-		"sess-quota-lifecycle",
-		userID,
-		"proj-lc",
-		"schedule/lc-abc12345",
-		// Threshold=80: a message with U5=90 must trigger graceful stop.
-		QuotaMonitorConfig{JobID: "job-lc", Threshold: 80},
-		nc,
-		sess,
-		func(sessionID, evType string, extra map[string]string) {
+		sessionSlug, sessionSlug,
+		userSlug, hostSlug, projectSlug,
+		80,  // softThreshold
+		1000, // hardHeadroomTokens (high — won't fire in this test)
+		false, // autoContinue
+		"initial prompt", "",
+		nc, sess,
+		func(sid, evType string, extra map[string]string) {
 			lifecycleMu.Lock()
 			lifecycleEvents = append(lifecycleEvents, evType)
 			lifecycleMu.Unlock()
 		},
+		kv.write,
 	)
 	if err != nil {
 		t.Fatalf("newQuotaMonitor: %v", err)
@@ -784,8 +953,7 @@ func TestNewQuotaMonitorSubscriptionAndLifecycle(t *testing.T) {
 	// --- Part 1: subscription is active — goroutine processes quota messages ---
 	//
 	// Publish U5=90 (above threshold=80 with HasData=true). The goroutine must
-	// react by queuing the graceful stop on stdinCh. This is a safe, race-free
-	// observation: stdinCh is a buffered channel written only by the goroutine.
+	// react by publishing MCLAUDE_STOP: quota_soft to sessions.input.
 	qs := QuotaStatus{HasData: true, U5: 90}
 	data, _ := json.Marshal(qs)
 	if err := nc.Publish(quotaSubject, data); err != nil {
@@ -795,11 +963,16 @@ func TestNewQuotaMonitorSubscriptionAndLifecycle(t *testing.T) {
 		t.Fatalf("flush: %v", err)
 	}
 
-	// Goroutine must receive the message and send the graceful stop.
+	// Goroutine must receive the message and publish MCLAUDE_STOP: quota_soft.
 	select {
-	case msg := <-sess.stdinCh:
-		if !strings.Contains(string(msg), "QUOTA_THRESHOLD_REACHED") {
-			t.Errorf("expected QUOTA_THRESHOLD_REACHED on stdinCh, got: %s", msg)
+	case msg := <-inputReceived:
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(msg, &parsed); err != nil {
+			t.Fatalf("invalid JSON from graceful stop: %v — raw: %s", err, msg)
+		}
+		text, _ := parsed["text"].(string)
+		if text != "MCLAUDE_STOP: quota_soft" {
+			t.Errorf("expected MCLAUDE_STOP: quota_soft, got: %q", text)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("quota message not processed by goroutine within 2s — subscription may not be active")

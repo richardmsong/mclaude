@@ -1,10 +1,12 @@
-// mclaude-cli: debug attach tool, session manager, and host/cluster management
-// for mclaude.
+// mclaude-cli: debug attach tool, session manager, host/cluster management,
+// and session import for mclaude.
 //
 // Usage:
 //
 //	mclaude-cli attach <session-id> [flags]
 //	mclaude-cli session list [-u <uslug>] [-p <pslug>] [--host <hslug>]
+//	mclaude-cli login [--server <url>]
+//	mclaude-cli import [--host <hslug>] [--server <url>]
 //	mclaude-cli host register [--name <name>]
 //	mclaude-cli host list
 //	mclaude-cli host use <hslug>
@@ -17,6 +19,8 @@
 //
 //	attach           Connect to a running session agent via unix socket.
 //	session list     List sessions for a project (uses ~/.mclaude/context.json defaults).
+//	login            Authenticate via device-code flow; stores credentials in ~/.mclaude/auth.json.
+//	import           Import existing Claude Code session data into mclaude.
 //	host register    Register this machine as a BYOH host (device-code flow).
 //	host list        List all hosts the user owns or has access to.
 //	host use         Set the active host.
@@ -62,6 +66,10 @@ func run(args []string) int {
 		return runAttach(args)
 	case "session":
 		return runSession(args)
+	case "login":
+		return runLogin(args)
+	case "import":
+		return runImport(args)
 	case "host":
 		return runHost(args)
 	case "cluster":
@@ -87,6 +95,11 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "    -u <uslug>                user slug (default: ~/.mclaude/context.json)")
 	fmt.Fprintln(os.Stderr, "    -p <pslug>                project slug, accepts @pslug (default: context)")
 	fmt.Fprintln(os.Stderr, "    --host <hslug>            host slug (default: context)")
+	fmt.Fprintln(os.Stderr, "  login                       authenticate via device-code flow")
+	fmt.Fprintln(os.Stderr, "    --server <url>            control-plane base URL (default: context or https://api.mclaude.internal)")
+	fmt.Fprintln(os.Stderr, "  import                      import existing Claude Code session data")
+	fmt.Fprintln(os.Stderr, "    --host <hslug>            host slug (default: ~/.mclaude/active-host)")
+	fmt.Fprintln(os.Stderr, "    --server <url>            control-plane base URL (default: context or https://api.mclaude.internal)")
 	fmt.Fprintln(os.Stderr, "  host register               register this machine as a BYOH host")
 	fmt.Fprintln(os.Stderr, "    --name <name>             display name (default: hostname)")
 	fmt.Fprintln(os.Stderr, "  host list                   list all hosts")
@@ -184,6 +197,53 @@ func runAttach(args []string) int {
 			log.Error().Err(err).Msg("REPL error")
 			return 1
 		}
+	}
+	return 0
+}
+
+// runLogin handles the "login" subcommand.
+func runLogin(args []string) int {
+	flags := cmd.LoginFlags{}
+
+	for i := 2; i < len(args); i++ {
+		switch args[i] {
+		case "--server":
+			i++
+			if i < len(args) {
+				flags.ServerURL = args[i]
+			}
+		}
+	}
+
+	if _, err := cmd.RunLogin(flags, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// runImport handles the "import" subcommand.
+func runImport(args []string) int {
+	flags := cmd.ImportFlags{}
+
+	for i := 2; i < len(args); i++ {
+		switch args[i] {
+		case "--host":
+			i++
+			if i < len(args) {
+				flags.HostSlug = args[i]
+			}
+		case "--server":
+			i++
+			if i < len(args) {
+				flags.ServerURL = args[i]
+			}
+		}
+	}
+
+	if _, err := cmd.RunImport(flags, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return 1
 	}
 	return 0
 }

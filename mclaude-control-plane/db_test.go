@@ -123,8 +123,8 @@ func TestSchema_UsersSlugUniqueIndex(t *testing.T) {
 }
 
 func TestSchema_SessionsKVEnsured(t *testing.T) {
-	// Verify ensureSessionsKV is referenced — checked via function existence rather
-	// than schema (KV bucket creation happens at runtime, not in DDL).
-	// This test guards against the function being removed.
-	_ = ensureSessionsKV // compile-time check: function must exist
+	// Verify per-user KV helper functions exist (ADR-0054: per-user bucket model).
+	// Checked as compile-time guards — KV bucket creation happens at runtime.
+	_ = ensurePerUserSessionsKV // compile-time check: function must exist
+	_ = ensurePerUserProjectsKV // compile-time check: function must exist
 }

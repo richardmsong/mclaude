@@ -25,7 +25,8 @@ type User struct {
 	PasswordHash string // bcrypt — empty for SSO-only accounts
 	OAuthID      *string
 	IsAdmin      bool
-	Slug         string // URL-safe identifier derived from email local-part (ADR-0046)
+	Slug         string  // URL-safe identifier derived from email local-part (ADR-0046)
+	NKeyPublic   *string // NKey public key for challenge-response auth (ADR-0054). NULL until first NKey-based login.
 	CreatedAt    time.Time
 }
 
@@ -55,7 +56,7 @@ func computeUserSlug(email string) string {
 // of truth for both BYOH machines and K8s clusters.
 type Host struct {
 	ID            string
-	UserID        string
+	UserID        string  // OwnerID in spec (ADR-0054); keeps user_id column name for DB compat
 	Slug          string
 	Name          string
 	Type          string  // 'machine' or 'cluster'
@@ -64,10 +65,35 @@ type Host struct {
 	LeafURL       *string // NULL for machine hosts
 	AccountJWT    *string // NULL for machine hosts
 	DirectNATSURL *string // Optional even for cluster hosts
-	PublicKey     *string
-	UserJWT       *string
+	PublicKey     *string // NKey public key (nkey_public in spec, public_key in DB)
+	UserJWT       *string // Legacy JWT column
+	NatsJWT       *string // ADR-0054: host NATS JWT (5-min TTL, host-scoped)
 	CreatedAt     time.Time
 	LastSeenAt    *time.Time
+}
+
+// AgentCredential is a row from the agent_credentials table (ADR-0054).
+type AgentCredential struct {
+	ID          string
+	UserID      string
+	HostSlug    string
+	ProjectSlug string
+	NKeyPublic  string
+	CreatedAt   time.Time
+}
+
+// Attachment is a row from the attachments table (ADR-0053).
+type Attachment struct {
+	ID        string
+	S3Key     string
+	Filename  string
+	MimeType  string
+	SizeBytes int64
+	UserID    string
+	HostID    string
+	ProjectID string
+	Confirmed bool
+	CreatedAt time.Time
 }
 
 // ConnectDB opens a pgxpool connection to the given DSN and verifies connectivity.
@@ -103,17 +129,26 @@ func (db *DB) Migrate(ctx context.Context) error {
 	return err
 }
 
-// GetUserByEmail looks up a user by email address. Returns nil, nil if not found.
-func (db *DB) GetUserByEmail(ctx context.Context, email string) (*User, error) {
-	row := db.pool.QueryRow(ctx,
-		`SELECT id, email, name, password_hash, oauth_id, is_admin, slug, created_at FROM users WHERE email = $1`,
-		email)
+// scanUser scans a user row from a query result.
+func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	u := &User{}
-	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.OAuthID, &u.IsAdmin, &u.Slug, &u.CreatedAt)
+	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.OAuthID, &u.IsAdmin, &u.Slug, &u.NKeyPublic, &u.CreatedAt)
 	if err != nil {
 		if err.Error() == "no rows in result set" {
 			return nil, nil
 		}
+		return nil, err
+	}
+	return u, nil
+}
+
+// GetUserByEmail looks up a user by email address. Returns nil, nil if not found.
+func (db *DB) GetUserByEmail(ctx context.Context, email string) (*User, error) {
+	row := db.pool.QueryRow(ctx,
+		`SELECT id, email, name, password_hash, oauth_id, is_admin, slug, nkey_public, created_at FROM users WHERE email = $1`,
+		email)
+	u, err := scanUser(row)
+	if err != nil {
 		return nil, fmt.Errorf("get user by email: %w", err)
 	}
 	return u, nil
@@ -122,33 +157,47 @@ func (db *DB) GetUserByEmail(ctx context.Context, email string) (*User, error) {
 // GetUserByID looks up a user by ID. Returns nil, nil if not found.
 func (db *DB) GetUserByID(ctx context.Context, id string) (*User, error) {
 	row := db.pool.QueryRow(ctx,
-		`SELECT id, email, name, password_hash, oauth_id, is_admin, slug, created_at FROM users WHERE id = $1`,
+		`SELECT id, email, name, password_hash, oauth_id, is_admin, slug, nkey_public, created_at FROM users WHERE id = $1`,
 		id)
-	u := &User{}
-	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.OAuthID, &u.IsAdmin, &u.Slug, &u.CreatedAt)
+	u, err := scanUser(row)
 	if err != nil {
-		if err.Error() == "no rows in result set" {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("get user by id: %w", err)
 	}
 	return u, nil
 }
 
 // GetUserBySlug looks up a user by slug. Returns nil, nil if not found.
-func (db *DB) GetUserBySlug(ctx context.Context, slug string) (*User, error) {
+func (db *DB) GetUserBySlug(ctx context.Context, uslug string) (*User, error) {
 	row := db.pool.QueryRow(ctx,
-		`SELECT id, email, name, password_hash, oauth_id, is_admin, slug, created_at FROM users WHERE slug = $1`,
-		slug)
-	u := &User{}
-	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.OAuthID, &u.IsAdmin, &u.Slug, &u.CreatedAt)
+		`SELECT id, email, name, password_hash, oauth_id, is_admin, slug, nkey_public, created_at FROM users WHERE slug = $1`,
+		uslug)
+	u, err := scanUser(row)
 	if err != nil {
-		if err.Error() == "no rows in result set" {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("get user by slug: %w", err)
 	}
 	return u, nil
+}
+
+// GetUserByNKeyPublic looks up a user by NKey public key. Returns nil, nil if not found.
+// Used for HTTP challenge-response authentication (ADR-0054).
+func (db *DB) GetUserByNKeyPublic(ctx context.Context, nkeyPublic string) (*User, error) {
+	row := db.pool.QueryRow(ctx,
+		`SELECT id, email, name, password_hash, oauth_id, is_admin, slug, nkey_public, created_at FROM users WHERE nkey_public = $1`,
+		nkeyPublic)
+	u, err := scanUser(row)
+	if err != nil {
+		return nil, fmt.Errorf("get user by nkey_public: %w", err)
+	}
+	return u, nil
+}
+
+// SetUserNKeyPublic stores the user's NKey public key (for challenge-response auth).
+// The UNIQUE constraint prevents two users from sharing the same NKey.
+func (db *DB) SetUserNKeyPublic(ctx context.Context, userID, nkeyPublic string) error {
+	_, err := db.pool.Exec(ctx,
+		`UPDATE users SET nkey_public = $1 WHERE id = $2`,
+		nkeyPublic, userID)
+	return err
 }
 
 // CreateUser inserts a new user row. id must be a pre-generated UUID.
@@ -202,6 +251,8 @@ type Project struct {
 	HostID        *string // nullable during migration; NOT NULL for new installs
 	HostSlug      string  // slug of the host this project is provisioned on; joined from hosts table
 	GitIdentityID *string
+	Source        string  // 'created' or 'import' (ADR-0053)
+	ImportRef     *string // S3 import ID; non-NULL only while archive exists in S3 (ADR-0053)
 	CreatedAt     time.Time
 }
 
@@ -308,17 +359,46 @@ func (db *DB) UpdateProjectStatus(ctx context.Context, projectID, status string)
 	return err
 }
 
+// SetProjectImportRef sets or clears the import_ref column for a project.
+// Pass empty string to clear (set to NULL). Used by import flow (ADR-0053).
+func (db *DB) SetProjectImportRef(ctx context.Context, projectID, importRef string) error {
+	var v *string
+	if importRef != "" {
+		v = &importRef
+	}
+	_, err := db.pool.Exec(ctx,
+		`UPDATE projects SET import_ref = $1 WHERE id = $2`,
+		v, projectID)
+	return err
+}
+
 // DeleteProject removes a project by ID.
 func (db *DB) DeleteProject(ctx context.Context, projectID string) error {
 	_, err := db.pool.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projectID)
 	return err
 }
 
-// GetHostsByUser returns all hosts for a user.
+// scanHost scans a full host row including the new nats_jwt column.
+func scanHost(row interface{ Scan(...any) error }) (*Host, error) {
+	h := &Host{}
+	err := row.Scan(&h.ID, &h.UserID, &h.Slug, &h.Name, &h.Type, &h.Role,
+		&h.JsDomain, &h.LeafURL, &h.AccountJWT, &h.DirectNATSURL,
+		&h.PublicKey, &h.UserJWT, &h.NatsJWT, &h.CreatedAt, &h.LastSeenAt)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return h, nil
+}
+
+// GetHostsByUser returns all hosts for a user (owned or granted via host_access).
+// Per ADR-0054: owned hosts (role='owner') + granted hosts via host_access table.
 func (db *DB) GetHostsByUser(ctx context.Context, userID string) ([]*Host, error) {
 	rows, err := db.pool.Query(ctx,
 		`SELECT id, user_id, slug, name, type, role, js_domain, leaf_url, account_jwt,
-		        direct_nats_url, public_key, user_jwt, created_at, last_seen_at
+		        direct_nats_url, public_key, user_jwt, nats_jwt, created_at, last_seen_at
 		 FROM hosts WHERE user_id = $1 ORDER BY created_at`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("get hosts by user: %w", err)
@@ -326,15 +406,266 @@ func (db *DB) GetHostsByUser(ctx context.Context, userID string) ([]*Host, error
 	defer rows.Close()
 	var hosts []*Host
 	for rows.Next() {
-		h := &Host{}
-		if err := rows.Scan(&h.ID, &h.UserID, &h.Slug, &h.Name, &h.Type, &h.Role,
-			&h.JsDomain, &h.LeafURL, &h.AccountJWT, &h.DirectNATSURL,
-			&h.PublicKey, &h.UserJWT, &h.CreatedAt, &h.LastSeenAt); err != nil {
+		h, err := scanHost(rows)
+		if err != nil {
 			return nil, err
 		}
 		hosts = append(hosts, h)
 	}
 	return hosts, rows.Err()
+}
+
+// GetHostBySlug looks up a host by slug. Returns the first match across all users.
+// Per ADR-0054, hosts are globally unique by slug (one row per host, not per user).
+// During migration, returns the 'owner' row if multiple rows exist for the same slug.
+func (db *DB) GetHostBySlug(ctx context.Context, hslug string) (*Host, error) {
+	row := db.pool.QueryRow(ctx,
+		`SELECT id, user_id, slug, name, type, role, js_domain, leaf_url, account_jwt,
+		        direct_nats_url, public_key, user_jwt, nats_jwt, created_at, last_seen_at
+		 FROM hosts WHERE slug = $1 AND role = 'owner' LIMIT 1`,
+		hslug)
+	h, err := scanHost(row)
+	if err != nil {
+		return nil, fmt.Errorf("get host by slug: %w", err)
+	}
+	return h, nil
+}
+
+// GetHostByPublicKey looks up a host by its NKey public key.
+// Used for HTTP challenge-response auth and $SYS presence tracking (ADR-0054).
+func (db *DB) GetHostByPublicKey(ctx context.Context, publicKey string) (*Host, error) {
+	row := db.pool.QueryRow(ctx,
+		`SELECT id, user_id, slug, name, type, role, js_domain, leaf_url, account_jwt,
+		        direct_nats_url, public_key, user_jwt, nats_jwt, created_at, last_seen_at
+		 FROM hosts WHERE public_key = $1 LIMIT 1`,
+		publicKey)
+	h, err := scanHost(row)
+	if err != nil {
+		return nil, fmt.Errorf("get host by public key: %w", err)
+	}
+	return h, nil
+}
+
+// GetHostAccessSlugs returns the slugs of all hosts the user has access to
+// (owned + granted). Used at JWT issuance time (ADR-0054).
+func (db *DB) GetHostAccessSlugs(ctx context.Context, userID string) ([]string, error) {
+	rows, err := db.pool.Query(ctx,
+		`SELECT DISTINCT h.slug
+		 FROM hosts h
+		 WHERE h.user_id = $1
+		 UNION
+		 SELECT DISTINCT h.slug
+		 FROM hosts h
+		 JOIN host_access ha ON ha.host_id = h.id
+		 WHERE ha.user_id = $1
+		 ORDER BY 1`,
+		userID)
+	if err != nil {
+		return nil, fmt.Errorf("get host access slugs: %w", err)
+	}
+	defer rows.Close()
+	var slugs []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		slugs = append(slugs, s)
+	}
+	return slugs, rows.Err()
+}
+
+// GrantHostAccess inserts a host_access record (user granted access to host).
+// The host owner has implicit access — this table only tracks granted users.
+func (db *DB) GrantHostAccess(ctx context.Context, hostID, userID string) error {
+	_, err := db.pool.Exec(ctx,
+		`INSERT INTO host_access (host_id, user_id) VALUES ($1, $2)
+		 ON CONFLICT (host_id, user_id) DO NOTHING`,
+		hostID, userID)
+	return err
+}
+
+// RevokeHostAccess removes a host_access record.
+func (db *DB) RevokeHostAccess(ctx context.Context, hostID, userID string) error {
+	_, err := db.pool.Exec(ctx,
+		`DELETE FROM host_access WHERE host_id = $1 AND user_id = $2`,
+		hostID, userID)
+	return err
+}
+
+// UpdateHostNatsJWT stores the host's current NATS JWT (5-min TTL per ADR-0054).
+func (db *DB) UpdateHostNatsJWT(ctx context.Context, hostID, natsJWT string) error {
+	_, err := db.pool.Exec(ctx,
+		`UPDATE hosts SET nats_jwt = $1, user_jwt = $1 WHERE id = $2`,
+		natsJWT, hostID)
+	return err
+}
+
+// RegisterHostNKeyPublic stores a host's NKey public key (set at registration).
+func (db *DB) RegisterHostNKeyPublic(ctx context.Context, hostID, publicKey string) error {
+	_, err := db.pool.Exec(ctx,
+		`UPDATE hosts SET public_key = $1 WHERE id = $2`,
+		publicKey, hostID)
+	return err
+}
+
+// GetAgentCredential looks up an agent credential by NKey public key.
+// Used for HTTP challenge-response auth (ADR-0054).
+func (db *DB) GetAgentCredentialByNKeyPublic(ctx context.Context, nkeyPublic string) (*AgentCredential, error) {
+	row := db.pool.QueryRow(ctx,
+		`SELECT id, user_id, host_slug, project_slug, nkey_public, created_at
+		 FROM agent_credentials WHERE nkey_public = $1`,
+		nkeyPublic)
+	ac := &AgentCredential{}
+	err := row.Scan(&ac.ID, &ac.UserID, &ac.HostSlug, &ac.ProjectSlug, &ac.NKeyPublic, &ac.CreatedAt)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get agent credential by nkey: %w", err)
+	}
+	return ac, nil
+}
+
+// UpsertAgentCredential stores or replaces an agent NKey public key.
+// The UNIQUE(user_id, host_slug, project_slug) constraint ensures one active
+// credential per project. On conflict, replaces the public key.
+func (db *DB) UpsertAgentCredential(ctx context.Context, id, userID, hostSlug, projectSlug, nkeyPublic string) error {
+	_, err := db.pool.Exec(ctx,
+		`INSERT INTO agent_credentials (id, user_id, host_slug, project_slug, nkey_public)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (user_id, host_slug, project_slug) DO UPDATE SET
+		     nkey_public = EXCLUDED.nkey_public,
+		     id = EXCLUDED.id`,
+		id, userID, hostSlug, projectSlug, nkeyPublic)
+	return err
+}
+
+// DeleteAgentCredentialsByHost removes all agent credentials for a given host slug.
+// Called during host deregistration (ADR-0054).
+func (db *DB) DeleteAgentCredentialsByHost(ctx context.Context, hostSlug string) error {
+	_, err := db.pool.Exec(ctx,
+		`DELETE FROM agent_credentials WHERE host_slug = $1`,
+		hostSlug)
+	return err
+}
+
+// DeleteAgentCredentialsByProject removes the agent credential for a project.
+// Called during project deprovisioning (ADR-0054).
+func (db *DB) DeleteAgentCredentialsByProject(ctx context.Context, userID, hostSlug, projectSlug string) error {
+	_, err := db.pool.Exec(ctx,
+		`DELETE FROM agent_credentials WHERE user_id = $1 AND host_slug = $2 AND project_slug = $3`,
+		userID, hostSlug, projectSlug)
+	return err
+}
+
+// GetAgentCredentialsByHostUser returns all agent credentials for a host/user combination.
+// Used for revocation during manage.revoke-access (ADR-0054).
+func (db *DB) GetAgentCredentialsByHostUser(ctx context.Context, hostSlug, userID string) ([]*AgentCredential, error) {
+	rows, err := db.pool.Query(ctx,
+		`SELECT id, user_id, host_slug, project_slug, nkey_public, created_at
+		 FROM agent_credentials WHERE host_slug = $1 AND user_id = $2`,
+		hostSlug, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var creds []*AgentCredential
+	for rows.Next() {
+		ac := &AgentCredential{}
+		if err := rows.Scan(&ac.ID, &ac.UserID, &ac.HostSlug, &ac.ProjectSlug, &ac.NKeyPublic, &ac.CreatedAt); err != nil {
+			return nil, err
+		}
+		creds = append(creds, ac)
+	}
+	return creds, rows.Err()
+}
+
+// GetAgentCredentialsByHost returns all agent credentials for a host.
+// Used for revocation during host deregistration/emergency revocation (ADR-0054).
+func (db *DB) GetAgentCredentialsByHost(ctx context.Context, hostSlug string) ([]*AgentCredential, error) {
+	rows, err := db.pool.Query(ctx,
+		`SELECT id, user_id, host_slug, project_slug, nkey_public, created_at
+		 FROM agent_credentials WHERE host_slug = $1`,
+		hostSlug)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var creds []*AgentCredential
+	for rows.Next() {
+		ac := &AgentCredential{}
+		if err := rows.Scan(&ac.ID, &ac.UserID, &ac.HostSlug, &ac.ProjectSlug, &ac.NKeyPublic, &ac.CreatedAt); err != nil {
+			return nil, err
+		}
+		creds = append(creds, ac)
+	}
+	return creds, rows.Err()
+}
+
+// CreateAttachment inserts an attachment record with confirmed=false.
+func (db *DB) CreateAttachment(ctx context.Context, a *Attachment) error {
+	_, err := db.pool.Exec(ctx,
+		`INSERT INTO attachments (id, s3_key, filename, mime_type, size_bytes, user_id, host_id, project_id, confirmed)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE)`,
+		a.ID, a.S3Key, a.Filename, a.MimeType, a.SizeBytes, a.UserID, a.HostID, a.ProjectID)
+	return err
+}
+
+// ConfirmAttachment sets confirmed=true for an attachment.
+func (db *DB) ConfirmAttachment(ctx context.Context, id, userID string) error {
+	tag, err := db.pool.Exec(ctx,
+		`UPDATE attachments SET confirmed = TRUE WHERE id = $1 AND user_id = $2`,
+		id, userID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("attachment not found or unauthorized")
+	}
+	return nil
+}
+
+// GetAttachment returns an attachment by ID. Returns nil, nil if not found.
+func (db *DB) GetAttachment(ctx context.Context, id, userID string) (*Attachment, error) {
+	row := db.pool.QueryRow(ctx,
+		`SELECT id, s3_key, filename, mime_type, size_bytes, user_id, host_id, project_id, confirmed, created_at
+		 FROM attachments WHERE id = $1 AND user_id = $2`,
+		id, userID)
+	a := &Attachment{}
+	err := row.Scan(&a.ID, &a.S3Key, &a.Filename, &a.MimeType, &a.SizeBytes,
+		&a.UserID, &a.HostID, &a.ProjectID, &a.Confirmed, &a.CreatedAt)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return a, nil
+}
+
+// GetProjectByUserAndSlug looks up a project by user ID and slug.
+func (db *DB) GetProjectByUserAndSlug(ctx context.Context, userID, pslug string) (*Project, error) {
+	row := db.pool.QueryRow(ctx,
+		`SELECT p.id, p.user_id, p.name, p.slug, p.git_url, p.status, p.host_id,
+		        COALESCE(h.slug, ''), p.created_at, p.git_identity_id
+		 FROM projects p
+		 LEFT JOIN hosts h ON h.id = p.host_id
+		 WHERE p.user_id = $1 AND p.slug = $2`, userID, pslug)
+	p := &Project{}
+	err := row.Scan(&p.ID, &p.UserID, &p.Name, &p.Slug, &p.GitURL, &p.Status, &p.HostID, &p.HostSlug, &p.CreatedAt, &p.GitIdentityID)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get project by user and slug: %w", err)
+	}
+	return p, nil
+}
+
+// GetProjectsByUserAndHost returns projects for a user on a specific host, by host slug.
+func (db *DB) GetProjectsByUserAndHost(ctx context.Context, userID, hostSlug string) ([]*Project, error) {
+	return db.GetProjectsByHostSlug(ctx, userID, hostSlug)
 }
 
 // GetProjectsByHostSlug returns all projects for a user on a specific host slug.
@@ -510,6 +841,7 @@ CREATE TABLE IF NOT EXISTS users (
     oauth_id      TEXT,
     is_admin      BOOLEAN NOT NULL DEFAULT FALSE,
     slug          TEXT UNIQUE NOT NULL DEFAULT '',
+    nkey_public   TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -526,6 +858,7 @@ CREATE TABLE IF NOT EXISTS hosts (
     direct_nats_url TEXT,
     public_key      TEXT,
     user_jwt        TEXT,
+    nats_jwt        TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_seen_at    TIMESTAMPTZ,
     UNIQUE (user_id, slug),
@@ -618,4 +951,58 @@ $$;
 
 -- Unique index: projects are unique-by-slug per user per host (ADR-0035).
 CREATE UNIQUE INDEX IF NOT EXISTS projects_user_id_host_id_slug_uniq ON projects (user_id, host_id, slug);
+
+-- ADR-0054: NKey public key for user challenge-response auth.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS nkey_public TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS users_nkey_public_uniq ON users (nkey_public) WHERE nkey_public IS NOT NULL;
+
+-- ADR-0054: nats_jwt column on hosts (renamed from user_jwt in the spec).
+-- Both columns exist during migration; nats_jwt is canonical per ADR-0054.
+ALTER TABLE hosts ADD COLUMN IF NOT EXISTS nats_jwt TEXT;
+
+-- ADR-0054: UNIQUE index on hosts.public_key for fast challenge-response lookup.
+CREATE UNIQUE INDEX IF NOT EXISTS hosts_public_key_uniq ON hosts (public_key) WHERE public_key IS NOT NULL;
+
+-- ADR-0054: host_access table — per-user access grants to hosts.
+-- The host owner has implicit access (not stored here). Only granted users.
+CREATE TABLE IF NOT EXISTS host_access (
+    host_id    TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    granted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (host_id, user_id)
+);
+
+-- ADR-0054: agent_credentials table — one credential per user/host/project.
+-- Stores the agent's NKey public key registered by the host controller.
+-- The UNIQUE(user_id, host_slug, project_slug) constraint ensures one active
+-- credential per project per host per user.
+CREATE TABLE IF NOT EXISTS agent_credentials (
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    host_slug    TEXT NOT NULL,
+    project_slug TEXT NOT NULL,
+    nkey_public  TEXT NOT NULL UNIQUE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, host_slug, project_slug)
+);
+
+-- ADR-0053: import support columns on projects.
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'created';
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS import_ref TEXT;
+
+-- ADR-0053: attachments table — metadata for S3-stored binary data.
+CREATE TABLE IF NOT EXISTS attachments (
+    id          TEXT PRIMARY KEY,
+    s3_key      TEXT UNIQUE NOT NULL,
+    filename    TEXT NOT NULL,
+    mime_type   TEXT NOT NULL,
+    size_bytes  BIGINT NOT NULL CHECK (size_bytes > 0),
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    host_id     TEXT NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    confirmed   BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_attachments_project ON attachments (project_id);
+CREATE INDEX IF NOT EXISTS idx_attachments_unconfirmed ON attachments (confirmed, created_at) WHERE confirmed = FALSE;
 `

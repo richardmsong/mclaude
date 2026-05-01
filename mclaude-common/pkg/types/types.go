@@ -2,9 +2,10 @@
 // and lifecycle event constants used across all mclaude components.
 //
 // These types define the canonical wire format for data stored in the
-// mclaude-sessions, mclaude-projects, mclaude-hosts, and mclaude-job-queue
+// mclaude-sessions-{uslug}, mclaude-projects-{uslug}, and mclaude-hosts
 // NATS KV buckets, as well as lifecycle events published on
-// mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{sslug}.
+// mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.sessions.{sslug}.lifecycle.*
+// subjects (ADR-0054 consolidated sessions.> hierarchy).
 //
 // See docs/spec-state-schema.md for the full schema reference.
 package types
@@ -42,7 +43,8 @@ const (
 // ---------------------------------------------------------------------------
 
 // LifecycleEvent is the envelope for all lifecycle event payloads published
-// on mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.lifecycle.{sslug}.
+// on mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.sessions.{sslug}.lifecycle.{eventType}
+// (ADR-0054 consolidated sessions.> hierarchy).
 //
 // Common fields (Type, SessionID, TS) are always present. Per-event optional
 // fields are populated only for the event types that carry them.
@@ -78,12 +80,12 @@ type LifecycleEvent struct {
 }
 
 // ---------------------------------------------------------------------------
-// mclaude-sessions KV value
+// mclaude-sessions-{uslug} KV value
 // ---------------------------------------------------------------------------
 
 // SessionState is the materialised view of a session stored in the
-// mclaude-sessions NATS KV bucket.
-// Key format: {uslug}.{hslug}.{pslug}.{sslug}
+// mclaude-sessions-{uslug} NATS KV bucket (per-user per ADR-0054).
+// Key format: hosts.{hslug}.projects.{pslug}.sessions.{sslug}
 type SessionState struct {
 	ID              string            `json:"id"`
 	Slug            string            `json:"slug,omitempty"`
@@ -103,7 +105,7 @@ type SessionState struct {
 	Capabilities    Capabilities      `json:"capabilities"`
 	PendingControls map[string]any    `json:"pendingControls"`
 	Usage           UsageStats        `json:"usage"`
-	ReplayFromSeq   uint64           `json:"replayFromSeq,omitempty"`
+	ReplayFromSeq   uint64            `json:"replayFromSeq,omitempty"`
 	JoinWorktree    bool              `json:"joinWorktree"`
 }
 
@@ -125,12 +127,12 @@ type UsageStats struct {
 }
 
 // ---------------------------------------------------------------------------
-// mclaude-projects KV value
+// mclaude-projects-{uslug} KV value
 // ---------------------------------------------------------------------------
 
 // ProjectState is the materialised view of a project stored in the
-// mclaude-projects NATS KV bucket.
-// Key format: {userId}.{projectId} (UUID-based; migration to slug-based deferred per ADR-0050)
+// mclaude-projects-{uslug} NATS KV bucket (per-user per ADR-0054).
+// Key format: hosts.{hslug}.projects.{pslug}
 type ProjectState struct {
 	ID            string    `json:"id"`
 	Slug          string    `json:"slug"`
@@ -141,6 +143,11 @@ type ProjectState struct {
 	Status        string    `json:"status"`
 	CreatedAt     time.Time `json:"createdAt"`
 	GitIdentityID string    `json:"gitIdentityId,omitempty"`
+	// ImportRef is the import ID (e.g. "imp-001") set by the control-plane
+	// when a project is created via `mclaude import`. Cleared by the
+	// session-agent after unpacking the import archive. Null when not an
+	// imported project. See ADR-0053.
+	ImportRef string `json:"importRef,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -148,13 +155,12 @@ type ProjectState struct {
 // ---------------------------------------------------------------------------
 
 // HostState is the materialised view of a host stored in the mclaude-hosts
-// NATS KV bucket.
-// Key format: {uslug}.{hslug}
+// NATS KV bucket (shared bucket, per-host read scoping in user JWT per ADR-0054).
+// Key format: {hslug} (flat, globally unique per ADR-0054)
 type HostState struct {
 	Slug       string    `json:"slug"`
 	Type       string    `json:"type"`
 	Name       string    `json:"name"`
-	Role       string    `json:"role"`
 	Online     bool      `json:"online"`
 	LastSeenAt time.Time `json:"lastSeenAt"`
 }
@@ -175,43 +181,72 @@ type QuotaStatus struct {
 }
 
 // ---------------------------------------------------------------------------
-// mclaude-job-queue KV value (ADR-0034 target schema)
+// Import and attachment types (ADR-0053)
+// Binary data (imports, attachments) flows through S3 with pre-signed URLs.
+// No NATS Object Store is used for binary data.
 // ---------------------------------------------------------------------------
 
-// JobEntry is the value stored in the mclaude-job-queue KV bucket.
-// Key format: {uslug}.{jobId}
-//
-// This struct reflects the ADR-0034 target schema. The current session-agent
-// code still carries some ADR-0009 fields (specPath, threshold, prUrl) and
-// lacks several ADR-0034 additions. See spec-state-schema.md for details.
-type JobEntry struct {
-	ID               string     `json:"id"`
-	UserID           string     `json:"userId"`
-	UserSlug         string     `json:"userSlug,omitempty"`
-	HostSlug         string     `json:"hostSlug,omitempty"`
-	ProjectID        string     `json:"projectId"`
-	ProjectSlug      string     `json:"projectSlug,omitempty"`
-	SessionID        string     `json:"sessionId"`
-	SessionSlug      string     `json:"sessionSlug,omitempty"`
-	ClaudeSessionID  string     `json:"claudeSessionID,omitempty"`
-	Prompt           string     `json:"prompt,omitempty"`
-	Title            string     `json:"title,omitempty"`
-	BranchSlug       string     `json:"branchSlug,omitempty"`
-	ResumePrompt     string     `json:"resumePrompt,omitempty"`
-	Priority         int        `json:"priority"`
-	SoftThreshold    int        `json:"softThreshold,omitempty"`
-	HardHeadroomTokens int     `json:"hardHeadroomTokens,omitempty"`
-	AutoContinue     bool       `json:"autoContinue"`
-	PermPolicy       string     `json:"permPolicy,omitempty"`
-	AllowedTools     []string   `json:"allowedTools,omitempty"`
-	Status           string     `json:"status"`
-	PausedVia        string     `json:"pausedVia,omitempty"`
-	Branch           string     `json:"branch"`
-	FailedTool       string     `json:"failedTool,omitempty"`
-	Error            string     `json:"error,omitempty"`
-	RetryCount       int        `json:"retryCount"`
-	ResumeAt         *time.Time `json:"resumeAt,omitempty"`
-	CreatedAt        time.Time  `json:"createdAt"`
-	StartedAt        *time.Time `json:"startedAt,omitempty"`
-	CompletedAt      *time.Time `json:"completedAt,omitempty"`
+// ImportRequest is the payload for the import.request NATS request/reply
+// (CLI → CP). CP responds with a pre-signed S3 URL for the import archive.
+type ImportRequest struct {
+	// Slug is the candidate project slug for the imported project.
+	Slug string `json:"slug"`
+	// SizeBytes is the size of the import archive in bytes.
+	SizeBytes int64 `json:"sizeBytes"`
+}
+
+// ImportMetadata is the contents of metadata.json inside an import archive.
+// Describes the provenance of the imported workspace.
+type ImportMetadata struct {
+	// CWD is the working directory of the imported workspace.
+	CWD string `json:"cwd"`
+	// GitRemote is the git remote URL of the imported repository (if any).
+	GitRemote string `json:"gitRemote,omitempty"`
+	// GitBranch is the git branch at the time of import (if any).
+	GitBranch string `json:"gitBranch,omitempty"`
+	// ImportedAt is the timestamp when the import was created.
+	ImportedAt time.Time `json:"importedAt"`
+	// SessionIds is the list of Claude Code session IDs in the archive.
+	SessionIds []string `json:"sessionIds,omitempty"`
+	// ClaudeCodeVersion is the version of Claude Code that created the archive.
+	ClaudeCodeVersion string `json:"claudeCodeVersion,omitempty"`
+}
+
+// AttachmentRef is a lightweight reference to an attachment carried in NATS
+// messages. The S3 key is not included — agents resolve it via the
+// attachments.download request/reply flow.
+type AttachmentRef struct {
+	// ID is the opaque attachment ID (e.g. "att-001").
+	ID string `json:"id"`
+	// Filename is the original filename (preserved for display/download).
+	Filename string `json:"filename"`
+	// MimeType is the MIME type (e.g. "image/png").
+	MimeType string `json:"mimeType"`
+	// SizeBytes is the file size in bytes.
+	SizeBytes int64 `json:"sizeBytes"`
+}
+
+// AttachmentMeta is the full attachment metadata stored in Postgres (the
+// attachments table) and returned by the download handler. Internal to the
+// control-plane — never sent directly over NATS. Agents use AttachmentRef
+// in NATS messages and resolve the full metadata via request/reply.
+type AttachmentMeta struct {
+	// ID is the opaque attachment ID (e.g. "att-001").
+	ID string `json:"id"`
+	// S3Key is the full S3 object key (e.g. "alice/laptop-a/myapp/attachments/att-001").
+	S3Key string `json:"s3Key"`
+	// Filename is the original filename.
+	Filename string `json:"filename"`
+	// MimeType is the MIME type.
+	MimeType string `json:"mimeType"`
+	// SizeBytes is the file size in bytes.
+	SizeBytes int64 `json:"sizeBytes"`
+	// UserSlug is the owning user's slug.
+	UserSlug string `json:"userSlug"`
+	// HostSlug is the host the project runs on.
+	HostSlug string `json:"hostSlug"`
+	// ProjectSlug is the project the attachment belongs to.
+	ProjectSlug string `json:"projectSlug"`
+	// CreatedAt is when the attachment was created.
+	CreatedAt time.Time `json:"createdAt"`
 }

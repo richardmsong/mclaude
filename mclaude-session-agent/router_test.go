@@ -147,17 +147,72 @@ func TestInitEventPopulatesCapabilities(t *testing.T) {
 		t.Fatal("no KV state with model set")
 	}
 
-	if len(found.Capabilities.Skills) != 2 {
-		t.Errorf("skills: got %v, want [commit review-pr]", found.Capabilities.Skills)
+	// Skills, Tools, Agents are top-level fields per spec-state-schema.md.
+	if len(found.Skills) != 2 {
+		t.Errorf("skills: got %v, want [commit review-pr]", found.Skills)
 	}
-	if len(found.Capabilities.Tools) != 6 {
-		t.Errorf("tools: got %v, want 6 tools", found.Capabilities.Tools)
+	if len(found.Tools) != 6 {
+		t.Errorf("tools: got %v, want 6 tools", found.Tools)
 	}
-	if len(found.Capabilities.Agents) != 2 {
-		t.Errorf("agents: got %v, want [general-purpose Explore]", found.Capabilities.Agents)
+	if len(found.Agents) != 2 {
+		t.Errorf("agents: got %v, want [general-purpose Explore]", found.Agents)
 	}
 
 	// Suppress unused sess variable warning.
+	_ = sess
+}
+
+// TestInitEventPopulatesCapabilities_BoolFlags verifies that the Capabilities field
+// is populated with CLICapabilities boolean flags from the driver on init event.
+// ADR-0005: the SPA reads these to determine backend features without event replay.
+// Per spec-state-schema.md: capabilities holds boolean flags (hasThinking, etc.),
+// NOT tools/skills/agents (those are now top-level fields).
+func TestInitEventPopulatesDriverCapabilities(t *testing.T) {
+	sess, _, kc := startTestSession(t, "simple_message.jsonl", "sess-driver-caps")
+
+	// Wait for KV write with model set (init event processed).
+	if !kc.waitFor(func(states []SessionState) bool {
+		for _, s := range states {
+			if s.Model != "" {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second) {
+		t.Fatal("KV never written after init event")
+	}
+
+	// Find the first KV state that has Capabilities set.
+	var found *SessionState
+	for _, s := range kc.all() {
+		s := s
+		if s.Model != "" {
+			found = &s
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("no KV state with model set")
+	}
+
+	// ClaudeCodeDriver capabilities: HasThinking=true, HasEventStream=true, HasSubagents=true.
+	// These are now in the top-level Capabilities field (drivers.CLICapabilities).
+	if !found.Capabilities.HasThinking {
+		t.Error("Capabilities.HasThinking: got false, want true (ClaudeCodeDriver)")
+	}
+	if !found.Capabilities.HasEventStream {
+		t.Error("Capabilities.HasEventStream: got false, want true (ClaudeCodeDriver)")
+	}
+	if !found.Capabilities.HasSubagents {
+		t.Error("Capabilities.HasSubagents: got false, want true (ClaudeCodeDriver)")
+	}
+	if !found.Capabilities.HasSessionResume {
+		t.Error("Capabilities.HasSessionResume: got false, want true (ClaudeCodeDriver)")
+	}
+	if found.Capabilities.ThinkingLabel != "Thinking" {
+		t.Errorf("Capabilities.ThinkingLabel: got %q, want %q", found.Capabilities.ThinkingLabel, "Thinking")
+	}
+
 	_ = sess
 }
 

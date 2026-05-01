@@ -23,19 +23,20 @@ func skipIfNoDocker(t *testing.T) {
 	}
 }
 
-// TestKVBucketInit verifies StartDeps creates all required KV buckets and streams.
+// TestKVBucketInit verifies CreateUserResources creates all required per-user KV
+// buckets and streams per ADR-0054.
 func TestKVBucketInit(t *testing.T) {
 	skipIfNoDocker(t)
 	deps := testutil.StartDeps(t)
 
+	testutil.CreateUserResources(t, deps.JetStream, "integ-user")
+
 	ctx := context.Background()
 
-	// All four KV buckets must exist.
+	// Per-user KV buckets must exist.
 	for _, bucket := range []string{
-		"mclaude-sessions",
-		"mclaude-projects",
-		"mclaude-heartbeats",
-		"mclaude-laptops",
+		"mclaude-sessions-integ-user",
+		"mclaude-projects-integ-user",
 	} {
 		kv, err := deps.JetStream.KeyValue(ctx, bucket)
 		if err != nil {
@@ -52,30 +53,31 @@ func TestKVBucketInit(t *testing.T) {
 		}
 	}
 
-	// Both JetStream streams must exist.
-	for _, streamName := range []string{"MCLAUDE_EVENTS", "MCLAUDE_LIFECYCLE"} {
-		stream, err := deps.JetStream.Stream(ctx, streamName)
-		if err != nil {
-			t.Errorf("stream %q not found: %v", streamName, err)
-			continue
-		}
+	// Per-user sessions stream must exist.
+	streamName := "MCLAUDE_SESSIONS_integ-user"
+	stream, err := deps.JetStream.Stream(ctx, streamName)
+	if err != nil {
+		t.Errorf("stream %q not found: %v", streamName, err)
+	} else {
 		info, err := stream.Info(ctx)
 		if err != nil {
 			t.Errorf("stream %q info: %v", streamName, err)
-		}
-		if info.Config.Name != streamName {
+		} else if info.Config.Name != streamName {
 			t.Errorf("stream name: got %q, want %q", info.Config.Name, streamName)
 		}
 	}
 }
 
-// TestSessionCRUDInKV verifies put, get, and delete of session state in NATS KV.
+// TestSessionCRUDInKV verifies put, get, and delete of session state in the
+// per-user NATS KV bucket per ADR-0054.
 func TestSessionCRUDInKV(t *testing.T) {
 	skipIfNoDocker(t)
 	deps := testutil.StartDeps(t)
+	testutil.CreateUserResources(t, deps.JetStream, "integ-user")
 
 	ctx := context.Background()
-	kv, err := deps.JetStream.KeyValue(ctx, "mclaude-sessions")
+	// Per ADR-0054, sessions bucket is per-user: mclaude-sessions-{uslug}.
+	kv, err := deps.JetStream.KeyValue(ctx, "mclaude-sessions-integ-user")
 	if err != nil {
 		t.Fatalf("get sessions KV: %v", err)
 	}
@@ -91,8 +93,8 @@ func TestSessionCRUDInKV(t *testing.T) {
 		Model:     "claude-sonnet-4-6",
 	}
 
-	// Create.
-	key := sessionKVKey(slug.UserSlug("integ-user"), slug.HostSlug("local"), slug.ProjectSlug(st.ProjectID), slug.SessionSlug(st.ID))
+	// Create. Key format: hosts.{hslug}.projects.{pslug}.sessions.{sslug} (no user slug in key).
+	key := sessionKVKey(slug.HostSlug("local"), slug.ProjectSlug(st.ProjectID), slug.SessionSlug(st.ID))
 	data, err := json.Marshal(st)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -148,18 +150,21 @@ func TestSessionCRUDInKV(t *testing.T) {
 
 
 // TestLifecycleEventPubSub verifies publish and consume of lifecycle events
-// on the MCLAUDE_LIFECYCLE JetStream stream.
+// on the per-user MCLAUDE_SESSIONS_{uslug} JetStream stream per ADR-0054.
 func TestLifecycleEventPubSub(t *testing.T) {
 	skipIfNoDocker(t)
 	deps := testutil.StartDeps(t)
+	testutil.CreateUserResources(t, deps.JetStream, "integ-user")
 
 	ctx := context.Background()
 	js := deps.JetStream
 
-	subject := "mclaude.users.integ-user.hosts.local.projects.integ-proj.lifecycle.integ-sess"
+	// Per ADR-0054, lifecycle events go to sessions.{sslug}.lifecycle.{eventType}
+	// and are captured by the per-user MCLAUDE_SESSIONS_{uslug} stream.
+	subject := "mclaude.users.integ-user.hosts.local.projects.integ-proj.sessions.integ-sess.lifecycle.session_created"
 
 	// Subscribe before publishing so we don't miss the message.
-	cons, err := js.CreateOrUpdateConsumer(ctx, "MCLAUDE_LIFECYCLE", jetstream.ConsumerConfig{
+	cons, err := js.CreateOrUpdateConsumer(ctx, "MCLAUDE_SESSIONS_integ-user", jetstream.ConsumerConfig{
 		FilterSubject: subject,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 	})
@@ -228,14 +233,15 @@ func TestNATSReconnect(t *testing.T) {
 	}
 }
 
-// TestNewAgentCreatesEventStream verifies that NewAgent creates the MCLAUDE_EVENTS
-// stream with the correct spec configuration (idempotent call).
-func TestNewAgentCreatesEventStream(t *testing.T) {
+// TestNewAgentConnectsToPerUserResources verifies that NewAgent succeeds when the
+// per-user KV buckets and MCLAUDE_SESSIONS_{uslug} stream are pre-created by the
+// control-plane (simulated by CreateUserResources). Per ADR-0054, the agent does NOT
+// create streams — it only opens pre-existing per-user resources.
+func TestNewAgentConnectsToPerUserResources(t *testing.T) {
 	skipIfNoDocker(t)
 	deps := testutil.StartDeps(t)
+	testutil.CreateUserResources(t, deps.JetStream, "integ-user")
 
-	// NewAgent should be able to create or confirm the MCLAUDE_EVENTS stream.
-	// StartDeps pre-creates the KV buckets; we re-use the connection.
 	logger := zerolog.New(io.Discard)
 	agent, err := NewAgent(deps.NATSConn, "integ-user", slug.UserSlug("integ-user"), slug.HostSlug("local"), "integ-proj", slug.ProjectSlug("integ-proj"), "claude", "", logger, nil, nil, "")
 	if err != nil {
@@ -246,54 +252,66 @@ func TestNewAgentCreatesEventStream(t *testing.T) {
 	ctx := context.Background()
 	js := deps.JetStream
 
-	// Verify the MCLAUDE_EVENTS stream has the spec-required config.
-	stream, err := js.Stream(ctx, "MCLAUDE_EVENTS")
+	// The agent must have connected to the per-user sessions KV bucket.
+	_, err = js.KeyValue(ctx, "mclaude-sessions-integ-user")
 	if err != nil {
-		t.Fatalf("MCLAUDE_EVENTS stream not found after NewAgent: %v", err)
+		t.Errorf("mclaude-sessions-integ-user KV not found: %v", err)
+	}
+
+	// The agent must NOT have created any streams (stream creation is CP's job).
+	for _, stale := range []string{"MCLAUDE_EVENTS", "MCLAUDE_API", "MCLAUDE_LIFECYCLE"} {
+		if _, err := js.Stream(ctx, stale); err == nil {
+			t.Errorf("stale stream %q should not exist — agent must not create streams", stale)
+		}
+	}
+
+	// The per-user stream (pre-created by CP simulation) must still exist.
+	stream, err := js.Stream(ctx, "MCLAUDE_SESSIONS_integ-user")
+	if err != nil {
+		t.Fatalf("MCLAUDE_SESSIONS_integ-user not found: %v", err)
 	}
 	info, err := stream.Info(ctx)
 	if err != nil {
 		t.Fatalf("stream info: %v", err)
 	}
-
 	if info.Config.Retention != jetstream.LimitsPolicy {
 		t.Errorf("retention: got %v, want LimitsPolicy", info.Config.Retention)
 	}
 	if info.Config.MaxAge != 30*24*time.Hour {
 		t.Errorf("max_age: got %v, want 30d", info.Config.MaxAge)
 	}
-	if info.Config.Storage != jetstream.FileStorage {
-		t.Errorf("storage: got %v, want FileStorage", info.Config.Storage)
-	}
-	if info.Config.Discard != jetstream.DiscardOld {
-		t.Errorf("discard: got %v, want DiscardOld", info.Config.Discard)
-	}
-	found := false
-	for _, subj := range info.Config.Subjects {
-		if subj == "mclaude.users.*.hosts.*.projects.*.events.*" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("subjects: %v does not include mclaude.users.*.hosts.*.projects.*.events.*", info.Config.Subjects)
+}
+
+// TestNewAgentFailsWithoutPerUserResources verifies that NewAgent fails fast
+// when the per-user KV buckets don't exist (control-plane not started).
+func TestNewAgentFailsWithoutPerUserResources(t *testing.T) {
+	skipIfNoDocker(t)
+	deps := testutil.StartDeps(t)
+	// Intentionally do NOT call CreateUserResources.
+
+	logger := zerolog.New(io.Discard)
+	_, err := NewAgent(deps.NATSConn, "no-user", slug.UserSlug("no-user"), slug.HostSlug("local"), "no-proj", slug.ProjectSlug("no-proj"), "claude", "", logger, nil, nil, "")
+	if err == nil {
+		t.Error("NewAgent should fail when per-user KV buckets don't exist")
 	}
 }
 
-// TestNewAgentEventStreamIdempotent verifies that calling NewAgent twice
-// (stream already exists) succeeds without error.
-func TestNewAgentEventStreamIdempotent(t *testing.T) {
+// TestNewAgentIdempotentForSameUser verifies that calling NewAgent twice for the
+// same user succeeds (second call opens the same per-user resources).
+func TestNewAgentIdempotentForSameUser(t *testing.T) {
 	skipIfNoDocker(t)
 	deps := testutil.StartDeps(t)
+	testutil.CreateUserResources(t, deps.JetStream, "integ-user")
 
 	logger := zerolog.New(io.Discard)
 
-	// First call — creates the stream.
+	// First call.
 	_, err := NewAgent(deps.NATSConn, "integ-user", slug.UserSlug("integ-user"), slug.HostSlug("local"), "integ-proj", slug.ProjectSlug("integ-proj"), "claude", "", logger, nil, nil, "")
 	if err != nil {
 		t.Fatalf("first NewAgent: %v", err)
 	}
 
-	// Second call on the same connection — stream already exists, must not error.
+	// Second call (same user, different project) — same per-user resources.
 	_, err = NewAgent(deps.NATSConn, "integ-user", slug.UserSlug("integ-user"), slug.HostSlug("local"), "integ-proj-2", slug.ProjectSlug("integ-proj-2"), "claude", "", logger, nil, nil, "")
 	if err != nil {
 		t.Fatalf("second NewAgent (idempotent): %v", err)

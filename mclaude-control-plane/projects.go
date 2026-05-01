@@ -70,9 +70,11 @@ func provisionTimeoutSeconds() time.Duration {
 	return DefaultProvisionTimeoutSeconds * time.Second
 }
 
-// StartProjectsSubscriber connects to NATS, ensures the mclaude-projects,
-// mclaude-job-queue, and mclaude-hosts KV buckets exist, and subscribes to
-// mclaude.users.*.api.projects.create (ADR-0050: slug-based subject).
+// StartProjectsSubscriber connects to NATS, ensures the shared mclaude-hosts KV
+// bucket exists, and subscribes to project creation NATS subjects.
+// Per ADR-0054, per-user KV buckets (mclaude-sessions-{uslug}, mclaude-projects-{uslug})
+// and the per-user sessions stream (MCLAUDE_SESSIONS_{uslug}) are created on user
+// registration/first login, not at startup.
 // The caller owns the *nats.Conn lifetime — Close() it on shutdown.
 func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 	js, err := nc.JetStream()
@@ -80,26 +82,13 @@ func (s *Server) StartProjectsSubscriber(nc *nats.Conn) error {
 		return err
 	}
 
-	// Ensure buckets exist at startup so they're ready before subscriptions fire.
-	if _, err := ensureProjectsKV(js); err != nil {
-		return err
-	}
-
-	if _, err := ensureJobQueueKV(js); err != nil {
-		return err
-	}
-
+	// Only the shared mclaude-hosts KV bucket is created at startup.
+	// Per-user buckets are created on user registration (ensureUserResources).
 	hostsKV, err := ensureHostsKV(js)
 	if err != nil {
 		return err
 	}
 	s.hostsKV = hostsKV
-
-	// Spec startup step 7: ensure mclaude-sessions KV bucket exists.
-	// Control-plane doesn't write to it — bucket creation only.
-	if _, err := ensureSessionsKV(js); err != nil {
-		return err
-	}
 
 	// CROSS-1 (ADR-0052): Subscribe to BOTH the legacy user-scoped subject and the
 	// host-scoped subject. The SPA publishes to the host-scoped subject
@@ -224,7 +213,8 @@ func (s *Server) handleProjectCreate(nc *nats.Conn, msg *nats.Msg, userSlug, sub
 			GitIdentityID: gitIdentityIDStr,
 		}
 		provData, _ := json.Marshal(provReq)
-		provSubject := subj.UserHostAPIProjectsProvision(slug.UserSlug(userSlug), slug.HostSlug(hostSlug))
+		// ADR-0054: publish to host-scoped fan-out subject.
+		provSubject := subj.HostUserProjectsCreate(slug.HostSlug(hostSlug), slug.UserSlug(userSlug), slug.ProjectSlug(proj.Slug))
 		provReply, err := nc.Request(provSubject, provData, provisionTimeoutSeconds())
 		if err != nil {
 			log.Error().Err(err).
@@ -276,16 +266,17 @@ func (s *Server) handleProjectCreate(nc *nats.Conn, msg *nats.Msg, userSlug, sub
 	_ = msg.Respond(reply)
 }
 
-// writeProjectKV writes a Project to the mclaude-projects JetStream KV bucket.
-// userSlug and hostSlug are included in the value (ADR-0050) so the SPA can
-// construct host-scoped NATS subjects. The key format ({userID}.{projectID})
-// is unchanged — key migration to {uslug}.{hslug}.{pslug} is a separate ADR.
+// writeProjectKV writes a Project to the per-user mclaude-projects-{uslug} KV bucket.
+// ADR-0054: per-user bucket with hierarchical key format hosts.{hslug}.projects.{pslug}.
 func writeProjectKV(nc *nats.Conn, userID, userSlug, hostSlug string, proj *Project) error {
+	if userSlug == "" || hostSlug == "" || proj.Slug == "" {
+		return nil // not enough info to construct the per-user key
+	}
 	js, err := nc.JetStream()
 	if err != nil {
 		return err
 	}
-	kv, err := ensureProjectsKV(js)
+	kv, err := ensurePerUserProjectsKV(js, userSlug)
 	if err != nil {
 		return err
 	}
@@ -301,36 +292,42 @@ func writeProjectKV(nc *nats.Conn, userID, userSlug, hostSlug string, proj *Proj
 		GitIdentityID: proj.GitIdentityID,
 	}
 	val, _ := json.Marshal(state)
-	_, err = kv.Put(userID+"."+proj.ID, val)
+	// ADR-0054: hierarchical key format with literal type-tokens.
+	key := "hosts." + hostSlug + ".projects." + proj.Slug
+	_, err = kv.Put(key, val)
 	return err
 }
 
-// ensureProjectsKV creates the mclaude-projects KV bucket if it doesn't exist.
-func ensureProjectsKV(js nats.JetStreamContext) (nats.KeyValue, error) {
-	kv, err := js.KeyValue("mclaude-projects")
+// ensurePerUserProjectsKV creates the per-user mclaude-projects-{uslug} KV bucket (ADR-0054).
+func ensurePerUserProjectsKV(js nats.JetStreamContext, uslug string) (nats.KeyValue, error) {
+	bucket := userProjectsBucket(uslug)
+	kv, err := js.KeyValue(bucket)
 	if err == nil {
 		return kv, nil
 	}
 	return js.CreateKeyValue(&nats.KeyValueConfig{
-		Bucket:  "mclaude-projects",
+		Bucket:  bucket,
 		History: 1,
 	})
 }
 
-// ensureJobQueueKV creates the mclaude-job-queue KV bucket if it doesn't exist.
-func ensureJobQueueKV(js nats.JetStreamContext) (nats.KeyValue, error) {
-	kv, err := js.KeyValue("mclaude-job-queue")
+// ensurePerUserSessionsKV creates the per-user mclaude-sessions-{uslug} KV bucket (ADR-0054).
+// History=64 allows replay of recent session state updates.
+func ensurePerUserSessionsKV(js nats.JetStreamContext, uslug string) (nats.KeyValue, error) {
+	bucket := userSessionsBucket(uslug)
+	kv, err := js.KeyValue(bucket)
 	if err == nil {
 		return kv, nil
 	}
 	return js.CreateKeyValue(&nats.KeyValueConfig{
-		Bucket:  "mclaude-job-queue",
-		History: 1,
+		Bucket:  bucket,
+		History: 64,
 	})
 }
 
-// ensureHostsKV creates the mclaude-hosts KV bucket if it doesn't exist (ADR-0046).
-// The bucket stores host liveness state keyed by {uslug}.{hslug}.
+// ensureHostsKV creates the shared mclaude-hosts KV bucket (ADR-0054).
+// Key format: {hslug} (flat key — hosts are globally unique).
+// Read access is scoped per-host in user JWTs.
 func ensureHostsKV(js nats.JetStreamContext) (nats.KeyValue, error) {
 	kv, err := js.KeyValue("mclaude-hosts")
 	if err == nil {
@@ -342,19 +339,47 @@ func ensureHostsKV(js nats.JetStreamContext) (nats.KeyValue, error) {
 	})
 }
 
-// ensureSessionsKV creates the mclaude-sessions KV bucket if it doesn't exist.
-// Per spec startup step 7, the control-plane ensures this bucket exists but
-// does not write to it (session-agents own session state).
-// History=64 allows the SPA to replay recent session state updates (ADR-0046).
-func ensureSessionsKV(js nats.JetStreamContext) (nats.KeyValue, error) {
-	kv, err := js.KeyValue("mclaude-sessions")
+// ensurePerUserSessionsStream creates the per-user MCLAUDE_SESSIONS_{uslug} JetStream stream (ADR-0054).
+// Replaces the previous three shared streams (MCLAUDE_EVENTS, MCLAUDE_API, MCLAUDE_LIFECYCLE).
+func ensurePerUserSessionsStream(js nats.JetStreamContext, uslug string) error {
+	streamName := userSessionsStream(uslug)
+	subject := "mclaude.users." + uslug + ".hosts.*.projects.*.sessions.>"
+
+	// Check if stream already exists
+	_, err := js.StreamInfo(streamName)
 	if err == nil {
-		return kv, nil
+		return nil // already exists
 	}
-	return js.CreateKeyValue(&nats.KeyValueConfig{
-		Bucket:  "mclaude-sessions",
-		History: 64,
+
+	_, err = js.AddStream(&nats.StreamConfig{
+		Name:       streamName,
+		Subjects:   []string{subject},
+		Retention:  nats.LimitsPolicy,
+		MaxAge:     30 * 24 * time.Hour, // 30 days
+		Storage:    nats.FileStorage,
+		Discard:    nats.DiscardOld,
 	})
+	return err
+}
+
+// ensureUserResources creates all per-user JetStream resources on user registration.
+// Per ADR-0054: creates mclaude-sessions-{uslug}, mclaude-projects-{uslug},
+// and MCLAUDE_SESSIONS_{uslug} stream.
+func ensureUserResources(nc *nats.Conn, uslug string) error {
+	js, err := nc.JetStream()
+	if err != nil {
+		return err
+	}
+	if _, err := ensurePerUserSessionsKV(js, uslug); err != nil {
+		return err
+	}
+	if _, err := ensurePerUserProjectsKV(js, uslug); err != nil {
+		return err
+	}
+	if err := ensurePerUserSessionsStream(js, uslug); err != nil {
+		return err
+	}
+	return nil
 }
 
 // replyError sends a JSON error reply if the message has a reply subject.
@@ -382,11 +407,13 @@ func publishProjectsUpdated(nc *nats.Conn, userSlug string) {
 // publishProjectsUpdateToHost publishes a NATS message to
 // mclaude.users.{uslug}.hosts.{hslug}.api.projects.update so the controller
 // refreshes user-secrets (GAP-CP-03, GAP-CP-05).
+// This subject still exists per spec-control-plane.md (PATCH /api/projects/{id}).
 func publishProjectsUpdateToHost(nc *nats.Conn, userSlug, hostSlug string) {
 	if nc == nil || userSlug == "" || hostSlug == "" {
 		return
 	}
-	subject := subj.UserHostAPIProjectsUpdate(slug.UserSlug(userSlug), slug.HostSlug(hostSlug))
+	// Inline construction: mclaude.users.{uslug}.hosts.{hslug}.api.projects.update
+	subject := "mclaude.users." + userSlug + ".hosts." + hostSlug + ".api.projects.update"
 	payload, _ := json.Marshal(map[string]string{"event": "credentials_changed"})
 	if err := nc.Publish(subject, payload); err != nil {
 		log.Warn().Err(err).Str("subject", subject).Msg("publish projects.update failed (non-fatal)")
@@ -394,14 +421,20 @@ func publishProjectsUpdateToHost(nc *nats.Conn, userSlug, hostSlug string) {
 }
 
 // publishProjectsDeleteToHost publishes a NATS message to
-// mclaude.users.{uslug}.hosts.{hslug}.api.projects.delete so the controller
-// tears down per-project resources (GAP-CP-04).
-func publishProjectsDeleteToHost(nc *nats.Conn, userSlug, hostSlug, projectID string) {
+// mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.delete (ADR-0054 fan-out)
+// so the controller tears down per-project resources (GAP-CP-04).
+func publishProjectsDeleteToHost(nc *nats.Conn, userSlug, hostSlug, projectSlug, projectID string) {
 	if nc == nil || userSlug == "" || hostSlug == "" {
 		return
 	}
-	subject := subj.UserHostAPIProjectsDelete(slug.UserSlug(userSlug), slug.HostSlug(hostSlug))
-	payload, _ := json.Marshal(map[string]string{"projectId": projectID, "event": "deleted"})
+	var subject string
+	if projectSlug != "" {
+		subject = subj.HostUserProjectsDelete(slug.HostSlug(hostSlug), slug.UserSlug(userSlug), slug.ProjectSlug(projectSlug))
+	} else {
+		// Fallback for callers without project slug: use legacy user-scoped subject.
+		subject = "mclaude.users." + userSlug + ".hosts." + hostSlug + ".api.projects.delete"
+	}
+	payload, _ := json.Marshal(map[string]string{"projectId": projectID, "projectSlug": projectSlug, "event": "deleted"})
 	if err := nc.Publish(subject, payload); err != nil {
 		log.Warn().Err(err).Str("subject", subject).Str("projectId", projectID).Msg("publish projects.delete failed (non-fatal)")
 	}
