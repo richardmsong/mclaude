@@ -1,8 +1,9 @@
 # ADR: Fix User Slug Derivation and K8s Namespace Naming
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-01: accepted
+- 2026-05-01: implemented — all scope CLEAN
 
 ## Overview
 
