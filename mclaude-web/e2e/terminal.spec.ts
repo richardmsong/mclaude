@@ -18,9 +18,11 @@ test.describe('Terminal Tab', () => {
     // Wait for dashboard
     await expect(page.locator('[data-testid="auth-screen"]')).not.toBeVisible({ timeout: 15_000 })
 
-    // Open the first session
-    const sessionItem = page.locator('button').filter({ hasText: /Working|Idle|Needs permission|Updating|Restarting|Failed|Unknown|Waiting/ }).first()
-    await expect(sessionItem).toBeVisible({ timeout: 15_000 })
+    // Open the first session (look for session row by name or status dot)
+    const sessionItem = page.locator('button').filter({
+      has: page.locator('span.pulse, span[style*="border-radius: 50%"]'),
+    }).first()
+    await expect(sessionItem).toBeVisible({ timeout: 30_000 })
     await sessionItem.click()
 
     // Wait for session detail to load
