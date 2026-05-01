@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
+	"mclaude.io/common/pkg/hostauth"
 	"mclaude.io/common/pkg/slug"
 )
 
@@ -101,27 +102,24 @@ func main() {
 	// If CP URL is provided, use HostAuth for dynamic JWT refresh (ADR-0054).
 	// Otherwise fall back to static creds file.
 	var natsOpts []nats.Option
-	var hostAuth *HostAuth
+	var ha *hostauth.HostAuth
 
 	if cpURL != "" {
 		// Load the NKey seed and current JWT from the .creds file.
 		// HostAuth will proactively refresh the JWT before the 5-minute TTL expires.
-		credsData, err := os.ReadFile(credsFile)
-		if err != nil {
-			log.Fatal().Err(err).Str("creds_file", credsFile).Msg("failed to read credentials file")
+		var haErr error
+		ha, haErr = hostauth.NewHostAuthFromCredsFile(credsFile, cpURL, log.Logger)
+		if haErr != nil {
+			log.Fatal().Err(haErr).Str("creds_file", credsFile).Msg("failed to load credentials")
 		}
-		hostAuth, err = NewHostAuthFromCredsFile(credsData, cpURL, log.Logger)
-		if err != nil {
-			log.Fatal().Err(err).Str("creds_file", credsFile).Msg("failed to parse credentials")
-		}
-		natsOpts = append(natsOpts, nats.UserJWT(hostAuth.JWTFunc(), hostAuth.SignFunc()))
+		natsOpts = append(natsOpts, nats.UserJWT(ha.JWTFunc(), ha.SignFunc()))
 
 		// On NATS permissions violation, trigger an immediate JWT refresh (ADR-0054).
 		// This handles the edge case where the host's cached JWT predates a permission change.
 		natsOpts = append(natsOpts, nats.ErrorHandler(func(_ *nats.Conn, sub *nats.Subscription, err error) {
 			if err != nil && isPermissionsViolation(err) {
 				log.Warn().Err(err).Msg("NATS permissions violation — triggering immediate JWT refresh")
-				if _, refreshErr := hostAuth.Refresh(context.Background()); refreshErr != nil {
+				if _, refreshErr := ha.Refresh(context.Background()); refreshErr != nil {
 					log.Warn().Err(refreshErr).Msg("immediate JWT refresh failed")
 				} else {
 					log.Info().Msg("JWT refreshed after permissions violation")
@@ -148,8 +146,8 @@ func main() {
 	defer cancel()
 
 	// Start host JWT refresh loop (proactive, before 5-minute TTL expiry).
-	if hostAuth != nil {
-		hostAuth.StartRefreshLoop(ctx)
+	if ha != nil {
+		ha.StartRefreshLoop(ctx)
 	}
 
 	ctrl := NewController(nc, hostSlug, dataDir, cpURL, log.Logger)

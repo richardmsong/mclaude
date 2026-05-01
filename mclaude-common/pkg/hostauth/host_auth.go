@@ -1,12 +1,17 @@
-package main
+// Package hostauth provides shared NKey challenge-response authentication logic
+// for host controllers. Both mclaude-controller-k8s and mclaude-controller-local
+// import this package as mclaude.io/common/pkg/hostauth (ADR-0063).
+package hostauth
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -21,9 +26,14 @@ const (
 	hostJWTRefreshBuffer = 60 * time.Second
 )
 
-// HostAuth manages the host controller's NKey identity and JWT credential refresh.
-// It loads the NKey seed from the .creds file and handles proactive JWT refresh
-// via the CP HTTP challenge-response protocol (ADR-0054).
+// ErrNotRegistered is returned by Refresh when the host's public key is not
+// registered with the control-plane (HTTP 404). Callers should retry with
+// exponential backoff (recommended: 5s initial, doubling, capped at 60s).
+var ErrNotRegistered = errors.New("host not registered with control-plane")
+
+// HostAuth manages the host controller's NKey identity and JWT credential
+// refresh. It handles proactive JWT refresh via the CP HTTP challenge-response
+// protocol (ADR-0054).
 type HostAuth struct {
 	kp    nkeys.KeyPair
 	cpURL string
@@ -33,11 +43,18 @@ type HostAuth struct {
 	currentJWT string
 }
 
-// NewHostAuthFromCredsFile loads the NKey key pair and current JWT from the .creds
-// file at credsFile. cpURL is the base URL of the control-plane for HTTP
-// challenge-response refresh (e.g. "https://cp.example.com"). If cpURL is empty,
-// JWT refresh is disabled and the host JWT is used as-is until it expires.
-func NewHostAuthFromCredsFile(credsData []byte, cpURL string, log zerolog.Logger) (*HostAuth, error) {
+// NewHostAuthFromCredsFile loads the NKey key pair and current JWT from the
+// .creds file at credsPath. cpURL is the base URL of the control-plane for
+// HTTP challenge-response refresh (e.g. "https://cp.example.com"). If cpURL
+// is empty, JWT refresh is disabled and the host JWT is used as-is until it
+// expires. Used by mclaude-controller-local where a JWT is already present
+// from a prior mclaude host register invocation.
+func NewHostAuthFromCredsFile(credsPath string, cpURL string, log zerolog.Logger) (*HostAuth, error) {
+	credsData, err := os.ReadFile(credsPath)
+	if err != nil {
+		return nil, fmt.Errorf("read creds file %s: %w", credsPath, err)
+	}
+
 	kp, err := nkeys.ParseDecoratedUserNKey(credsData)
 	if err != nil {
 		return nil, fmt.Errorf("parse NKey from creds: %w", err)
@@ -54,6 +71,42 @@ func NewHostAuthFromCredsFile(credsData []byte, cpURL string, log zerolog.Logger
 		log:        log,
 		currentJWT: jwt,
 	}, nil
+}
+
+// NewHostAuthFromSeed reads only the NKey seed from seedPath, derives the key
+// pair, stores cpURL, and sets jwt = "". No pre-existing JWT is required. Used
+// by mclaude-controller-k8s where the Helm pre-install Job writes only the seed
+// and the operator runs mclaude host register separately (ADR-0063).
+func NewHostAuthFromSeed(seedPath string, cpURL string, log zerolog.Logger) (*HostAuth, error) {
+	seedData, err := os.ReadFile(seedPath)
+	if err != nil {
+		return nil, fmt.Errorf("read seed file %s: %w", seedPath, err)
+	}
+
+	// ParseDecoratedUserNKey handles both decorated ("-----BEGIN USER NKEY SEED-----"
+	// wrapped) and raw seed strings (SUAB...).
+	kp, err := nkeys.ParseDecoratedUserNKey(seedData)
+	if err != nil {
+		return nil, fmt.Errorf("parse NKey seed from %s: %w", seedPath, err)
+	}
+
+	return &HostAuth{
+		kp:         kp,
+		cpURL:      cpURL,
+		log:        log,
+		currentJWT: "", // no pre-existing JWT; Refresh() must be called before connecting to NATS
+	}, nil
+}
+
+// PublicKey returns the NKey public key string (starts with "U").
+// The key is derived from the keypair loaded at construction time.
+func (h *HostAuth) PublicKey() string {
+	pub, err := h.kp.PublicKey()
+	if err != nil {
+		// This cannot happen for a valid keypair loaded via the constructors.
+		panic(fmt.Sprintf("hostauth: PublicKey() failed on valid keypair: %v", err))
+	}
+	return pub
 }
 
 // JWTFunc returns a function for nats.UserJWT() that returns the current JWT.
@@ -76,27 +129,32 @@ func (h *HostAuth) SignFunc() func([]byte) ([]byte, error) {
 	}
 }
 
-// PublicKey returns the NKey public key string (starts with "U").
-func (h *HostAuth) PublicKey() (string, error) {
-	return h.kp.PublicKey()
-}
-
 // Refresh runs the HTTP challenge-response flow against the CP auth endpoint.
-// On success, updates the stored JWT. The NATS connection picks up the new JWT
-// on the next auth challenge (reconnect). Requires cpURL to be set.
+// On success, updates the stored JWT and returns it.
+//
+// When the host's public key is not registered (CP returns HTTP 404), Refresh
+// logs a registration instruction and returns ErrNotRegistered. Callers should
+// implement a retry loop (recommended: 5s initial interval, doubling, 60s cap).
+//
+// Requires cpURL to be set; returns an error if cpURL is empty.
 func (h *HostAuth) Refresh(ctx context.Context) (string, error) {
 	if h.cpURL == "" {
 		return "", fmt.Errorf("no CP URL configured")
 	}
 
-	pubKey, err := h.kp.PublicKey()
-	if err != nil {
-		return "", fmt.Errorf("get public key: %w", err)
-	}
+	pubKey := h.PublicKey()
 
 	// Step 1: request a challenge nonce.
 	challenge, err := h.requestChallenge(ctx, pubKey)
 	if err != nil {
+		// Propagate ErrNotRegistered unwrapped so callers can errors.Is() it.
+		if errors.Is(err, ErrNotRegistered) {
+			h.log.Error().Msgf(
+				"NKey %s not registered with control-plane. To complete registration run:\n  mclaude host register --type cluster --name <display-name> --nkey-public %s",
+				pubKey, pubKey,
+			)
+			return "", ErrNotRegistered
+		}
 		return "", fmt.Errorf("request challenge: %w", err)
 	}
 
@@ -119,10 +177,10 @@ func (h *HostAuth) Refresh(ctx context.Context) (string, error) {
 	return newJWT, nil
 }
 
-// StartRefreshLoop runs a background goroutine that proactively refreshes the host
-// JWT before the 5-minute TTL expires (ADR-0054). The loop fires at
-// hostJWTTTL - hostJWTRefreshBuffer intervals. If cpURL is empty, the loop is a
-// no-op and a warning is logged.
+// StartRefreshLoop runs a background goroutine that proactively refreshes the
+// host JWT before the 5-minute TTL expires (ADR-0054). The loop fires at
+// hostJWTTTL - hostJWTRefreshBuffer intervals. If cpURL is empty, the loop is
+// a no-op and a warning is logged.
 //
 // Refresh errors are logged as warnings but do not crash the controller — the
 // current JWT remains valid for up to hostJWTRefreshBuffer before expiry.
@@ -152,6 +210,7 @@ func (h *HostAuth) StartRefreshLoop(ctx context.Context) {
 }
 
 // requestChallenge calls POST /api/auth/challenge and returns the nonce.
+// Returns ErrNotRegistered (unwrapped) if the server responds with HTTP 404.
 func (h *HostAuth) requestChallenge(ctx context.Context, pubKey string) (string, error) {
 	body, _ := json.Marshal(map[string]string{"nkey_public": pubKey})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.cpURL+"/api/auth/challenge", bytes.NewReader(body))
@@ -165,6 +224,10 @@ func (h *HostAuth) requestChallenge(ctx context.Context, pubKey string) (string,
 		return "", fmt.Errorf("POST /api/auth/challenge: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", ErrNotRegistered
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))

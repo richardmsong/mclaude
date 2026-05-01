@@ -16,6 +16,7 @@ import (
 	"github.com/nats-io/nkeys"
 	"github.com/rs/zerolog"
 
+	"mclaude.io/common/pkg/hostauth"
 	"mclaude.io/common/pkg/slug"
 )
 
@@ -43,20 +44,40 @@ func newTestController(t *testing.T, hostSlugStr string) (*Controller, string) {
 	}, dataDir
 }
 
-// buildTestHostAuth creates a HostAuth with a freshly generated NKey pair.
+// buildTestHostAuth creates a *hostauth.HostAuth with a freshly generated NKey
+// pair by writing a temporary .creds file and loading it via NewHostAuthFromCredsFile.
 // cpURL may be empty (for tests that don't call Refresh).
-func buildTestHostAuth(t *testing.T, cpURL string) *HostAuth {
+func buildTestHostAuth(t *testing.T, cpURL string) *hostauth.HostAuth {
 	t.Helper()
 	kp, err := nkeys.CreateUser()
 	if err != nil {
 		t.Fatalf("create test NKey: %v", err)
 	}
-	return &HostAuth{
-		kp:         kp,
-		cpURL:      cpURL,
-		log:        nopLogger(),
-		currentJWT: "initial-jwt",
+	seed, err := kp.Seed()
+	if err != nil {
+		t.Fatalf("get seed: %v", err)
 	}
+
+	// Write a minimal .creds file so NewHostAuthFromCredsFile can parse it.
+	fakeJWT := "initial-jwt"
+	credsContent := "-----BEGIN NATS USER JWT-----\n" +
+		fakeJWT + "\n" +
+		"------END NATS USER JWT------\n" +
+		"\n" +
+		"-----BEGIN USER NKEY SEED-----\n" +
+		string(seed) + "\n" +
+		"------END USER NKEY SEED------\n"
+
+	credsFile := filepath.Join(t.TempDir(), "nats.creds")
+	if err := os.WriteFile(credsFile, []byte(credsContent), 0600); err != nil {
+		t.Fatalf("write test creds file: %v", err)
+	}
+
+	ha, err := hostauth.NewHostAuthFromCredsFile(credsFile, cpURL, nopLogger())
+	if err != nil {
+		t.Fatalf("NewHostAuthFromCredsFile: %v", err)
+	}
+	return ha
 }
 
 // --------------------------------------------------------------------------
@@ -324,36 +345,33 @@ func TestHostAuth_RefreshUpdatesStoredJWT(t *testing.T) {
 		t.Fatalf("Refresh: %v", err)
 	}
 
-	ha.mu.RLock()
-	stored := ha.currentJWT
-	ha.mu.RUnlock()
-
+	// Verify the stored JWT is updated by reading it via JWTFunc.
+	stored, err := ha.JWTFunc()()
+	if err != nil {
+		t.Fatalf("JWTFunc(): %v", err)
+	}
 	if stored != newJWT {
 		t.Errorf("stored JWT = %q, want %q", stored, newJWT)
 	}
 }
 
 func TestHostAuth_JWTFuncReturnsCurrent(t *testing.T) {
+	// buildTestHostAuth initialises the JWT to "initial-jwt" via a temp creds file.
 	ha := buildTestHostAuth(t, "")
-	ha.mu.Lock()
-	ha.currentJWT = "static-jwt"
-	ha.mu.Unlock()
 
 	got, err := ha.JWTFunc()()
 	if err != nil {
 		t.Fatalf("JWTFunc(): %v", err)
 	}
-	if got != "static-jwt" {
-		t.Errorf("JWTFunc() = %q, want %q", got, "static-jwt")
+	// The JWT loaded from the creds file is "initial-jwt" (set in buildTestHostAuth).
+	if got != "initial-jwt" {
+		t.Errorf("JWTFunc() = %q, want %q", got, "initial-jwt")
 	}
 }
 
 func TestHostAuth_PublicKeyFormat(t *testing.T) {
 	ha := buildTestHostAuth(t, "")
-	pub, err := ha.PublicKey()
-	if err != nil {
-		t.Fatalf("PublicKey: %v", err)
-	}
+	pub := ha.PublicKey()
 	if pub == "" {
 		t.Error("PublicKey() returned empty string")
 	}
@@ -392,10 +410,7 @@ func TestHostAuth_VerifySignatureCorrectness(t *testing.T) {
 		t.Fatalf("sign: %v", err)
 	}
 	// The NKey pair should be able to verify the signature (NKey is Ed25519).
-	pub, err := ha.kp.PublicKey()
-	if err != nil {
-		t.Fatalf("public key: %v", err)
-	}
+	pub := ha.PublicKey()
 	verifier, err := nkeys.FromPublicKey(pub)
 	if err != nil {
 		t.Fatalf("from public key: %v", err)
@@ -420,27 +435,31 @@ func TestNewHostAuthFromCredsFile_Valid(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Build minimal .creds file content.
+	// Build minimal .creds file content and write to temp file.
 	fakeJWT := "TEST_JWT_FOR_UNIT_TEST_NOT_A_REAL_TOKEN"
-	credsData := []byte(
-		"-----BEGIN NATS USER JWT-----\n" +
-			fakeJWT + "\n" +
-			"------END NATS USER JWT------\n" +
-			"\n" +
-			"-----BEGIN USER NKEY SEED-----\n" +
-			string(seed) + "\n" +
-			"------END USER NKEY SEED------\n",
-	)
+	credsContent := "-----BEGIN NATS USER JWT-----\n" +
+		fakeJWT + "\n" +
+		"------END NATS USER JWT------\n" +
+		"\n" +
+		"-----BEGIN USER NKEY SEED-----\n" +
+		string(seed) + "\n" +
+		"------END USER NKEY SEED------\n"
 
-	ha, err := NewHostAuthFromCredsFile(credsData, "https://cp.example.com", nopLogger())
+	credsFile := filepath.Join(t.TempDir(), "nats.creds")
+	if err := os.WriteFile(credsFile, []byte(credsContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	ha, err := hostauth.NewHostAuthFromCredsFile(credsFile, "https://cp.example.com", nopLogger())
 	if err != nil {
 		t.Fatalf("NewHostAuthFromCredsFile: %v", err)
 	}
 
-	// Verify the JWT was extracted.
-	ha.mu.RLock()
-	storedJWT := ha.currentJWT
-	ha.mu.RUnlock()
+	// Verify the JWT was extracted (read via JWTFunc).
+	storedJWT, jwtErr := ha.JWTFunc()()
+	if jwtErr != nil {
+		t.Fatalf("JWTFunc(): %v", jwtErr)
+	}
 	if storedJWT != fakeJWT {
 		t.Errorf("currentJWT = %q, want %q", storedJWT, fakeJWT)
 	}
@@ -456,8 +475,12 @@ func TestNewHostAuthFromCredsFile_Valid(t *testing.T) {
 }
 
 func TestNewHostAuthFromCredsFile_InvalidSeed(t *testing.T) {
-	credsData := []byte("garbage-data-not-a-creds-file")
-	_, err := NewHostAuthFromCredsFile(credsData, "", nopLogger())
+	// Write garbage data to a temp file.
+	credsFile := filepath.Join(t.TempDir(), "bad.creds")
+	if err := os.WriteFile(credsFile, []byte("garbage-data-not-a-creds-file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := hostauth.NewHostAuthFromCredsFile(credsFile, "", nopLogger())
 	if err == nil {
 		t.Error("expected error for invalid creds data")
 	}
