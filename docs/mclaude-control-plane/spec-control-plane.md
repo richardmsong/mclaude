@@ -19,7 +19,7 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 | `NATS_URL` | No | `nats://localhost:4222` | Internal hub NATS broker URL |
 | `NATS_WS_URL` | No | (empty) | External WebSocket URL for browser clients; empty means client derives from origin |
 | `NATS_ACCOUNT_SEED` | Yes (production) | (none) | Account NKey seed string. Used directly to sign per-host user JWTs and session-agent JWTs. In production Helm deployments, populated from the `operator-keys` Secret's `accountSeed` key. If not set, generates an ephemeral account key (dev-only — not suitable for production). |
-| `OPERATOR_KEYS_PATH` | No | `/etc/mclaude/operator-keys` | Mount path for the `mclaude-system/operator-keys` Secret. At runtime, provides `operatorSeed` (for re-signing the account JWT during revocation) and `sysAccountSeed` (for publishing to `$SYS.REQ.CLAIMS.UPDATE`). Also used by the `init-keys` and `gen-leaf-creds` subcommands. |
+| `OPERATOR_KEYS_PATH` | No | `/etc/mclaude/operator-keys` | Mount path for the `mclaude-system/operator-keys` Secret. At runtime, provides `operatorSeed` (for re-signing the account JWT during revocation) and `sysAccountSeed` (for publishing to `$SYS.REQ.CLAIMS.UPDATE`). Also used by the `init-keys` subcommand. |
 | `NATS_SYS_ACCOUNT_SEED` | No | (read from `OPERATOR_KEYS_PATH/sysAccountSeed`) | System account NKey seed string. CP uses system account credentials to publish `$SYS.REQ.CLAIMS.UPDATE` for JWT revocation (ADR-0054). In production, populated from the `operator-keys` Secret's `sysAccountSeed` key. If set as an env var, takes precedence over the file-based path. |
 | `ADMIN_TOKEN` | No | (empty) | Static bearer token for the admin port (9091). All `/admin/*` routes require this token via `Authorization: Bearer <token>`. |
 | `BOOTSTRAP_ADMIN_EMAIL` | No | (empty) | Email of the first admin. Read from Helm value; the init-keys Job pre-creates a `users` row with `is_admin=true` and `oauth_id=NULL`; first OAuth login linking that email promotes the user. |
@@ -142,10 +142,10 @@ Per ADR-0035 the control-plane communicates with controllers over host-scoped NA
 
 | Subject | Description |
 |---------|-------------|
-| `$SYS.ACCOUNT.{accountKey}.CONNECT` | Per-connection event. Switch on payload `client.kind`: `Client` → `SELECT * FROM hosts WHERE public_key = client.nkey AND type = 'machine'`, update `last_seen_at` for that single row, upsert `mclaude-hosts` KV `online=true`. `Leafnode` → `SELECT * FROM hosts WHERE public_key = client.nkey AND type = 'cluster' LIMIT 1`, then update `last_seen_at` for **all** rows where `slug = found.slug AND type = 'cluster'` and upsert KV for each user row (cluster-shared liveness). No match → ignore (covers SPA's per-login ephemeral NKey and control-plane's own connection). |
+| `$SYS.ACCOUNT.{accountKey}.CONNECT` | Per-connection event. Switch on payload `client.kind`: `Client` → `SELECT * FROM hosts WHERE public_key = client.nkey LIMIT 1` (no type filter — matches both `type='machine'` and `type='cluster'`), update `last_seen_at` for the matched row, upsert `mclaude-hosts` KV `{hslug}` with `online=true`. No match → ignore (covers SPA's per-login ephemeral NKey and control-plane's own connection). The `Leafnode` branch is removed — all host controllers connect hub-direct as `"Client"` per ADR-0063. |
 | `$SYS.ACCOUNT.{accountKey}.DISCONNECT` | Same lookup logic; sets `mclaude-hosts` KV `online=false` for the matched row(s). Does not rewrite `last_seen_at` (it tracks last-known-online). |
 | `mclaude.hosts.{hslug}.api.agents.register` | Agent public key registration (ADR-0054). Host controllers register spawned agent NKey public keys here. Request: `{user_slug, project_slug, nkey_public}`. CP validates host access + project ownership + host assignment, then stores `(user_id, host_slug, project_slug) → nkey_public` in the `agent_credentials` table. Returns `{ok: true}`. Errors: `FORBIDDEN` (user does not have access to host), `NOT_FOUND` (project not assigned to host). The agent then authenticates itself via HTTP challenge-response to get its per-project JWT. |
-| `mclaude.users.*.hosts._.register` | Host registration (ADR-0054). User's CLI publishes `{name, type, nkey_public}`. CP creates host in Postgres (slug, name, type, owner_id, nkey_public). Returns `{ok, slug}` — **no JWT** in the response; the host authenticates itself via HTTP challenge-response. The `_` sentinel in the hslug position cannot collide with real slugs (slugs are `[a-z0-9-]+`). |
+| `mclaude.users.*.hosts._.register` | Host registration (ADR-0054). User's CLI publishes `{name, type, nkey_public}`. CP creates host in Postgres (slug, name, type, user_id, public_key). Returns `{ok, slug}` — **no JWT** in the response; the host authenticates itself via HTTP challenge-response. The `_` sentinel in the hslug position cannot collide with real slugs (slugs are `[a-z0-9-]+`). |
 | `mclaude.users.*.hosts.*.manage.grant` | Host access grant (ADR-0054). Request: `{userSlug}`. CP validates the publisher is the host owner, inserts `(host_id, user_id)` into `host_access` table, revokes the grantee's current NATS JWT (host list changed). Returns `{ok: true}`. |
 | `mclaude.users.*.hosts.*.manage.revoke-access` | Host access revocation (ADR-0054). Request: `{userSlug}`. CP validates ownership, deletes `(host_id, user_id)` from `host_access`, revokes the grantee's NATS JWT + all agent JWTs for grantee's projects on that host. Active sessions on the host are terminated. |
 | `mclaude.users.*.hosts.*.manage.deregister` | Host deregistration (ADR-0054). Authorization: host owner or platform operator. Drains all active projects (publishes delete for each), revokes host credential (adds to NATS revocation list), deletes host row from Postgres, tombstones `$KV.mclaude-hosts.{hslug}`, removes all stored agent NKey public keys for the host. |
@@ -194,17 +194,15 @@ Key tables added by ADR-0054/0053:
 
 ### Kubernetes Dependency
 
-The control-plane has **no** K8s client at runtime and creates **no** K8s resources during normal operation. All MCProject CR creation, namespace provisioning, PVC management, RBAC reconciliation, and pod template construction live in `mclaude-controller-k8s` (see `docs/mclaude-controller/spec-controller.md`). The control-plane reaches the controller via NATS request/reply on two subject patterns:
+The control-plane has **no** K8s client at runtime and creates **no** K8s resources during normal operation. All MCProject CR creation, namespace provisioning, PVC management, RBAC reconciliation, and pod template construction live in `mclaude-controller-k8s` (see `docs/mclaude-controller-k8s/spec-k8s-architecture.md`). The control-plane reaches the controller via NATS request/reply on two subject patterns:
 
 - **ADR-0054 host-scoped (primary, used by dev-seed):** `mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.create` — CP-initiated fan-out provisioning.
 - **Legacy ADR-0035 user-scoped (SPA backward compat):** `mclaude.users.{uslug}.hosts.{hslug}.api.projects.>` — retained for SPA-initiated project creation.
 
 The control-plane binary also doubles as two Helm pre-install Job entrypoints (the only code paths that use `client-go`):
 - **`control-plane init-keys`** — generates operator + account NKey pairs and JWTs, writes them to the `operator-keys` Secret in `mclaude-system`. Idempotent: exits 0 if the Secret already exists. Also creates the bootstrap admin row in Postgres when `BOOTSTRAP_ADMIN_EMAIL` is set. Run by the `mclaude-cp` chart's pre-install Job. Env vars: `NAMESPACE` (default `mclaude-system`), `OPERATOR_KEYS_SECRET` (default `operator-keys`).
-- **`control-plane gen-leaf-creds`** — reads the account seed from the `operator-keys` Secret, generates a NATS user JWT + NKey seed, writes them as a `.creds` file into a `mclaude-worker-nats-leaf-creds` Secret. The JWT has no explicit pub/sub permissions (unrestricted within the account). This is a separate credential from the scoped per-cluster JWT issued by `POST /admin/clusters` — the gen-leaf-creds JWT is used only by the worker NATS StatefulSet for the leaf-node connection. Idempotent: exits 0 if the leaf-creds Secret already exists. Run by the `mclaude-worker` chart's pre-install Job. Env vars: `NAMESPACE` (default `mclaude-system`), `LEAF_CREDS_SECRET` (default `mclaude-worker-nats-leaf-creds`), `ACCOUNT_SEED_SECRET` (default `operator-keys`), `ACCOUNT_SEED_KEY` (default `accountSeed`).
-
 At runtime, the control-plane mounts one K8s Secret as a file:
-- `mclaude-system/operator-keys` — mounted at `OPERATOR_KEYS_PATH` (default `/etc/mclaude/operator-keys`). Read-only. Provides `operatorJwt`, `accountJwt`, `accountSeed`, `operatorSeed`, and `sysAccountSeed` for signing per-host user JWTs, per-cluster leaf JWTs, and publishing JWT revocations to `$SYS.REQ.CLAIMS.UPDATE` (ADR-0054).
+- `mclaude-system/operator-keys` — mounted at `OPERATOR_KEYS_PATH` (default `/etc/mclaude/operator-keys`). Read-only. Provides `operatorJwt`, `accountJwt`, `accountSeed`, `operatorSeed`, and `sysAccountSeed` for signing per-host user JWTs and publishing JWT revocations to `$SYS.REQ.CLAIMS.UPDATE` (ADR-0054). The `gen-leaf-creds` subcommand (which generated worker NATS leaf credentials) was removed by ADR-0063.
 
 ## Internal Behavior
 
@@ -230,7 +228,7 @@ Per ADR-0054, all identity types (user, host, agent) generate their own NKey pai
 **User login:** Login validates email and bcrypt password hash (or OAuth identity) against Postgres. The login request body includes `nkey_public` — the user's NKey public key generated client-side (SPA stores seed in `localStorage`; CLI stores seed in `~/.mclaude/auth.json`). On success, the control plane:
 
 1. Stores the public key in `users.nkey_public` (for future challenge-response auth).
-2. Loads the calling user's hosts: owned hosts (`SELECT … FROM hosts WHERE owner_id = ?`) plus granted hosts (`SELECT … FROM host_access WHERE user_id = ?`).
+2. Loads the calling user's hosts: owned hosts (`SELECT … FROM hosts WHERE user_id = ?`) plus granted hosts (`SELECT … FROM host_access WHERE user_id = ?`).
 3. Resolves the list of host slugs the user has access to (derived from owned + granted hosts).
 4. Issues a user JWT (`IssueUserJWT(publicKey, userSlug, hostSlugs, accountKP, expirySecs)`) signed by the account signing key. `claims.Name = userID` (UUID). Permissions per ADR-0054 Full Permission Specifications — explicit, per-user-resource allow-lists referencing `KV_mclaude-sessions-{uslug}`, `KV_mclaude-projects-{uslug}`, `MCLAUDE_SESSIONS_{uslug}`, and per-host entries for the shared `mclaude-hosts` KV bucket. No `$JS.API.>` wildcards.
 5. JWT lifetime is `JWT_EXPIRY_SECONDS` (default 8h). **No NKey seed in the response** — the client already has its seed.
@@ -281,7 +279,7 @@ A background goroutine runs every 15 minutes, querying `oauth_connections` for G
 
 1. SPA publishes to `mclaude.users.{uslug}.api.projects.create` (NATS) with `{name, hostSlug, gitUrl?, gitIdentityId?}`, or uses HTTP `POST /api/users/{uslug}/projects`.
 2. Control plane validates the request, including optional `gitIdentityId` hostname match, and verifies the calling user has access to `hostSlug` (owned + granted via `host_access` table).
-3. Resolves `host_id` from `(owner_id/host_access, hostSlug)`.
+3. Resolves `host_id` from `(user_id/host_access, hostSlug)`.
 4. Creates a Postgres `projects` row (`host_id`, `slug`, `name`, `git_url`, optional `git_identity_id`).
 5. Writes the project to the per-user `mclaude-projects-{uslug}` KV bucket (key `hosts.{hslug}.projects.{pslug}` — hierarchical key format per ADR-0054).
 6. Publishes to `mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.create` with `{userID, userSlug, hostSlug, projectID, projectSlug, gitUrl, gitIdentityId}` (fan-out scheme per ADR-0054). Awaits the controller's reply (`PROVISION_TIMEOUT_SECONDS`).
@@ -322,8 +320,8 @@ On project deletion (ADR-0053), in addition to the standard Postgres + KV + prov
 - **Hub NATS**: provisioning request publisher, KV bucket management, `$SYS` presence subscriber, host lifecycle handler, agent registration handler, import/attachment NATS handlers. Connects with retry-on-fail and unlimited reconnects.
 - **S3-compatible storage**: MinIO for self-hosted, AWS S3 for cloud (ADR-0053). Used for import archives and attachments. CP generates pre-signed URLs — never proxies binary data directly. Configured via `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`.
 - **`mclaude-system/operator-keys` Secret**: mounted at `OPERATOR_KEYS_PATH`. Provides operator + account NKeys / JWTs for the trust chain and `sysAccountSeed` for JWT revocation via `$SYS.REQ.CLAIMS.UPDATE` (ADR-0054). Generated by the `mclaude-cp` Helm pre-install Job (`mclaude-cp init-keys`).
-- **`mclaude-controller-k8s`** (one per worker cluster): receives `mclaude.hosts.{cslug}.>` provisioning requests (ADR-0054 host-scoped scheme). Lives in `docs/mclaude-controller/spec-controller.md`.
-- **`mclaude-controller-local`** (one per BYOH machine): receives `mclaude.hosts.{hslug}.>` provisioning requests directly from hub NATS (ADR-0054/ADR-0058). Lives in `docs/mclaude-controller/spec-controller.md`.
+- **`mclaude-controller-k8s`** (one per worker cluster): receives `mclaude.hosts.{cslug}.>` provisioning requests (ADR-0054 host-scoped scheme). Lives in `docs/mclaude-controller-k8s/spec-k8s-architecture.md`.
+- **`mclaude-controller-local`** (one per BYOH machine): receives `mclaude.hosts.{hslug}.>` provisioning requests directly from hub NATS (ADR-0054/ADR-0058). Lives in `docs/mclaude-controller-local/spec-controller-local.md`.
 - **OAuth providers** (optional): GitHub and/or GitLab instances for token exchange, profile fetch, token revocation, token refresh, and repo listing.
 - **OpenTelemetry** (optional): tracer provider for distributed tracing (HTTP, DB, NATS request spans).
 

@@ -5,11 +5,11 @@ Per ADR-0035 the previous single `mclaude` chart is split into two independently
 | Chart | Purpose | Installed in |
 |-------|---------|--------------|
 | `mclaude-cp` | Central control-plane: hub NATS, Postgres, control-plane Deployment, SPA, operator/account NKey bootstrap. | The single `mclaude-cp` Kubernetes cluster. |
-| `mclaude-worker` | Worker cluster: worker NATS (leaf-linked into hub), `mclaude-controller-k8s` operator, session-agent template. | Each worker Kubernetes cluster (one per cluster host). |
+| `mclaude-worker` | Worker cluster: `mclaude-controller-k8s` operator (hub-direct, independently installable), session-agent template. | Each worker Kubernetes cluster (one per cluster host). |
 
-A single-cluster degenerate deployment installs **both** charts into the same K8s cluster, with the worker NATS leaf URL pointing at the in-cluster hub service.
+A single-cluster degenerate deployment installs **both** charts into the same K8s cluster; `mclaude-worker` connects directly to the hub NATS service.
 
-BYOH machines do **not** use Helm — they install the `mclaude-cli` binary, run `mclaude host register`, and start `mclaude-controller-local`. See `docs/mclaude-controller/spec-controller.md`.
+BYOH machines do **not** use Helm — they install the `mclaude-cli` binary, run `mclaude host register`, and start `mclaude-controller-local`. See `docs/mclaude-controller-local/spec-controller-local.md`.
 
 ---
 
@@ -37,7 +37,7 @@ The Job is the only place the operator/account seeds are generated; subsequent d
 | StatefulSet | `{release}-nats` | Single replica (configurable). VolumeClaimTemplate `data` when persistence enabled. |
 | Service | `{release}-nats` | ClusterIP. Ports: client (4222), websocket (8080), monitor (8222), **leafnodes (7422)**. |
 | Service | `{release}-nats-headless` | Headless service for StatefulSet DNS. |
-| ConfigMap | `{release}-nats-config` | `nats.conf` with the 3-tier trust chain (`operator`, `resolver: MEMORY`, `resolver_preload`) referencing `mclaude-system/operator-keys`, plus `leafnodes { listen: 0.0.0.0:7422 }`. JetStream domain `hub`. |
+| ConfigMap | `{release}-nats-config` | `nats.conf` with the 3-tier trust chain (`operator`, `resolver: nats`, `resolver_preload`) referencing `mclaude-system/operator-keys`. JetStream domain `hub`. `resolver: nats` enables JWT revocation via `$SYS.REQ.CLAIMS.UPDATE` (ADR-0054). |
 
 For the full NATS server config see `docs/spec-state-schema.md` — NATS Server Configuration.
 
@@ -127,63 +127,71 @@ The `slug-backfill` Job is removed — per ADR-0035 there is no migration of exi
 
 ## Chart: `mclaude-worker`
 
+Independently installable into any Kubernetes cluster that can reach the control-plane over HTTPS and hub NATS over WebSocket (port 443). Registers the worker cluster as a host via the existing BYOH `mclaude host register` flow — no separate `mclaude cluster register` command, no local NATS StatefulSet, no leaf-node credentials.
+
 ### Deployment
 
-`helm install mclaude-worker charts/mclaude-worker -n mclaude-system` into each worker cluster. Required values come from the response of `mclaude cluster register` (run against the hub).
-
 ```bash
-mclaude cluster register --slug us-east --jetstream-domain us-east \
-    --leaf-url nats-leaf://hub.mclaude.example:7422
-
-# Returns: leafJwt, leafSeed, accountJwt, operatorJwt, jsDomain
-# Admin places these into the worker's NATS Secret + Helm values.
+helm install mclaude-worker charts/mclaude-worker -n mclaude-system --create-namespace \
+  --set controlPlane.url=https://cp.mclaude.example \
+  --set host.name="us-east" \
+  --set host.hubNatsUrl=nats-wss://nats.mclaude.example:443
 ```
 
-### Worker NATS
+After install, read the NKey public key from the pre-install Job and attest the host from a workstation:
+
+```bash
+kubectl logs job/mclaude-worker-gen-host-nkey -n mclaude-system
+mclaude host register --type cluster --name "us-east" --nkey-public <pubkey>
+```
+
+### Deregistration
+
+Before uninstalling, deregister the host so CP removes the `hosts` row and revokes the JWT:
+
+```bash
+# Option A: explicit operator action (recommended)
+mclaude host deregister --slug us-east
+helm uninstall mclaude-worker -n mclaude-system
+
+# Option B: automated via Helm pre-delete hook
+helm uninstall mclaude-worker -n mclaude-system
+# pre-delete Job reads nkey_seed, performs challenge-response, publishes manage.deregister
+```
+
+### Pre-Install Job and NKey Secret
 
 | Kind | Name | Notes |
 |---|---|---|
-| StatefulSet | `{release}-nats` | Single replica (configurable). VolumeClaimTemplate `data` when persistence enabled. |
-| Service | `{release}-nats` | ClusterIP. Ports: client (4222), websocket (8080), monitor (8222). |
-| ConfigMap | `{release}-nats-config` | `nats.conf` with same 3-tier trust chain as the hub (`operator`, `accountJwt`, `resolver: MEMORY`), plus `leafnodes { remotes: [{url: $LEAF_URL, credentials: /etc/nats/leaf.creds}] }` and `jetstream { domain: $JS_DOMAIN }`. |
-| Secret | `{release}-nats-leaf-creds` | Contains the leaf-node credentials (`leafJwt` + `leafSeed`) returned by `mclaude cluster register`. Mode `0600`. |
-| Secret | `{release}-nats-trust` | Contains `operatorJwt` + `accountJwt` returned by `mclaude cluster register` — referenced from `nats-config` for `resolver_preload`. |
-
-For full NATS server config see `docs/spec-state-schema.md` — NATS Server Configuration.
+| Job | `{release}-gen-host-nkey` | Pre-install hook (weight `-10`). Generates NKey pair via `nkeys.CreateUser()` (U-prefix). Writes decorated seed string to Secret `{release}-host-creds` field `nkey_seed`. Prints public key to Job log and NOTES.txt. Idempotent — skips if Secret exists. |
+| Secret | `{release}-host-creds` | Single field: `nkey_seed`. JWT is **not** stored here — acquired in-memory via challenge-response on boot. |
 
 ### Controller (`mclaude-controller-k8s`)
 
 | Kind | Name | Notes |
 |---|---|---|
-| Deployment | `{release}-controller` | Single replica with leader election. Container is the kubebuilder operator binary. Mounts the per-cluster controller credentials (same Secret as `nats-leaf-creds`, since the controller JWT and leaf JWT are the same JWT per ADR-0035). |
+| Deployment | `{release}-controller` | Single replica. Mounts `{release}-host-creds` at `/etc/mclaude/host-creds/`. Env: `HUB_NATS_URL`, `CONTROL_PLANE_URL`, `HOST_NKEY_SEED_PATH=/etc/mclaude/host-creds/nkey_seed`. |
 | Service | `{release}-controller-metrics` | Prometheus scrape target. |
-| ServiceAccount | `{release}-controller` | The K8s SA that the controller uses. |
-| ClusterRole | `{release}-controller` | Grants namespace, pod, deployment, PVC, secret, configmap, serviceaccount, role, rolebinding, and `MCProject` CRD management across all namespaces. |
-| ClusterRoleBinding | `{release}-controller` | Binds the ClusterRole to the ServiceAccount. |
+| ServiceAccount | `{release}-controller` | K8s SA used by the controller. |
+| ClusterRole | `{release}-controller` | Grants namespace, deployment, PVC, secret, configmap, serviceaccount, role, rolebinding, and `MCProject` CRD management. |
+| ClusterRoleBinding | `{release}-controller` | Binds ClusterRole to ServiceAccount. |
 | CustomResourceDefinition | `mcprojects.mclaude.io` | `MCProject` v1alpha1. Namespaced. |
 
 ### Session-Agent Template
 
 | Kind | Name | Notes |
 |---|---|---|
-| ConfigMap | `{release}-session-agent-template` | Static pod template values (image, imagePullPolicy, terminationGracePeriodSeconds, resourcesJson, projectPvcSize, projectPvcStorageClass, nixPvcSize, nixPvcStorageClass, corporateCAEnabled, corporateCAConfigMapName, corporateCAConfigMapKey). Read by `mclaude-controller-k8s` to build per-project Deployments. Rendered from `sessionAgent.*` Helm values. |
+| ConfigMap | `{release}-session-agent-template` | Static pod template values (image, imagePullPolicy, terminationGracePeriodSeconds, resourcesJson, projectPvcSize, projectPvcStorageClass, nixPvcSize, nixPvcStorageClass, corporateCAEnabled, corporateCAConfigMapName, corporateCAConfigMapKey). Read by `mclaude-controller-k8s` to build per-project Deployments. |
 
-### Configuration knobs
+### Configuration Knobs
 
 | Key | Default | Description |
 |---|---|---|
-| `clusterSlug` | `""` | **Required.** The cluster's canonical slug. Must match the slug used at `mclaude cluster register`. |
-| `jsDomain` | `""` | **Required.** JetStream domain — must match `--jetstream-domain` from registration. |
-| `leafUrl` | `""` | **Required.** Hub leaf-node URL (e.g. `nats-leaf://hub.mclaude.example:7422`). For single-cluster degenerate installs, set to `nats-leaf://{cp-release}-nats.mclaude-system.svc:7422`. |
-| `leafCreds.existingSecret` | `""` | Name of a pre-created Secret with `leafJwt` + `leafSeed`. If empty, the chart expects raw values via `leafCreds.jwt` / `leafCreds.seed`. Note: leaf creds are used by the **worker NATS StatefulSet** for the leaf-node connection to hub NATS. The controller binary does **not** read these creds — it authenticates via `NATS_ACCOUNT_SEED` and generates its own ephemeral user JWT. |
-| `trustChain.operatorJwt` | `""` | Operator JWT from cluster registration response. |
-| `trustChain.accountJwt` | `""` | Account JWT from cluster registration response. |
-| `trustChain.accountPublicKey` | `""` | Account NKey public key. Used in NATS `resolver_preload` configuration. |
-| `trustChain.resolverPreload` | `""` | Pre-formatted resolver preload entry for NATS config. Alternative to separate `accountPublicKey` + `accountJwt` when the admin provides a complete preload string. |
-| `hubUrl` | `""` | Hub NATS URL for reference/SPA direct connections. Informational — not consumed by any template or Go binary. Retained for operator documentation purposes. |
-| `nats.persistence.size` | `10Gi` | Worker JetStream PVC size. |
-| `controller.replicas` | `1` | Controller replicas (leader election handles HA). |
-| `sessionAgent.image.*` | ghcr.io image | Image used in per-project Deployments created by the controller. |
+| `controlPlane.url` | `""` | **Required.** Control-plane HTTP URL. Used for challenge-response auth and session-agent bootstrap. |
+| `host.name` | `""` | **Required.** Display name rendered into NOTES.txt only. Controller derives its actual slug from the JWT. |
+| `host.hubNatsUrl` | `""` | **Required.** Hub NATS WebSocket URL (e.g. `nats-wss://nats.mclaude.example:443`). Set as `HUB_NATS_URL` on the controller Deployment. |
+| `controller.replicas` | `1` | Controller replicas. |
+| `sessionAgent.image.*` | ghcr.io image | Image for per-project session-agent Deployments. |
 | `sessionAgent.terminationGracePeriodSeconds` | `86400` | Graceful shutdown window. |
 | `sessionAgent.persistence.storageClass` | `""` | Storage class for project PVCs (RWO). |
 | `sessionAgent.persistence.size` | `50Gi` | Project PVC size. |
@@ -192,27 +200,32 @@ For full NATS server config see `docs/spec-state-schema.md` — NATS Server Conf
 | `sessionAgent.corporateCA.enabled` | `false` | Mount trust-manager CA bundle into session-agent pods. |
 | `sessionAgent.corporateCA.bundleName` | `""` | trust-manager Bundle CR name. |
 | `sessionAgent.corporateCA.configMapName` | `""` | ConfigMap name synced by trust-manager. |
-| `sessionAgent.corporateCA.configMapKey` | `ca-certificates.crt` | Key in the ConfigMap containing PEM certs. |
-| `sessionAgentNatsUrl` | `""` | NATS URL injected into session-agent pods (overrides the worker NATS default). For single-cluster deployments where KV buckets live on hub NATS, set to the hub NATS URL (e.g. `nats://mclaude-cp-nats.mclaude-system.svc.cluster.local:4222`). Exposed to the controller as `SESSION_AGENT_NATS_URL`. |
-| `controller.config.devOAuthToken` | `""` | Claude API OAuth token for dev/CI environments. When set, the controller injects it as `oauth-token` in per-user `user-secrets` Secret. Exposed to the controller as `DEV_OAUTH_TOKEN`. |
+| `sessionAgent.corporateCA.configMapKey` | `ca-certificates.crt` | PEM certs key in ConfigMap. |
+| `controller.config.devOAuthToken` | `""` | Claude API OAuth token for dev/CI. Injected as `oauth-token` in per-user `user-secrets` Secret via `DEV_OAUTH_TOKEN` env. |
 
-### Single-cluster degenerate install
-
-Install both charts into the same Kubernetes cluster:
+### Single-Cluster Degenerate Install
 
 ```bash
 helm install mclaude-cp     charts/mclaude-cp     -n mclaude-system --create-namespace
-mclaude cluster register --slug local --jetstream-domain local \
-    --leaf-url nats-leaf://mclaude-cp-nats.mclaude-system.svc:7422
 helm install mclaude-worker charts/mclaude-worker -n mclaude-system \
-    --set clusterSlug=local --set jsDomain=local \
-    --set leafUrl=nats-leaf://mclaude-cp-nats.mclaude-system.svc:7422 \
-    --set-file trustChain.operatorJwt=./operator.jwt \
-    --set-file trustChain.accountJwt=./account.jwt \
-    --set-file leafCreds.jwt=./leaf.jwt --set-file leafCreds.seed=./leaf.seed
+  --set controlPlane.url=https://cp.mclaude.example \
+  --set host.name="local" \
+  --set host.hubNatsUrl=nats://mclaude-cp-nats.mclaude-system.svc:4222
+
+kubectl logs job/mclaude-worker-gen-host-nkey -n mclaude-system
+mclaude host register --type cluster --name "local" --nkey-public <pubkey>
 ```
 
-Behavior is identical to multi-cluster except the leaf URL points at the in-cluster hub service.
+### Migration from Leaf-NATS Worker Chart
+
+```bash
+helm uninstall mclaude-worker -n mclaude-system
+helm install mclaude-worker charts/mclaude-worker -n mclaude-system \
+  --set controlPlane.url=... --set host.name=... --set host.hubNatsUrl=...
+# Then run mclaude host register (see Deployment section above)
+```
+
+Brief downtime for K8s-hosted projects during cutover. No in-place upgrade path.
 
 ---
 
@@ -241,4 +254,4 @@ Behavior is identical to multi-cluster except the leaf URL points at the in-clus
 - Optional: trust-manager for corporate CA bundle injection into session-agent pods (worker chart).
 - For HTTPS: **cert-manager** in the cluster with a `ClusterIssuer` that owns the Secret named in `ingress.tls[0].secretName`. See `docs/spec-tls-certs.md`.
 - For DNS automation: **ExternalDNS** in the cluster, configured with the DigitalOcean provider and `domainFilters=[mclaude.richardmcsong.com]`. See `docs/spec-tls-certs.md`.
-- For each worker chart install: a successful `mclaude cluster register` call against the running hub control-plane to mint the per-cluster trust-chain credentials.
+- For each worker chart install: the operator must run `mclaude host register --type cluster --name <name> --nkey-public <pubkey>` against the running hub control-plane to register the cluster host before the controller can connect.

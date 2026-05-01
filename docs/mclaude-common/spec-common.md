@@ -120,6 +120,33 @@ Generates a fresh operator + account NKey pair and the corresponding JWTs for th
 | `SysAccountPublicKey` | `string` | NATS system account public key                        |
 | `SysAccountJWT`       | `string` | System account JWT (signed by operator; no JetStream) |
 
+### Package `hostauth`
+
+Shared NKey challenge-response authentication logic for host controllers. Both `mclaude-controller-k8s` and `mclaude-controller-local` import this package as `mclaude.io/common/pkg/hostauth`.
+
+**Constructors:**
+
+`NewHostAuthFromCredsFile(credsPath string, cpURL string, log zerolog.Logger) (*HostAuth, error)` — reads a `.creds`-formatted file (NKey seed + pre-existing JWT). Used by `mclaude-controller-local` where a JWT is already present from a prior `mclaude host register` invocation.
+
+`NewHostAuthFromSeed(seedPath string, cpURL string, log zerolog.Logger) (*HostAuth, error)` — reads only the NKey seed from `seedPath`. No pre-existing JWT required. Used by `mclaude-controller-k8s` where the Helm pre-install Job writes only the seed and the operator runs `mclaude host register` separately.
+
+**`Refresh() (jwt string, err error)`**
+
+Performs HTTP challenge-response against `cpURL`:
+1. `POST /api/auth/challenge {nkey_public}` → `{challenge}`
+2. Signs challenge with NKey private key.
+3. `POST /api/auth/verify {nkey_public, challenge, signature}` → `{jwt}`
+4. Returns the new JWT.
+
+When constructed via `NewHostAuthFromSeed` and the public key is not yet registered (CP returns HTTP 404), `Refresh()` returns a sentinel retryable error and logs:
+```
+NKey <pubkey> not registered with control-plane. To complete registration run:
+  mclaude host register --type cluster --name <display-name> --nkey-public <pubkey>
+```
+Callers must implement the retry loop. The recommended pattern for K8s: retry every 5s with exponential backoff capped at 60s.
+
+**`PublicKey() string`** — returns the NKey public key (U-prefix). Used to extract the key for logging or NOTES.txt display before JWT acquisition.
+
 ### Package `types`
 
 Shared Go struct types for NATS KV bucket payloads and lifecycle event constants. These types define the canonical wire format for data stored in per-user `mclaude-sessions-{uslug}`, `mclaude-projects-{uslug}` KV buckets, the shared `mclaude-hosts` bucket, as well as lifecycle events published on `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.sessions.{sslug}.lifecycle` subjects (ADR-0054 consolidated `sessions.>` hierarchy). See `spec-state-schema.md` for the full schema reference.

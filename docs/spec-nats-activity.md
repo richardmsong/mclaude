@@ -188,7 +188,7 @@ CLI → NATS: PUB mclaude.users.alice.hosts._.register
             {"name":"My MacBook","type":"machine","nkey_public":"<host-public-key>"}
             (reply-to: _INBOX.xyz)
 CP:         Validates alice's identity from NATS connection.
-            Creates host row in Postgres (slug: "laptop-a", owner_id: alice, nkey_public: stored).
+            Creates host row in Postgres (slug: "laptop-a", user_id: alice, public_key: stored).
 CP → NATS:  PUB _INBOX.xyz  {"ok":true,"slug":"laptop-a"}
 ```
 
