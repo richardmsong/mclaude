@@ -8,18 +8,19 @@ import (
 )
 
 // SessionAgentSubjectPermissions returns permissions for a session agent.
-// Per ADR-0050: both UUID-prefixed and host-scoped slug subjects, plus JetStream and inbox.
+// ADR-0054: per-user KV bucket names (mclaude-sessions-{uslug}, mclaude-projects-{uslug}).
 func SessionAgentSubjectPermissions(userID, userSlug string) (pubAllow, subAllow []string) {
+	sessBucket := fmt.Sprintf("mclaude-sessions-%s", userSlug)
+	projBucket := fmt.Sprintf("mclaude-projects-%s", userSlug)
 	perms := []string{
 		fmt.Sprintf("mclaude.%s.>", userID),
 		fmt.Sprintf("mclaude.users.%s.hosts.*.>", userSlug),
 		"_INBOX.>",
 		"$JS.API.>",
 		"$JS.*.API.>",
-		"$KV.mclaude-sessions.>",
-		"$KV.mclaude-projects.>",
+		fmt.Sprintf("$KV.%s.>", sessBucket),
+		fmt.Sprintf("$KV.%s.>", projBucket),
 		"$KV.mclaude-hosts.>",
-		"$KV.mclaude-job-queue.>",
 		"$JS.ACK.>",
 		"$JS.FC.>",
 		"$JS.API.DIRECT.GET.>",
