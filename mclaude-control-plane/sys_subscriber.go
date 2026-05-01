@@ -34,11 +34,11 @@ type sysConnectEvent struct {
 }
 
 // StartSysSubscriber subscribes to $SYS.ACCOUNT.*.CONNECT and
-// $SYS.ACCOUNT.*.DISCONNECT on hub NATS. Per ADR-0035:
-//   - kind="Client" + nkey matches hosts.public_key with type='machine'
-//     → update that row's last_seen_at and set online in KV
-//   - kind="Leafnode" + nkey matches a row with type='cluster'
-//     → update ALL rows where slug=found.slug AND type='cluster'
+// $SYS.ACCOUNT.*.DISCONNECT on hub NATS. Per ADR-0054/ADR-0063:
+//   - kind="Client" + nkey matches hosts.public_key (no type filter — matches
+//     both type='machine' and type='cluster') → update last_seen_at and set
+//     online=true in KV
+//   - kind="Leafnode" → log warning and drop (leaf topology removed per ADR-0054)
 //   - No match → ignore (SPA ephemeral NKey, control-plane's own connection)
 //
 // DISCONNECT mirrors with online=false (does not rewrite last_seen_at).
@@ -81,24 +81,26 @@ func (s *Server) handleSysEvent(msg *nats.Msg, isConnect bool) {
 
 	switch evt.Client.Kind {
 	case "Client":
-		// Machine host: look up by public_key + type='machine'.
+		// Look up by public_key only — no type filter. Matches both type='machine'
+		// and type='cluster' (ADR-0063: K8s cluster controllers connect hub-direct
+		// as "Client", not "Leafnode").
 		if isConnect {
 			now := time.Now().UTC()
 			_, err := s.db.pool.Exec(ctx, `
 				UPDATE hosts SET last_seen_at = $1
-				WHERE public_key = $2 AND type = 'machine'`,
+				WHERE public_key = $2`,
 				now, nkeyPub)
 			if err != nil {
-				log.Warn().Err(err).Str("nkey", nkeyPub).Msg("$SYS CONNECT: update machine host last_seen_at")
+				log.Warn().Err(err).Str("nkey", nkeyPub).Msg("$SYS CONNECT: update host last_seen_at")
 			}
 
-			// KV write: {hslug} → online=true (ADR-0054: flat key).
+			// KV write: {hslug} → online=true (ADR-0054: flat key, no user prefix).
 			if s.hostsKV != nil {
 				var hslug, hname, htype string
 				qerr := s.db.pool.QueryRow(ctx, `
 					SELECT h.slug AS hslug, h.name, h.type
 					FROM hosts h
-					WHERE h.public_key = $1 AND h.type = 'machine'`,
+					WHERE h.public_key = $1`,
 					nkeyPub).Scan(&hslug, &hname, &htype)
 				if qerr == nil {
 					nowStr := now.Format(time.RFC3339)
@@ -124,7 +126,7 @@ func (s *Server) handleSysEvent(msg *nats.Msg, isConnect bool) {
 				qerr := s.db.pool.QueryRow(ctx, `
 					SELECT h.slug AS hslug, h.name, h.type
 					FROM hosts h
-					WHERE h.public_key = $1 AND h.type = 'machine'`,
+					WHERE h.public_key = $1`,
 					nkeyPub).Scan(&hslug, &hname, &htype)
 				if qerr == nil {
 					key := hslug
@@ -147,94 +149,10 @@ func (s *Server) handleSysEvent(msg *nats.Msg, isConnect bool) {
 			}
 		}
 
-	case "Leafnode":
-		// Cluster host: look up by public_key + type='cluster', update ALL rows
-		// with matching slug (cluster-shared liveness across granted users).
-		var clusterSlug string
-		err := s.db.pool.QueryRow(ctx, `
-			SELECT slug FROM hosts
-			WHERE public_key = $1 AND type = 'cluster' LIMIT 1`,
-			nkeyPub).Scan(&clusterSlug)
-		if err != nil {
-			// No match — ignore (could be a non-mclaude leaf node).
-			return
-		}
-		if isConnect {
-			now := time.Now().UTC()
-			_, err = s.db.pool.Exec(ctx, `
-				UPDATE hosts SET last_seen_at = $1
-				WHERE slug = $2 AND type = 'cluster'`,
-				now, clusterSlug)
-			if err != nil {
-				log.Warn().Err(err).Str("slug", clusterSlug).Msg("$SYS CONNECT: update cluster host last_seen_at")
-			}
-
-			// KV write: {hslug} → online=true (ADR-0054: flat key).
-			if s.hostsKV != nil {
-				rows, qerr := s.db.pool.Query(ctx, `
-					SELECT h.slug AS hslug, h.name, h.type
-					FROM hosts h
-					WHERE h.slug = $1 AND h.type = 'cluster'`,
-					clusterSlug)
-				if qerr == nil {
-					defer rows.Close()
-					nowStr := now.Format(time.RFC3339)
-					for rows.Next() {
-						var hslug, hname, htype string
-						if serr := rows.Scan(&hslug, &hname, &htype); serr != nil {
-							continue
-						}
-						state := HostKVState{
-							Slug:       hslug,
-							Type:       htype,
-							Name:       hname,
-							Online:     true,
-							LastSeenAt: &nowStr,
-						}
-						if val, merr := json.Marshal(state); merr == nil {
-							key := hslug
-							if _, perr := s.hostsKV.Put(key, val); perr != nil {
-								log.Warn().Err(perr).Str("key", key).Msg("$SYS CONNECT: hostsKV cluster put failed")
-							}
-						}
-					}
-				}
-			}
-		} else {
-			// DISCONNECT: no last_seen_at update per ADR-0035; set online=false in KV.
-			if s.hostsKV != nil {
-				rows, qerr := s.db.pool.Query(ctx, `
-					SELECT h.slug AS hslug, h.name, h.type
-					FROM hosts h
-					WHERE h.slug = $1 AND h.type = 'cluster'`,
-					clusterSlug)
-				if qerr == nil {
-					defer rows.Close()
-					for rows.Next() {
-						var hslug, hname, htype string
-						if serr := rows.Scan(&hslug, &hname, &htype); serr != nil {
-							continue
-						}
-						key := hslug
-						// Read-modify-write: preserve lastSeenAt from existing entry.
-						existing, gerr := s.hostsKV.Get(key)
-						if gerr != nil {
-							// No existing entry — skip.
-							continue
-						}
-						var state HostKVState
-						if jerr := json.Unmarshal(existing.Value(), &state); jerr != nil {
-							state = HostKVState{Slug: hslug, Type: htype, Name: hname}
-						}
-						state.Online = false
-						if val, merr := json.Marshal(state); merr == nil {
-							if _, perr := s.hostsKV.Put(key, val); perr != nil {
-								log.Warn().Err(perr).Str("key", key).Msg("$SYS DISCONNECT: hostsKV cluster put failed")
-							}
-						}
-					}
-				}
-			}
-		}
+	default:
+		// Unexpected event kind — leaf topology was removed in ADR-0054/ADR-0063.
+		// Log a warning and drop.
+		log.Warn().Str("kind", evt.Client.Kind).Str("nkey", nkeyPub).
+			Msg("$SYS event: unexpected client kind; leaf topology removed per ADR-0063 — dropping")
 	}
 }

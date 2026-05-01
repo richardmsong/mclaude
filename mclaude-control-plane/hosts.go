@@ -16,13 +16,13 @@ import (
 )
 
 // HostResponse is a single host entry in list/CRUD responses.
+// ADR-0063: JsDomain field removed (leaf topology dropped per ADR-0054).
 type HostResponse struct {
 	ID            string     `json:"id"`
 	Slug          string     `json:"slug"`
 	Name          string     `json:"name"`
 	Type          string     `json:"type"`
 	Role          string     `json:"role"`
-	JsDomain      *string    `json:"jsDomain,omitempty"`
 	DirectNATSURL *string    `json:"directNatsUrl,omitempty"`
 	LastSeenAt    *time.Time `json:"lastSeenAt,omitempty"`
 	CreatedAt     time.Time  `json:"createdAt"`
@@ -181,7 +181,7 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request, userID 
 	}
 
 	rows, err := s.db.pool.Query(r.Context(), `
-		SELECT id, slug, name, type, role, js_domain, direct_nats_url, last_seen_at, created_at
+		SELECT id, slug, name, type, role, direct_nats_url, last_seen_at, created_at
 		FROM hosts WHERE user_id = $1 ORDER BY created_at`, userID)
 	if err != nil {
 		http.Error(w, "query error", http.StatusInternalServerError)
@@ -192,7 +192,7 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request, userID 
 	var hosts []HostResponse
 	for rows.Next() {
 		var h HostResponse
-		if err := rows.Scan(&h.ID, &h.Slug, &h.Name, &h.Type, &h.Role, &h.JsDomain, &h.DirectNATSURL, &h.LastSeenAt, &h.CreatedAt); err != nil {
+		if err := rows.Scan(&h.ID, &h.Slug, &h.Name, &h.Type, &h.Role, &h.DirectNATSURL, &h.LastSeenAt, &h.CreatedAt); err != nil {
 			http.Error(w, "scan error", http.StatusInternalServerError)
 			return
 		}

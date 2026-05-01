@@ -50,23 +50,22 @@ type AdminSessionStopRequest struct {
 }
 
 // AdminClusterRegisterRequest is the body for POST /admin/clusters (ADR-0035).
+// ADR-0063: jsDomain and leafUrl fields removed (leaf topology dropped per ADR-0054).
 type AdminClusterRegisterRequest struct {
 	Slug         string `json:"slug"`
 	Name         string `json:"name,omitempty"`
-	JsDomain     string `json:"jsDomain"`
-	LeafURL      string `json:"leafUrl"`
 	DirectNATSURL string `json:"directNatsUrl,omitempty"`
 	UserSlug     string `json:"userSlug,omitempty"` // owner user slug; if empty, first admin user is used
 }
 
 // AdminClusterRegisterResponse is returned on successful cluster registration.
+// ADR-0063: jsDomain field removed (leaf topology dropped per ADR-0054).
 type AdminClusterRegisterResponse struct {
 	Slug         string `json:"slug"`
 	LeafJWT      string `json:"leafJwt,omitempty"`
 	LeafSeed     string `json:"leafSeed,omitempty"`
 	AccountJWT   string `json:"accountJwt,omitempty"`
 	OperatorJWT  string `json:"operatorJwt,omitempty"`
-	JsDomain     string `json:"jsDomain"`
 	DirectNATSURL string `json:"directNatsUrl,omitempty"`
 }
 
@@ -347,8 +346,8 @@ func (s *Server) adminRegisterCluster(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	if req.Slug == "" || req.JsDomain == "" || req.LeafURL == "" {
-		http.Error(w, "slug, jsDomain, and leafUrl are required", http.StatusBadRequest)
+	if req.Slug == "" {
+		http.Error(w, "slug is required", http.StatusBadRequest)
 		return
 	}
 	if req.Name == "" {
@@ -397,9 +396,9 @@ func (s *Server) adminRegisterCluster(w http.ResponseWriter, r *http.Request) {
 
 	hostID := uuid.NewString()
 	_, err = s.db.pool.Exec(r.Context(), `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, js_domain, leaf_url, account_jwt, direct_nats_url, public_key, user_jwt)
-		VALUES ($1, $2, $3, $4, 'cluster', 'owner', $5, $6, '', $7, $8, $9)`,
-		hostID, ownerUserID, req.Slug, req.Name, req.JsDomain, req.LeafURL, req.DirectNATSURL, clusterNKey.PublicKey, clusterJWT)
+		INSERT INTO hosts (id, user_id, slug, name, type, role, direct_nats_url, public_key, user_jwt)
+		VALUES ($1, $2, $3, $4, 'cluster', 'owner', $5, $6, $7)`,
+		hostID, ownerUserID, req.Slug, req.Name, req.DirectNATSURL, clusterNKey.PublicKey, clusterJWT)
 	if err != nil {
 		if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
 			http.Error(w, "cluster slug already exists", http.StatusConflict)
@@ -423,7 +422,6 @@ func (s *Server) adminRegisterCluster(w http.ResponseWriter, r *http.Request) {
 		LeafJWT:      clusterJWT,
 		LeafSeed:     string(clusterSeed),
 		AccountJWT:   accountJWTStr,
-		JsDomain:     req.JsDomain,
 		DirectNATSURL: req.DirectNATSURL,
 	})
 }
@@ -436,7 +434,7 @@ func (s *Server) adminListClusters(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.pool.Query(r.Context(),
-		`SELECT DISTINCT slug, name, js_domain, leaf_url, direct_nats_url
+		`SELECT DISTINCT slug, name, direct_nats_url
 		 FROM hosts WHERE type = 'cluster' ORDER BY slug`)
 	if err != nil {
 		http.Error(w, "query error", http.StatusInternalServerError)
@@ -444,17 +442,16 @@ func (s *Server) adminListClusters(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
+	// ADR-0063: jsDomain and leafUrl removed (leaf topology dropped per ADR-0054).
 	type clusterEntry struct {
 		Slug         string  `json:"slug"`
 		Name         string  `json:"name"`
-		JsDomain     *string `json:"jsDomain"`
-		LeafURL      *string `json:"leafUrl"`
 		DirectNATSURL *string `json:"directNatsUrl"`
 	}
 	var clusters []clusterEntry
 	for rows.Next() {
 		var c clusterEntry
-		if err := rows.Scan(&c.Slug, &c.Name, &c.JsDomain, &c.LeafURL, &c.DirectNATSURL); err != nil {
+		if err := rows.Scan(&c.Slug, &c.Name, &c.DirectNATSURL); err != nil {
 			http.Error(w, "scan error", http.StatusInternalServerError)
 			return
 		}
@@ -487,11 +484,12 @@ func (s *Server) adminGrantCluster(w http.ResponseWriter, r *http.Request, cslug
 	}
 
 	// Look up the cluster's shared fields from an existing host row.
-	var jsDomain, leafURL, accountJWT, directNATSURL, publicKey *string
+	// ADR-0063: js_domain, leaf_url, account_jwt columns dropped.
+	var directNATSURL, publicKey *string
 	err := s.db.pool.QueryRow(r.Context(), `
-		SELECT js_domain, leaf_url, account_jwt, direct_nats_url, public_key
+		SELECT direct_nats_url, public_key
 		FROM hosts WHERE slug = $1 AND type = 'cluster' LIMIT 1`, cslug).
-		Scan(&jsDomain, &leafURL, &accountJWT, &directNATSURL, &publicKey)
+		Scan(&directNATSURL, &publicKey)
 	if err != nil {
 		http.Error(w, "cluster not found", http.StatusNotFound)
 		return
@@ -514,10 +512,10 @@ func (s *Server) adminGrantCluster(w http.ResponseWriter, r *http.Request, cslug
 
 	hostID := uuid.NewString()
 	_, err = s.db.pool.Exec(r.Context(), `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, js_domain, leaf_url, account_jwt, direct_nats_url, public_key, user_jwt)
-		VALUES ($1, $2, $3, $4, 'cluster', 'user', $5, $6, $7, $8, $9, $10)
+		INSERT INTO hosts (id, user_id, slug, name, type, role, direct_nats_url, public_key, user_jwt)
+		VALUES ($1, $2, $3, $4, 'cluster', 'user', $5, $6, $7)
 		ON CONFLICT (user_id, slug) DO NOTHING`,
-		hostID, user.ID, cslug, cslug, jsDomain, leafURL, accountJWT, directNATSURL, publicKey, userJWT)
+		hostID, user.ID, cslug, cslug, directNATSURL, publicKey, userJWT)
 	if err != nil {
 		http.Error(w, "failed to grant cluster access", http.StatusInternalServerError)
 		return

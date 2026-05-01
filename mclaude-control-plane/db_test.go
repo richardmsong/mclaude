@@ -83,14 +83,13 @@ func TestSchema_HasUniqueEmailConstraint(t *testing.T) {
 }
 
 func TestSchema_HostsTableColumns(t *testing.T) {
+	// ADR-0063: js_domain, leaf_url, account_jwt dropped by migration.
+	// Check only the columns that remain after the ADR-0063 migration.
 	hostCols := []string{
 		"user_id",
 		"slug",
 		"type",
 		"role",
-		"js_domain",
-		"leaf_url",
-		"account_jwt",
 		"direct_nats_url",
 		"public_key",
 		"user_jwt",
@@ -100,6 +99,23 @@ func TestSchema_HostsTableColumns(t *testing.T) {
 		if !strings.Contains(schema, col) {
 			t.Errorf("schema hosts table missing column %q", col)
 		}
+	}
+}
+
+func TestSchema_ADR0063_DropLegacyColumns(t *testing.T) {
+	// ADR-0063: migration must drop the legacy cluster-host constraint and
+	// the deprecated columns js_domain, leaf_url, account_jwt.
+	if !strings.Contains(schema, "js_domain IS NOT NULL") {
+		t.Error("ADR-0063 migration missing: expected original CHECK constraint referencing js_domain")
+	}
+	if !strings.Contains(schema, "DROP COLUMN js_domain") {
+		t.Error("ADR-0063 migration missing: DROP COLUMN js_domain")
+	}
+	if !strings.Contains(schema, "DROP COLUMN leaf_url") {
+		t.Error("ADR-0063 migration missing: DROP COLUMN leaf_url")
+	}
+	if !strings.Contains(schema, "DROP COLUMN account_jwt") {
+		t.Error("ADR-0063 migration missing: DROP COLUMN account_jwt")
 	}
 }
 

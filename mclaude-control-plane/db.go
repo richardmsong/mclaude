@@ -48,6 +48,7 @@ func computeUserSlug(email string) string {
 
 // Host is a row from the hosts table. Per ADR-0035, this is the single source
 // of truth for both BYOH machines and K8s clusters.
+// ADR-0063: columns js_domain, leaf_url, account_jwt dropped (leaf topology removed per ADR-0054).
 type Host struct {
 	ID            string
 	UserID        string  // OwnerID in spec (ADR-0054); keeps user_id column name for DB compat
@@ -55,10 +56,7 @@ type Host struct {
 	Name          string
 	Type          string  // 'machine' or 'cluster'
 	Role          string  // 'owner' or 'user'
-	JsDomain      *string // NULL for machine hosts
-	LeafURL       *string // NULL for machine hosts
-	AccountJWT    *string // NULL for machine hosts
-	DirectNATSURL *string // Optional even for cluster hosts
+	DirectNATSURL *string // Optional
 	PublicKey     *string // NKey public key (nkey_public in spec, public_key in DB)
 	UserJWT       *string // Legacy JWT column
 	NatsJWT       *string // ADR-0054: host NATS JWT (5-min TTL, host-scoped)
@@ -372,12 +370,11 @@ func (db *DB) DeleteProject(ctx context.Context, projectID string) error {
 	return err
 }
 
-// scanHost scans a full host row including the new nats_jwt column.
+// scanHost scans a full host row. ADR-0063: js_domain, leaf_url, account_jwt columns dropped.
 func scanHost(row interface{ Scan(...any) error }) (*Host, error) {
 	h := &Host{}
 	err := row.Scan(&h.ID, &h.UserID, &h.Slug, &h.Name, &h.Type, &h.Role,
-		&h.JsDomain, &h.LeafURL, &h.AccountJWT, &h.DirectNATSURL,
-		&h.PublicKey, &h.UserJWT, &h.NatsJWT, &h.CreatedAt, &h.LastSeenAt)
+		&h.DirectNATSURL, &h.PublicKey, &h.UserJWT, &h.NatsJWT, &h.CreatedAt, &h.LastSeenAt)
 	if err != nil {
 		if err.Error() == "no rows in result set" {
 			return nil, nil
@@ -391,7 +388,7 @@ func scanHost(row interface{ Scan(...any) error }) (*Host, error) {
 // Per ADR-0054: owned hosts (role='owner') + granted hosts via host_access table.
 func (db *DB) GetHostsByUser(ctx context.Context, userID string) ([]*Host, error) {
 	rows, err := db.pool.Query(ctx,
-		`SELECT id, user_id, slug, name, type, role, js_domain, leaf_url, account_jwt,
+		`SELECT id, user_id, slug, name, type, role,
 		        direct_nats_url, public_key, user_jwt, nats_jwt, created_at, last_seen_at
 		 FROM hosts WHERE user_id = $1 ORDER BY created_at`, userID)
 	if err != nil {
@@ -414,7 +411,7 @@ func (db *DB) GetHostsByUser(ctx context.Context, userID string) ([]*Host, error
 // During migration, returns the 'owner' row if multiple rows exist for the same slug.
 func (db *DB) GetHostBySlug(ctx context.Context, hslug string) (*Host, error) {
 	row := db.pool.QueryRow(ctx,
-		`SELECT id, user_id, slug, name, type, role, js_domain, leaf_url, account_jwt,
+		`SELECT id, user_id, slug, name, type, role,
 		        direct_nats_url, public_key, user_jwt, nats_jwt, created_at, last_seen_at
 		 FROM hosts WHERE slug = $1 AND role = 'owner' LIMIT 1`,
 		hslug)
@@ -429,7 +426,7 @@ func (db *DB) GetHostBySlug(ctx context.Context, hslug string) (*Host, error) {
 // Used for HTTP challenge-response auth and $SYS presence tracking (ADR-0054).
 func (db *DB) GetHostByPublicKey(ctx context.Context, publicKey string) (*Host, error) {
 	row := db.pool.QueryRow(ctx,
-		`SELECT id, user_id, slug, name, type, role, js_domain, leaf_url, account_jwt,
+		`SELECT id, user_id, slug, name, type, role,
 		        direct_nats_url, public_key, user_jwt, nats_jwt, created_at, last_seen_at
 		 FROM hosts WHERE public_key = $1 LIMIT 1`,
 		publicKey)
@@ -1002,4 +999,38 @@ CREATE TABLE IF NOT EXISTS attachments (
 );
 CREATE INDEX IF NOT EXISTS idx_attachments_project ON attachments (project_id);
 CREATE INDEX IF NOT EXISTS idx_attachments_unconfirmed ON attachments (confirmed, created_at) WHERE confirmed = FALSE;
+
+-- ADR-0063: drop legacy leaf-NATS CHECK constraint and deprecated columns from hosts.
+-- The constraint blocked inserting type='cluster' rows without js_domain/leaf_url/account_jwt.
+-- Columns js_domain, leaf_url, account_jwt are deprecated per ADR-0054 (hub-direct topology).
+-- PostgreSQL CHECK constraints are named by the server; find and drop it by scanning
+-- pg_constraint. Uses DO block to be idempotent across fresh installs (where the
+-- columns and constraint were never created) and upgrades (where they exist).
+DO $$
+DECLARE
+    cname TEXT;
+BEGIN
+    -- Drop the legacy cluster-host CHECK constraint if it exists.
+    SELECT conname INTO cname
+    FROM pg_constraint
+    WHERE conrelid = 'hosts'::regclass
+      AND contype = 'c'
+      AND pg_get_constraintdef(oid) LIKE '%js_domain%'
+    LIMIT 1;
+    IF cname IS NOT NULL THEN
+        EXECUTE 'ALTER TABLE hosts DROP CONSTRAINT ' || quote_ident(cname);
+    END IF;
+
+    -- Drop deprecated columns if they exist.
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'hosts' AND column_name = 'js_domain') THEN
+        ALTER TABLE hosts DROP COLUMN js_domain;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'hosts' AND column_name = 'leaf_url') THEN
+        ALTER TABLE hosts DROP COLUMN leaf_url;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'hosts' AND column_name = 'account_jwt') THEN
+        ALTER TABLE hosts DROP COLUMN account_jwt;
+    END IF;
+END
+$$;
 `

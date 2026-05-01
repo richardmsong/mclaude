@@ -149,9 +149,9 @@ func TestIntegration_NATSSubjectPermissions(t *testing.T) {
 	}
 
 	expiresAt := time.Now().Add(time.Hour).Unix()
-	aliceJWT, aliceSeed, err := IssueUserJWT("alice", "alice-slug", accountKP, expiresAt)
+	aliceJWT, aliceSeed, err := IssueUserJWTLegacy("alice", "alice-slug", accountKP, expiresAt)
 	if err != nil {
-		t.Fatalf("IssueUserJWT: %v", err)
+		t.Fatalf("IssueUserJWTLegacy: %v", err)
 	}
 
 	aliceKP, err := nkeys.FromSeed(aliceSeed)
@@ -567,41 +567,31 @@ func TestIntegration_HandleSysEvent_MachineDisconnect(t *testing.T) {
 	}
 }
 
-// TestIntegration_HandleSysEvent_ClusterConnect verifies that a Leafnode CONNECT
-// event for a cluster host writes online=true to mclaude-hosts KV for all
-// matching user rows (ADR-0046).
+// TestIntegration_HandleSysEvent_ClusterConnect verifies that a Client CONNECT
+// event for a cluster host writes online=true to mclaude-hosts KV (ADR-0063:
+// K8s cluster controllers connect hub-direct as "Client", not "Leafnode").
+// The "Client" branch looks up by public_key with no type filter, so it matches
+// both type='machine' and type='cluster' rows.
 func TestIntegration_HandleSysEvent_ClusterConnect(t *testing.T) {
 	ctx := context.Background()
 	db := mustConnectDB(t, ctx)
 
-	// Create two users who each have a cluster host with the same slug
-	// (simulating a shared cluster granted to multiple users).
+	// Create a user with a cluster host using a unique public_key.
+	// ADR-0063: no js_domain/leaf_url/account_jwt columns needed (constraint dropped).
 	_, err := db.CreateUser(ctx, "clconn-u1", "clconn1@example.com", "ClConn1", "")
 	if err != nil {
 		t.Fatalf("CreateUser u1: %v", err)
 	}
-	_, err = db.CreateUser(ctx, "clconn-u2", "clconn2@example.com", "ClConn2", "")
-	if err != nil {
-		t.Fatalf("CreateUser u2: %v", err)
-	}
-	// Cluster hosts require js_domain, leaf_url, account_jwt per the hosts_check constraint.
 	_, err = db.pool.Exec(ctx, `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key, js_domain, leaf_url, account_jwt)
-		VALUES ('clconn-h1', 'clconn-u1', 'mycluster', 'My Cluster', 'cluster', 'owner', 'UTEST_CL_CONNECT_KEY', 'hub', 'nats://hub:7422', 'fake-account-jwt-1')`,
+		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key)
+		VALUES ('clconn-h1', 'clconn-u1', 'mycluster', 'My Cluster', 'cluster', 'owner', 'UTEST_CL_CONNECT_KEY')`,
 	)
 	if err != nil {
-		t.Fatalf("insert cluster host u1: %v", err)
-	}
-	_, err = db.pool.Exec(ctx, `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key, js_domain, leaf_url, account_jwt)
-		VALUES ('clconn-h2', 'clconn-u2', 'mycluster', 'My Cluster', 'cluster', 'user', 'UTEST_CL_CONNECT_KEY', 'hub', 'nats://hub:7422', 'fake-account-jwt-2')`,
-	)
-	if err != nil {
-		t.Fatalf("insert cluster host u2: %v", err)
+		t.Fatalf("insert cluster host: %v", err)
 	}
 	t.Cleanup(func() {
-		db.pool.Exec(ctx, `DELETE FROM hosts WHERE id IN ('clconn-h1','clconn-h2')`)  //nolint:errcheck
-		db.pool.Exec(ctx, `DELETE FROM users WHERE id IN ('clconn-u1','clconn-u2')`)  //nolint:errcheck
+		db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = 'clconn-h1'`)  //nolint:errcheck
+		db.pool.Exec(ctx, `DELETE FROM users WHERE id = 'clconn-u1'`)  //nolint:errcheck
 	})
 
 	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
@@ -621,68 +611,58 @@ func TestIntegration_HandleSysEvent_ClusterConnect(t *testing.T) {
 
 	srv := &Server{db: db, hostsKV: hostsKV}
 
-	// Simulate a $SYS Leafnode CONNECT event.
-	payload := `{"server":{"name":"hub"},"client":{"kind":"Leafnode","name":"mycluster","nkey":"UTEST_CL_CONNECT_KEY"}}`
+	// Simulate a $SYS Client CONNECT event from a K8s cluster controller.
+	// ADR-0063: cluster controllers connect hub-direct as "Client", not "Leafnode".
+	payload := `{"server":{"name":"hub"},"client":{"kind":"Client","name":"mycluster","nkey":"UTEST_CL_CONNECT_KEY"}}`
 	srv.handleSysEvent(&nats.Msg{Data: []byte(payload)}, true /* isConnect */)
 
-	// Both user rows should have online=true written to mclaude-hosts KV.
-	// ADR-0062: slugs derived from full emails: clconn1@example.com → clconn1-example-com
-	for _, userSlug := range []string{"clconn1-example-com", "clconn2-example-com"} {
-		key := userSlug + ".mycluster"
-		entry, err := hostsKV.Get(key)
-		if err != nil {
-			t.Errorf("hostsKV.Get(%q): %v — expected entry after cluster CONNECT", key, err)
-			continue
-		}
-		var state HostKVState
-		if err := json.Unmarshal(entry.Value(), &state); err != nil {
-			t.Fatalf("unmarshal HostKVState for %q: %v", key, err)
-		}
-		if !state.Online {
-			t.Errorf("key %q: online = %v; want true after cluster CONNECT", key, state.Online)
-		}
-		if state.Slug != "mycluster" {
-			t.Errorf("key %q: slug = %q; want %q", key, state.Slug, "mycluster")
-		}
-		if state.LastSeenAt == nil {
-			t.Errorf("key %q: lastSeenAt should be set after cluster CONNECT", key)
-		}
+	// The cluster host row should have online=true written to mclaude-hosts KV.
+	// KV key is {hslug} (flat, no user prefix — per spec-state-schema.md § mclaude-hosts).
+	key := "mycluster"
+	entry, err := hostsKV.Get(key)
+	if err != nil {
+		t.Fatalf("hostsKV.Get(%q): %v — expected entry after cluster CONNECT", key, err)
+	}
+	var state HostKVState
+	if err := json.Unmarshal(entry.Value(), &state); err != nil {
+		t.Fatalf("unmarshal HostKVState for %q: %v", key, err)
+	}
+	if !state.Online {
+		t.Errorf("key %q: online = %v; want true after cluster CONNECT", key, state.Online)
+	}
+	if state.Slug != "mycluster" {
+		t.Errorf("key %q: slug = %q; want mycluster", key, state.Slug)
+	}
+	if state.Type != "cluster" {
+		t.Errorf("key %q: type = %q; want cluster", key, state.Type)
+	}
+	if state.LastSeenAt == nil {
+		t.Errorf("key %q: lastSeenAt should be set after cluster CONNECT", key)
 	}
 }
 
-// TestIntegration_HandleSysEvent_ClusterDisconnect verifies that a Leafnode
-// DISCONNECT event sets online=false in mclaude-hosts KV for all matching
-// user rows, without modifying lastSeenAt (ADR-0046).
+// TestIntegration_HandleSysEvent_ClusterDisconnect verifies that a Client
+// DISCONNECT event sets online=false in mclaude-hosts KV for the cluster host,
+// without modifying lastSeenAt (ADR-0046/ADR-0063).
 func TestIntegration_HandleSysEvent_ClusterDisconnect(t *testing.T) {
 	ctx := context.Background()
 	db := mustConnectDB(t, ctx)
 
+	// ADR-0063: no js_domain/leaf_url/account_jwt columns needed (constraint dropped).
 	_, err := db.CreateUser(ctx, "cldisc-u1", "cldisc1@example.com", "ClDisc1", "")
 	if err != nil {
 		t.Fatalf("CreateUser u1: %v", err)
 	}
-	_, err = db.CreateUser(ctx, "cldisc-u2", "cldisc2@example.com", "ClDisc2", "")
-	if err != nil {
-		t.Fatalf("CreateUser u2: %v", err)
-	}
-	// Cluster hosts require js_domain, leaf_url, account_jwt per the hosts_check constraint.
 	_, err = db.pool.Exec(ctx, `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key, js_domain, leaf_url, account_jwt)
-		VALUES ('cldisc-h1', 'cldisc-u1', 'disccluster', 'Disc Cluster', 'cluster', 'owner', 'UTEST_CL_DISC_KEY', 'hub', 'nats://hub:7422', 'fake-account-jwt-disc-1')`,
+		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key)
+		VALUES ('cldisc-h1', 'cldisc-u1', 'disccluster', 'Disc Cluster', 'cluster', 'owner', 'UTEST_CL_DISC_KEY')`,
 	)
 	if err != nil {
-		t.Fatalf("insert cluster host u1: %v", err)
-	}
-	_, err = db.pool.Exec(ctx, `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key, js_domain, leaf_url, account_jwt)
-		VALUES ('cldisc-h2', 'cldisc-u2', 'disccluster', 'Disc Cluster', 'cluster', 'user', 'UTEST_CL_DISC_KEY', 'hub', 'nats://hub:7422', 'fake-account-jwt-disc-2')`,
-	)
-	if err != nil {
-		t.Fatalf("insert cluster host u2: %v", err)
+		t.Fatalf("insert cluster host: %v", err)
 	}
 	t.Cleanup(func() {
-		db.pool.Exec(ctx, `DELETE FROM hosts WHERE id IN ('cldisc-h1','cldisc-h2')`)  //nolint:errcheck
-		db.pool.Exec(ctx, `DELETE FROM users WHERE id IN ('cldisc-u1','cldisc-u2')`)  //nolint:errcheck
+		db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = 'cldisc-h1'`)  //nolint:errcheck
+		db.pool.Exec(ctx, `DELETE FROM users WHERE id = 'cldisc-u1'`)  //nolint:errcheck
 	})
 
 	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
@@ -702,47 +682,79 @@ func TestIntegration_HandleSysEvent_ClusterDisconnect(t *testing.T) {
 
 	srv := &Server{db: db, hostsKV: hostsKV}
 
-	connectPayload := `{"server":{"name":"hub"},"client":{"kind":"Leafnode","name":"disccluster","nkey":"UTEST_CL_DISC_KEY"}}`
+	// Connect first.
+	// ADR-0063: cluster controllers connect hub-direct as "Client", not "Leafnode".
+	connectPayload := `{"server":{"name":"hub"},"client":{"kind":"Client","name":"disccluster","nkey":"UTEST_CL_DISC_KEY"}}`
 	srv.handleSysEvent(&nats.Msg{Data: []byte(connectPayload)}, true)
 
-	// Capture lastSeenAt values before disconnect.
-	// ADR-0062: slugs derived from full emails: cldisc1@example.com → cldisc1-example-com
-	savedLastSeen := map[string]*string{}
-	for _, userSlug := range []string{"cldisc1-example-com", "cldisc2-example-com"} {
-		key := userSlug + ".disccluster"
-		entry, err := hostsKV.Get(key)
-		if err != nil {
-			t.Fatalf("hostsKV.Get(%q) after CONNECT: %v", key, err)
-		}
-		var state HostKVState
-		json.Unmarshal(entry.Value(), &state) //nolint:errcheck
-		savedLastSeen[userSlug] = state.LastSeenAt
+	// Capture lastSeenAt before disconnect.
+	// KV key is {hslug} (flat, no user prefix — per spec-state-schema.md § mclaude-hosts).
+	key := "disccluster"
+	entry, err := hostsKV.Get(key)
+	if err != nil {
+		t.Fatalf("hostsKV.Get(%q) after CONNECT: %v", key, err)
 	}
+	var stateAfterConnect HostKVState
+	json.Unmarshal(entry.Value(), &stateAfterConnect) //nolint:errcheck
+	savedLastSeen := stateAfterConnect.LastSeenAt
 
 	// Now disconnect.
-	disconnectPayload := `{"server":{"name":"hub"},"client":{"kind":"Leafnode","name":"disccluster","nkey":"UTEST_CL_DISC_KEY"}}`
+	disconnectPayload := `{"server":{"name":"hub"},"client":{"kind":"Client","name":"disccluster","nkey":"UTEST_CL_DISC_KEY"}}`
 	srv.handleSysEvent(&nats.Msg{Data: []byte(disconnectPayload)}, false)
 
 	// Verify online=false and lastSeenAt unchanged.
-	for _, userSlug := range []string{"cldisc1-example-com", "cldisc2-example-com"} {
-		key := userSlug + ".disccluster"
-		entry, err := hostsKV.Get(key)
-		if err != nil {
-			t.Errorf("hostsKV.Get(%q) after DISCONNECT: %v", key, err)
-			continue
-		}
-		var state HostKVState
-		if err := json.Unmarshal(entry.Value(), &state); err != nil {
-			t.Fatalf("unmarshal HostKVState for %q: %v", key, err)
-		}
-		if state.Online {
-			t.Errorf("key %q: online should be false after DISCONNECT", key)
-		}
-		saved := savedLastSeen[userSlug]
-		if state.LastSeenAt == nil || saved == nil || *state.LastSeenAt != *saved {
-			t.Errorf("key %q: lastSeenAt changed on DISCONNECT: got %v, want %v",
-				key, state.LastSeenAt, saved)
-		}
+	entry, err = hostsKV.Get(key)
+	if err != nil {
+		t.Fatalf("hostsKV.Get(%q) after DISCONNECT: %v", key, err)
+	}
+	var stateAfterDisconnect HostKVState
+	if err := json.Unmarshal(entry.Value(), &stateAfterDisconnect); err != nil {
+		t.Fatalf("unmarshal HostKVState for %q: %v", key, err)
+	}
+	if stateAfterDisconnect.Online {
+		t.Errorf("key %q: online should be false after DISCONNECT", key)
+	}
+	if stateAfterDisconnect.LastSeenAt == nil || savedLastSeen == nil ||
+		*stateAfterDisconnect.LastSeenAt != *savedLastSeen {
+		t.Errorf("key %q: lastSeenAt changed on DISCONNECT: got %v, want %v",
+			key, stateAfterDisconnect.LastSeenAt, savedLastSeen)
+	}
+}
+
+// TestIntegration_HandleSysEvent_LeafnodeDropped verifies that "Leafnode" kind
+// $SYS events are silently dropped (ADR-0063: leaf topology removed). No KV
+// writes should occur and no panic should result.
+func TestIntegration_HandleSysEvent_LeafnodeDropped(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
+	if err != nil {
+		t.Fatalf("NATS connect: %v", err)
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+	hostsKV, err := ensureHostsKV(js)
+	if err != nil {
+		t.Fatalf("ensureHostsKV: %v", err)
+	}
+
+	srv := &Server{db: db, hostsKV: hostsKV}
+
+	// A "Leafnode" CONNECT event should not write anything to KV.
+	payload := `{"server":{"name":"hub"},"client":{"kind":"Leafnode","name":"somenode","nkey":"UTEST_LEAFNODE_DROPPED_KEY"}}`
+	// Must not panic.
+	srv.handleSysEvent(&nats.Msg{Data: []byte(payload)}, true)
+	srv.handleSysEvent(&nats.Msg{Data: []byte(payload)}, false)
+
+	// No KV entry should have been written for this nkey.
+	_, err = hostsKV.Get("somenode")
+	if err == nil {
+		t.Error("Leafnode event should not write to hostsKV; got an entry")
 	}
 }
 

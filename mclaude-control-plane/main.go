@@ -34,10 +34,7 @@ func main() {
 		runInitKeys()
 		return
 	}
-	if len(os.Args) > 1 && os.Args[1] == "gen-leaf-creds" {
-		runGenLeafCreds()
-		return
-	}
+
 
 	logger := zerolog.New(os.Stdout).With().
 		Str("component", "control-plane").
