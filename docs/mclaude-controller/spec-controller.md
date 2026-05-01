@@ -69,7 +69,7 @@ The wildcard at the user level is what enables one cluster controller to receive
 For full schemas see `docs/spec-state-schema.md` — Kubernetes Resources. Summary:
 
 - CRD `MCProject` (`mcprojects.mclaude.io/v1alpha1`).
-- Per-user namespace `mclaude-{userId}` with ServiceAccount, Role, RoleBinding.
+- Per-user namespace `mclaude-{userSlug}` (ADR-0062) with ServiceAccount, Role, RoleBinding.
 - Per-user `user-secrets` Secret (NATS credentials, OAuth tokens, CLI configs) and `user-config` ConfigMap.
 - Per-project `project-{projectId}` and `nix-{projectId}` PVCs.
 - Per-project `project-{projectId}` Deployment.
@@ -80,7 +80,7 @@ For full schemas see `docs/spec-state-schema.md` — Kubernetes Resources. Summa
 On each reconcile cycle:
 
 1. Loads the session-agent-template ConfigMap for image, resource, and PVC configuration.
-2. Ensures the user namespace exists with correct labels (including `mclaude.io/user-namespace: "true"` when corporate CA is enabled for trust-manager targeting).
+2. Ensures the user namespace `mclaude-{userSlug}` exists with correct labels (including `mclaude.io/user-namespace: "true"` when corporate CA is enabled for trust-manager targeting). ADR-0062: namespace is derived from the user slug, not the user UUID. On migration, the controller creates the new slug-named namespace if it does not exist; the old UUID-named namespace (`mclaude-{userId}`) is left for manual cleanup. No automatic PVC migration — fresh PVCs are created in the new namespace.
 3. Ensures RBAC resources (ServiceAccount, Role, RoleBinding).
 4. Ensures the `user-config` ConfigMap and `user-secrets` Secret. NATS credentials in the Secret are session-agent JWTs minted by the controller via `IssueSessionAgentJWT` (signed by the account signing key).
 5. Copies imagePullSecrets from the controller's namespace.

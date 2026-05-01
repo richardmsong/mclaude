@@ -15,7 +15,7 @@ Single PostgreSQL instance in the control-plane cluster. Managed by `mclaude-con
 | Column | Type | Constraints | Description |
 |--------|------|-------------|-------------|
 | `id` | TEXT | PRIMARY KEY | UUID v4 |
-| `slug` | TEXT | UNIQUE NOT NULL | Typed-slug identifier used in subjects, URLs, and KV keys. Derived at user creation as `lower(regexp_replace(split_part(email, '@', 1), '[^a-zA-Z0-9]+', '-', 'g'))` (email local-part only, slugified) with numeric suffix on collision. Immutable after creation; email changes do not rewrite the slug. |
+| `slug` | TEXT | UNIQUE NOT NULL | Typed-slug identifier used in subjects, URLs, and KV keys. Derived at user creation by slugifying the full email: `lower(regexp_replace(email, '[^a-zA-Z0-9]+', '-', 'g'))` trimmed of leading/trailing `-`, truncated to 63 chars (ADR-0062). Examples: `dev@mclaude.local` → `dev-mclaude-local`, `richard.song@gmail.com` → `richard-song-gmail-com`. Numeric suffix on collision. Immutable after creation; email changes do not rewrite the slug. |
 | `email` | TEXT | UNIQUE NOT NULL | Login email |
 | `name` | TEXT | NOT NULL | Display name (free-form UTF-8, max 128 chars, mutable) |
 | `password_hash` | TEXT | NOT NULL DEFAULT '' | bcrypt hash (legacy / dev-seed; production users authenticate via OAuth) |
@@ -474,14 +474,14 @@ status:
 Writers: control-plane (created on project creation)
 Readers: reconciler (watches for changes, drives provisioning)
 
-### Namespace: `mclaude-{userId}`
+### Namespace: `mclaude-{userSlug}`
 
 Labels: `mclaude.io/user-id={userId}`, `mclaude.io/managed=true`
 
 Created by: `mclaude-controller-k8s` (`reconcileNamespace`).
 Contains all per-user resources below.
 
-### Secret: `user-secrets` (in `mclaude-{userId}`)
+### Secret: `user-secrets` (in `mclaude-{userSlug}`)
 
 | Key | Value | Description |
 |-----|-------|-------------|
@@ -496,7 +496,7 @@ Contains all per-user resources below.
 Writers: `mclaude-controller-k8s` (`reconcileSecrets`), control-plane OAuth callback + PAT handler + `reconcileUserCLIConfig`
 Readers: session-agent pod (mounted read-only at `/home/node/.user-secrets`)
 
-### ConfigMap: `user-config` (in `mclaude-{userId}`)
+### ConfigMap: `user-config` (in `mclaude-{userSlug}`)
 
 Contents: Claude Code workspace settings, hooks, seed configuration.
 
@@ -521,7 +521,7 @@ Static Helm-templated ConfigMap containing session-agent pod spec values:
 Writers: Helm install/upgrade
 Readers: reconciler — watches this ConfigMap (filtered by name + namespace) in addition to reading it on startup; on change, re-enqueues all `MCProject` CRs so updated pod specs (e.g. new image) are applied without a manual `helm upgrade` (ADR-0043)
 
-### PVC: `project-{projectId}` (in `mclaude-{userId}`)
+### PVC: `project-{projectId}` (in `mclaude-{userSlug}`)
 
 - AccessMode: ReadWriteOnce
 - Size: from session-agent-template ConfigMap
@@ -529,7 +529,7 @@ Readers: reconciler — watches this ConfigMap (filtered by name + namespace) in
 - Contents: bare git repo, worktrees, Claude Code JSONL persistence
 - Mounted at: `/data` in session-agent pod
 
-### PVC: `nix-{projectId}` (in `mclaude-{userId}`)
+### PVC: `nix-{projectId}` (in `mclaude-{userSlug}`)
 
 - AccessMode: ReadWriteOnce
 - Size: from session-agent-template ConfigMap
@@ -537,7 +537,7 @@ Readers: reconciler — watches this ConfigMap (filtered by name + namespace) in
 - Contents: shared Nix store (cached tools)
 - Mounted at: `/nix` in session-agent pod
 
-### Deployment: `project-{projectId}` (in `mclaude-{userId}`)
+### Deployment: `project-{projectId}` (in `mclaude-{userSlug}`)
 
 - Replicas: 1
 - Strategy: `Recreate` — old pod must exit before new pod starts; prevents two pods consuming the same durable JetStream consumers simultaneously (ADR-0043)
@@ -550,7 +550,7 @@ Readers: reconciler — watches this ConfigMap (filtered by name + namespace) in
 
 Writers: `mclaude-controller-k8s` (`reconcileDeployment`)
 
-### RBAC: ServiceAccount, Role, RoleBinding (in `mclaude-{userId}`)
+### RBAC: ServiceAccount, Role, RoleBinding (in `mclaude-{userSlug}`)
 
 - ServiceAccount: `mclaude-sa`
 - Role: `mclaude-role` — allows get/watch/patch on ConfigMap `user-config` (for config reload) and get on Secret `user-secrets` (for NATS credentials and OAuth tokens mounted into session-agent pods)

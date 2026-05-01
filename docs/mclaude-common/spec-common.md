@@ -41,7 +41,7 @@ When a candidate fails validation, generates a deterministic slug `{prefix}-{6 b
 
 **User slug derivation (`DeriveUserSlug`):**
 
-Produces `{slugify(displayName)}-{first domain segment}` from a display name and email. Falls back to the email local-part when the display name slugifies to empty.
+Produces `slugify(full-email)` — lowercase, replace all non-`[a-z0-9]` runs with `-`, trim leading/trailing `-`, truncate to 63 chars. Examples: `dev@mclaude.local` → `dev-mclaude-local`, `richard.song@gmail.com` → `richard-song-gmail-com`. The full domain is included to prevent collisions between users on different domains (ADR-0062).
 
 **MustParse helpers:** `MustParseUserSlug`, `MustParseProjectSlug`, `MustParseSessionSlug`, `MustParseHostSlug`, `MustParseClusterSlug` -- validate and return the typed wrapper or panic.
 

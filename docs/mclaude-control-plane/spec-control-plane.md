@@ -185,6 +185,8 @@ If a per-user bucket or stream is missing at runtime (e.g., after a restore), th
 
 Manages the `users`, `projects`, `hosts`, `host_access`, `agent_credentials`, `attachments`, and `oauth_connections` tables (ADR-0054, ADR-0053). Schema is applied on startup via idempotent DDL (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`). For full schema, see `spec-state-schema.md` -- Postgres.
 
+**User slug derivation (ADR-0024, ADR-0062):** `computeUserSlug(email)` slugifies the full email address — lowercase, replace all non-`[a-z0-9]` runs with `-`, trim leading/trailing `-`, truncate to 63 chars. Examples: `dev@mclaude.local` → `dev-mclaude-local`, `richard.song@gmail.com` → `richard-song-gmail-com`. The full domain is included (not just the first segment) to prevent collisions between users on different domains. SQL backfill applies the same algorithm to existing rows.
+
 Key tables added by ADR-0054/0053:
 - **`host_access`** — `(host_id, user_id)` composite PK. Tracks per-user access grants to hosts. The host owner has implicit access (not stored here).
 - **`agent_credentials`** — `(user_id, host_slug, project_slug) → nkey_public`. One active credential per user/host/project. Used for HTTP challenge-response auth. Cleaned up on deprovision.

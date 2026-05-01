@@ -16,7 +16,7 @@ Per ADR-0054, every NATS subject the agent uses is host-scoped: `mclaude.users.{
 
 ### Standalone Mode (K8s)
 
-Runs as a single-container Deployment per project in the `mclaude-{userId}` namespace. The pod entrypoint (`entrypoint.sh`) seeds the Nix store from a bootstrap tarball, consumes secrets from the mounted `user-secrets` Secret, seeds Claude Code config from the `user-config` ConfigMap, symlinks JSONL history to the project PVC, disables onboarding and permission dialogs, and then execs the `session-agent` binary with `--mode k8s`.
+Runs as a single-container Deployment per project in the `mclaude-{userSlug}` namespace. The pod entrypoint (`entrypoint.sh`) seeds the Nix store from a bootstrap tarball, consumes secrets from the mounted `user-secrets` Secret, seeds Claude Code config from the `user-config` ConfigMap, symlinks JSONL history to the project PVC, disables onboarding and permission dialogs, and then execs the `session-agent` binary with `--mode k8s`.
 
 The container image is Alpine-based with Node.js 22, Claude Code (native binary), git, gh, glab, zsh, and Nix. A `pkg` shim translates `apt`/`brew` commands to `nix profile` operations. Two PVCs are mounted: the project PVC at `/data` (bare repo, worktrees, JSONL persistence, shared memory) and the Nix PVC at `/nix` (shared Nix store).
 
