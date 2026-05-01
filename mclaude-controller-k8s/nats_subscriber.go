@@ -219,7 +219,7 @@ func (p *NATSProvisioner) handleUpdate(ctx context.Context, req ProvisionRequest
 		return fmt.Errorf("get MCProject CR: %w", err)
 	}
 
-	userNs := "mclaude-" + mcp.Spec.UserID
+	userNs := "mclaude-" + mcp.Spec.UserSlug // ADR-0062: use slug, not UUID
 	if err := p.reconciler.reconcileSecrets(ctx, &mcp, userNs); err != nil {
 		return fmt.Errorf("reconcile secrets: %w", err)
 	}

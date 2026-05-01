@@ -76,7 +76,7 @@ func (r *MCProjectReconciler) Reconcile(ctx context.Context, req reconcile.Reque
 		}
 	}
 
-	userNs := "mclaude-" + mcp.Spec.UserID
+	userNs := "mclaude-" + mcp.Spec.UserSlug // ADR-0062: use slug, not UUID
 	log = log.With().Str("userNs", userNs).Str("projectId", mcp.Spec.ProjectID).Logger()
 
 	tpl, err := r.loadTemplate(ctx)

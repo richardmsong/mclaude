@@ -171,7 +171,8 @@ func TestGap4_ClaudeCodeTmpDir(t *testing.T) {
 	tpl := defaultTemplate()
 	tpl.hostSlug = "us-east"
 
-	podTpl := r.buildPodTemplate(ctx, mcp, "mclaude-user-123", tpl)
+	// ADR-0062: namespace derived from UserSlug ("alice"), not UserID ("user-123").
+	podTpl := r.buildPodTemplate(ctx, mcp, "mclaude-alice", tpl)
 
 	// Check env var.
 	found := false
@@ -345,6 +346,110 @@ func TestGap9_LogLevelParsing(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("ParseLevel(%q) = %v, want %v", tt.input, got, tt.want)
 		}
+	}
+}
+
+// TestADR0062_NamespaceUsesSlug verifies that the reconciler creates namespace
+// mclaude-{userSlug} (not mclaude-{userId}) per ADR-0062.
+// Integration test case: "Namespace uses slug — Controller creates namespace
+// mclaude-dev-mclaude-local (not UUID)".
+func TestADR0062_NamespaceUsesSlug(t *testing.T) {
+	const (
+		userSlug = "dev-mclaude-local"
+		userID   = "0ade44ea-9cef-4c29-af96-92c0b0dd19a5"
+	)
+
+	mcp := &MCProject{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: SchemeGroupVersion.String(),
+			Kind:       "MCProject",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dev-mclaude-local-default",
+			Namespace: "mclaude-system",
+			UID:       types.UID("uid-dev"),
+		},
+		Spec: MCProjectSpec{
+			UserID:      userID,
+			ProjectID:   "proj-789",
+			UserSlug:    userSlug,
+			ProjectSlug: "default",
+		},
+	}
+
+	r := newTestReconciler(mcp)
+	ctx := context.Background()
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: mcp.Name, Namespace: mcp.Namespace}}
+
+	// Run through Pending → Provisioning → Ready transitions.
+	// First reconcile: Pending.
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	// Second reconcile: Provisioning → creates namespace.
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+
+	// Verify slug-named namespace was created.
+	wantNs := "mclaude-" + userSlug
+	ns := &corev1.Namespace{}
+	if err := r.client.Get(ctx, types.NamespacedName{Name: wantNs}, ns); err != nil {
+		t.Fatalf("expected namespace %q to exist, got error: %v", wantNs, err)
+	}
+
+	// Verify UUID-named namespace was NOT created.
+	oldNs := "mclaude-" + userID
+	oldNsObj := &corev1.Namespace{}
+	if err := r.client.Get(ctx, types.NamespacedName{Name: oldNs}, oldNsObj); err == nil {
+		t.Errorf("old UUID namespace %q should NOT have been created", oldNs)
+	}
+}
+
+// TestADR0062_UserSlugEnvVar verifies that the session-agent pod receives
+// USER_SLUG=<userSlug> (e.g., dev-mclaude-local) per ADR-0062.
+func TestADR0062_UserSlugEnvVar(t *testing.T) {
+	const userSlug = "dev-mclaude-local"
+
+	mcp := &MCProject{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: SchemeGroupVersion.String(),
+			Kind:       "MCProject",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dev-mclaude-local-default",
+			Namespace: "mclaude-system",
+			UID:       types.UID("uid-dev"),
+		},
+		Spec: MCProjectSpec{
+			UserID:      "0ade44ea-9cef-4c29-af96-92c0b0dd19a5",
+			ProjectID:   "proj-789",
+			UserSlug:    userSlug,
+			ProjectSlug: "default",
+		},
+	}
+
+	r := newTestReconciler(mcp)
+	ctx := context.Background()
+
+	tpl := defaultTemplate()
+	tpl.hostSlug = "us-east"
+
+	podTpl := r.buildPodTemplate(ctx, mcp, "mclaude-"+userSlug, tpl)
+
+	// Verify USER_SLUG env var value equals the slug, not the UUID.
+	var found bool
+	for _, e := range podTpl.Spec.Containers[0].Env {
+		if e.Name == "USER_SLUG" {
+			if e.Value != userSlug {
+				t.Errorf("USER_SLUG: got %q, want %q", e.Value, userSlug)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("USER_SLUG env var not found in pod template")
 	}
 }
 
