@@ -41,9 +41,8 @@ test.describe('Session Detail / Chat View', () => {
     // Verify at least one turn is rendered — look for user messages or assistant text blocks.
     // Conversation history may include user messages, assistant text, or tool cards.
     // Wait generously for event replay from NATS JetStream.
-    const anyContent = page.locator('text=/Claude|User|Working|Idle/').first()
-      .or(page.locator('button:has-text("Events")'))
-    await expect(anyContent).toBeVisible({ timeout: 15_000 })
+    const eventsTab = page.getByRole('button', { name: 'Events' })
+    await expect(eventsTab).toBeVisible({ timeout: 15_000 })
   })
 
   // SPA-CHAT-03: Tool use collapsible blocks

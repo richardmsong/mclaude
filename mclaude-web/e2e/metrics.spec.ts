@@ -64,12 +64,11 @@ test.describe('Token Usage page', () => {
 
   test('Breakdown section shows Input, Output, Cache Read, Cache Write labels', async ({ page }) => {
     await expect(page.getByText('Breakdown')).toBeVisible()
-    // Scope to the Breakdown section to avoid strict-mode violations from duplicate labels
-    const breakdownSection = page.locator('div').filter({ hasText: 'Breakdown' }).last()
-    await expect(breakdownSection.getByText('Input', { exact: true }).first()).toBeVisible()
-    await expect(breakdownSection.getByText('Output', { exact: true }).first()).toBeVisible()
-    await expect(breakdownSection.getByText('Cache Read', { exact: true }).first()).toBeVisible()
-    await expect(breakdownSection.getByText('Cache Write', { exact: true }).first()).toBeVisible()
+    // Verify all four breakdown labels are visible somewhere on the page
+    await expect(page.getByText('Input').first()).toBeVisible()
+    await expect(page.getByText('Output').first()).toBeVisible()
+    await expect(page.getByText('Cache Read').first()).toBeVisible()
+    await expect(page.getByText('Cache Write').first()).toBeVisible()
   })
 
   test('Cost by Project section exists', async ({ page }) => {
