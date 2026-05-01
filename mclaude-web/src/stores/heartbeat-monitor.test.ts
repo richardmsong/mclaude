@@ -23,13 +23,14 @@ describe('HeartbeatMonitor', () => {
 
     it('returns true after online:true KV entry arrives', () => {
       monitor.start()
-      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: true })
+      // ADR-0054: mclaude-hosts key format is flat {hslug} (no user prefix)
+      mockNats.kvSet('mclaude-hosts', 'host-1', { online: true })
       expect(monitor.isHealthy('host-1')).toBe(true)
     })
 
     it('returns false after online:false KV entry arrives', () => {
       monitor.start()
-      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: false })
+      mockNats.kvSet('mclaude-hosts', 'host-1', { online: false })
       expect(monitor.isHealthy('host-1')).toBe(false)
     })
   })
@@ -40,7 +41,8 @@ describe('HeartbeatMonitor', () => {
       const changes: Array<{ hostSlug: string; online: boolean }> = []
       monitor.onHealthChanged((hslug, online) => changes.push({ hostSlug: hslug, online }))
 
-      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: true })
+      // ADR-0054: key is just {hslug}, monitor extracts it directly
+      mockNats.kvSet('mclaude-hosts', 'host-1', { online: true })
 
       expect(changes).toHaveLength(1)
       expect(changes[0]!.hostSlug).toBe('host-1')
@@ -52,8 +54,8 @@ describe('HeartbeatMonitor', () => {
       const changes: Array<{ hostSlug: string; online: boolean }> = []
       monitor.onHealthChanged((hslug, online) => changes.push({ hostSlug: hslug, online }))
 
-      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: true })
-      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: false })
+      mockNats.kvSet('mclaude-hosts', 'host-1', { online: true })
+      mockNats.kvSet('mclaude-hosts', 'host-1', { online: false })
 
       expect(changes).toHaveLength(2)
       expect(changes[1]!.hostSlug).toBe('host-1')
@@ -65,11 +67,11 @@ describe('HeartbeatMonitor', () => {
       const changes: Array<{ online: boolean }> = []
       monitor.onHealthChanged((_, online) => changes.push({ online }))
 
-      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: true })
+      mockNats.kvSet('mclaude-hosts', 'host-1', { online: true })
       const countAfterFirst = changes.length
 
       // Same online value — no change event should fire
-      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: true })
+      mockNats.kvSet('mclaude-hosts', 'host-1', { online: true })
       expect(changes.length).toBe(countAfterFirst)
     })
 
@@ -80,7 +82,7 @@ describe('HeartbeatMonitor', () => {
 
       unsub()
 
-      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: true })
+      mockNats.kvSet('mclaude-hosts', 'host-1', { online: true })
       expect(changes).toHaveLength(0)
     })
   })
@@ -91,60 +93,65 @@ describe('HeartbeatMonitor', () => {
       const changes: Array<{ online: boolean }> = []
       monitor.onHealthChanged((_, online) => changes.push({ online }))
 
-      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: true })
+      mockNats.kvSet('mclaude-hosts', 'host-1', { online: true })
 
       monitor.stop()
 
       // Further KV updates should not trigger listeners after stop
-      mockNats.kvSet('mclaude-hosts', 'user-1.host-1', { online: false })
+      mockNats.kvSet('mclaude-hosts', 'host-1', { online: false })
       expect(changes.every(c => c.online === true)).toBe(true)
     })
   })
 
-  // ── ADR-0048 regression ───────────────────────────────────────────────────
-  // App.tsx passes authState.userSlug ?? authState.userId to HeartbeatMonitor
-  // so that it watches slug-keyed mclaude-hosts entries (e.g. "dev.local")
-  // written by the control-plane per ADR-0046.
-  describe('ADR-0048 regression — HeartbeatMonitor uses userSlug (not userId) for mclaude-hosts KV prefix', () => {
+  // ── ADR-0054 regression ───────────────────────────────────────────────────
+  // ADR-0054 changed mclaude-hosts KV key format: key is now flat {hslug}
+  // (no user slug prefix). The HeartbeatMonitor watches with '>' wildcard
+  // and extracts hostSlug directly from the key.
+  describe('ADR-0054 regression — HeartbeatMonitor uses flat {hslug} key format', () => {
     const userId = '550e8400-e29b-41d4-a716-446655440000'
     const userSlug = 'dev'
 
-    it('watches with slug prefix when userSlug differs from userId', () => {
+    it('receives host data with flat key format (no user prefix)', () => {
       const nats = new MockNATSClient()
-      // App.tsx passes userSlug ?? userId as the third argument (ADR-0048)
       const hb = new HeartbeatMonitor(nats, userId, userSlug)
       hb.start()
 
-      // Slug-prefixed key — must be received
-      nats.kvSet('mclaude-hosts', `${userSlug}.host-1`, { online: true })
+      // ADR-0054: key is just {hslug}, no user slug prefix
+      nats.kvSet('mclaude-hosts', 'host-1', { online: true })
       expect(hb.isHealthy('host-1')).toBe(true)
 
       hb.stop()
     })
 
-    it('does NOT receive UUID-prefixed host data when constructed with slug', () => {
+    it('correctly extracts hostSlug from flat key', () => {
       const nats = new MockNATSClient()
-      // When userSlug='dev' is passed, mclaude-hosts watch pattern is 'dev.*'.
-      // A UUID-prefixed entry like '550e8400-….host-1' must NOT match.
       const hb = new HeartbeatMonitor(nats, userId, userSlug)
       hb.start()
 
-      nats.kvSet('mclaude-hosts', `${userId}.host-1`, { online: true })
-      expect(hb.isHealthy('host-1')).toBe(false)
+      const changes: Array<{ hostSlug: string; online: boolean }> = []
+      hb.onHealthChanged((hslug, online) => changes.push({ hostSlug: hslug, online }))
+
+      nats.kvSet('mclaude-hosts', 'laptop-a', { online: true })
+      expect(changes[0]?.hostSlug).toBe('laptop-a')
 
       hb.stop()
     })
 
-    it('falls back to userId prefix when userSlug is not provided', () => {
+    it('works regardless of which userId/userSlug is passed (bucket is shared)', () => {
       const nats = new MockNATSClient()
-      // When no third arg is given, userSlug defaults to userId (UUID).
-      const hb = new HeartbeatMonitor(nats, userId)
-      hb.start()
+      // Both a UUID-constructed and slug-constructed monitor watch the same shared bucket
+      const hbSlug = new HeartbeatMonitor(nats, userId, userSlug)
+      const hbUuid = new HeartbeatMonitor(nats, userId)
+      hbSlug.start()
+      hbUuid.start()
 
-      nats.kvSet('mclaude-hosts', `${userId}.host-1`, { online: true })
-      expect(hb.isHealthy('host-1')).toBe(true)
+      nats.kvSet('mclaude-hosts', 'host-1', { online: true })
+      // Both monitors see the same flat key
+      expect(hbSlug.isHealthy('host-1')).toBe(true)
+      expect(hbUuid.isHealthy('host-1')).toBe(true)
 
-      hb.stop()
+      hbSlug.stop()
+      hbUuid.stop()
     })
   })
 })

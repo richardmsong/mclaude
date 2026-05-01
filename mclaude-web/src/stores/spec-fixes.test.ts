@@ -153,8 +153,8 @@ describe('G7-G9: Session payload fields', () => {
     sessionStore = new SessionStore(mockNats, 'user-1', 'dev')
     sessionStore.startWatching()
 
-    // Set up a project so the VM can resolve slugs
-    mockNats.kvSet('mclaude-projects', 'user-1.project-1', makeProjectKVState({
+    // Set up a project so the VM can resolve slugs (ADR-0054: per-user bucket)
+    mockNats.kvSet('mclaude-projects-dev', 'hosts.local.projects.my-project', makeProjectKVState({
       id: 'project-1',
       slug: 'my-project',
       hostSlug: 'local',
@@ -162,8 +162,8 @@ describe('G7-G9: Session payload fields', () => {
   })
 
   it('G8: deleteSession includes requestId', async () => {
-    // Set up a session to delete
-    mockNats.kvSet('mclaude-sessions', 'dev.local.my-project.session-1', makeSessionKVState({
+    // Set up a session to delete (ADR-0054: per-user bucket, new key format)
+    mockNats.kvSet('mclaude-sessions-dev', 'hosts.local.projects.my-project.sessions.session-1', makeSessionKVState({
       id: 'session-1',
       projectId: 'project-1',
       hostSlug: 'local',
@@ -185,7 +185,7 @@ describe('G7-G9: Session payload fields', () => {
   })
 
   it('G9: restartSession includes requestId', async () => {
-    mockNats.kvSet('mclaude-sessions', 'dev.local.my-project.session-1', makeSessionKVState({
+    mockNats.kvSet('mclaude-sessions-dev', 'hosts.local.projects.my-project.sessions.session-1', makeSessionKVState({
       id: 'session-1',
       projectId: 'project-1',
       hostSlug: 'local',
@@ -217,29 +217,29 @@ describe('G10: Session KV DEL removes by UUID via slug lookup', () => {
   })
 
   it('removes session from map when DEL arrives for a session with matching slug', () => {
-    // Add session with slug
+    // ADR-0054: per-user bucket, new key format
     const session = makeSessionKVState({ id: 'uuid-abc-123', projectId: 'project-1', slug: 'my-session' })
-    mockNats.kvSet('mclaude-sessions', 'user-1.local.project-1.my-session', session)
+    mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.my-session', session)
     expect(store.sessions.has('uuid-abc-123')).toBe(true)
 
-    // DEL arrives with slug-based key
-    mockNats.kvDelete('mclaude-sessions', 'user-1.local.project-1.my-session')
+    // DEL arrives with slug-based key (ADR-0054 format)
+    mockNats.kvDelete('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.my-session')
     expect(store.sessions.has('uuid-abc-123')).toBe(false)
   })
 
   it('does not crash when DEL arrives for unknown slug', () => {
-    mockNats.kvDelete('mclaude-sessions', 'user-1.local.project-1.nonexistent')
+    mockNats.kvDelete('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.nonexistent')
     expect(store.sessions.size).toBe(0)
   })
 
   it('removes only the session with matching slug, not others', () => {
     const s1 = makeSessionKVState({ id: 'uuid-1', projectId: 'project-1', slug: 'sess-a' })
     const s2 = makeSessionKVState({ id: 'uuid-2', projectId: 'project-1', slug: 'sess-b' })
-    mockNats.kvSet('mclaude-sessions', 'user-1.local.project-1.sess-a', s1)
-    mockNats.kvSet('mclaude-sessions', 'user-1.local.project-1.sess-b', s2)
+    mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.sess-a', s1)
+    mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.sess-b', s2)
     expect(store.sessions.size).toBe(2)
 
-    mockNats.kvDelete('mclaude-sessions', 'user-1.local.project-1.sess-a')
+    mockNats.kvDelete('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.sess-a')
     expect(store.sessions.has('uuid-1')).toBe(false)
     expect(store.sessions.has('uuid-2')).toBe(true)
     expect(store.sessions.size).toBe(1)
@@ -270,27 +270,29 @@ describe('G13: Project KV DEL is explicitly handled', () => {
     store.startWatching()
   })
 
-  it('removes project from map on DEL operation', () => {
-    const project = makeProjectKVState({ id: 'project-1', name: 'Test' })
-    mockNats.kvSet('mclaude-projects', 'user-1.project-1', project)
+  it('removes project from map on DEL operation (slug-based lookup)', () => {
+    // ADR-0054: per-user bucket, key format hosts.{hslug}.projects.{pslug}
+    // Project map is keyed by UUID; DEL handler uses slug->UUID lookup.
+    const project = makeProjectKVState({ id: 'project-1', name: 'Test', slug: 'project-1' })
+    mockNats.kvSet('mclaude-projects-user-1', 'hosts.local.projects.project-1', project)
     expect(store.projects.has('project-1')).toBe(true)
 
-    mockNats.kvDelete('mclaude-projects', 'user-1.project-1')
+    mockNats.kvDelete('mclaude-projects-user-1', 'hosts.local.projects.project-1')
     expect(store.projects.has('project-1')).toBe(false)
   })
 
   it('does not remove project on malformed JSON (non-DEL)', () => {
-    // First add a valid project
-    const project = makeProjectKVState({ id: 'project-1', name: 'Test' })
-    mockNats.kvSet('mclaude-projects', 'user-1.project-1', project)
+    // First add a valid project (ADR-0054: per-user bucket)
+    const project = makeProjectKVState({ id: 'project-1', name: 'Test', slug: 'project-1' })
+    mockNats.kvSet('mclaude-projects-user-1', 'hosts.local.projects.project-1', project)
     expect(store.projects.has('project-1')).toBe(true)
 
-    // Simulate a PUT with malformed data (shouldn't remove the project now)
+    // Simulate a PUT with malformed data (should not remove the project now)
     const watchers = (mockNats as unknown as { _kvWatchers: Map<string, Array<{ pattern: string; callback: (e: unknown) => void }>> })._kvWatchers
-    const projectWatchers = watchers.get('mclaude-projects') ?? []
+    const projectWatchers = watchers.get('mclaude-projects-user-1') ?? []
     for (const w of projectWatchers) {
       w.callback({
-        key: 'user-1.project-1',
+        key: '****************',
         value: new TextEncoder().encode('NOT VALID JSON{'),
         revision: 99,
         operation: 'PUT',
@@ -301,13 +303,13 @@ describe('G13: Project KV DEL is explicitly handled', () => {
   })
 
   it('notifies project listeners on DEL', () => {
-    const project = makeProjectKVState({ id: 'project-1', name: 'Test' })
-    mockNats.kvSet('mclaude-projects', 'user-1.project-1', project)
+    const project = makeProjectKVState({ id: 'project-1', name: 'Test', slug: 'project-1' })
+    mockNats.kvSet('mclaude-projects-user-1', 'hosts.local.projects.project-1', project)
 
     const calls: number[] = []
     store.onProjectChanged(projects => calls.push(projects.size))
 
-    mockNats.kvDelete('mclaude-projects', 'user-1.project-1')
+    mockNats.kvDelete('mclaude-projects-user-1', 'hosts.local.projects.project-1')
     expect(calls).toEqual([0])
   })
 })

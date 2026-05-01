@@ -9,14 +9,16 @@ describe('SessionStore', () => {
 
   beforeEach(() => {
     mockNats = new MockNATSClient()
+    // userSlug defaults to userId='user-1', so bucket is 'mclaude-sessions-user-1'
     store = new SessionStore(mockNats, 'user-1')
     store.startWatching()
   })
 
   describe('KV watch → SessionState updates', () => {
     it('updates sessions map when kvSet is called for a session', () => {
+      // ADR-0054: per-user bucket 'mclaude-sessions-user-1', key format hosts.{hslug}.projects.{pslug}.sessions.{sslug}
       const sessionState = makeSessionKVState({ id: 'session-1', projectId: 'project-1' })
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', sessionState)
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-1', sessionState)
       const result = store.sessions.get('session-1')
       expect(result).toBeDefined()
       expect(result?.id).toBe('session-1')
@@ -30,7 +32,7 @@ describe('SessionStore', () => {
         name: 'Custom Name',
         state: 'running',
       })
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-2.session-2', sessionState)
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-2.sessions.session-2', sessionState)
       const result = store.sessions.get('session-2')
       expect(result?.name).toBe('Custom Name')
       expect(result?.state).toBe('running')
@@ -41,8 +43,8 @@ describe('SessionStore', () => {
     it('contains both sessions in the map after setting two', () => {
       const session1 = makeSessionKVState({ id: 'session-1', projectId: 'project-1' })
       const session2 = makeSessionKVState({ id: 'session-2', projectId: 'project-1' })
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', session1)
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-2', session2)
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-1', session1)
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-2', session2)
       expect(store.sessions.get('session-1')).toBeDefined()
       expect(store.sessions.get('session-2')).toBeDefined()
       expect(store.sessions.size).toBe(2)
@@ -54,24 +56,24 @@ describe('SessionStore', () => {
       let callCount = 0
       store.onSessionChanged(() => { callCount++ })
       const sessionState = makeSessionKVState()
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', sessionState)
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-1', sessionState)
       expect(callCount).toBe(1)
     })
 
     it('fires multiple times for multiple updates', () => {
       const calls: number[] = []
       store.onSessionChanged((sessions) => calls.push(sessions.size))
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({ id: 'session-1' }))
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-2', makeSessionKVState({ id: 'session-2' }))
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-1', makeSessionKVState({ id: 'session-1' }))
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-2', makeSessionKVState({ id: 'session-2' }))
       expect(calls).toEqual([1, 2])
     })
 
     it('unsubscribe stops listener', () => {
       let callCount = 0
       const unsub = store.onSessionChanged(() => { callCount++ })
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState())
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-1', makeSessionKVState())
       unsub()
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-2', makeSessionKVState({ id: 'session-2' }))
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-2', makeSessionKVState({ id: 'session-2' }))
       expect(callCount).toBe(1)
     })
   })
@@ -81,9 +83,9 @@ describe('SessionStore', () => {
       const s1 = makeSessionKVState({ id: 'session-1', projectId: 'project-1' })
       const s2 = makeSessionKVState({ id: 'session-2', projectId: 'project-1' })
       const s3 = makeSessionKVState({ id: 'session-3', projectId: 'project-2' })
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', s1)
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-2', s2)
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-2.session-3', s3)
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-1', s1)
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-2', s2)
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-2.sessions.session-3', s3)
       const project1Sessions = store.getSessionsForProject('project-1')
       expect(project1Sessions).toHaveLength(2)
       expect(project1Sessions.map(s => s.id)).toContain('session-1')
@@ -101,8 +103,9 @@ describe('SessionStore', () => {
 
   describe('Project KV watch', () => {
     it('updates projects map when kvSet called for a project', () => {
+      // ADR-0054: per-user bucket 'mclaude-projects-user-1', key format hosts.{hslug}.projects.{pslug}
       const projectState = makeProjectKVState({ id: 'project-1', name: 'My Project' })
-      mockNats.kvSet('mclaude-projects', 'user-1.project-1', projectState)
+      mockNats.kvSet('mclaude-projects-user-1', 'hosts.local.projects.project-1', projectState)
       const result = store.projects.get('project-1')
       expect(result).toBeDefined()
       expect(result?.id).toBe('project-1')
@@ -112,37 +115,37 @@ describe('SessionStore', () => {
     it('contains multiple projects after setting two', () => {
       const p1 = makeProjectKVState({ id: 'project-1' })
       const p2 = makeProjectKVState({ id: 'project-2' })
-      mockNats.kvSet('mclaude-projects', 'user-1.project-1', p1)
-      mockNats.kvSet('mclaude-projects', 'user-1.project-2', p2)
+      mockNats.kvSet('mclaude-projects-user-1', 'hosts.local.projects.project-1', p1)
+      mockNats.kvSet('mclaude-projects-user-1', 'hosts.local.projects.project-2', p2)
       expect(store.projects.size).toBe(2)
     })
 
     it('onProjectChanged fires on project update', () => {
       let callCount = 0
       store.onProjectChanged(() => { callCount++ })
-      mockNats.kvSet('mclaude-projects', 'user-1.project-1', makeProjectKVState())
+      mockNats.kvSet('mclaude-projects-user-1', 'hosts.local.projects.project-1', makeProjectKVState())
       expect(callCount).toBe(1)
     })
   })
 
   describe('KV DEL → session removal', () => {
     it('removes session from map on DEL operation (slug-based lookup)', () => {
-      // G10 fix: DEL key contains slug, but map is keyed by UUID.
-      // The session must have a slug field matching the key's last segment.
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.my-session', makeSessionKVState({ id: 'session-1', projectId: 'project-1', slug: 'my-session' }))
+      // ADR-0054: DEL key format hosts.{hslug}.projects.{pslug}.sessions.{sslug}
+      // Last segment is still {sslug}; map is keyed by UUID via slug lookup.
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.my-session', makeSessionKVState({ id: 'session-1', projectId: 'project-1', slug: 'my-session' }))
       expect(store.sessions.has('session-1')).toBe(true)
 
-      mockNats.kvDelete('mclaude-sessions', 'user-1.project-1.my-session')
+      mockNats.kvDelete('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.my-session')
       expect(store.sessions.has('session-1')).toBe(false)
     })
 
     it('notifies session listeners on DEL', () => {
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.my-session', makeSessionKVState({ id: 'session-1', projectId: 'project-1', slug: 'my-session' }))
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.my-session', makeSessionKVState({ id: 'session-1', projectId: 'project-1', slug: 'my-session' }))
 
       const calls: number[] = []
       store.onSessionChanged(sessions => calls.push(sessions.size))
 
-      mockNats.kvDelete('mclaude-sessions', 'user-1.project-1.my-session')
+      mockNats.kvDelete('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.my-session')
       expect(calls).toEqual([0])
     })
   })
@@ -152,18 +155,18 @@ describe('SessionStore', () => {
       const added: string[] = []
       store.onSessionAdded('project-1', session => added.push(session.id))
 
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({ id: 'session-1', projectId: 'project-1' }))
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-1', makeSessionKVState({ id: 'session-1', projectId: 'project-1' }))
       expect(added).toEqual(['session-1'])
     })
 
     it('does NOT fire for sessions already known at registration time', () => {
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-existing', makeSessionKVState({ id: 'session-existing', projectId: 'project-1' }))
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-existing', makeSessionKVState({ id: 'session-existing', projectId: 'project-1' }))
 
       const added: string[] = []
       store.onSessionAdded('project-1', session => added.push(session.id))
 
       // Re-delivering the same session (e.g. KV update) should not trigger onSessionAdded
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-existing', makeSessionKVState({ id: 'session-existing', projectId: 'project-1', state: 'running' }))
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-existing', makeSessionKVState({ id: 'session-existing', projectId: 'project-1', state: 'running' }))
       expect(added).toHaveLength(0)
     })
 
@@ -171,7 +174,7 @@ describe('SessionStore', () => {
       const added: string[] = []
       store.onSessionAdded('project-1', session => added.push(session.id))
 
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-2.session-other', makeSessionKVState({ id: 'session-other', projectId: 'project-2' }))
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-2.sessions.session-other', makeSessionKVState({ id: 'session-other', projectId: 'project-2' }))
       expect(added).toHaveLength(0)
     })
 
@@ -180,7 +183,7 @@ describe('SessionStore', () => {
       const unsub = store.onSessionAdded('project-1', session => added.push(session.id))
       unsub()
 
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({ id: 'session-1', projectId: 'project-1' }))
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-1', makeSessionKVState({ id: 'session-1', projectId: 'project-1' }))
       expect(added).toHaveLength(0)
     })
   })
@@ -188,7 +191,7 @@ describe('SessionStore', () => {
   describe('getSessionBySlug (ADR-0024)', () => {
     it('returns session when slug matches', () => {
       const session = makeSessionKVState({ id: 'session-1', projectId: 'project-1', slug: 'my-session' })
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.my-session', session)
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.my-session', session)
       const result = store.getSessionBySlug('my-session')
       expect(result).toBeDefined()
       expect(result?.id).toBe('session-1')
@@ -196,90 +199,90 @@ describe('SessionStore', () => {
 
     it('returns undefined when slug does not match', () => {
       const session = makeSessionKVState({ id: 'session-1', slug: 'my-session' })
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.my-session', session)
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.my-session', session)
       expect(store.getSessionBySlug('other-slug')).toBeUndefined()
     })
 
     it('returns undefined when sessions have no slug field', () => {
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({ id: 'session-1' }))
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-1', makeSessionKVState({ id: 'session-1' }))
       expect(store.getSessionBySlug('session-1')).toBeUndefined()
     })
   })
 
   describe('resolveSession (ADR-0024)', () => {
     it('resolves by UUID when session id matches', () => {
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({ id: 'session-1' }))
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-1', makeSessionKVState({ id: 'session-1' }))
       const result = store.resolveSession('session-1')
       expect(result?.id).toBe('session-1')
     })
 
     it('resolves by slug when UUID lookup fails but slug matches', () => {
       const session = makeSessionKVState({ id: 'uuid-abc', slug: 'my-session' })
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.my-session', session)
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.my-session', session)
       const result = store.resolveSession('my-session')
       expect(result?.id).toBe('uuid-abc')
     })
 
     it('returns undefined when neither UUID nor slug matches', () => {
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({ id: 'session-1', slug: 'test-slug' }))
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-1', makeSessionKVState({ id: 'session-1', slug: 'test-slug' }))
       expect(store.resolveSession('nonexistent')).toBeUndefined()
     })
   })
 
-  // ── ADR-0048 regression ───────────────────────────────────────────────────
-  // App.tsx passes authState.userId (UUID) — not authState.userSlug — as the
-  // userSlug argument to SessionStore so that KV watches match existing
-  // UUID-prefixed keys in mclaude-sessions and mclaude-projects.
-  describe('ADR-0048 regression — SessionStore must use userId (UUID) for KV prefix', () => {
+  // ── ADR-0054 bucket name regression ──────────────────────────────────────
+  // ADR-0054 changed KV layout: user slug is now encoded in the bucket name
+  // (mclaude-sessions-{uslug}), not in the key prefix.
+  // App.tsx passes authState.userSlug ?? authState.userId as the userSlug param.
+  describe('ADR-0054 regression — SessionStore uses userSlug for per-user bucket names', () => {
     const userId = '550e8400-e29b-41d4-a716-446655440000'
     const userSlug = 'dev'
 
-    it('receives UUID-prefixed session data when constructed with UUID as userSlug', () => {
+    it('receives session data from per-user bucket when constructed with userSlug', () => {
       const nats = new MockNATSClient()
-      // App.tsx passes userId as the userSlug argument to SessionStore (ADR-0048 fix)
-      const s = new SessionStore(nats, userId, userId)
+      // App.tsx passes userSlug as the third argument
+      const s = new SessionStore(nats, userId, userSlug)
       s.startWatching()
 
-      const session = makeSessionKVState({ id: 'session-uuid', projectId: 'proj-1' })
-      nats.kvSet('mclaude-sessions', `${userId}.local.proj-1.session-uuid`, session)
-      expect(s.sessions.get('session-uuid')).toBeDefined()
+      const session = makeSessionKVState({ id: 'session-1', projectId: 'proj-1' })
+      // Bucket name uses userSlug: 'mclaude-sessions-dev'
+      nats.kvSet('mclaude-sessions-dev', 'hosts.local.projects.proj-1.sessions.session-1', session)
+      expect(s.sessions.get('session-1')).toBeDefined()
 
       s.stopWatching()
     })
 
-    it('does NOT receive slug-prefixed session data when constructed with UUID as userSlug', () => {
+    it('does NOT receive session data from a different user bucket', () => {
       const nats = new MockNATSClient()
-      // If App.tsx mistakenly passed userSlug='dev' instead of userId (UUID),
-      // SessionStore would watch 'dev.>' and miss all UUID-keyed entries.
-      // This test documents the correct behavior: UUID-constructed store must
-      // ignore slug-prefixed entries.
-      const s = new SessionStore(nats, userId, userId)
+      const s = new SessionStore(nats, userId, userSlug)
       s.startWatching()
 
-      const session = makeSessionKVState({ id: 'session-slug', projectId: 'proj-1' })
-      nats.kvSet('mclaude-sessions', `${userSlug}.local.proj-1.session-slug`, session)
-      expect(s.sessions.get('session-slug')).toBeUndefined()
+      const session = makeSessionKVState({ id: 'session-other', projectId: 'proj-1' })
+      // Writing to the UUID bucket (wrong bucket for this store)
+      nats.kvSet(`mclaude-sessions-${userId}`, 'hosts.local.projects.proj-1.sessions.session-other', session)
+      expect(s.sessions.get('session-other')).toBeUndefined()
 
       s.stopWatching()
     })
 
-    it('receives UUID-prefixed project data when constructed with UUID as userSlug', () => {
+    it('receives project data from per-user bucket when constructed with userSlug', () => {
       const nats = new MockNATSClient()
-      const s = new SessionStore(nats, userId, userId)
+      const s = new SessionStore(nats, userId, userSlug)
       s.startWatching()
 
-      nats.kvSet('mclaude-projects', `${userId}.proj-1`, makeProjectKVState({ id: 'proj-1', name: 'Test' }))
+      // Bucket name uses userSlug: 'mclaude-projects-dev'
+      nats.kvSet('mclaude-projects-dev', 'hosts.local.projects.proj-1', makeProjectKVState({ id: 'proj-1', name: 'Test' }))
       expect(s.projects.get('proj-1')).toBeDefined()
 
       s.stopWatching()
     })
 
-    it('does NOT receive slug-prefixed project data when constructed with UUID as userSlug', () => {
+    it('does NOT receive project data from a different user bucket', () => {
       const nats = new MockNATSClient()
-      const s = new SessionStore(nats, userId, userId)
+      const s = new SessionStore(nats, userId, userSlug)
       s.startWatching()
 
-      nats.kvSet('mclaude-projects', `${userSlug}.proj-1`, makeProjectKVState({ id: 'proj-1' }))
+      // Writing to the UUID bucket (wrong bucket for this store)
+      nats.kvSet(`mclaude-projects-${userId}`, 'hosts.local.projects.proj-1', makeProjectKVState({ id: 'proj-1' }))
       expect(s.projects.get('proj-1')).toBeUndefined()
 
       s.stopWatching()

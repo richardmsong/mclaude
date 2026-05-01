@@ -24,7 +24,8 @@ vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { activate() {} fit() {} di
 
 function makeVM(mockNats: MockNATSClient) {
   const sessionState = makeSessionKVState({ id: 'sess-1', projectId: 'proj-1' })
-  mockNats.kvSet('mclaude-sessions', 'user-1.proj-1.sess-1', sessionState)
+  // ADR-0054: per-user bucket, new key format
+  mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.proj-1.sessions.sess-1', sessionState)
   const sessionStore = new SessionStore(mockNats, 'user-1')
   sessionStore.startWatching()
   const eventStore = new EventStore({

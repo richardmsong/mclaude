@@ -68,8 +68,8 @@ describe('monitoring — structured pino logs', () => {
     })
     sessionStore = new SessionStore(mockNats, 'user-1')
 
-    // Pre-populate session store so vm.state.skills works
-    mockNats.kvSet('mclaude-sessions', 'user-1/session-1', makeSessionKVState())
+    // Pre-populate session store so vm.state.skills works (ADR-0054: per-user bucket)
+    mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-1', makeSessionKVState())
     sessionStore.startWatching()
 
     vm = new ConversationVM(
@@ -132,7 +132,7 @@ describe('monitoring — structured pino logs', () => {
     it('logs debug with component=session-store and sessionId on KV update', () => {
       // Trigger a KV update after the store is already watching
       mockLogLines.length = 0
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-2', makeSessionKVState({ id: 'session-2' }))
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-2', makeSessionKVState({ id: 'session-2' }))
 
       const lines = logsForComponent('session-store')
       expect(lines.length).toBeGreaterThanOrEqual(1)

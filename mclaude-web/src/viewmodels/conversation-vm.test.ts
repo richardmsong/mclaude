@@ -18,7 +18,8 @@ describe('ConversationVM', () => {
   beforeEach(() => {
     mockNats = new MockNATSClient()
     const sessionState = makeSessionKVState()
-    mockNats.kvSet('mclaude-sessions', 'user-1/project-1/session-1', sessionState)
+    // ADR-0054: per-user bucket, new key format
+  mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-1', sessionState)
 
     sessionStore = new SessionStore(mockNats, 'user-1')
     sessionStore.startWatching()

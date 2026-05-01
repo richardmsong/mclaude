@@ -1,7 +1,5 @@
 import type { INATSClient, SessionKVState, ProjectKVState } from '@/types'
 import { logger } from '@/logger'
-import { kvKeySessionsForUser, kvKeyProjectsForUser } from '@/lib/subj'
-import type { UserSlug } from '@/lib/slug'
 
 export type SessionStoreListener = (sessions: Map<string, SessionKVState>) => void
 export type ProjectStoreListener = (projects: Map<string, ProjectKVState>) => void
@@ -33,13 +31,13 @@ export class SessionStore {
   startWatching(): void {
     this._stopWatching()
 
-    // Watch sessions — keys are {uslug}.{pslug}.{sslug} (ADR-0024 typed-slug scheme)
-    // Use > wildcard for multi-level match across all projects and sessions for this user
-    const sessionKey = kvKeySessionsForUser(this.userSlug as UserSlug)
-    const unwatch1 = this.natsClient.kvWatch('mclaude-sessions', sessionKey, (entry) => {
+    // Watch sessions — per-user bucket (ADR-0054). Bucket name encodes user slug.
+    // Key format: hosts.{hslug}.projects.{pslug}.sessions.{sslug}
+    // Use > wildcard to match all keys within the per-user bucket.
+    const unwatch1 = this.natsClient.kvWatch(`mclaude-sessions-${this.userSlug}`, '>', (entry) => {
       if (entry.operation === 'DEL' || entry.operation === 'PURGE') {
-        // KV key is slug-based ({uslug}.{hslug}.{pslug}.{sslug}) but the _sessions
-        // map is keyed by UUID. Find the session by matching the slug from the key.
+        // Key format: hosts.{hslug}.projects.{pslug}.sessions.{sslug}
+        // The _sessions map is keyed by UUID. Find the session by slug from the last key segment.
         const parts = entry.key.split('.')
         const sessionSlug = parts[parts.length - 1]
         if (sessionSlug) {
@@ -65,26 +63,32 @@ export class SessionStore {
         this._notifySessions()
         this._notifyAddListeners(state.id, state)
       } catch {
-        // Malformed value — extract sessionId from key {userId}.{projectId}.{sessionId}
-        const parts = entry.key.split('.')
-        const sessionId = parts[parts.length - 1]
-        if (sessionId) {
-          this._sessions.delete(sessionId)
-        }
+        // Malformed value — ignore silently
         this._notifySessions()
       }
     })
     this._unwatchers.push(unwatch1)
 
-    // Watch projects — key format: "{userId}.{projectId}" (UUID-based keys)
-    const projectKey = kvKeyProjectsForUser(this.userId as UserSlug)
-    const unwatch2 = this.natsClient.kvWatch('mclaude-projects', projectKey, (entry) => {
+    // Watch projects — per-user bucket (ADR-0054). Bucket name encodes user slug.
+    // Key format: hosts.{hslug}.projects.{pslug}
+    const unwatch2 = this.natsClient.kvWatch(`mclaude-projects-${this.userSlug}`, '>', (entry) => {
       // Spec: explicitly check DEL/PURGE instead of relying on parse failure
       if (entry.operation === 'DEL' || entry.operation === 'PURGE') {
+        // Key format: hosts.{hslug}.projects.{pslug}
+        // The _projects map is keyed by UUID. Find the project by slug from the last key segment.
         const parts = entry.key.split('.')
-        const projectId = parts[parts.length - 1]
-        if (projectId) {
-          this._projects.delete(projectId)
+        const projectSlug = parts[parts.length - 1]
+        if (projectSlug) {
+          let uuidToDelete: string | undefined
+          for (const [uuid, project] of this._projects) {
+            if (project.slug === projectSlug) {
+              uuidToDelete = uuid
+              break
+            }
+          }
+          if (uuidToDelete) {
+            this._projects.delete(uuidToDelete)
+          }
         }
         this._notifyProjects()
         return

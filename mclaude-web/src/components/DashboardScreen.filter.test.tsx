@@ -47,10 +47,11 @@ describe('DashboardScreen — project filter', () => {
 
   it('shows sessions for the selected project after applying filter', () => {
     // Set up two projects; p-1 has sessions, p-2 has none.
-    mockNats.kvSet('mclaude-projects', 'user-1.p-1', makeProjectKVState({ id: 'p-1', name: 'mclaude' }))
-    mockNats.kvSet('mclaude-projects', 'user-1.p-2', makeProjectKVState({ id: 'p-2', name: 'other' }))
-    mockNats.kvSet('mclaude-sessions', 'user-1.p-1.sess-1', makeSessionKVState({ id: 'sess-1', projectId: 'p-1', name: 'Session One' }))
-    mockNats.kvSet('mclaude-sessions', 'user-1.p-1.sess-2', makeSessionKVState({ id: 'sess-2', projectId: 'p-1', name: 'Session Two' }))
+    // ADR-0054: per-user buckets, new key format
+    mockNats.kvSet('mclaude-projects-user-1', 'hosts.local.projects.p-1', makeProjectKVState({ id: 'p-1', name: 'mclaude' }))
+    mockNats.kvSet('mclaude-projects-user-1', 'hosts.local.projects.p-2', makeProjectKVState({ id: 'p-2', name: 'other' }))
+    mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.p-1.sessions.sess-1', makeSessionKVState({ id: 'sess-1', projectId: 'p-1', name: 'Session One' }))
+    mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.p-1.sessions.sess-2', makeSessionKVState({ id: 'sess-2', projectId: 'p-1', name: 'Session Two' }))
 
     const { rerender } = render(
       <DashboardScreen
@@ -89,9 +90,9 @@ describe('DashboardScreen — project filter', () => {
   })
 
   it('shows empty state only when the filtered project genuinely has no sessions', () => {
-    mockNats.kvSet('mclaude-projects', 'user-1.p-1', makeProjectKVState({ id: 'p-1', name: 'mclaude' }))
-    mockNats.kvSet('mclaude-projects', 'user-1.p-2', makeProjectKVState({ id: 'p-2', name: 'empty-project' }))
-    mockNats.kvSet('mclaude-sessions', 'user-1.p-1.sess-1', makeSessionKVState({ id: 'sess-1', projectId: 'p-1', name: 'Session One' }))
+    mockNats.kvSet('mclaude-projects-user-1', 'hosts.local.projects.p-1', makeProjectKVState({ id: 'p-1', name: 'mclaude' }))
+    mockNats.kvSet('mclaude-projects-user-1', 'hosts.local.projects.p-2', makeProjectKVState({ id: 'p-2', name: 'empty-project' }))
+    mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.p-1.sessions.sess-1', makeSessionKVState({ id: 'sess-1', projectId: 'p-1', name: 'Session One' }))
 
     // Filter to p-2 which has no sessions
     act(() => {

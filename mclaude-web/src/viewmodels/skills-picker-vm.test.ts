@@ -14,7 +14,8 @@ describe('SkillsPickerVM', () => {
 
   beforeEach(() => {
     mockNats = new MockNATSClient()
-    mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-1', makeSessionKVState({
+    // ADR-0054: per-user bucket, new key format
+    mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-1', makeSessionKVState({
       id: 'session-1',
       capabilities: { skills: ['commit', 'review-pr', 'deploy'], tools: ['Bash'], agents: [] },
     }))
@@ -56,7 +57,7 @@ describe('SkillsPickerVM', () => {
     })
 
     it('returns empty array when capabilities has no skills', () => {
-      mockNats.kvSet('mclaude-sessions', 'user-1.project-1.session-2', makeSessionKVState({
+      mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-2', makeSessionKVState({
         id: 'session-2',
         capabilities: { skills: [], tools: [], agents: [] },
       }))

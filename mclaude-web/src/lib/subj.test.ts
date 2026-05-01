@@ -185,33 +185,33 @@ describe('NATS subject builders', () => {
   })
 })
 
-describe('KV key builders (ADR-0035)', () => {
-  it('kvKeySession: {uslug}.{hslug}.{pslug}.{sslug}', () => {
-    expect(kvKeySession(U, H, P, S)).toBe('alice-gmail.mbp16.mclaude.s-42')
+describe('KV key builders (ADR-0054 — per-user buckets)', () => {
+  it('kvKeySession: hosts.{hslug}.projects.{pslug}.sessions.{sslug} (user slug in bucket name)', () => {
+    expect(kvKeySession(H, P, S)).toBe('hosts.mbp16.projects.mclaude.sessions.s-42')
   })
 
-  it('kvKeySessionsForUser: {uslug}.>', () => {
-    expect(kvKeySessionsForUser(U)).toBe('alice-gmail.>')
+  it('kvKeySessionsForUser: > (watch all in per-user bucket)', () => {
+    expect(kvKeySessionsForUser(U)).toBe('>')
   })
 
-  it('kvKeyProject: {uslug}.{hslug}.{pslug}', () => {
-    expect(kvKeyProject(U, H, P)).toBe('alice-gmail.mbp16.mclaude')
+  it('kvKeyProject: hosts.{hslug}.projects.{pslug} (user slug in bucket name)', () => {
+    expect(kvKeyProject(H, P)).toBe('hosts.mbp16.projects.mclaude')
   })
 
-  it('kvKeyProjectsForUser: {uslug}.>', () => {
-    expect(kvKeyProjectsForUser(U)).toBe('alice-gmail.>')
+  it('kvKeyProjectsForUser: > (watch all in per-user bucket)', () => {
+    expect(kvKeyProjectsForUser(U)).toBe('>')
   })
 
   it('kvKeyUserClusters: {uslug}', () => {
     expect(kvKeyUserClusters(U)).toBe('alice-gmail')
   })
 
-  it('kvKeyHost: {uslug}.{hslug} (renamed from kvKeyLaptop)', () => {
-    expect(kvKeyHost(U, H)).toBe('alice-gmail.mbp16')
+  it('kvKeyHost: {hslug} (flat — no user prefix, globally unique per ADR-0054)', () => {
+    expect(kvKeyHost(H)).toBe('mbp16')
   })
 
-  it('kvKeyHostsForUser: {uslug}.*', () => {
-    expect(kvKeyHostsForUser(U)).toBe('alice-gmail.*')
+  it('kvKeyHostsForUser: > (watch all; JWT scopes delivery per-host)', () => {
+    expect(kvKeyHostsForUser(U)).toBe('>')
   })
 
   it('kvKeyJob: {uslug}.{jobId}', () => {

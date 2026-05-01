@@ -14,7 +14,8 @@ describe('PermissionPromptVM', () => {
 
   beforeEach(() => {
     mockNats = new MockNATSClient()
-    mockNats.kvSet('mclaude-sessions', 'user-1/project-1/session-1', makeSessionKVState())
+    // ADR-0054: per-user bucket, new key format
+  mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-1', makeSessionKVState())
 
     const sessionStore = new SessionStore(mockNats, 'user-1')
     sessionStore.startWatching()

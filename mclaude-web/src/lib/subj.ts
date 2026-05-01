@@ -114,27 +114,39 @@ export function subjClusterStatus(cslug: ClusterSlug): string {
 }
 
 // --------------------------------------------------------------------------
-// KV key helpers (ADR-0035)
+// KV key helpers (ADR-0054)
 // --------------------------------------------------------------------------
 
-/** mclaude-sessions KV key: {uslug}.{hslug}.{pslug}.{sslug} */
-export function kvKeySession(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug, sslug: SessionSlug): string {
-  return `${uslug}.${hslug}.${pslug}.${sslug}`
+/**
+ * mclaude-sessions-{uslug} KV key (ADR-0054 — user slug is in the bucket name).
+ * Key format: hosts.{hslug}.projects.{pslug}.sessions.{sslug}
+ */
+export function kvKeySession(hslug: HostSlug, pslug: ProjectSlug, sslug: SessionSlug): string {
+  return `hosts.${hslug}.projects.${pslug}.sessions.${sslug}`
 }
 
-/** Watch all sessions for a user across all hosts: {uslug}.> */
-export function kvKeySessionsForUser(uslug: UserSlug): string {
-  return `${uslug}.>`
+/**
+ * Watch all sessions in the per-user bucket: > (bucket name encodes user slug — ADR-0054).
+ * The uslug parameter is intentionally unused; it is kept for call-site clarity.
+ */
+export function kvKeySessionsForUser(_uslug: UserSlug): string {
+  return `>`
 }
 
-/** mclaude-projects KV key: {uslug}.{hslug}.{pslug} */
-export function kvKeyProject(uslug: UserSlug, hslug: HostSlug, pslug: ProjectSlug): string {
-  return `${uslug}.${hslug}.${pslug}`
+/**
+ * mclaude-projects-{uslug} KV key (ADR-0054 — user slug is in the bucket name).
+ * Key format: hosts.{hslug}.projects.{pslug}
+ */
+export function kvKeyProject(hslug: HostSlug, pslug: ProjectSlug): string {
+  return `hosts.${hslug}.projects.${pslug}`
 }
 
-/** Watch all projects for a user across all hosts: {uslug}.> */
-export function kvKeyProjectsForUser(uslug: UserSlug): string {
-  return `${uslug}.>`
+/**
+ * Watch all projects in the per-user bucket: > (bucket name encodes user slug — ADR-0054).
+ * The uslug parameter is intentionally unused; it is kept for call-site clarity.
+ */
+export function kvKeyProjectsForUser(_uslug: UserSlug): string {
+  return `>`
 }
 
 /** mclaude-clusters KV key: {uslug} */
@@ -142,14 +154,21 @@ export function kvKeyUserClusters(uslug: UserSlug): string {
   return `${uslug}`
 }
 
-/** mclaude-hosts KV key: {uslug}.{hslug} (renamed from kvKeyLaptop per ADR-0035) */
-export function kvKeyHost(uslug: UserSlug, hslug: HostSlug): string {
-  return `${uslug}.${hslug}`
+/**
+ * mclaude-hosts KV key (ADR-0054 — shared bucket, globally unique host slugs).
+ * Key format: {hslug} (flat, no user prefix)
+ */
+export function kvKeyHost(hslug: HostSlug): string {
+  return `${hslug}`
 }
 
-/** Watch all hosts for a user: {uslug}.* */
-export function kvKeyHostsForUser(uslug: UserSlug): string {
-  return `${uslug}.*`
+/**
+ * Watch all accessible hosts in the shared mclaude-hosts bucket: > (ADR-0054).
+ * JWT scopes delivery to the user's permitted hosts server-side.
+ * The uslug parameter is intentionally unused; it is kept for call-site clarity.
+ */
+export function kvKeyHostsForUser(_uslug: UserSlug): string {
+  return `>`
 }
 
 export function kvKeyJob(uslug: UserSlug, jobId: string): string {
