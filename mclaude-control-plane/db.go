@@ -891,9 +891,11 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS oauth_id TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS slug TEXT NOT NULL DEFAULT '';
 
--- Backfill slug from full email for any existing rows where slug is empty (ADR-0062).
+-- Backfill slug from full email (ADR-0062).
 -- Algorithm: lowercase, replace all non-[a-z0-9] runs with '-', trim leading/trailing '-'.
-UPDATE users SET slug = trim(both '-' from lower(regexp_replace(email, '[^a-zA-Z0-9]+', '-', 'g'))) WHERE slug = '';
+-- Runs for empty slugs AND for old local-part-only slugs that don't include the domain.
+UPDATE users SET slug = trim(both '-' from lower(regexp_replace(email, '[^a-zA-Z0-9]+', '-', 'g')))
+WHERE slug = '' OR slug != trim(both '-' from lower(regexp_replace(email, '[^a-zA-Z0-9]+', '-', 'g')));
 
 -- Ensure slug uniqueness (idempotent; covers both fresh installs and upgrades
 -- where the column was added without the UNIQUE constraint).
