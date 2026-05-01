@@ -192,7 +192,10 @@ Key tables added by ADR-0054/0053:
 
 ### Kubernetes Dependency
 
-The control-plane has **no** K8s client at runtime and creates **no** K8s resources during normal operation. All MCProject CR creation, namespace provisioning, PVC management, RBAC reconciliation, and pod template construction live in `mclaude-controller-k8s` (see `docs/mclaude-controller/spec-controller.md`). The control-plane reaches the controller exclusively via NATS request/reply on `mclaude.users.{uslug}.hosts.{hslug}.api.projects.>`.
+The control-plane has **no** K8s client at runtime and creates **no** K8s resources during normal operation. All MCProject CR creation, namespace provisioning, PVC management, RBAC reconciliation, and pod template construction live in `mclaude-controller-k8s` (see `docs/mclaude-controller/spec-controller.md`). The control-plane reaches the controller via NATS request/reply on two subject patterns:
+
+- **ADR-0054 host-scoped (primary, used by dev-seed):** `mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.create` — CP-initiated fan-out provisioning.
+- **Legacy ADR-0035 user-scoped (SPA backward compat):** `mclaude.users.{uslug}.hosts.{hslug}.api.projects.>` — retained for SPA-initiated project creation.
 
 The control-plane binary also doubles as two Helm pre-install Job entrypoints (the only code paths that use `client-go`):
 - **`control-plane init-keys`** — generates operator + account NKey pairs and JWTs, writes them to the `operator-keys` Secret in `mclaude-system`. Idempotent: exits 0 if the Secret already exists. Also creates the bootstrap admin row in Postgres when `BOOTSTRAP_ADMIN_EMAIL` is set. Run by the `mclaude-cp` chart's pre-install Job. Env vars: `NAMESPACE` (default `mclaude-system`), `OPERATOR_KEYS_SECRET` (default `operator-keys`).

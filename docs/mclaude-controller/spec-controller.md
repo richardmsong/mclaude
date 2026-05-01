@@ -44,16 +44,25 @@ The cluster's slug is configured at deploy time via the Helm value `clusterSlug`
 
 #### NATS subscriptions
 
-Subscribes via the per-cluster JWT (issued at `POST /admin/clusters` time, scoped to `mclaude.users.*.hosts.{cluster-slug}.>`):
+Subscribes to **two** subject patterns (dual subscription during ADR-0054 migration):
+
+**ADR-0054 host-scoped pattern (primary):**
 
 | Subject | Behavior |
 |---------|----------|
-| `mclaude.users.*.hosts.{CLUSTER_SLUG}.api.projects.provision` | Request/reply. Resolves `userSlug`, `hostSlug`, `projectSlug` from the subject + payload; creates the `MCProject` CR; returns success when reconcile reaches `Ready` (or 503-style failure). |
-| `mclaude.users.*.hosts.{CLUSTER_SLUG}.api.projects.create` | Request/reply. Identical to provision today; reserved for future fan-out. |
-| `mclaude.users.*.hosts.{CLUSTER_SLUG}.api.projects.update` | Request/reply. Reconciles per-user `user-secrets` Secret (NATS creds, OAuth tokens, CLI configs) and re-applies the pod template. **Not yet implemented** — the NATS handler dispatches `create`, `provision`, and `delete` but has no handler for `update`. Reserved for future credential refresh flow. |
-| `mclaude.users.*.hosts.{CLUSTER_SLUG}.api.projects.delete` | Request/reply. Tears down the `MCProject` CR (and cascaded namespace/RBAC/PVCs/Deployment). |
+| `mclaude.hosts.{CLUSTER_SLUG}.users.*.projects.*.create` | Request/reply. CP-initiated fan-out provisioning (ADR-0054). Resolves `userSlug`, `hostSlug`, `projectSlug` from the subject + payload; creates the `MCProject` CR; returns success when reconcile reaches `Ready`. |
+| `mclaude.hosts.{CLUSTER_SLUG}.users.*.projects.*.delete` | Request/reply. Tears down the `MCProject` CR (and cascaded namespace/RBAC/PVCs/Deployment). |
 
-The wildcard at the user level is what enables one cluster controller to receive provisioning requests from every user granted access to its cluster.
+**Legacy ADR-0035 user-scoped pattern (backward compatibility):**
+
+| Subject | Behavior |
+|---------|----------|
+| `mclaude.users.*.hosts.{CLUSTER_SLUG}.api.projects.provision` | Request/reply. Legacy provisioning. Same behavior as `create` above. |
+| `mclaude.users.*.hosts.{CLUSTER_SLUG}.api.projects.create` | Request/reply. Identical to provision. |
+| `mclaude.users.*.hosts.{CLUSTER_SLUG}.api.projects.update` | Request/reply. Reconciles per-user `user-secrets` Secret. **Not yet implemented.** |
+| `mclaude.users.*.hosts.{CLUSTER_SLUG}.api.projects.delete` | Request/reply. Tears down the `MCProject` CR. |
+
+The wildcard at the user level is what enables one cluster controller to receive provisioning requests from every user granted access to its cluster. The host-scoped pattern is the ADR-0054 target; the user-scoped pattern is retained for SPA-initiated project creation and backward compatibility during migration.
 
 #### Kubernetes resources
 

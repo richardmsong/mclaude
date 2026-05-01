@@ -30,11 +30,11 @@ The SPA consumes raw stream-json events from NATS JetStream (`MCLAUDE_EVENTS` st
 
 ## State Management
 
-The SPA watches NATS KV buckets for live updates:
+The SPA watches NATS KV buckets for live updates. Per ADR-0054, sessions and projects use per-user buckets (user slug encoded in the bucket name):
 
-- `mclaude-sessions` — session state (capabilities, pendingControls, usage, state)
-- `mclaude-projects` — project list and status
-- `mclaude-hosts` — host liveness and online/offline state (via `HeartbeatMonitor`)
+- `mclaude-sessions-{uslug}` — per-user session state (capabilities, pendingControls, usage, status). Key format: `hosts.{hslug}.projects.{pslug}.sessions.{sslug}`.
+- `mclaude-projects-{uslug}` — per-user project list and status. Key format: `hosts.{hslug}.projects.{pslug}`.
+- `mclaude-hosts` — host liveness and online/offline state (via `HeartbeatMonitor`). Shared bucket, key format: `{hslug}`.
 
 ## Event Replay
 
@@ -133,7 +133,7 @@ The `SessionState.state` union includes `"updating"` (set by the session-agent o
 
 ### createSession()
 
-`SessionListVM.createSession()` publishes to `subjSessionsCreate(uslug, hslug, pslug)` and waits for the new session to appear in the `mclaude-sessions` KV watcher (via `SessionStore.onSessionAdded()`). Timeout: 30 seconds. On error the session-agent publishes an `api_error` event on `subjEventsApi(uslug, hslug, pslug)`; the SPA subscribes and surfaces the error to the user.
+`SessionListVM.createSession()` publishes to `subjSessionsCreate(uslug, hslug, pslug)` and waits for the new session to appear in the `mclaude-sessions-{uslug}` KV watcher (via `SessionStore.onSessionAdded()`). Timeout: 30 seconds. On error the session-agent publishes an `api_error` event on `subjEventsApi(uslug, hslug, pslug)`; the SPA subscribes and surfaces the error to the user.
 
 No request-reply: JetStream `api.sessions.create` messages have no Reply field. Success is signalled by the session key appearing in KV.
 
@@ -159,10 +159,10 @@ Registers a one-shot listener that fires when a new session belonging to `projec
 
 ### SessionStore KV Watch Prefixes
 
-`SessionStore` watches two KV buckets with different key prefixes (ADR-0050 D13):
+`SessionStore` watches two per-user KV buckets (ADR-0054):
 
-- **`mclaude-sessions`**: watched with `userSlug` prefix (`kvKeySessionsForUser(userSlug)`). Session KV keys are slug-based (`{uslug}.{hslug}.{pslug}.{sslug}`), written by the session-agent.
-- **`mclaude-projects`**: watched with `userId` prefix (`kvKeyProjectsForUser(userId)`). Project KV keys are still UUID-based (`{userId}.{projectId}`), written by the control-plane. The project KV key format has not been migrated to slugs yet.
+- **`mclaude-sessions-{uslug}`**: watched with `>` wildcard (all keys in the per-user bucket). Session KV keys: `hosts.{hslug}.projects.{pslug}.sessions.{sslug}`, written by the session-agent.
+- **`mclaude-projects-{uslug}`**: watched with `>` wildcard (all keys in the per-user bucket). Project KV keys: `hosts.{hslug}.projects.{pslug}`, written by the control-plane.
 
 `App.tsx` passes `authState.userSlug ?? authState.userId` as the `userSlug` constructor param and `authState.userId` as the `userId` param.
 
