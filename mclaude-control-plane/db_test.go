@@ -8,23 +8,40 @@ import (
 // ---- computeUserSlug ----
 
 func TestComputeUserSlug_BasicEmail(t *testing.T) {
+	// ADR-0062: slugify the full email (not just local-part).
+	// Algorithm: lowercase, replace all non-[a-z0-9] runs with '-', trim leading/trailing '-', truncate to 63 chars.
 	cases := []struct {
 		email string
 		want  string
 	}{
-		{"alice@example.com", "alice"},
-		{"bob.smith@example.com", "bob-smith"},
-		{"jane_doe@example.com", "jane-doe"},
-		{"user+tag@example.com", "user-tag"},
-		{"ALICE@EXAMPLE.COM", "alice"},
-		{"mixed.CASE.User@domain.io", "mixed-case-user"},
-		{"multi--dash@example.com", "multi-dash"},
+		// Full email slugification — domain included to prevent collisions.
+		{"alice@example.com", "alice-example-com"},
+		{"bob.smith@example.com", "bob-smith-example-com"},
+		{"jane_doe@example.com", "jane-doe-example-com"},
+		{"user+tag@example.com", "user-tag-example-com"},
+		{"ALICE@EXAMPLE.COM", "alice-example-com"},
+		{"mixed.CASE.User@domain.io", "mixed-case-user-domain-io"},
+		{"multi--dash@example.com", "multi-dash-example-com"},
+		// ADR-0062 canonical examples.
+		{"dev@mclaude.local", "dev-mclaude-local"},
+		{"richard.song@gmail.com", "richard-song-gmail-com"},
+		{"richard@rbc.com", "richard-rbc-com"},
 	}
 	for _, tc := range cases {
 		got := computeUserSlug(tc.email)
 		if got != tc.want {
 			t.Errorf("computeUserSlug(%q) = %q; want %q", tc.email, got, tc.want)
 		}
+	}
+}
+
+// TestComputeUserSlug_CollisionResistance verifies that users with the same
+// local-part on different domains get different slugs (ADR-0062).
+func TestComputeUserSlug_CollisionResistance(t *testing.T) {
+	s1 := computeUserSlug("richard@rbc.com")
+	s2 := computeUserSlug("richard@gmail.com")
+	if s1 == s2 {
+		t.Errorf("computeUserSlug collision: both richard@rbc.com and richard@gmail.com produced %q", s1)
 	}
 }
 

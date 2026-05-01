@@ -274,7 +274,7 @@ func TestIntegration_StartProjectsSubscriberCreatesKVBuckets(t *testing.T) {
 }
 
 // TestIntegration_UserSlug_PopulatedOnCreate verifies that CreateUser derives
-// the slug from the email local-part (ADR-0046).
+// the slug from the full email (ADR-0062).
 func TestIntegration_UserSlug_PopulatedOnCreate(t *testing.T) {
 	ctx := context.Background()
 	db := mustConnectDB(t, ctx)
@@ -283,8 +283,9 @@ func TestIntegration_UserSlug_PopulatedOnCreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	if user.Slug != "alice-smith" {
-		t.Errorf("Slug = %q; want %q", user.Slug, "alice-smith")
+	// ADR-0062: full email is slugified → alice.smith@example.com → alice-smith-example-com
+	if user.Slug != "alice-smith-example-com" {
+		t.Errorf("Slug = %q; want %q", user.Slug, "alice-smith-example-com")
 	}
 
 	// Verify the slug persists through a DB round-trip.
@@ -292,8 +293,8 @@ func TestIntegration_UserSlug_PopulatedOnCreate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetUserByID: %v", err)
 	}
-	if fetched.Slug != "alice-smith" {
-		t.Errorf("fetched Slug = %q; want %q", fetched.Slug, "alice-smith")
+	if fetched.Slug != "alice-smith-example-com" {
+		t.Errorf("fetched Slug = %q; want %q", fetched.Slug, "alice-smith-example-com")
 	}
 }
 
@@ -302,14 +303,14 @@ func TestIntegration_UserSlug_Unique(t *testing.T) {
 	ctx := context.Background()
 	db := mustConnectDB(t, ctx)
 
-	// Two users with different emails that produce the same slug.
-	// Use test-specific prefix to avoid conflict with TestIntegration_UserCreateAndFetch
-	// which also creates an "alice" user.
-	_, err := db.CreateUser(ctx, "slug-uniq-u1", "alice.slugtest@example.com", "Alice1", "")
+	// Two different emails that produce the same full-email slug (ADR-0062):
+	// sluguniqtest@a.b.com  → sluguniqtest-a-b-com
+	// sluguniqtest-a@b.com  → sluguniqtest-a-b-com
+	_, err := db.CreateUser(ctx, "slug-uniq-u1", "sluguniqtest@a.b.com", "UniqTest1", "")
 	if err != nil {
 		t.Fatalf("CreateUser first: %v", err)
 	}
-	_, err = db.CreateUser(ctx, "slug-uniq-u2", "alice.slugtest@other.com", "Alice2", "")
+	_, err = db.CreateUser(ctx, "slug-uniq-u2", "sluguniqtest-a@b.com", "UniqTest2", "")
 	if err == nil {
 		t.Error("expected error for duplicate slug; got nil")
 	}
@@ -347,8 +348,9 @@ func TestIntegration_HandleLogin_UserSlugInResponse(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.UserSlug != "bob-jones" {
-		t.Errorf("userSlug = %q; want %q", resp.UserSlug, "bob-jones")
+	// ADR-0062: full email is slugified → bob.jones@example.com → bob-jones-example-com
+	if resp.UserSlug != "bob-jones-example-com" {
+		t.Errorf("userSlug = %q; want %q", resp.UserSlug, "bob-jones-example-com")
 	}
 	if resp.UserID == "" {
 		t.Error("userId missing from response")
@@ -408,8 +410,9 @@ func TestIntegration_HandleRefresh_ReturnsSlug(t *testing.T) {
 	if resp.UserID != "refresh-slug-u1" {
 		t.Errorf("userID = %q; want refresh-slug-u1", resp.UserID)
 	}
-	if resp.UserSlug != "refresh-slug" {
-		t.Errorf("userSlug = %q; want refresh-slug", resp.UserSlug)
+	// ADR-0062: full email is slugified → refresh.slug@example.com → refresh-slug-example-com
+	if resp.UserSlug != "refresh-slug-example-com" {
+		t.Errorf("userSlug = %q; want refresh-slug-example-com", resp.UserSlug)
 	}
 	// New JWT must differ from original.
 	if resp.JWT == loginResp.JWT {
@@ -465,9 +468,10 @@ func TestIntegration_HandleSysEvent_MachineConnect(t *testing.T) {
 	srv.handleSysEvent(fakeMsg, true /* isConnect */)
 
 	// Verify mclaude-hosts KV was written with online=true.
-	entry, err := hostsKV.Get("sysevt.myhost")
+	// ADR-0062: user slug is derived from full email: sysevt@example.com → sysevt-example-com
+	entry, err := hostsKV.Get("sysevt-example-com.myhost")
 	if err != nil {
-		t.Fatalf("hostsKV.Get(sysevt.myhost): %v", err)
+		t.Fatalf("hostsKV.Get(sysevt-example-com.myhost): %v", err)
 	}
 
 	var state HostKVState
@@ -529,7 +533,8 @@ func TestIntegration_HandleSysEvent_MachineDisconnect(t *testing.T) {
 	srv.handleSysEvent(&nats.Msg{Data: []byte(connectPayload)}, true)
 
 	// Verify online=true after CONNECT.
-	entry, err := hostsKV.Get("sysdisc.dischost")
+	// ADR-0062: user slug is derived from full email: sysdisc@example.com → sysdisc-example-com
+	entry, err := hostsKV.Get("sysdisc-example-com.dischost")
 	if err != nil {
 		t.Fatalf("hostsKV.Get after CONNECT: %v", err)
 	}
@@ -544,7 +549,7 @@ func TestIntegration_HandleSysEvent_MachineDisconnect(t *testing.T) {
 	disconnectPayload := `{"server":{"name":"hub"},"client":{"kind":"Client","name":"dischost","nkey":"UTEST_PUBKEY_SYSDISC"}}`
 	srv.handleSysEvent(&nats.Msg{Data: []byte(disconnectPayload)}, false)
 
-	entry, err = hostsKV.Get("sysdisc.dischost")
+	entry, err = hostsKV.Get("sysdisc-example-com.dischost")
 	if err != nil {
 		t.Fatalf("hostsKV.Get after DISCONNECT: %v", err)
 	}
@@ -621,7 +626,8 @@ func TestIntegration_HandleSysEvent_ClusterConnect(t *testing.T) {
 	srv.handleSysEvent(&nats.Msg{Data: []byte(payload)}, true /* isConnect */)
 
 	// Both user rows should have online=true written to mclaude-hosts KV.
-	for _, userSlug := range []string{"clconn1", "clconn2"} {
+	// ADR-0062: slugs derived from full emails: clconn1@example.com → clconn1-example-com
+	for _, userSlug := range []string{"clconn1-example-com", "clconn2-example-com"} {
 		key := userSlug + ".mycluster"
 		entry, err := hostsKV.Get(key)
 		if err != nil {
@@ -700,8 +706,9 @@ func TestIntegration_HandleSysEvent_ClusterDisconnect(t *testing.T) {
 	srv.handleSysEvent(&nats.Msg{Data: []byte(connectPayload)}, true)
 
 	// Capture lastSeenAt values before disconnect.
+	// ADR-0062: slugs derived from full emails: cldisc1@example.com → cldisc1-example-com
 	savedLastSeen := map[string]*string{}
-	for _, userSlug := range []string{"cldisc1", "cldisc2"} {
+	for _, userSlug := range []string{"cldisc1-example-com", "cldisc2-example-com"} {
 		key := userSlug + ".disccluster"
 		entry, err := hostsKV.Get(key)
 		if err != nil {
@@ -717,7 +724,7 @@ func TestIntegration_HandleSysEvent_ClusterDisconnect(t *testing.T) {
 	srv.handleSysEvent(&nats.Msg{Data: []byte(disconnectPayload)}, false)
 
 	// Verify online=false and lastSeenAt unchanged.
-	for _, userSlug := range []string{"cldisc1", "cldisc2"} {
+	for _, userSlug := range []string{"cldisc1-example-com", "cldisc2-example-com"} {
 		key := userSlug + ".disccluster"
 		entry, err := hostsKV.Get(key)
 		if err != nil {

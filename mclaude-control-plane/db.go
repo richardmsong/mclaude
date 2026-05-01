@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"regexp"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,17 +28,13 @@ type User struct {
 	CreatedAt    time.Time
 }
 
-// slugNonAlphaNum matches any run of characters that are not alphanumeric.
-var slugNonAlphaNum = regexp.MustCompile(`[^a-zA-Z0-9]+`)
-
-// computeUserSlug derives a URL-safe slug from an email address.
-// Uses the local part (before '@'), lowercased, with non-alphanumeric runs
-// replaced by '-'. Consistent with the SQL backfill in the schema migration.
+// computeUserSlug derives a URL-safe slug from an email address (ADR-0062).
+// Slugifies the full email: lowercase, replace all non-[a-z0-9] runs with '-',
+// trim leading/trailing '-', truncate to 63 chars.
+// Examples: dev@mclaude.local → dev-mclaude-local, richard@rbc.com → richard-rbc-com.
 // KNOWN-12: Validates against reserved-word blocklist and generates fallback on collision.
 func computeUserSlug(email string) string {
-	local := strings.Split(email, "@")[0]
-	s := strings.ToLower(slugNonAlphaNum.ReplaceAllString(local, "-"))
-	s = strings.Trim(s, "-")
+	s := slug.Slugify(email)
 	if s == "" {
 		return ""
 	}
@@ -897,8 +891,9 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS oauth_id TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS slug TEXT NOT NULL DEFAULT '';
 
--- Backfill slug from email local-part for any existing rows where slug is empty.
-UPDATE users SET slug = lower(regexp_replace(split_part(email, '@', 1), '[^a-zA-Z0-9]+', '-', 'g')) WHERE slug = '';
+-- Backfill slug from full email for any existing rows where slug is empty (ADR-0062).
+-- Algorithm: lowercase, replace all non-[a-z0-9] runs with '-', trim leading/trailing '-'.
+UPDATE users SET slug = trim(both '-' from lower(regexp_replace(email, '[^a-zA-Z0-9]+', '-', 'g'))) WHERE slug = '';
 
 -- Ensure slug uniqueness (idempotent; covers both fresh installs and upgrades
 -- where the column was added without the UNIQUE constraint).
