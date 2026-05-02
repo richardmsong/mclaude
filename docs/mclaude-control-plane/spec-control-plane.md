@@ -245,7 +245,7 @@ Per ADR-0054, all identity types (user, host, agent) generate their own NKey pai
 
 **Per-user resource provisioning:** On user registration (first login), CP creates per-user KV buckets (`mclaude-sessions-{uslug}`, `mclaude-projects-{uslug}`) and the per-user sessions stream (`MCLAUDE_SESSIONS_{uslug}`). These resources are created once per user and persist.
 
-The auth middleware on protected routes decodes and validates the JWT against the account public key and extracts the user UUID into the request context. **Known gap:** the spec-described access boundary enforcement (cross-user 403 when JWT `sub` doesn't match URL `{uslug}`, cross-host 403) is not implemented — the middleware only extracts the user ID without checking URL parameters. Admin routes use a separate static `ADMIN_TOKEN` middleware on the loopback port (not per-user `is_admin` checks).
+The auth middleware on protected routes decodes and validates the JWT against the account public key, extracts the user UUID into the request context, and enforces access boundaries: returns 403 Forbidden when the JWT subject (user slug) does not match the URL `{uslug}` parameter. Admin users bypass this check. Admin routes use a separate static `ADMIN_TOKEN` middleware on the loopback port (not per-user `is_admin` checks).
 
 ### JWT Revocation
 
@@ -297,7 +297,7 @@ On project deletion (ADR-0053), in addition to the standard Postgres + KV + prov
 
 - **Postgres unavailable at startup**: fatal exit.
 - **Postgres unavailable at runtime**: affected HTTP handlers return 503; admin routes return 503.
-- **`OPERATOR_KEYS_PATH` mount missing or unreadable**: fatal exit on startup — control-plane cannot mint per-host JWTs.
+- **`OPERATOR_KEYS_PATH` mount missing or unreadable**: warning logged at startup; JWT revocation is disabled (TTL-only fallback). Control-plane can still mint and validate JWTs without this path — only the `$SYS.REQ.CLAIMS.UPDATE` revocation path is unavailable. This is the expected behavior in dev environments that lack the operator-keys Secret mount.
 - **NATS connection failure**: retries indefinitely with unlimited reconnects. KV writes are best-effort; DB row is authoritative.
 - **Provisioning request timeout**: `POST /api/users/{uslug}/projects` returns 503 with `{error: "host {hslug} unreachable"}`. The Postgres row is rolled back (or marked failed); the SPA presents the host as offline. Project creation queueing for retry is out of scope for v1.
 - **Device-code expired (>10 min)**: `POST /api/hosts/register` returns 410 Gone with `{error: "code expired, restart registration"}`.
