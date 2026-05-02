@@ -1138,3 +1138,158 @@ func TestADR0063_AgentNKeySecretName(t *testing.T) {
 		}
 	}
 }
+
+// TestGap4_UserSecretsOAuthToken verifies that reconcileSecrets writes the
+// oauth-token key into user-secrets when devOAuthToken is set, and omits it
+// when devOAuthToken is empty.
+// Spec: spec-k8s-architecture.md:107 — "The user-secrets Secret contains
+// oauth-token (from DEV_OAUTH_TOKEN if set)".
+func TestGap4_UserSecretsOAuthToken(t *testing.T) {
+	ctx := context.Background()
+	userNs := "mclaude-alice"
+
+	// --- Case 1: devOAuthToken is set — oauth-token key must be present ---
+	t.Run("token set", func(t *testing.T) {
+		mcp := testMCProject("alice-my-project", "mclaude-system")
+		r := newTestReconciler(mcp)
+		r.devOAuthToken = "test-token-abc"
+
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: userNs}}
+		if err := r.client.Create(ctx, ns); err != nil {
+			t.Fatalf("create namespace: %v", err)
+		}
+
+		if err := r.reconcileSecrets(ctx, mcp, userNs); err != nil {
+			t.Fatalf("reconcileSecrets: %v", err)
+		}
+
+		secret := &corev1.Secret{}
+		if err := r.client.Get(ctx, types.NamespacedName{Name: "user-secrets", Namespace: userNs}, secret); err != nil {
+			t.Fatalf("get user-secrets: %v", err)
+		}
+
+		got, ok := secret.Data["oauth-token"]
+		if !ok {
+			t.Fatal("user-secrets missing oauth-token key")
+		}
+		if string(got) != "test-token-abc" {
+			t.Errorf("oauth-token: got %q, want %q", string(got), "test-token-abc")
+		}
+	})
+
+	// --- Case 2: devOAuthToken is empty — oauth-token key must be absent ---
+	t.Run("token empty", func(t *testing.T) {
+		mcp := testMCProject("alice-my-project2", "mclaude-system")
+		// newTestReconciler sets devOAuthToken to "" (zero value).
+		r := newTestReconciler(mcp)
+
+		ns2 := "mclaude-alice2"
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns2}}
+		if err := r.client.Create(ctx, ns); err != nil {
+			t.Fatalf("create namespace: %v", err)
+		}
+
+		if err := r.reconcileSecrets(ctx, mcp, ns2); err != nil {
+			t.Fatalf("reconcileSecrets: %v", err)
+		}
+
+		secret := &corev1.Secret{}
+		if err := r.client.Get(ctx, types.NamespacedName{Name: "user-secrets", Namespace: ns2}, secret); err != nil {
+			t.Fatalf("get user-secrets: %v", err)
+		}
+
+		if val, ok := secret.Data["oauth-token"]; ok && len(val) > 0 {
+			t.Errorf("expected oauth-token to be absent when devOAuthToken is empty, got %q", string(val))
+		}
+	})
+}
+
+// TestGap5_ImagePullSecretsCopiedFromControllerNs verifies that reconcileSecrets
+// copies Secrets of type kubernetes.io/dockerconfigjson from the controller's
+// namespace into the user namespace.
+// Spec: spec-k8s-architecture.md:105 — "Copies imagePullSecrets from the
+// controller's namespace."
+func TestGap5_ImagePullSecretsCopiedFromControllerNs(t *testing.T) {
+	ctx := context.Background()
+	userNs := "mclaude-alice"
+	dockerConfigData := []byte(`{"auths":{"registry.example.com":{"auth":"dXNlcjpwYXNz"}}}`)
+
+	mcp := testMCProject("alice-my-project", "mclaude-system")
+
+	// Pre-create a dockerconfigjson Secret in the controller namespace.
+	regcred := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "regcred",
+			Namespace: "mclaude-system",
+		},
+		Type: corev1.SecretTypeDockerConfigJson,
+		Data: map[string][]byte{
+			corev1.DockerConfigJsonKey: dockerConfigData,
+		},
+	}
+
+	r := newTestReconciler(mcp, regcred)
+
+	// Create the user namespace so reconcileSecrets can proceed.
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: userNs}}
+	if err := r.client.Create(ctx, ns); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	if err := r.reconcileSecrets(ctx, mcp, userNs); err != nil {
+		t.Fatalf("reconcileSecrets: %v", err)
+	}
+
+	// Verify the secret was copied into the user namespace.
+	copied := &corev1.Secret{}
+	if err := r.client.Get(ctx, types.NamespacedName{Name: "regcred", Namespace: userNs}, copied); err != nil {
+		t.Fatalf("expected regcred secret to exist in %q, got error: %v", userNs, err)
+	}
+
+	// Verify type is preserved.
+	if copied.Type != corev1.SecretTypeDockerConfigJson {
+		t.Errorf("copied secret type: got %q, want %q", copied.Type, corev1.SecretTypeDockerConfigJson)
+	}
+
+	// Verify data is preserved.
+	if string(copied.Data[corev1.DockerConfigJsonKey]) != string(dockerConfigData) {
+		t.Errorf("copied secret data mismatch: got %q, want %q",
+			string(copied.Data[corev1.DockerConfigJsonKey]), string(dockerConfigData))
+	}
+}
+
+// TestGap5_NonDockerSecretsNotCopied verifies that reconcileSecrets does NOT copy
+// Secrets of types other than kubernetes.io/dockerconfigjson.
+func TestGap5_NonDockerSecretsNotCopied(t *testing.T) {
+	ctx := context.Background()
+	userNs := "mclaude-alice"
+
+	mcp := testMCProject("alice-my-project", "mclaude-system")
+
+	// Pre-create a generic (Opaque) Secret in the controller namespace — must NOT be copied.
+	opaqueSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "some-opaque-secret",
+			Namespace: "mclaude-system",
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{"key": []byte("value")},
+	}
+
+	r := newTestReconciler(mcp, opaqueSecret)
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: userNs}}
+	if err := r.client.Create(ctx, ns); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	if err := r.reconcileSecrets(ctx, mcp, userNs); err != nil {
+		t.Fatalf("reconcileSecrets: %v", err)
+	}
+
+	// Verify the opaque secret was NOT copied.
+	notCopied := &corev1.Secret{}
+	if err := r.client.Get(ctx, types.NamespacedName{Name: "some-opaque-secret", Namespace: userNs}, notCopied); err == nil {
+		t.Error("opaque secret should NOT have been copied into the user namespace")
+	}
+}
