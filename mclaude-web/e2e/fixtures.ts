@@ -7,12 +7,17 @@ import { fileURLToPath } from 'url'
 
 const TEST_USER_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '.test-user.json')
 
-function loadTestUser(): { email: string; token: string } | null {
+function loadTestUser(): { email: string; token: string; projectSlug?: string; sessionSlug?: string } | null {
   try {
     if (fs.existsSync(TEST_USER_FILE)) {
       const record = JSON.parse(fs.readFileSync(TEST_USER_FILE, 'utf-8'))
       if (!record.skipped && record.email && record.token) {
-        return { email: record.email, token: record.token }
+        return {
+          email: record.email as string,
+          token: record.token as string,
+          projectSlug: typeof record.projectSlug === 'string' ? record.projectSlug : undefined,
+          sessionSlug: typeof record.sessionSlug === 'string' ? record.sessionSlug : undefined,
+        }
       }
     }
   } catch {}
@@ -22,6 +27,8 @@ function loadTestUser(): { email: string; token: string } | null {
 const testUser = loadTestUser()
 export const DEV_EMAIL = process.env['DEV_EMAIL'] || testUser?.email || 'dev@mclaude.local'
 export const DEV_TOKEN = process.env['DEV_TOKEN'] || testUser?.token || 'dev'
+export const DEV_PROJECT_SLUG = process.env['DEV_PROJECT_SLUG'] || testUser?.projectSlug || 'default-project'
+export const DEV_SESSION_SLUG = process.env['DEV_SESSION_SLUG'] || testUser?.sessionSlug || ''
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
