@@ -1,9 +1,10 @@
 # ADR: Binary Data — Imports and Attachments
 
-**Status**: draft
+**Status**: accepted
 **Status history**:
 - 2026-04-29: draft (session import only)
 - 2026-04-30: expanded to cover attachments, replaced NATS Object Store with S3 + pre-signed URLs
+- 2026-05-02: accepted — paired with spec-cli.md, spec-control-plane.md, spec-session-agent.md, spec-common.md, spec-web.md, spec-state-schema.md, spec-nats-payload-schema.md, spec-nats-activity.md
 
 ## Overview
 
