@@ -102,7 +102,7 @@ All Deployments, PVCs, and Secrets materialized per project carry `ownerReferenc
 
 On each reconcile cycle:
 
-1. Loads the session-agent-template ConfigMap for image, resource, and PVC configuration.
+1. Loads the session-agent-template ConfigMap for image, resource, and PVC configuration. Default session-agent pod resources (from `charts/mclaude-worker/values.yaml`): requests `cpu: 200m, memory: 64Mi`; limits `cpu: 2000m, memory: 2Gi`. AKS production overrides via `values-aks.yaml`.
 2. Ensures the user namespace `mclaude-{userSlug}` exists with correct labels (ADR-0062: namespace derived from `userSlug`, not UUID).
 3. Ensures RBAC resources (ServiceAccount, Role, RoleBinding).
 4. Ensures the `user-config` ConfigMap and `user-secrets` Secret. The `user-secrets` Secret contains `oauth-token` (from `DEV_OAUTH_TOKEN` if set) and OAuth connection tokens. It does **not** contain NATS credentials.

@@ -150,14 +150,11 @@ mclaude host register --type cluster --name "us-east" --nkey-public <pubkey>
 Before uninstalling, deregister the host so CP removes the `hosts` row and revokes the JWT:
 
 ```bash
-# Option A: explicit operator action (recommended)
 mclaude host deregister --slug us-east
 helm uninstall mclaude-worker -n mclaude-system
-
-# Option B: automated via Helm pre-delete hook
-helm uninstall mclaude-worker -n mclaude-system
-# pre-delete Job reads nkey_seed, performs challenge-response, publishes manage.deregister
 ```
+
+A Helm pre-delete hook Job (Option B: automated deregistration without operator intervention) is a planned future enhancement — not implemented in V1.
 
 ### Pre-Install Job and NKey Secret
 
@@ -192,15 +189,19 @@ helm uninstall mclaude-worker -n mclaude-system
 | `host.hubNatsUrl` | `""` | **Required.** Hub NATS WebSocket URL (e.g. `nats-wss://nats.mclaude.example:443`). Set as `HUB_NATS_URL` on the controller Deployment. |
 | `controller.replicas` | `1` | Controller replicas. |
 | `sessionAgent.image.*` | ghcr.io image | Image for per-project session-agent Deployments. |
+| `sessionAgent.resources.requests.cpu` | `200m` | CPU request for session-agent pods. |
+| `sessionAgent.resources.requests.memory` | `64Mi` | Memory request for session-agent pods. Kept low so test pods can be scheduled alongside dev pods in k3d (ADR-0066). AKS overrides via `values-aks.yaml`. |
+| `sessionAgent.resources.limits.cpu` | `2000m` | CPU limit for session-agent pods. |
+| `sessionAgent.resources.limits.memory` | `2Gi` | Memory limit for session-agent pods. |
 | `sessionAgent.terminationGracePeriodSeconds` | `86400` | Graceful shutdown window. |
 | `sessionAgent.persistence.storageClass` | `""` | Storage class for project PVCs (RWO). |
 | `sessionAgent.persistence.size` | `50Gi` | Project PVC size. |
 | `sessionAgent.nix.storageClass` | `""` | Storage class for Nix store PVCs. |
 | `sessionAgent.nix.size` | `20Gi` | Nix PVC size. |
-| `sessionAgent.corporateCA.enabled` | `false` | Mount trust-manager CA bundle into session-agent pods. |
-| `sessionAgent.corporateCA.bundleName` | `""` | trust-manager Bundle CR name. |
-| `sessionAgent.corporateCA.configMapName` | `""` | ConfigMap name synced by trust-manager. |
-| `sessionAgent.corporateCA.configMapKey` | `ca-certificates.crt` | PEM certs key in ConfigMap. |
+| `sessionAgent.corporateCA.enabled` | `false` | Mount trust-manager CA bundle into session-agent pods. Rendered as `corporateCAEnabled` in the session-agent-template ConfigMap. |
+| `sessionAgent.corporateCA.bundleName` | `""` | trust-manager Bundle CR name. Consumed directly by the controller binary at runtime (not stored in the session-agent-template ConfigMap) — used for Bundle CR lookup when labeling user namespaces. |
+| `sessionAgent.corporateCA.configMapName` | `""` | ConfigMap name synced by trust-manager. Rendered as `corporateCAConfigMapName` in the session-agent-template ConfigMap. |
+| `sessionAgent.corporateCA.configMapKey` | `ca-certificates.crt` | PEM certs key in ConfigMap. Rendered as `corporateCAConfigMapKey` in the session-agent-template ConfigMap. |
 | `controller.config.devOAuthToken` | `""` | Claude API OAuth token for dev/CI. Injected as `oauth-token` in per-user `user-secrets` Secret via `DEV_OAUTH_TOKEN` env. |
 
 ### Single-Cluster Degenerate Install
