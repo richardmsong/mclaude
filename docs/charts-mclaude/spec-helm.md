@@ -194,8 +194,8 @@ A Helm pre-delete hook Job (Option B: automated deregistration without operator 
 
 | Kind | Name | Notes |
 |---|---|---|
-| Job | `{release}-gen-host-nkey` | Pre-install hook (weight `-10`). Generates NKey pair via `nkeys.CreateUser()` (U-prefix). Writes decorated seed string to Secret `{release}-host-creds` field `nkey_seed`. Prints public key to Job log and NOTES.txt. Idempotent — skips if Secret exists. |
-| Secret | `{release}-host-creds` | Single field: `nkey_seed`. JWT is **not** stored here — acquired in-memory via challenge-response on boot. |
+| Job | `{release}-gen-host-nkey` | Pre-install and pre-upgrade hook (weight `-10`). Generates NKey pair via `nkeys.CreateUser()` (U-prefix). Writes decorated seed string to Secret `{release}-host-creds` field `nkey_seed`. Prints public key to Job log and NOTES.txt. Idempotent — skips if Secret exists. Creates Secret with `helm.sh/resource-policy: keep` so the seed survives `helm uninstall`. |
+| Secret | `{release}-host-creds` | Single field: `nkey_seed`. Created exclusively by the gen-host-nkey Job (not a Helm chart template). Annotated `helm.sh/resource-policy: keep` — persists across `helm uninstall`. JWT is **not** stored here — acquired in-memory via challenge-response on boot. |
 
 ### Controller (`mclaude-controller-k8s`)
 
