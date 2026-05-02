@@ -1,18 +1,23 @@
 // mclaude-controller-k8s: kubebuilder operator for MCProject CRDs.
 // Extracted from mclaude-control-plane per ADR-0035 (stage 5).
+// ADR-0063: boot via hostauth.NewHostAuthFromSeed, decode hslug from JWT,
+// connect to hub NATS with host JWT, drop account-key and leaf-NATS code paths.
 //
 // Subscribes to NATS provisioning subjects for its cluster and creates
 // MCProject CRs which the reconciler then provisions as K8s resources.
 package main
 
 import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
-	natsjwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nkeys"
 	"github.com/rs/zerolog"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -20,13 +25,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	"mclaude.io/common/pkg/hostauth"
 )
 
 func main() {
 	// controller-runtime v0.23+ requires SetLogger before NewManager.
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
-	// Gap 9: Read LOG_LEVEL env var and configure zerolog level.
 	logLevel, err := zerolog.ParseLevel(envOr("LOG_LEVEL", "info"))
 	if err != nil {
 		logLevel = zerolog.InfoLevel
@@ -37,20 +43,41 @@ func main() {
 		Logger().
 		Level(logLevel)
 
-	natsURL := envOr("NATS_URL", "nats://localhost:4222")
-	clusterSlug := os.Getenv("CLUSTER_SLUG")
-	if clusterSlug == "" {
-		logger.Fatal().Msg("CLUSTER_SLUG is required — set to this cluster's host slug (e.g. us-east)")
+	// ADR-0063: env vars — HUB_NATS_URL replaces NATS_URL; HOST_NKEY_SEED_PATH and
+	// CONTROL_PLANE_URL replace NATS_ACCOUNT_SEED / NATS_CREDENTIALS_PATH / CLUSTER_SLUG.
+	hubNATSURL := envOr("HUB_NATS_URL", "nats://localhost:4222")
+	controlPlaneURL := os.Getenv("CONTROL_PLANE_URL")
+	if controlPlaneURL == "" {
+		logger.Fatal().Msg("CONTROL_PLANE_URL is required — set to the control-plane base URL (e.g. https://cp.mclaude.example)")
 	}
-	helmReleaseName := envOr("HELM_RELEASE_NAME", "mclaude")
+	seedPath := envOr("HOST_NKEY_SEED_PATH", "/etc/mclaude/host-creds/nkey_seed")
+
+	helmReleaseName := envOr("HELM_RELEASE_NAME", "mclaude-worker")
 	sessionAgentTemplateCM := envOr("SESSION_AGENT_TEMPLATE_CM", helmReleaseName+"-session-agent-template")
 	devOAuthToken := os.Getenv("DEV_OAUTH_TOKEN")
 
-	// Account NKey — loaded from NATS_ACCOUNT_SEED env (required in production).
-	accountKP, err := loadAccountKey()
+	// ADR-0063 boot sequence:
+	// 1. Load NKey seed from mounted Secret file.
+	// 2. Refresh() → HTTP challenge-response → receive host JWT.
+	//    Retry on ErrNotRegistered: 5s initial, doubling, 60s cap.
+	// 3. Decode hslug from the JWT name ("host-{hslug}").
+	// 4. Connect to hub NATS with the host JWT.
+	// 5. Start background JWT refresh loop.
+	auth, err := hostauth.NewHostAuthFromSeed(seedPath, controlPlaneURL, logger)
 	if err != nil {
-		logger.Fatal().Err(err).Msg("account nkey")
+		logger.Fatal().Err(err).Str("seedPath", seedPath).Msg("load NKey seed")
 	}
+
+	logger.Info().Str("pubkey", auth.PublicKey()).Msg("NKey loaded — acquiring host JWT via challenge-response")
+
+	ctx := context.Background()
+	hostJWT := bootRefresh(ctx, auth, logger)
+
+	hslug, err := hostSlugFromJWT(hostJWT)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("decode host slug from JWT")
+	}
+	logger.Info().Str("hslug", hslug).Msg("host slug decoded from JWT")
 
 	// Set up controller-runtime scheme.
 	scheme := runtime.NewScheme()
@@ -63,14 +90,13 @@ func main() {
 
 	restCfg := ctrl.GetConfigOrDie()
 
-	// Gap 6 + Gap 9: Leader election with configurable namespace.
 	leaderElectionNs := envOr("LEADER_ELECTION_NAMESPACE", "mclaude-system")
 
 	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
 		Scheme:                  scheme,
 		Metrics:                 metricsserver.Options{BindAddress: envOr("METRICS_ADDR", ":8082")},
 		HealthProbeBindAddress:  envOr("HEALTH_PROBE_ADDR", ":8081"),
-		LeaderElection:          true,
+		LeaderElection:          envOr("LEADER_ELECTION", "false") == "true",
 		LeaderElectionID:        "mclaude-controller-k8s",
 		LeaderElectionNamespace: leaderElectionNs,
 	})
@@ -88,35 +114,25 @@ func main() {
 	// Determine control-plane namespace.
 	controlPlaneNs := detectNamespace()
 
-	// sessionAgentNATSURL: prefer explicit env var (hub NATS), fall back to deriving from worker NATS URL.
-	saURL := envOr("SESSION_AGENT_NATS_URL", sessionAgentNATSURL(natsURL, controlPlaneNs))
-
 	reconciler := &MCProjectReconciler{
 		client:                 mgr.GetClient(),
 		scheme:                 mgr.GetScheme(),
 		controlPlaneNs:         controlPlaneNs,
 		releaseName:            helmReleaseName,
 		sessionAgentTemplateCM: sessionAgentTemplateCM,
-		sessionAgentNATSURL:    saURL,
-		accountKP:              accountKP,
+		sessionAgentNATSURL:    hubNATSURL, // session-agents inherit HUB_NATS_URL directly (ADR-0063)
+		controlPlaneURL:        controlPlaneURL,
 		devOAuthToken:          devOAuthToken,
-		clusterSlug:            clusterSlug,
+		clusterSlug:            hslug, // decoded from JWT, not from env
 		logger:                 logger.With().Str("reconciler", "mcproject").Logger(),
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		logger.Fatal().Err(err).Msg("setup MCProject reconciler")
 	}
 
-	// NATS connection — authenticate with user JWT signed by account key (ADR-0040).
-	userJWT, userKP, err := generateNATSUserCreds(accountKP, clusterSlug)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("generate NATS user credentials")
-	}
-	nc, err := nats.Connect(natsURL,
-		nats.UserJWT(
-			func() (string, error) { return userJWT, nil },
-			func(nonce []byte) ([]byte, error) { return userKP.Sign(nonce) },
-		),
+	// Connect to hub NATS using the host JWT (ADR-0063).
+	nc, err := nats.Connect(hubNATSURL,
+		nats.UserJWT(auth.JWTFunc(), auth.SignFunc()),
 		nats.RetryOnFailedConnect(true),
 		nats.MaxReconnects(-1),
 	)
@@ -125,19 +141,25 @@ func main() {
 	}
 	defer nc.Close()
 
+	// Wire the NATS connection into the reconciler for agent NKey registration (ADR-0063 step 6b).
+	reconciler.nc = nc
+
+	// Start background JWT refresh loop (ADR-0063).
+	auth.StartRefreshLoop(ctx)
+
 	// Start NATS provisioning subscriber.
 	provisioner := &NATSProvisioner{
 		nc:             nc,
 		k8sClient:      mgr.GetClient(),
 		controlPlaneNs: controlPlaneNs,
-		clusterSlug:    clusterSlug,
+		clusterSlug:    hslug,
 		reconciler:     reconciler,
 		logger:         logger.With().Str("subscriber", "provisioner").Logger(),
 	}
 	if err := provisioner.StartNATSSubscriber(); err != nil {
 		logger.Fatal().Err(err).Msg("start NATS provisioning subscriber")
 	}
-	logger.Info().Str("clusterSlug", clusterSlug).Msg("NATS provisioning subscriber started")
+	logger.Info().Str("hslug", hslug).Msg("NATS provisioning subscriber started")
 
 	logger.Info().Msg("starting controller-runtime manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
@@ -145,53 +167,60 @@ func main() {
 	}
 }
 
-// loadAccountKey loads the account NKey from NATS_ACCOUNT_SEED env.
-// In production, this is always set. For dev/test, generates an ephemeral key.
-func loadAccountKey() (nkeys.KeyPair, error) {
-	if seed := os.Getenv("NATS_ACCOUNT_SEED"); seed != "" {
-		return nkeys.FromSeed([]byte(seed))
+// bootRefresh calls auth.Refresh() with exponential backoff until a JWT is acquired.
+// Initial wait: 5s, doubles each attempt, capped at 60s (ADR-0063).
+func bootRefresh(ctx context.Context, auth *hostauth.HostAuth, log zerolog.Logger) string {
+	const (
+		initialInterval = 5 * time.Second
+		maxInterval     = 60 * time.Second
+	)
+	interval := initialInterval
+	for {
+		jwt, err := auth.Refresh(ctx)
+		if err == nil {
+			return jwt
+		}
+		if errors.Is(err, hostauth.ErrNotRegistered) {
+			// Logged by Refresh(); just wait.
+		} else {
+			log.Error().Err(err).Msg("challenge-response failed — retrying")
+		}
+		select {
+		case <-ctx.Done():
+			log.Fatal().Msg("context cancelled during boot refresh")
+			return ""
+		case <-time.After(interval):
+		}
+		interval *= 2
+		if interval > maxInterval {
+			interval = maxInterval
+		}
 	}
-	return nkeys.CreateAccount()
 }
 
-// generateNATSUserCreds creates an ephemeral user JWT signed by the account key,
-// allowing the controller-k8s to authenticate against a NATS server running
-// operator JWT auth. Permissions are scoped to this cluster's slug per spec-state-schema.md.
-func generateNATSUserCreds(accountKP nkeys.KeyPair, clusterSlug string) (userJWT string, userKP nkeys.KeyPair, err error) {
-	userKP, err = nkeys.CreateUser()
+// hostSlugFromJWT decodes the JWT payload (without signature verification) and
+// extracts the host slug from the claim name field ("host-{hslug}").
+func hostSlugFromJWT(token string) (string, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("invalid JWT: expected 3 parts, got %d", len(parts))
+	}
+	// Decode the payload (second part) — base64url without padding.
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", nil, fmt.Errorf("create user nkey: %w", err)
+		return "", fmt.Errorf("decode JWT payload: %w", err)
 	}
-	userPub, err := userKP.PublicKey()
-	if err != nil {
-		return "", nil, fmt.Errorf("user public key: %w", err)
+	var claims struct {
+		Name string `json:"name"`
 	}
-	claims := natsjwt.NewUserClaims(userPub)
-	claims.Name = "controller-k8s"
-	claims.IssuerAccount, _ = accountKP.PublicKey()
-
-	// Scope controller JWT permissions to this cluster per spec-state-schema.md.
-	// Dual subscription per ADR-0061: both host-scoped (ADR-0054) and legacy user-scoped (ADR-0035).
-	claims.Permissions.Pub.Allow = natsjwt.StringList{
-		fmt.Sprintf("mclaude.users.*.hosts.%s.>", clusterSlug), // legacy ADR-0035
-		fmt.Sprintf("mclaude.hosts.%s.>", clusterSlug),         // ADR-0054 host-scoped (ADR-0061)
-		"_INBOX.>",
-		"$JS.*.API.>",
-		"$SYS.ACCOUNT.*.CONNECT",
-		"$SYS.ACCOUNT.*.DISCONNECT",
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", fmt.Errorf("unmarshal JWT payload: %w", err)
 	}
-	claims.Permissions.Sub.Allow = natsjwt.StringList{
-		fmt.Sprintf("mclaude.users.*.hosts.%s.>", clusterSlug), // legacy ADR-0035
-		fmt.Sprintf("mclaude.hosts.%s.>", clusterSlug),         // ADR-0054 host-scoped (ADR-0061)
-		"_INBOX.>",
-		"$JS.*.API.>",
+	// Host JWTs are named "host-{hslug}" (see control-plane nkeys.go IssueHostJWT).
+	if !strings.HasPrefix(claims.Name, "host-") {
+		return "", fmt.Errorf("unexpected JWT name %q — expected 'host-{slug}' prefix", claims.Name)
 	}
-
-	jwt, err := claims.Encode(accountKP)
-	if err != nil {
-		return "", nil, fmt.Errorf("encode user jwt: %w", err)
-	}
-	return jwt, userKP, nil
+	return strings.TrimPrefix(claims.Name, "host-"), nil
 }
 
 // detectNamespace reads the pod namespace from the service account mount.
@@ -202,21 +231,6 @@ func detectNamespace() string {
 		return "mclaude-system"
 	}
 	return strings.TrimSpace(string(nsBytes))
-}
-
-// sessionAgentNATSURL returns a FQDN NATS URL suitable for pods in other namespaces.
-func sessionAgentNATSURL(rawURL, ns string) string {
-	withoutScheme := strings.TrimPrefix(rawURL, "nats://")
-	parts := strings.SplitN(withoutScheme, ":", 2)
-	hostname := parts[0]
-	port := ""
-	if len(parts) == 2 {
-		port = ":" + parts[1]
-	}
-	if strings.Contains(hostname, ".") {
-		return rawURL
-	}
-	return "nats://" + hostname + "." + ns + ".svc.cluster.local" + port
 }
 
 func envOr(key, def string) string {

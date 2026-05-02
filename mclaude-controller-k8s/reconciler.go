@@ -12,6 +12,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"github.com/rs/zerolog"
 	appsv1 "k8s.io/api/apps/v1"
@@ -30,8 +31,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	mclnats "mclaude.io/common/pkg/nats"
 )
 
 // MCProjectReconciler reconciles MCProject CRs.
@@ -42,10 +41,21 @@ type MCProjectReconciler struct {
 	releaseName            string
 	sessionAgentTemplateCM string
 	sessionAgentNATSURL    string
-	accountKP              nkeys.KeyPair
-	devOAuthToken          string
-	clusterSlug            string
-	logger                 zerolog.Logger
+	// controlPlaneURL is the CP HTTP base URL injected into session-agent pods as
+	// CONTROL_PLANE_URL so they can run their own challenge-response auth (ADR-0063).
+	controlPlaneURL string
+	devOAuthToken   string
+	clusterSlug     string
+	logger          zerolog.Logger
+	// nc is the hub NATS connection used for agent NKey registration (ADR-0063 step 6b).
+	// Nil in unit tests — reconcileAgentNKey skips the NATS call when nc == nil.
+	nc natsConn
+}
+
+// natsConn is the subset of *nats.Conn used by the reconciler.
+// Defined as an interface to allow injection of a fake in tests.
+type natsConn interface {
+	Request(subj string, data []byte, timeout time.Duration) (*nats.Msg, error)
 }
 
 // Reconcile is called whenever an MCProject CR changes.
@@ -106,13 +116,20 @@ func (r *MCProjectReconciler) Reconcile(ctx context.Context, req reconcile.Reque
 		log.Error().Err(secretsErr).Msg("ensure secrets")
 	}
 
+	// Step 6b (ADR-0063): ensure per-project agent NKey Secret and register
+	// the agent's public key with CP via NATS agents.register.
+	agentNKeyErr := r.reconcileAgentNKey(ctx, &mcp, userNs)
+	if agentNKeyErr != nil {
+		log.Error().Err(agentNKeyErr).Msg("ensure agent nkey")
+	}
+
 	deployErr := r.reconcileDeployment(ctx, &mcp, userNs, tpl)
 	r.updateCondition(ctx, &mcp, string(ConditionDeploymentReady), deployErr)
 	if deployErr != nil {
 		log.Error().Err(deployErr).Msg("ensure deployment")
 	}
 
-	allReady := nsErr == nil && rbacErr == nil && secretsErr == nil && deployErr == nil
+	allReady := nsErr == nil && rbacErr == nil && secretsErr == nil && agentNKeyErr == nil && deployErr == nil
 	if allReady {
 		now := metav1.Now()
 		mcp.Status.LastReconciledAt = &now
@@ -207,6 +224,9 @@ func (r *MCProjectReconciler) reconcileSecrets(ctx context.Context, mcp *MCProje
 		return fmt.Errorf("user-config configmap: %w", err)
 	}
 
+	// ADR-0063: user-secrets retains only oauth-token and OAuth connection entries.
+	// The nats-creds field is no longer written — session-agent pods self-bootstrap
+	// NATS credentials via HTTP challenge-response against CONTROL_PLANE_URL.
 	existingSecret := &corev1.Secret{}
 	err := r.client.Get(ctx, types.NamespacedName{Name: "user-secrets", Namespace: userNs}, existingSecret)
 	if err == nil {
@@ -214,19 +234,16 @@ func (r *MCProjectReconciler) reconcileSecrets(ctx context.Context, mcp *MCProje
 		if existingSecret.Data == nil {
 			existingSecret.Data = make(map[string][]byte)
 		}
-		if len(existingSecret.Data["nats-creds"]) == 0 {
-			jwtStr, seed, issueErr := IssueSessionAgentJWT(mcp.Spec.UserID, mcp.Spec.UserSlug, r.accountKP)
-			if issueErr != nil {
-				return fmt.Errorf("issue session-agent jwt: %w", issueErr)
-			}
-			existingSecret.Data["nats-creds"] = mclnats.FormatNATSCredentials(jwtStr, seed)
+		// Remove stale nats-creds if present from a prior controller version.
+		if _, hasCreds := existingSecret.Data["nats-creds"]; hasCreds {
+			delete(existingSecret.Data, "nats-creds")
 			needsUpdate = true
 		}
 		if r.devOAuthToken != "" && string(existingSecret.Data["oauth-token"]) != r.devOAuthToken {
 			existingSecret.Data["oauth-token"] = []byte(r.devOAuthToken)
 			needsUpdate = true
 		}
-		// Gap 8: Ensure this MCProject is an owner of user-secrets.
+		// Ensure this MCProject is an owner of user-secrets.
 		if ownerErr := r.addOwnerIfMissing(ctx, mcp, existingSecret); ownerErr != nil {
 			r.logger.Warn().Err(ownerErr).Msg("add owner to user-secrets")
 		}
@@ -236,19 +253,15 @@ func (r *MCProjectReconciler) reconcileSecrets(ctx context.Context, mcp *MCProje
 			}
 		}
 	} else if k8serrors.IsNotFound(err) {
-		jwtStr, seed, issueErr := IssueSessionAgentJWT(mcp.Spec.UserID, mcp.Spec.UserSlug, r.accountKP)
-		if issueErr != nil {
-			return fmt.Errorf("issue session-agent jwt: %w", issueErr)
-		}
 		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: "user-secrets", Namespace: userNs},
-			Data:       map[string][]byte{"nats-creds": mclnats.FormatNATSCredentials(jwtStr, seed)},
+			Data:       map[string][]byte{},
 		}
 		if r.devOAuthToken != "" {
 			secret.Data["oauth-token"] = []byte(r.devOAuthToken)
 		}
-		// Gap 8: Set this MCProject as owner of the new user-secrets Secret.
-		if ownerErr := ctrlutil.SetOwnerReference(mcp, secret, r.scheme); ownerErr != nil {
+		// Set this MCProject as owner of the new user-secrets Secret.
+		if ownerErr := ctrlutil.SetControllerReference(mcp, secret, r.scheme); ownerErr != nil {
 			r.logger.Warn().Err(ownerErr).Msg("set owner on user-secrets")
 		}
 		if createErr := r.client.Create(ctx, secret); createErr != nil && !k8serrors.IsAlreadyExists(createErr) {
@@ -311,12 +324,16 @@ func (r *MCProjectReconciler) buildPodTemplate(ctx context.Context, mcp *MCProje
 		{Name: "USER_ID", Value: userID},
 		{Name: "PROJECT_ID", Value: projectID},
 		{Name: "NATS_URL", Value: r.sessionAgentNATSURL},
+		// ADR-0063: session-agent self-bootstraps NATS credentials via challenge-response.
+		{Name: "CONTROL_PLANE_URL", Value: r.controlPlaneURL},
 		// ADR-0035/ADR-0050: slug-based env vars for host-scoped subject construction.
 		{Name: "USER_SLUG", Value: mcp.Spec.UserSlug},
 		{Name: "HOST_SLUG", Value: tpl.hostSlug},
 		{Name: "PROJECT_SLUG", Value: mcp.Spec.ProjectSlug},
-		// Gap 4: CLAUDE_CODE_TMPDIR — persistent temp dir on the project-data volume.
+		// CLAUDE_CODE_TMPDIR — persistent temp dir on the project-data volume.
 		{Name: "CLAUDE_CODE_TMPDIR", Value: "/data/claude-tmp"},
+		// ADR-0063 step 6b: path to the agent NKey seed file for session-agent bootstrap.
+		{Name: "AGENT_NKEY_PATH", Value: "/etc/mclaude/agent-nkey/nkey_seed"},
 	}
 	if gitURL != "" {
 		env = append(env, corev1.EnvVar{Name: "GIT_URL", Value: gitURL})
@@ -325,12 +342,16 @@ func (r *MCProjectReconciler) buildPodTemplate(ctx context.Context, mcp *MCProje
 		env = append(env, corev1.EnvVar{Name: "GIT_IDENTITY_ID", Value: gitIdentityID})
 	}
 
+	agentNKeySecretName := agentNKeySecretName(projectID)
+
 	volumes := []corev1.Volume{
 		{Name: "project-data", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "project-" + projectID}}},
 		{Name: "nix-store", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "nix-" + projectID}}},
 		{Name: "claude-home", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		{Name: "user-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "user-config"}}}},
 		{Name: "user-secrets", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "user-secrets"}}},
+		// ADR-0063 step 6b: mount per-project agent NKey Secret for session-agent self-bootstrap.
+		{Name: "agent-nkey", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: agentNKeySecretName}}},
 	}
 
 	volumeMounts := []corev1.VolumeMount{
@@ -341,6 +362,8 @@ func (r *MCProjectReconciler) buildPodTemplate(ctx context.Context, mcp *MCProje
 		{Name: "user-secrets", MountPath: "/home/node/.user-secrets", ReadOnly: true},
 		// Gap 4: CLAUDE_CODE_TMPDIR — SubPath on project-data for persistent temp files.
 		{Name: "project-data", MountPath: "/data/claude-tmp", SubPath: "claude-tmp"},
+		// ADR-0063 step 6b: agent NKey seed mounted for session-agent challenge-response bootstrap.
+		{Name: "agent-nkey", MountPath: "/etc/mclaude/agent-nkey/", ReadOnly: true},
 	}
 
 	annotations := map[string]string{}
@@ -454,6 +477,141 @@ func (r *MCProjectReconciler) reconcileDeployment(ctx context.Context, mcp *MCPr
 	if createErr := r.client.Create(ctx, deploy); createErr != nil && !k8serrors.IsAlreadyExists(createErr) {
 		return fmt.Errorf("create deployment: %w", createErr)
 	}
+	return nil
+}
+
+// agentRegisterRequest is the NATS payload for mclaude.hosts.{hslug}.api.agents.register
+// (ADR-0063 Session-Agent Auth).
+type agentRegisterRequest struct {
+	NKeyPublic  string `json:"nkey_public"`
+	UserSlug    string `json:"userSlug"`
+	HostSlug    string `json:"hostSlug"`
+	ProjectSlug string `json:"projectSlug"`
+}
+
+// agentRegisterReply is the expected NATS reply from CP.
+type agentRegisterReply struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// agentNKeySecretName returns the name of the per-project agent NKey Secret.
+func agentNKeySecretName(projectID string) string {
+	return "agent-nkey-" + projectID
+}
+
+// reconcileAgentNKey implements Reconciler Loop step 6b (ADR-0063):
+//
+//  1. Checks whether the per-project agent-nkey-{projectId} Secret already exists.
+//     If it does and already contains an nkey_seed, returns immediately (idempotent).
+//  2. Otherwise, generates a new NKey pair via nkeys.CreateUser(), writes the
+//     decorated seed string to the Secret, and registers the public key with CP
+//     via NATS request to mclaude.hosts.{hslug}.api.agents.register.
+func (r *MCProjectReconciler) reconcileAgentNKey(ctx context.Context, mcp *MCProject, userNs string) error {
+	secretName := agentNKeySecretName(mcp.Spec.ProjectID)
+	existing := &corev1.Secret{}
+	getErr := r.client.Get(ctx, types.NamespacedName{Name: secretName, Namespace: userNs}, existing)
+	secretExists := getErr == nil
+	if getErr != nil && !k8serrors.IsNotFound(getErr) {
+		return fmt.Errorf("get agent-nkey secret: %w", getErr)
+	}
+
+	if secretExists && len(existing.Data["nkey_seed"]) > 0 {
+		// Secret already exists with a seed — idempotent, skip registration.
+		return nil
+	}
+
+	// Generate a new NKey user pair for the agent.
+	kp, err := nkeys.CreateUser()
+	if err != nil {
+		return fmt.Errorf("generate agent NKey: %w", err)
+	}
+
+	// Get the public key for registration.
+	pubKey, err := kp.PublicKey()
+	if err != nil {
+		return fmt.Errorf("get agent NKey public key: %w", err)
+	}
+
+	// Get the decorated seed string (SUAB...) for storage.
+	seed, err := kp.Seed()
+	if err != nil {
+		return fmt.Errorf("get agent NKey seed: %w", err)
+	}
+
+	// Register the agent's public key with CP via NATS (if a NATS connection is available).
+	// nc is nil in unit tests; the NATS call is skipped in that case.
+	if r.nc != nil {
+		if registerErr := r.registerAgentNKey(ctx, mcp, pubKey); registerErr != nil {
+			return registerErr
+		}
+	}
+
+	if !secretExists {
+		// Create the new Secret.
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      secretName,
+				Namespace: userNs,
+			},
+			Data: map[string][]byte{
+				"nkey_seed": seed,
+			},
+		}
+		if ownerErr := ctrlutil.SetControllerReference(mcp, secret, r.scheme); ownerErr != nil {
+			r.logger.Warn().Err(ownerErr).Msg("set controller ref on agent-nkey secret")
+		}
+		if createErr := r.client.Create(ctx, secret); createErr != nil && !k8serrors.IsAlreadyExists(createErr) {
+			return fmt.Errorf("create agent-nkey secret: %w", createErr)
+		}
+	} else {
+		// Secret exists but nkey_seed is empty — update it.
+		if existing.Data == nil {
+			existing.Data = make(map[string][]byte)
+		}
+		existing.Data["nkey_seed"] = seed
+		if updateErr := r.client.Update(ctx, existing); updateErr != nil {
+			return fmt.Errorf("update agent-nkey secret: %w", updateErr)
+		}
+	}
+
+	return nil
+}
+
+// registerAgentNKey sends the NATS request to register the agent's public key
+// with the control-plane. Subject: mclaude.hosts.{hslug}.api.agents.register
+// Payload: {nkey_public, userSlug, hostSlug, projectSlug}
+// Expected reply: {ok: true}
+func (r *MCProjectReconciler) registerAgentNKey(ctx context.Context, mcp *MCProject, pubKey string) error {
+	subject := fmt.Sprintf("mclaude.hosts.%s.api.agents.register", r.clusterSlug)
+
+	payload, err := json.Marshal(agentRegisterRequest{
+		NKeyPublic:  pubKey,
+		UserSlug:    mcp.Spec.UserSlug,
+		HostSlug:    r.clusterSlug,
+		ProjectSlug: mcp.Spec.ProjectSlug,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal agent register payload: %w", err)
+	}
+
+	reply, err := r.nc.Request(subject, payload, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("NATS agents.register request: %w", err)
+	}
+
+	var resp agentRegisterReply
+	if unmarshalErr := json.Unmarshal(reply.Data, &resp); unmarshalErr != nil {
+		return fmt.Errorf("unmarshal agents.register reply: %w", unmarshalErr)
+	}
+	if !resp.OK {
+		return fmt.Errorf("agents.register failed: %s", resp.Error)
+	}
+
+	r.logger.Info().
+		Str("pubKey", pubKey).
+		Str("projectSlug", mcp.Spec.ProjectSlug).
+		Msg("agent NKey registered with control-plane")
 	return nil
 }
 
