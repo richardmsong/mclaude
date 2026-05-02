@@ -1,9 +1,27 @@
 import { test as base, expect, type Page } from '@playwright/test'
+import * as fs from 'fs'
+import * as path from 'path'
+import { fileURLToPath } from 'url'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-export const DEV_EMAIL = process.env['DEV_EMAIL'] || 'dev@mclaude.local'
-export const DEV_TOKEN = process.env['DEV_TOKEN'] || 'dev'
+const TEST_USER_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '.test-user.json')
+
+function loadTestUser(): { email: string; token: string } | null {
+  try {
+    if (fs.existsSync(TEST_USER_FILE)) {
+      const record = JSON.parse(fs.readFileSync(TEST_USER_FILE, 'utf-8'))
+      if (!record.skipped && record.email && record.token) {
+        return { email: record.email, token: record.token }
+      }
+    }
+  } catch {}
+  return null
+}
+
+const testUser = loadTestUser()
+export const DEV_EMAIL = process.env['DEV_EMAIL'] || testUser?.email || 'dev@mclaude.local'
+export const DEV_TOKEN = process.env['DEV_TOKEN'] || testUser?.token || 'dev'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
