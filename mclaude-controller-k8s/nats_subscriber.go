@@ -1,6 +1,10 @@
 // nats_subscriber.go implements the NATS subscription for project provisioning
-// requests from the control-plane. Per ADR-0035, the cluster controller subscribes
-// to mclaude.users.*.hosts.{cluster-slug}.api.projects.> (wildcard at user level).
+// requests from the control-plane. Per ADR-0063 (aligning with ADR-0054), the
+// controller subscribes to the single host-scoped pattern:
+//
+//	mclaude.hosts.{hslug}.>
+//
+// The legacy dual subscription ("during ADR-0054 migration") is dropped.
 package main
 
 import (
@@ -46,36 +50,21 @@ type NATSProvisioner struct {
 	logger          zerolog.Logger
 }
 
-// StartNATSSubscriber subscribes to both provisioning subject patterns for this cluster
-// (dual subscription during ADR-0054 migration per ADR-0061):
+// StartNATSSubscriber subscribes to the single host-scoped provisioning subject
+// pattern (ADR-0063, aligning with ADR-0054):
 //
-//   - ADR-0054 host-scoped (primary): mclaude.hosts.{clusterSlug}.>
-//     Receives CP-initiated fan-out provisioning (dev-seed and production CP).
+//	mclaude.hosts.{hslug}.>
 //
-//   - Legacy ADR-0035 user-scoped (backward compatibility): mclaude.users.*.hosts.{clusterSlug}.api.projects.>
-//     Retained for SPA-initiated project creation until the old pattern is fully retired.
-//
-// Both subscriptions route to the same handleProvisionRequest handler, which reads
-// userSlug/projectSlug/projectID from the JSON payload — making it subject-pattern-agnostic.
+// CP fan-out provisioning events arrive on this subject; the handler reads
+// userSlug/projectSlug/projectID from the JSON payload.
 func (p *NATSProvisioner) StartNATSSubscriber() error {
-	// Legacy ADR-0035 user-scoped pattern (backward compatibility for SPA-initiated creation).
-	legacySubject := fmt.Sprintf("mclaude.users.*.hosts.%s.api.projects.>", p.clusterSlug)
-	p.logger.Info().Str("subject", legacySubject).Msg("subscribing to legacy provisioning requests (ADR-0035)")
-	if _, err := p.nc.Subscribe(legacySubject, func(msg *nats.Msg) {
-		p.handleProvisionRequest(msg)
-	}); err != nil {
-		return fmt.Errorf("subscribe legacy subject: %w", err)
-	}
-
-	// ADR-0054 host-scoped pattern (primary: CP dev-seed fan-out provisioning).
 	hostSubject := fmt.Sprintf("mclaude.hosts.%s.>", p.clusterSlug)
-	p.logger.Info().Str("subject", hostSubject).Msg("subscribing to host-scoped provisioning requests (ADR-0054)")
+	p.logger.Info().Str("subject", hostSubject).Msg("subscribing to host-scoped provisioning requests (ADR-0054/ADR-0063)")
 	if _, err := p.nc.Subscribe(hostSubject, func(msg *nats.Msg) {
 		p.handleProvisionRequest(msg)
 	}); err != nil {
 		return fmt.Errorf("subscribe host-scoped subject: %w", err)
 	}
-
 	return nil
 }
 
@@ -101,7 +90,7 @@ func (p *NATSProvisioner) handleProvisionRequest(msg *nats.Msg) {
 	operation := extractOperation(msg.Subject)
 
 	switch operation {
-	case "create", "provision":
+	case "create":
 		err := p.handleCreate(ctx, req)
 		if err != nil {
 			p.logger.Error().Err(err).
@@ -135,7 +124,10 @@ func (p *NATSProvisioner) handleProvisionRequest(msg *nats.Msg) {
 		p.replyOK(msg, req.ProjectSlug)
 
 	default:
-		p.replyError(msg, fmt.Sprintf("unknown operation: %s", operation), "unknown_operation")
+		p.logger.Warn().
+			Str("subject", msg.Subject).
+			Str("operation", operation).
+			Msg("unknown subject suffix, ignoring")
 	}
 }
 
