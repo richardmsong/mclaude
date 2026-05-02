@@ -200,36 +200,53 @@ Playwright tests run against the live k3d cluster at `https://dev.mclaude.richar
 
 ### Running tests against k3d
 
+The admin API binds to `127.0.0.1:9091` inside the pod and is not exposed via the public Ingress. A `kubectl port-forward` is required to reach it:
+
 ```bash
+# Step 1 — forward the admin port (run in a separate terminal or background):
+kubectl port-forward -n mclaude-system svc/mclaude-cp-control-plane 9091:9091 &
+
+# Step 2 — run tests:
 BASE_URL=https://dev.mclaude.richardmcsong.com \
+ADMIN_URL=http://localhost:9091 \
 ADMIN_TOKEN=dev-admin-token \
 npx playwright test --project=chromium
 ```
 
 `ADMIN_TOKEN` is the break-glass admin bearer token stored in the `mclaude-control-plane` K8s Secret (`admin-token` field). For the k3d dev cluster the value is `dev-admin-token`.
 
+To run tests without a port-forward (skip user creation, use hardcoded dev defaults):
+```bash
+BASE_URL=https://dev.mclaude.richardmcsong.com npx playwright test --project=chromium
+```
+
 ### Test user isolation
 
 **Global setup** (`e2e/global-setup.ts`):
-1. Reads `BASE_URL` and `ADMIN_TOKEN` (default `dev-admin-token`) from env.
-2. If `DEV_EMAIL` and `DEV_TOKEN` env vars are both set, skips creation and writes `{skipped: true}` to `e2e/.test-user.json` — the caller supplies credentials directly.
-3. Otherwise, calls `POST {BASE_URL}/admin/users` with `Authorization: Bearer {ADMIN_TOKEN}`, body `{email: "e2e-{Date.now()}@mclaude.local", name: "E2E Test User", password: "<random 16-char hex>"}`.
-4. Writes `{userId, email, token}` to `e2e/.test-user.json`.
-5. On failure, throws — all tests abort cleanly.
+1. Reads `ADMIN_URL`, `ADMIN_TOKEN` (default `dev-admin-token`), and `BASE_URL` from env.
+2. If `DEV_EMAIL` and `DEV_TOKEN` env vars are both set, skips creation: writes `{skipped: true}` to `.test-user.json` and returns.
+3. If `ADMIN_URL` is not set, skips creation: writes `{skipped: true}` and returns — spec files fall back to their hardcoded dev defaults.
+4. Otherwise, calls `POST {ADMIN_URL}/admin/users` with `Authorization: Bearer {ADMIN_TOKEN}`, body `{email: "e2e-{Date.now()}@mclaude.local", name: "E2E Test User", password: "<random 16-char hex>"}`.
+5. Sets `process.env['DEV_EMAIL'] = email` and `process.env['DEV_TOKEN'] = token` so spec files that read from `process.env` inherit the test user credentials.
+6. Writes `{userId, email, token}` to `e2e/.test-user.json`.
+7. On failure, throws — all tests abort cleanly.
 
 **Global teardown** (`e2e/global-teardown.ts`):
 1. Reads `e2e/.test-user.json`. If missing or `skipped: true`, returns immediately.
-2. Calls `DELETE {BASE_URL}/admin/users/{userId}` with `Authorization: Bearer {ADMIN_TOKEN}`.
-3. Deletes `e2e/.test-user.json`.
+2. Deletes `e2e/.test-user.json` eagerly before the API call (prevents re-read on a subsequent crashed run).
+3. Calls `DELETE {ADMIN_URL}/admin/users/{userId}` with `Authorization: Bearer {ADMIN_TOKEN}`.
 4. Logs a warning on deletion failure (does not throw — teardown runs after tests complete regardless).
 
 **`playwright.config.ts`** declares `globalSetup: './e2e/global-setup.ts'` and `globalTeardown: './e2e/global-teardown.ts'`.
 
-### Fixture credentials
+### Fixture credentials and spec file pattern
 
 `e2e/fixtures.ts` resolves credentials in priority order:
-1. `DEV_EMAIL` / `DEV_TOKEN` environment variables (CI pre-provisioned user).
+1. `DEV_EMAIL` / `DEV_TOKEN` environment variables (set by global setup or CI).
 2. `e2e/.test-user.json` (written by global setup for the current run).
+3. Hardcoded defaults `dev@mclaude.local` / `dev`.
+
+Spec files that define local credential constants must use `process.env['DEV_EMAIL'] || 'dev@mclaude.local'` — not hardcoded string literals — so that global setup's `process.env` assignments take effect.
 
 `e2e/.test-user.json` is gitignored and ephemeral — it exists only during a `npx playwright test` invocation.
 

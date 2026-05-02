@@ -25,22 +25,31 @@ Two problems:
 | User password (login token) | Random 16-char hex string generated at setup | Can be used with `/auth/login email+token` |
 | Credentials storage | `e2e/.test-user.json` (temp file, gitignored) | Shared between setup and all test workers; survives worker restarts |
 | Teardown on failure | Always delete (global teardown runs even on test failure) | Prevents accumulation of orphaned test users |
+| Admin API access | Separate `ADMIN_URL` env var (e.g. `http://localhost:9091` via kubectl port-forward) | Admin API binds to `127.0.0.1:9091` inside the pod — not exposed via public Ingress |
+| Skip-on-no-ADMIN_URL | If `ADMIN_URL` is unset, global setup writes `{skipped:true}` and no-ops | Running without port-forward still works; spec files fall back to hardcoded dev defaults |
 | ADMIN_TOKEN default | `dev-admin-token` | Matches the k3d dev cluster secret value; CI can override via env |
 | BASE_URL for k3d | `https://dev.mclaude.richardmcsong.com` | The existing k3d Ingress URL |
-| Fixtures fallback | `DEV_EMAIL` / `DEV_TOKEN` env vars still override `.test-user.json` | CI pipelines that pre-provision users can bypass setup |
+| Credential propagation | Global setup sets `process.env['DEV_EMAIL']`/`['DEV_TOKEN']` in addition to writing `.test-user.json` | Spec files that read `process.env['DEV_EMAIL']` directly inherit the test user credentials |
+| Spec file credential pattern | `process.env['DEV_EMAIL'] \|\| 'dev@mclaude.local'` | All spec files that hardcode credentials should read from env var with hardcoded fallback |
+| Fixtures fallback | `DEV_EMAIL` / `DEV_TOKEN` env vars take priority; then `.test-user.json`; then hardcoded defaults | CI pipelines that pre-provision users can set env vars to bypass setup |
 
 ## User Flow (developer)
 
 ```bash
 # Run against k3d (standard command):
+# Step 1 — forward the admin port (separate terminal or background):
+kubectl port-forward -n mclaude-system svc/mclaude-cp-control-plane 9091:9091 &
+
+# Step 2 — run tests:
 BASE_URL=https://dev.mclaude.richardmcsong.com \
+ADMIN_URL=http://localhost:9091 \
 ADMIN_TOKEN=dev-admin-token \
 npx playwright test --project=chromium
 
-# Run against local Vite dev server (unchanged):
+# Run against local Vite dev server (unchanged — no ADMIN_URL needed, skips user creation):
 npx playwright test
 
-# Override to use a pre-existing account (opt-out of test user):
+# Override to use a pre-existing account (opt-out of test user, no ADMIN_URL needed):
 DEV_EMAIL=my@email.com DEV_TOKEN=mytoken \
 BASE_URL=https://dev.mclaude.richardmcsong.com \
 npx playwright test --project=chromium
@@ -53,16 +62,18 @@ npx playwright test --project=chromium
 **New files:**
 
 `e2e/global-setup.ts` — runs once before all tests:
-1. Reads `BASE_URL` and `ADMIN_TOKEN` (default `dev-admin-token`) from env.
-2. `POST {BASE_URL}/admin/users` with `Authorization: Bearer {ADMIN_TOKEN}`, body `{email: "e2e-{Date.now()}@mclaude.local", name: "E2E Test User", password: "{random 16-char hex}"}`.
-3. If `DEV_EMAIL` / `DEV_TOKEN` are set in the environment, skips creation and writes a sentinel `{skipped: true}` record — this lets CI override the test user without running the admin API call.
-4. Writes `{userId, email, token}` to `e2e/.test-user.json`.
-5. On failure, throws — all tests abort cleanly.
+1. Reads `ADMIN_URL` (e.g. `http://localhost:9091` via kubectl port-forward), `ADMIN_TOKEN` (default `dev-admin-token`), and `BASE_URL` from env.
+2. If `DEV_EMAIL` and `DEV_TOKEN` are both set, skips creation: writes `{skipped: true}` to `.test-user.json` and returns.
+3. If `ADMIN_URL` is not set, skips creation: writes `{skipped: true}` and returns — spec files fall back to their hardcoded defaults.
+4. Otherwise, calls `POST {ADMIN_URL}/admin/users` with `Authorization: Bearer {ADMIN_TOKEN}`, body `{email: "e2e-{Date.now()}@mclaude.local", name: "E2E Test User", password: "{random 16-char hex}"}`.
+5. Sets `process.env['DEV_EMAIL'] = email` and `process.env['DEV_TOKEN'] = token` so spec files that read from `process.env` inherit the test user credentials.
+6. Writes `{userId, email, token}` to `e2e/.test-user.json`.
+7. On failure, throws — all tests abort cleanly.
 
 `e2e/global-teardown.ts` — runs once after all tests (including on failure):
 1. Reads `e2e/.test-user.json`. If missing or `skipped: true`, returns immediately.
-2. `DELETE {BASE_URL}/admin/users/{userId}` with `Authorization: Bearer {ADMIN_TOKEN}`.
-3. Deletes `e2e/.test-user.json`.
+2. Deletes `e2e/.test-user.json` eagerly (before the API call, so it cannot be re-read on a subsequent crashed run).
+3. Calls `DELETE {ADMIN_URL}/admin/users/{userId}` with `Authorization: Bearer {ADMIN_TOKEN}`.
 4. Logs a warning (not a throw) if deletion fails — the user may have been deleted already.
 
 **Modified files:**
