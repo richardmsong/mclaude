@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url'
 
 const TEST_USER_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '.test-user.json')
 
-export default async function globalSetup(config: FullConfig) {
+export default async function globalSetup(_config: FullConfig) {
   // If DEV_EMAIL and DEV_TOKEN are both set, use them directly (CI override)
   const devEmail = process.env['DEV_EMAIL']
   const devToken = process.env['DEV_TOKEN']
@@ -15,12 +15,18 @@ export default async function globalSetup(config: FullConfig) {
     return
   }
 
-  const baseURL = process.env['BASE_URL'] || config.projects[0]?.use?.baseURL || 'http://localhost:5173'
+  // If ADMIN_URL is not set, skip user creation — spec files fall back to hardcoded defaults
+  const adminURL = process.env['ADMIN_URL']
+  if (!adminURL) {
+    fs.writeFileSync(TEST_USER_FILE, JSON.stringify({ skipped: true }))
+    return
+  }
+
   const adminToken = process.env['ADMIN_TOKEN'] || 'dev-admin-token'
   const email = `e2e-${Date.now()}@mclaude.local`
   const token = crypto.randomBytes(8).toString('hex')
 
-  const res = await fetch(`${baseURL}/admin/users`, {
+  const res = await fetch(`${adminURL}/admin/users`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -35,5 +41,10 @@ export default async function globalSetup(config: FullConfig) {
   }
 
   const data = await res.json() as { id: string }
+
+  // Propagate credentials to worker processes via environment
+  process.env['DEV_EMAIL'] = email
+  process.env['DEV_TOKEN'] = token
+
   fs.writeFileSync(TEST_USER_FILE, JSON.stringify({ userId: data.id, email, token }))
 }

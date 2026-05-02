@@ -12,13 +12,15 @@ import { test, expect, type Page } from '@playwright/test'
 // does not include 'paused' or 'needs_spec_fix'. These tests are marked as
 // fixme and will be unblocked once the SPA implements the quota UI.
 
-const BASE_URL = 'https://dev.mclaude.richardmcsong.com'
+const BASE_URL = process.env['BASE_URL'] || 'https://dev.mclaude.richardmcsong.com'
+const DEV_EMAIL = process.env['DEV_EMAIL'] || 'dev@mclaude.local'
+const DEV_TOKEN = process.env['DEV_TOKEN'] || 'dev'
 
 async function login(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.getByTestId('auth-screen')).toBeVisible({ timeout: 10_000 })
-  await page.getByPlaceholder(/Email/).fill('dev@mclaude.local')
-  await page.getByPlaceholder(/Access token/).fill('dev')
+  await page.getByPlaceholder(/Email/).fill(DEV_EMAIL)
+  await page.getByPlaceholder(/Access token/).fill(DEV_TOKEN)
   await page.getByRole('button', { name: 'Connect' }).click()
   await expect(page.getByTestId('auth-screen')).not.toBeVisible({ timeout: 20_000 })
 }

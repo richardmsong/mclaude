@@ -1,5 +1,8 @@
 import { test, expect } from '@playwright/test'
 
+const DEV_EMAIL = process.env['DEV_EMAIL'] || 'dev@mclaude.local'
+const DEV_TOKEN = process.env['DEV_TOKEN'] || 'dev'
+
 // ── Smoke tests (always run — no server required) ──────────────────────────
 // These validate the static UI without requiring a NATS connection.
 
@@ -85,8 +88,8 @@ test.describe('Session flow', () => {
 
     // Login form — no Server URL field, only email + token
     await expect(page.getByTestId('auth-screen')).toBeVisible()
-    await page.getByPlaceholder(/Email/).fill(process.env['E2E_EMAIL'] ?? 'dev@mclaude.local')
-    await page.getByPlaceholder(/Access token/).fill(process.env['E2E_TOKEN'] ?? 'dev')
+    await page.getByPlaceholder(/Email/).fill(DEV_EMAIL)
+    await page.getByPlaceholder(/Access token/).fill(DEV_TOKEN)
     await page.getByRole('button', { name: 'Connect' }).click()
 
     // After login, dashboard should appear

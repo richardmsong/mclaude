@@ -5,7 +5,9 @@ import { test, expect } from '@playwright/test'
 // /api/auth/device-code/verify (not /auth/device-code/verify as the SPA spec
 // suggests — the control plane serves an HTML form at the /api/ path).
 
-const BASE_URL = 'https://dev.mclaude.richardmcsong.com'
+const BASE_URL = process.env['BASE_URL'] || 'https://dev.mclaude.richardmcsong.com'
+const DEV_EMAIL = process.env['DEV_EMAIL'] || 'dev@mclaude.local'
+const DEV_TOKEN = process.env['DEV_TOKEN'] || 'dev'
 
 // NOTE: The test matrix specifies /auth/device-code/verify, but the actual
 // implementation serves the page at /api/auth/device-code/verify (a plain HTML
@@ -67,10 +69,10 @@ test.describe('Device-Code Verification Page', () => {
     const passwordInput = page.locator('input[name="password"], input[type="password"]')
 
     if (await emailInput.isVisible()) {
-      await emailInput.fill('dev@mclaude.local')
+      await emailInput.fill(DEV_EMAIL)
     }
     if (await passwordInput.isVisible()) {
-      await passwordInput.fill('dev')
+      await passwordInput.fill(DEV_TOKEN)
     }
 
     // Submit the form
@@ -124,8 +126,8 @@ test.describe('Device-Code Verification Page', () => {
     const passwordInput = page.locator('input[type="password"], input[name="password"]')
     const codeInput = page.locator('input[name="user_code"]')
 
-    if (await emailInput.isVisible()) await emailInput.fill('dev@mclaude.local')
-    if (await passwordInput.isVisible()) await passwordInput.fill('dev')
+    if (await emailInput.isVisible()) await emailInput.fill(DEV_EMAIL)
+    if (await passwordInput.isVisible()) await passwordInput.fill(DEV_TOKEN)
     if (await codeInput.isVisible()) await codeInput.fill(expiredCode)
 
     const submitBtn = page.locator('button[type="submit"]').or(page.locator('input[type="submit"]'))

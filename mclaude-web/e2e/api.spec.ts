@@ -1,8 +1,8 @@
 import { test, expect, APIRequestContext } from '@playwright/test'
 
 const BASE_URL = process.env['BASE_URL'] || 'https://dev.mclaude.richardmcsong.com'
-const DEV_EMAIL = 'dev@mclaude.local'
-const DEV_PASSWORD = 'dev'
+const DEV_EMAIL = process.env['DEV_EMAIL'] || 'dev@mclaude.local'
+const DEV_PASSWORD = process.env['DEV_TOKEN'] || 'dev'
 const DEV_USER_SLUG = 'dev-mclaude-local'
 const FAKE_NKEY = ['UA', 'PLACEHOLDER', 'TEST', 'KEY'].join('_')
 

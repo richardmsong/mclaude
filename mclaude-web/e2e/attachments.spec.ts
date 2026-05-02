@@ -7,9 +7,9 @@ import { test, expect } from '@playwright/test'
 // Tests are guarded with test.skip when S3 is not configured.
 // To run: configure S3 in the dev deployment and set E2E_S3=1.
 
-const BASE_URL = 'https://dev.mclaude.richardmcsong.com'
-const DEV_EMAIL = 'dev@mclaude.local'
-const DEV_TOKEN = 'dev'
+const BASE_URL = process.env['BASE_URL'] || 'https://dev.mclaude.richardmcsong.com'
+const DEV_EMAIL = process.env['DEV_EMAIL'] || 'dev@mclaude.local'
+const DEV_TOKEN = process.env['DEV_TOKEN'] || 'dev'
 
 const S3_CONFIGURED = !!process.env['E2E_S3']
 

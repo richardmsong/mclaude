@@ -4,9 +4,9 @@ import { test, expect, type Page } from '@playwright/test'
 // These test the session detail view for streaming, permission handling,
 // replay, error rendering, and KV DEL handling.
 
-const BASE_URL = 'https://dev.mclaude.richardmcsong.com'
-const DEV_EMAIL = 'dev@mclaude.local'
-const DEV_TOKEN = 'dev'
+const BASE_URL = process.env['BASE_URL'] || 'https://dev.mclaude.richardmcsong.com'
+const DEV_EMAIL = process.env['DEV_EMAIL'] || 'dev@mclaude.local'
+const DEV_TOKEN = process.env['DEV_TOKEN'] || 'dev'
 
 async function login(page: Page): Promise<void> {
   await page.goto('/')

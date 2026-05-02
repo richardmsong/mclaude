@@ -10,16 +10,23 @@ export default async function globalTeardown(_config: FullConfig) {
 
   const raw = fs.readFileSync(TEST_USER_FILE, 'utf-8')
   const record = JSON.parse(raw)
+
+  // Delete the file eagerly before the API call — prevents re-read on a subsequent crashed run
   fs.rmSync(TEST_USER_FILE, { force: true })
 
   if (record.skipped) return
 
   const { userId } = record
-  const baseURL = process.env['BASE_URL'] || 'http://localhost:5173'
+  const adminURL = process.env['ADMIN_URL']
   const adminToken = process.env['ADMIN_TOKEN'] || 'dev-admin-token'
 
+  if (!adminURL) {
+    console.warn('global-teardown: ADMIN_URL is not set — cannot delete test user')
+    return
+  }
+
   try {
-    const res = await fetch(`${baseURL}/admin/users/${userId}`, {
+    const res = await fetch(`${adminURL}/admin/users/${userId}`, {
       method: 'DELETE',
       headers: { 'Authorization': `Bearer ${adminToken}` },
     })

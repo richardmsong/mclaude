@@ -2,8 +2,8 @@ import { test, expect } from '@playwright/test'
 
 // ── Dev deployment credentials ─────────────────────────────────────────────
 const DEV_URL = 'https://dev.mclaude.richardmcsong.com'
-const DEV_EMAIL = 'dev@mclaude.local'
-const DEV_TOKEN = 'dev'
+const DEV_EMAIL = process.env['DEV_EMAIL'] || 'dev@mclaude.local'
+const DEV_TOKEN = process.env['DEV_TOKEN'] || 'dev'
 
 // ── Helper: login flow ─────────────────────────────────────────────────────
 async function login(page: import('@playwright/test').Page, email = DEV_EMAIL, token = DEV_TOKEN) {

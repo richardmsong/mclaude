@@ -1,12 +1,15 @@
 import { test, expect, type Page } from '@playwright/test'
 
+const DEV_EMAIL = process.env['DEV_EMAIL'] || 'dev@mclaude.local'
+const DEV_TOKEN = process.env['DEV_TOKEN'] || 'dev'
+
 // ── Helper: login and navigate to the first available session ───────────
 async function loginAndOpenSession(page: Page): Promise<void> {
   await page.goto('/')
 
   // Fill login form
-  await page.getByPlaceholder(/Email/).fill('dev@mclaude.local')
-  await page.getByPlaceholder(/Access token/).fill('dev')
+  await page.getByPlaceholder(/Email/).fill(DEV_EMAIL)
+  await page.getByPlaceholder(/Access token/).fill(DEV_TOKEN)
   await page.getByRole('button', { name: 'Connect' }).click()
 
   // Wait for dashboard to appear (auth screen should disappear)

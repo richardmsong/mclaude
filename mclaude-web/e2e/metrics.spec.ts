@@ -1,12 +1,15 @@
 import { test, expect, type Page } from '@playwright/test'
 
+const DEV_EMAIL = process.env['DEV_EMAIL'] || 'dev@mclaude.local'
+const DEV_TOKEN = process.env['DEV_TOKEN'] || 'dev'
+
 // ── Helper: login and wait for dashboard ────────────────────────────────────
 
 async function login(page: Page) {
   await page.goto('/')
   await expect(page.getByTestId('auth-screen')).toBeVisible({ timeout: 10000 })
-  await page.getByPlaceholder(/Email/).fill('dev@mclaude.local')
-  await page.getByPlaceholder(/Access token/).fill('dev')
+  await page.getByPlaceholder(/Email/).fill(DEV_EMAIL)
+  await page.getByPlaceholder(/Access token/).fill(DEV_TOKEN)
   await page.getByRole('button', { name: 'Connect' }).click()
   // Wait for auth screen to disappear (dashboard or other screen loads)
   await expect(page.getByTestId('auth-screen')).not.toBeVisible({ timeout: 15000 })

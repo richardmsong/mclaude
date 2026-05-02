@@ -1,18 +1,21 @@
 import { test, expect } from '@playwright/test'
 
+const DEV_EMAIL = process.env['DEV_EMAIL'] || 'dev@mclaude.local'
+const DEV_TOKEN = process.env['DEV_TOKEN'] || 'dev'
+
 // ── Terminal tab tests ──────────────────────────────────────────────────
 // These run against the live dev deployment and verify the terminal UI.
 
 test.describe('Terminal Tab', () => {
-  test.use({ baseURL: 'https://dev.mclaude.richardmcsong.com' })
+  test.use({ baseURL: process.env['BASE_URL'] || 'https://dev.mclaude.richardmcsong.com' })
 
   // SPA-TERM-01: Terminal tab exists
   test('SPA-TERM-01: Terminal tab button is visible in session detail', async ({ page }) => {
     await page.goto('/')
 
     // Login
-    await page.getByPlaceholder(/Email/).fill('dev@mclaude.local')
-    await page.getByPlaceholder(/Access token/).fill('dev')
+    await page.getByPlaceholder(/Email/).fill(DEV_EMAIL)
+    await page.getByPlaceholder(/Access token/).fill(DEV_TOKEN)
     await page.getByRole('button', { name: 'Connect' }).click()
 
     // Wait for dashboard

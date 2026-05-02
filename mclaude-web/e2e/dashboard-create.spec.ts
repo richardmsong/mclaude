@@ -2,9 +2,9 @@ import { test, expect, type Page } from '@playwright/test'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const DEV_EMAIL = 'dev@mclaude.local'
-const DEV_TOKEN = 'dev'
-const BASE_URL = 'https://dev.mclaude.richardmcsong.com'
+const DEV_EMAIL = process.env['DEV_EMAIL'] || 'dev@mclaude.local'
+const DEV_TOKEN = process.env['DEV_TOKEN'] || 'dev'
+const BASE_URL = process.env['BASE_URL'] || 'https://dev.mclaude.richardmcsong.com'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

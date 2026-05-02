@@ -2,8 +2,8 @@ import { test, expect, type Page } from '@playwright/test'
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-const DEV_EMAIL = 'dev@mclaude.local'
-const DEV_TOKEN = 'dev'
+const DEV_EMAIL = process.env['DEV_EMAIL'] || 'dev@mclaude.local'
+const DEV_TOKEN = process.env['DEV_TOKEN'] || 'dev'
 
 /**
  * Authenticate against the dev deployment and wait until the dashboard loads.
