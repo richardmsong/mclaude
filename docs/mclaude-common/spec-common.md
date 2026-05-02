@@ -133,8 +133,8 @@ Shared NKey challenge-response authentication logic for host controllers. Both `
 **`Refresh(ctx context.Context) (jwt string, err error)`**
 
 Performs HTTP challenge-response against `cpURL`:
-1. `POST /api/auth/challenge {nkey_public}` → `{challenge}`
-2. Signs challenge with NKey private key.
+1. `POST /api/auth/challenge {nkey_public}` → `{challenge}` (a base64-encoded random nonce)
+2. Base64-decodes `challenge` to raw nonce bytes, then signs those bytes with the NKey private key: `sig = kp.Sign(base64.StdEncoding.DecodeString(challenge))`.
 3. `POST /api/auth/verify {nkey_public, challenge, signature}` → `{jwt}`
 4. Returns the new JWT.
 

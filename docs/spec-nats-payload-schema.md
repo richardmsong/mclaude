@@ -1440,7 +1440,7 @@ Response:
 |-------|-------------|
 | `nkey_public` | Same public key from the challenge step |
 | `challenge` | The nonce returned by `/api/auth/challenge` |
-| `signature` | Ed25519 signature of the challenge nonce, signed with the NKey seed. Base64-encoded. |
+| `signature` | Ed25519 signature of the raw nonce bytes. Client must base64-decode the `challenge` string to its 32-byte nonce, then sign those bytes with the NKey private key — not the base64 string itself. Base64-encoded. |
 | `jwt` | NATS user JWT signed by CP's account key. Contains identity-specific Pub/Sub.Allow (see ADR-0054 permission specs). |
 
 CP verifies the signature against the stored public key, determines the identity type (user, host, or agent), resolves current permissions, signs and returns a JWT. Error responses:
