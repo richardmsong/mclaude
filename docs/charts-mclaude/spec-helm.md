@@ -4,7 +4,7 @@ Per ADR-0035 the previous single `mclaude` chart is split into two independently
 
 | Chart | Purpose | Installed in |
 |-------|---------|--------------|
-| `mclaude-cp` | Central control-plane: hub NATS, Postgres, control-plane Deployment, SPA, operator/account NKey bootstrap. | The single `mclaude-cp` Kubernetes cluster. |
+| `mclaude-cp` | Central control-plane: hub NATS, Postgres, MinIO object storage, control-plane Deployment, SPA, operator/account NKey bootstrap. | The single `mclaude-cp` Kubernetes cluster. |
 | `mclaude-worker` | Worker cluster: `mclaude-controller-k8s` operator (hub-direct, independently installable), session-agent template. | Each worker Kubernetes cluster (one per cluster host). |
 
 A single-cluster degenerate deployment installs **both** charts into the same K8s cluster; `mclaude-worker` connects directly to the hub NATS service.
@@ -55,7 +55,7 @@ For Postgres table schemas see `docs/spec-state-schema.md` — Postgres.
 
 | Kind | Name | Notes |
 |---|---|---|
-| Deployment | `{release}-control-plane` | Configurable replicas. Optional `dbmate` init container when `migrations.enabled`. Mounts `mclaude-system/operator-keys` at `OPERATOR_KEYS_PATH`. Mounts `provider-config` ConfigMap when OAuth providers are configured. |
+| Deployment | `{release}-control-plane` | Configurable replicas. Optional `dbmate` init container when `migrations.enabled`. Mounts `mclaude-system/operator-keys` at `OPERATOR_KEYS_PATH`. Mounts `provider-config` ConfigMap when OAuth providers are configured. When `minio.enabled=true` and `ingress.minioHost` is non-empty: env vars `S3_ENDPOINT=https://{ingress.minioHost}`, `S3_BUCKET={minio.bucket}`, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` from Secret `{release}-minio` (or `minio.existingSecret`). `S3_REGION` is intentionally omitted — `loadS3Config()` defaults to `us-east-1` which is correct for MinIO path-style signing. |
 | Service | `{release}-control-plane` | ClusterIP. Ports: http (8080), metrics (9091). |
 | ConfigMap | `{release}-provider-config` | `providers.json` — OAuth provider instances. Created only when `controlPlane.providers` is non-empty. |
 | ServiceAccount | `{release}-mclaude` | Used by the control-plane Deployment. **No K8s permissions** — the control-plane has no controller-runtime client per ADR-0035. |
@@ -69,6 +69,20 @@ The previous `ClusterRole` / `ClusterRoleBinding` granting cross-namespace pod/s
 | Deployment | `{release}-spa` | nginx + the built SPA bundle. |
 | Service | `{release}-spa` | Maps 80 → 8080. |
 
+### MinIO
+
+S3-compatible object storage for import archives and chat attachments per ADR-0053. All resources gated by `minio.enabled` (default `true`). Image: `minio/minio:RELEASE.2025-04-22T22-12-26Z` via the `mclaude-cp.image` helper (respects `global.imageRegistry`).
+
+| Kind | Name | Notes |
+|---|---|---|
+| Deployment | `{release}-minio` | Single replica. Command: `minio server /data --console-address :9001`. PVC `{release}-minio-data` at `/data` (when `minio.persistence.enabled`); `emptyDir` otherwise. Env vars `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` from Secret `{release}-minio`. Pod security context uses standard `mclaude-cp.podSecurityContext` helper (`runAsNonRoot: true`, `runAsUser: 1000`, `runAsGroup: 1000`, `fsGroup: 1000` — compatible with MinIO's UID 1000 process). Container security context uses standard `mclaude-cp.securityContext` helper (same pattern as all other Deployments). Resources: `minio.resources`. |
+| Service | `{release}-minio` | ClusterIP. Port 9000 (S3 API), port 9001 (console). Not exposed via Ingress by default. |
+| PersistentVolumeClaim | `{release}-minio-data` | `accessModes: [ReadWriteOnce]`. Size: `minio.persistence.size`. StorageClass: `minio.persistence.storageClass` (empty = cluster default). Created only when `minio.persistence.enabled`. |
+| Secret | `{release}-minio` | Keys `access-key` and `secret-key`, populated from `minio.rootUser`/`minio.rootPassword`. Created only when `minio.existingSecret` is unset. |
+| Job | `{release}-minio-bucket` | Post-install/post-upgrade hook. `restartPolicy: Never`, `activeDeadlineSeconds: 120`, `backoffLimit: 3`, `hook-delete-policy: before-hook-creation,hook-succeeded`. Image: `minio/mc:RELEASE.2025-04-16T18-25-19Z` via `mclaude-cp.image` helper. Both containers share an `emptyDir` volume named `mc-config` mounted at `/root/.mc` (init writes alias config; main container reads it). Init container: `mc alias set local http://{release}-minio:9000 $ACCESS_KEY $SECRET_KEY`, then loops on `mc ready local` (max 60s). Main container: `mc mb --ignore-existing local/{minio.bucket}`. Both security context helpers (`mclaude-cp.podSecurityContext`, `mclaude-cp.securityContext`) are intentionally omitted — the `minio/mc` image may run as root, and this is a one-time admin operation. |
+
+**Security**: MinIO is only accessible via ClusterIP inside the cluster. External access is TLS-terminated at Traefik Ingress (`{release}-minio`). The MinIO console (port 9001) is not exposed via Ingress. All object access by clients requires pre-signed URLs signed by the control-plane — no direct bucket access.
+
 ### Ingress
 
 | Kind | Name | Notes |
@@ -76,6 +90,7 @@ The previous `ClusterRole` / `ClusterRoleBinding` granting cross-namespace pod/s
 | Ingress | `{release}` | Routes `/auth`, `/api`, `/admin`, `/scim` to control-plane; `/` to SPA. Created when `ingress.enabled`. |
 | Ingress | `{release}-nats-ws` | NATS WebSocket on a dedicated hostname → hub NATS WebSocket port. Created when `ingress.natsHost` is set. |
 | Ingress | `{release}-leaf` | Optional. Exposes `leafnodes` port 7422 over a TLS-terminated TCP/WS proxy when worker clusters live outside the hub's network. Created when `ingress.leafHost` is set. |
+| Ingress | `{release}-minio` | MinIO S3 API at `ingress.minioHost` → `{release}-minio:9000`. Created when `ingress.enabled` AND `ingress.minioHost` non-empty. Inherits `ingress.annotations` (via `deepCopy`+`mergeOverwrite`) with `nginx.ingress.kubernetes.io/proxy-body-size: "0"` override (unlimited — supports 500MB import archives). ExternalDNS annotations point at `ingress.minioHost`/`ingress.externalDnsTarget`. TLS: iterates `ingress.tls`, appends `minioHost` to each entry's `hosts` list so Traefik SNI routing works. |
 
 ### Namespace
 
@@ -111,9 +126,27 @@ The previous `ClusterRole` / `ClusterRoleBinding` granting cross-namespace pod/s
 | `ingress.enabled` | `true` | Create Ingress resources. |
 | `ingress.host` | `""` | Platform hostname. |
 | `ingress.natsHost` | `""` | Separate hostname for NATS WebSocket; second Ingress when set. |
+| `ingress.minioHost` | `""` | Hostname for MinIO S3 API Ingress (e.g. `minio.mclaude.richardmcsong.com`). Must be a direct subdomain of the wildcard TLS cert, not a subdomain of `ingress.host`. When non-empty AND `ingress.enabled`, creates the MinIO Ingress and wires `S3_ENDPOINT` on the control-plane Deployment. |
 | `ingress.leafHost` | `""` | Hostname for leaf-node ingress (cross-cluster WAN deployments). |
 | `ingress.tls` | `[]` | TLS configuration. cert-manager + ExternalDNS produce wildcard certs per `docs/spec-tls-certs.md`. |
 | `ingress.externalDnsTarget` | `""` | Override A-record target for ExternalDNS. |
+| `minio.enabled` | `true` | Deploy MinIO in-cluster S3-compatible storage. When `false`, no MinIO resources are created and `S3_*` env vars are omitted from the control-plane Deployment. |
+| `minio.image.registry` | `docker.io` | MinIO server image registry. Override for air-gapped deployments. |
+| `minio.image.repository` | `minio/minio` | MinIO server image repository. |
+| `minio.image.tag` | `RELEASE.2025-04-22T22-12-26Z` | MinIO server image tag (pinned for reproducibility). |
+| `minio.image.pullPolicy` | `IfNotPresent` | MinIO server image pull policy. |
+| `minio.resources` | `requests: {cpu: 100m, memory: 128Mi}, limits: {cpu: 500m, memory: 512Mi}` | MinIO Deployment resource requests and limits. |
+| `minio.persistence.enabled` | `true` | Create a PVC for MinIO data. When `false`, data is stored in `emptyDir` (lost on pod restart). |
+| `minio.persistence.storageClass` | `""` | Storage class for MinIO PVC. Empty string uses the cluster default. AKS overrides to `managed-csi-premium`. |
+| `minio.persistence.size` | `20Gi` | MinIO PVC size. |
+| `minio.bucket` | `mclaude` | S3 bucket name created on first install by the bucket-creation Job. All objects keyed as `{uslug}/{hslug}/{pslug}/...` per ADR-0053. |
+| `minio.existingSecret` | `""` | Name of an existing Kubernetes Secret with keys `access-key` and `secret-key`. When set, the chart does not create its own Secret and `minio.rootUser`/`minio.rootPassword` are ignored. |
+| `minio.rootUser` | `minioadmin` | MinIO root username. Used only when `minio.existingSecret` is unset. **Change for production.** |
+| `minio.rootPassword` | `minioadmin` | MinIO root password. Used only when `minio.existingSecret` is unset. **Change for production.** |
+| `minio.mcImage.registry` | `docker.io` | `minio/mc` image registry for the bucket-creation Job. Override for air-gapped deployments. |
+| `minio.mcImage.repository` | `minio/mc` | `minio/mc` image repository. |
+| `minio.mcImage.tag` | `RELEASE.2025-04-16T18-25-19Z` | `minio/mc` image tag. |
+| `minio.mcImage.pullPolicy` | `IfNotPresent` | `minio/mc` image pull policy. |
 
 The `slug-backfill` Job is removed — per ADR-0035 there is no migration of existing data; deployment is a clean break.
 
@@ -234,12 +267,12 @@ Brief downtime for K8s-hosted projects during cutover. No in-place upgrade path.
 
 | Values file | Purpose |
 |---|---|
-| `values.yaml` (cp) | Defaults for all hub knobs. Production-oriented images, persistence enabled, nginx ingress. |
-| `values-dev.yaml` (cp) | Local k3d development. Images built locally (`pullPolicy: Never`), persistence disabled, no ingress, devSeed enabled. |
-| `values-e2e.yaml` (cp) | CI end-to-end tests. Python HTTP stubs for control-plane and SPA, real NATS/Postgres, persistence disabled. |
-| `values-k3d-ghcr.yaml` (cp) | Local k3d preview with ghcr.io images. Traefik ingress with TLS on `*.mclaude.richardmcsong.com`. |
-| `values-airgap.yaml` (cp) | Air-gapped deployments. All images pulled via `global.imageRegistry`. |
-| `values-aks.yaml` (cp) | Azure Kubernetes Service production. `managed-csi-premium`, larger PVCs, scaled replicas. |
+| `values.yaml` (cp) | Defaults for all hub knobs. Production-oriented images, persistence enabled, nginx ingress. MinIO enabled by default (`minio.enabled: true`, `minio.persistence.enabled: true`). `ingress.minioHost` is empty — set it in a cluster-specific overlay. |
+| `values-dev.yaml` (cp) | Local k3d development. Images built locally (`pullPolicy: Never`), persistence disabled, no ingress, devSeed enabled. `minio.enabled: false` — no valid `S3_ENDPOINT` without an Ingress hostname, and presigned URLs would not be reachable. |
+| `values-e2e.yaml` (cp) | CI end-to-end tests. Python HTTP stub control-plane and SPA, real NATS/Postgres, persistence disabled. `minio.enabled: false` — stub control-plane does not read env vars or call S3. |
+| `values-k3d-ghcr.yaml` (cp) | Local k3d preview with ghcr.io images. Traefik ingress with TLS on `*.mclaude.richardmcsong.com`. Sets `ingress.minioHost: minio.mclaude.richardmcsong.com` (direct subdomain of the wildcard cert, covered by `*.mclaude.richardmcsong.com`). |
+| `values-airgap.yaml` (cp) | Air-gapped deployments. All images pulled via `global.imageRegistry`. Overrides `minio.image.registry` and `minio.mcImage.registry` to `registry.internal.example.com` so both MinIO server and `minio/mc` bucket-Job images are pulled from the internal mirror. |
+| `values-aks.yaml` (cp) | Azure Kubernetes Service production. `managed-csi-premium`, larger PVCs, scaled replicas. Sets `minio.persistence.storageClass: managed-csi-premium` (consistent with NATS and Postgres storage class overrides). |
 | `values.yaml` (worker) | Defaults. Production image refs, persistence enabled. |
 | `values-dev.yaml` (worker) | Local k3d. Tailored for single-cluster degenerate install. |
 | `values-airgap.yaml` (worker) | Air-gapped variant. |
