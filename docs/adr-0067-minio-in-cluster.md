@@ -1,9 +1,10 @@
 # ADR: MinIO In-Cluster Object Storage
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-02: draft
 - 2026-05-02: accepted — paired with docs/charts-mclaude/spec-helm.md
+- 2026-05-02: implemented — all scope CLEAN
 
 ## Overview
 
