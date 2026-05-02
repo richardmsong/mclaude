@@ -1,8 +1,9 @@
 # ADR: Fix hostauth Challenge Signing — Sign Raw Nonce Bytes Not Base64 String
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-02: accepted — paired with docs/mclaude-common/spec-common.md, docs/mclaude-control-plane/spec-control-plane.md
+- 2026-05-02: implemented — all scope CLEAN
 
 ## Overview
 
