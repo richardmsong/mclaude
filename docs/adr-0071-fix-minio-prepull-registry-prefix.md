@@ -1,8 +1,9 @@
 # ADR: Fix minio/mc Pre-Pull — Drop docker.io/ Registry Prefix
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-02: accepted — paired with docs/charts-mclaude/spec-helm.md
+- 2026-05-02: implemented — all scope CLEAN
 
 ## Overview
 
