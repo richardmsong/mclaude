@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { Turn, Block, StreamingTextBlock, SkillInvocationBlock, PendingMessage, UserImageBlock } from '@/types'
+import type { Turn, Block, StreamingTextBlock, SkillInvocationBlock, PendingMessage, UserImageBlock, AttachmentRefBlock } from '@/types'
 import { UserMessage } from './UserMessage'
 import { AssistantText } from './AssistantText'
 import { ThinkingBlock } from './ThinkingBlock'
@@ -10,12 +10,15 @@ import { SystemEvent } from './SystemEvent'
 import { SkillChip } from './SkillChip'
 import { TurnUsageBadge } from './TurnUsageBadge'
 import { EventDetailModal } from './EventDetailModal'
+import { AttachmentRefView } from './AttachmentRefView'
 
 interface EventListProps {
   turns: Turn[]
   pendingMessages?: PendingMessage[]
   onApprove: (requestId: string) => void
   onDeny: (requestId: string) => void
+  /** Fetch pre-signed download URL for an attachment_ref block. */
+  onFetchAttachmentUrl?: (id: string) => Promise<string>
 }
 
 function UserImageThumbnail({ dataUrl, pending }: { dataUrl: string; pending: boolean }) {
@@ -83,7 +86,7 @@ function TappableTextBlock({ block, turn }: { block: Block; turn: Turn }) {
   )
 }
 
-function renderBlock(block: Block, turn: Turn, allTurns: Turn[], onApprove: (id: string) => void, onDeny: (id: string) => void): React.ReactNode {
+function renderBlock(block: Block, turn: Turn, allTurns: Turn[], onApprove: (id: string) => void, onDeny: (id: string) => void, onFetchAttachmentUrl?: (id: string) => Promise<string>): React.ReactNode {
   switch (block.type) {
     case 'text':
       return <TappableTextBlock key={block.type + turn.id} block={block} turn={turn} />
@@ -153,12 +156,24 @@ function renderBlock(block: Block, turn: Turn, allTurns: Turn[], onApprove: (id:
     case 'skill_invocation':
       return <SkillChip key={'skill' + turn.id} block={block as SkillInvocationBlock} />
 
+    case 'attachment_ref': {
+      const attBlock = block as AttachmentRefBlock
+      const fetchUrl = onFetchAttachmentUrl ?? (() => Promise.reject(new Error('no attachment resolver')))
+      return (
+        <AttachmentRefView
+          key={'att-' + attBlock.id}
+          block={attBlock}
+          onFetchDownloadUrl={fetchUrl}
+        />
+      )
+    }
+
     default:
       return null
   }
 }
 
-export function EventList({ turns, pendingMessages = [], onApprove, onDeny }: EventListProps) {
+export function EventList({ turns, pendingMessages = [], onApprove, onDeny, onFetchAttachmentUrl }: EventListProps) {
   // Only render top-level turns (no parentToolUseId)
   const topLevelTurns = turns.filter(t => !t.parentToolUseId)
 
@@ -178,7 +193,7 @@ export function EventList({ turns, pendingMessages = [], onApprove, onDeny }: Ev
             if (block.type === 'skill_invocation') {
               return (
                 <div key={`${turn.id}-${i}`}>
-                  {renderBlock(block, turn, turns, onApprove, onDeny)}
+                  {renderBlock(block, turn, turns, onApprove, onDeny, onFetchAttachmentUrl)}
                 </div>
               )
             }
@@ -200,6 +215,13 @@ export function EventList({ turns, pendingMessages = [], onApprove, onDeny }: Ev
                 />
               )
             }
+            if (block.type === 'attachment_ref') {
+              return (
+                <div key={`${turn.id}-${i}`}>
+                  {renderBlock(block, turn, turns, onApprove, onDeny, onFetchAttachmentUrl)}
+                </div>
+              )
+            }
             return null
           })
         }
@@ -209,7 +231,7 @@ export function EventList({ turns, pendingMessages = [], onApprove, onDeny }: Ev
             <div key={turn.id} style={{ margin: '4px 0' }}>
               {turn.blocks.map((block, i) => (
                 <div key={`${turn.id}-block-${i}`}>
-                  {renderBlock(block, turn, turns, onApprove, onDeny)}
+                  {renderBlock(block, turn, turns, onApprove, onDeny, onFetchAttachmentUrl)}
                 </div>
               ))}
               {turn.usage && (
@@ -222,7 +244,7 @@ export function EventList({ turns, pendingMessages = [], onApprove, onDeny }: Ev
         if (turn.type === 'system') {
           return turn.blocks.map((block, i) => (
             <div key={`${turn.id}-sys-${i}`}>
-              {renderBlock(block, turn, turns, onApprove, onDeny)}
+              {renderBlock(block, turn, turns, onApprove, onDeny, onFetchAttachmentUrl)}
             </div>
           ))
         }

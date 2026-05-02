@@ -3,6 +3,7 @@ import { HashRouter, useNavigate, useLocation } from 'react-router-dom'
 import { useVersionPoller } from '@/hooks/useVersionPoller'
 import { AuthClient } from '@/transport/auth-client'
 import { NATSClient } from '@/transport/nats-client'
+import { AttachmentClient } from '@/transport/attachment-client'
 import { AuthStore } from '@/stores/auth-store'
 import { SessionStore } from '@/stores/session-store'
 import { EventStore } from '@/stores/event-store'
@@ -17,6 +18,7 @@ import { SessionDetailScreen } from './SessionDetailScreen'
 import { Settings } from './Settings'
 import { TokenUsage } from './TokenUsage'
 import { UserManagement } from './UserManagement'
+import { DeviceCodeVerifyPage } from './DeviceCodeVerifyPage'
 
 // ── Hash routing helpers (React Router v6 with HashRouter) ────────────────
 // Kept for programmatic navigation — React Router v6 useNavigate returns
@@ -29,6 +31,7 @@ function parseRoute(pathname: string): { screen: string; sessionId?: string; hos
   if (pathname === '/usage') return { screen: 'usage' }
   if (pathname === '/users') return { screen: 'users' }
   if (pathname === '/hosts') return { screen: 'hosts' }
+  if (pathname === '/auth/device-code/verify') return { screen: 'device-code-verify' }
   // ADR-0035 host-scoped format: /u/{uslug}/h/{hslug}/p/{pslug}/s/{sslug}
   const hostScopedMatch = /^\/u\/([a-z0-9][a-z0-9-]*)\/h\/([a-z0-9][a-z0-9-]*)\/p\/([a-z0-9][a-z0-9-]*)\/s\/([a-z0-9][a-z0-9-]*)$/.exec(pathname)
   if (hostScopedMatch) return { screen: 'session', sessionId: hostScopedMatch[4], hostSlug: hostScopedMatch[2] }
@@ -141,6 +144,10 @@ function AppInner() {
   const location = useLocation()
   // AuthStore uses window.location.origin as the server URL — no user input needed.
   const [authClient] = useState<AuthClient>(() => new AuthClient(window.location.origin))
+  const [attachmentClient] = useState<AttachmentClient>(() => new AttachmentClient(
+    window.location.origin,
+    () => authClient.getStoredTokens()?.jwt ?? null,
+  ))
   const [authStore, setAuthStore] = useState<AuthStore>(() => {
     return new AuthStore(authClient, natsClient)
   })
@@ -538,6 +545,19 @@ function AppInner() {
     navigate('/')
   }
 
+  // ── Device-code verification page ─────────────────────────────────────
+  // Served at /auth/device-code/verify — minimal standalone page with no navigation chrome.
+  // Must be rendered before the auth gate so that the route can be reached;
+  // the DeviceCodeVerifyPage itself redirects to login if not authenticated.
+  if (route.screen === 'device-code-verify') {
+    return (
+      <DeviceCodeVerifyPage
+        isAuthenticated={authState.status === 'authenticated'}
+        onNavigateToLogin={() => navigate('/')}
+      />
+    )
+  }
+
   // ── X4: Version block screen ──────────────────────────────────────────
   // Shown when the client is below minClientVersion and a reload didn't fix it.
   if (versionBlocked) {
@@ -644,6 +664,8 @@ function AppInner() {
   if (route.screen === 'session' && route.sessionId && conversationVM && eventStore && sessionStore) {
     const session = sessionStore.resolveSession(route.sessionId)
     const project = session ? sessionStore.projects.get(session.projectId) : undefined
+    const sessionProjectSlug = project?.slug ?? session?.projectSlug
+    const sessionHostSlug = project?.hostSlug ?? session?.hostSlug ?? route.hostSlug ?? 'local'
     return (
       <Fragment>
         <SessionDetailScreen
@@ -660,6 +682,9 @@ function AppInner() {
           connected={connected}
           initialMessage={initialMessage ?? undefined}
           onInitialMessageSent={() => setInitialMessage(null)}
+          attachmentClient={attachmentClient}
+          projectSlug={sessionProjectSlug}
+          hostSlug={sessionHostSlug}
         />
         {toast && <Toast message={toast.message} isError={toast.isError} />}
         {updateAvailable && <UpdateBanner />}

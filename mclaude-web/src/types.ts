@@ -412,6 +412,16 @@ export interface UserImageBlock {
   mimeType: string  // e.g. "image/png"
 }
 
+/** ADR-0053: Attachment reference block — emitted when a session event contains
+ *  an attachment_ref content block. The SPA resolves it to a download URL. */
+export interface AttachmentRefBlock {
+  type: 'attachment_ref'
+  id: string
+  filename: string
+  mimeType: string
+  sizeBytes: number
+}
+
 export type Block =
   | TextBlock
   | StreamingTextBlock
@@ -423,6 +433,7 @@ export type Block =
   | SystemMessageBlock
   | SkillInvocationBlock
   | UserImageBlock
+  | AttachmentRefBlock
 
 export interface PendingMessage {
   uuid: string

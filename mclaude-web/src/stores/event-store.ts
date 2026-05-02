@@ -14,6 +14,7 @@ import type {
   SystemMessageBlock,
   SkillInvocationBlock,
   UserImageBlock,
+  AttachmentRefBlock,
   SessionState,
   SystemInitEvent,
   SystemStateChangedEvent,
@@ -206,6 +207,19 @@ export class EventStore {
             mimeType: c.source.media_type,
           }
           blocks.push(imgBlock)
+        } else if (c.type === 'attachment_ref') {
+          // ADR-0053: attachment_ref blocks from pending messages (staged attachments)
+          const raw = c as unknown as { type: string; id?: string; filename?: string; mimeType?: string; sizeBytes?: number }
+          if (raw.id) {
+            const attBlock: AttachmentRefBlock = {
+              type: 'attachment_ref',
+              id: raw.id,
+              filename: raw.filename ?? 'file',
+              mimeType: raw.mimeType ?? 'application/octet-stream',
+              sizeBytes: raw.sizeBytes ?? 0,
+            }
+            blocks.push(attBlock)
+          }
         }
       }
     }
@@ -734,7 +748,15 @@ export class EventStore {
           }
         } else if (Array.isArray(event.message.content)) {
           for (const c of event.message.content) {
-            const raw = c as { type: string; text?: string; source?: { type: string; media_type: string; data: string } }
+            const raw = c as {
+              type: string
+              text?: string
+              source?: { type: string; media_type: string; data: string }
+              id?: string
+              filename?: string
+              mimeType?: string
+              sizeBytes?: number
+            }
             if (raw.type === 'text' && raw.text) {
               turn.blocks.push({ type: 'text', text: raw.text })
             } else if (raw.type === 'image') {
@@ -747,6 +769,16 @@ export class EventStore {
                 }
                 turn.blocks.push(imgBlock)
               }
+            } else if (raw.type === 'attachment_ref' && raw.id) {
+              // ADR-0053: attachment reference — resolved to download URL at render time
+              const attBlock: AttachmentRefBlock = {
+                type: 'attachment_ref',
+                id: raw.id,
+                filename: raw.filename ?? 'file',
+                mimeType: raw.mimeType ?? 'application/octet-stream',
+                sizeBytes: raw.sizeBytes ?? 0,
+              }
+              turn.blocks.push(attBlock)
             }
           }
         }

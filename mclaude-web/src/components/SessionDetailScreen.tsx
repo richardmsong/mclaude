@@ -10,6 +10,8 @@ import type { ConversationVM, ConversationVMState } from '@/viewmodels/conversat
 import type { SessionListVM } from '@/viewmodels/session-list-vm'
 import type { TerminalVM } from '@/viewmodels/terminal-vm'
 import { PRICE_PER_M, formatTokens, formatCost } from '@/lib/pricing'
+import type { AttachmentClient, AttachmentRef } from '@/transport/attachment-client'
+import { MAX_ATTACHMENT_BYTES } from '@/transport/attachment-client'
 
 interface SessionUsage {
   inputTokens: number
@@ -36,6 +38,12 @@ interface SessionDetailScreenProps {
   connected: boolean
   initialMessage?: string
   onInitialMessageSent?: () => void
+  /** ADR-0053: S3 attachment upload/download client. */
+  attachmentClient?: AttachmentClient
+  /** Current project slug — used for attachment upload URL scoping. */
+  projectSlug?: string
+  /** Current host slug — used for attachment upload URL scoping. */
+  hostSlug?: string
 }
 
 const STATE_LABELS: Record<string, string> = {
@@ -90,6 +98,9 @@ export function SessionDetailScreen({
   connected,
   initialMessage,
   onInitialMessageSent,
+  attachmentClient,
+  projectSlug,
+  hostSlug,
 }: SessionDetailScreenProps) {
   const [vmState, setVmState] = useState<ConversationVMState>(conversationVM.state)
   const [activeTab, setActiveTab] = useState<'events' | 'terminal'>(getStoredTab)
@@ -100,6 +111,9 @@ export function SessionDetailScreen({
   const [showRawOutput, setShowRawOutput] = useState(false)
   const [showEditSession, setShowEditSession] = useState(false)
   const [stagedImage, setStagedImage] = useState<{ base64: string; mimeType: string; previewUrl: string } | null>(null)
+  /** ADR-0053: staged attachment after S3 upload completes */
+  const [stagedAttachment, setStagedAttachment] = useState<AttachmentRef | null>(null)
+  const [attachmentUploading, setAttachmentUploading] = useState(false)
   const [pttRecording, setPttRecording] = useState(false)
   const [pttSupported, setPttSupported] = useState<boolean | null>(null)  // null = not yet checked
   const [planCardOpen, setPlanCardOpen] = useState(false)
@@ -121,6 +135,8 @@ export function SessionDetailScreen({
   const initialMessageSentRef = useRef(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  /** ADR-0053: file input for S3 attachment uploads (all file types, 50MB limit) */
+  const attachFileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const rawScrollRef = useRef<HTMLDivElement>(null)
   const rawAtBottomRef = useRef(true)
@@ -258,10 +274,13 @@ export function SessionDetailScreen({
 
   const handleSend = () => {
     const text = input.trim()
-    if (!text) return
+    if (!text && !stagedAttachment) return
     setInput('')
     setShowSkills(false)
-    if (stagedImage) {
+    if (stagedAttachment) {
+      conversationVM.sendMessageWithAttachment(text, stagedAttachment)
+      setStagedAttachment(null)
+    } else if (stagedImage) {
       conversationVM.sendMessageWithImage(text, stagedImage.base64, stagedImage.mimeType)
       setStagedImage(null)
     } else {
@@ -309,7 +328,7 @@ export function SessionDetailScreen({
   }
 
   const handleAttach = () => {
-    fileInputRef.current?.click()
+    attachFileInputRef.current?.click()
   }
 
   // Toast state for file validation errors
@@ -339,6 +358,42 @@ export function SessionDetailScreen({
     if (!file) return
     stageImageFile(file)
     // Reset so same file can be picked again
+    e.target.value = ''
+  }
+
+  /** ADR-0053: upload a file via S3 pre-signed URL and stage the resulting AttachmentRef. */
+  const stageAttachmentFile = async (file: File) => {
+    if (!attachmentClient) {
+      setFileError('Attachment uploads are not available.')
+      setTimeout(() => setFileError(null), 5000)
+      return
+    }
+    if (file.size > MAX_ATTACHMENT_BYTES) {
+      setFileError(`File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Maximum is 50 MB.`)
+      setTimeout(() => setFileError(null), 5000)
+      return
+    }
+    setAttachmentUploading(true)
+    setFileError(null)
+    try {
+      const ref = await attachmentClient.upload(
+        file,
+        projectSlug ?? 'default-project',
+        hostSlug ?? 'local',
+      )
+      setStagedAttachment(ref)
+    } catch (err) {
+      setFileError(err instanceof Error ? err.message : 'Upload failed. Please try again.')
+      setTimeout(() => setFileError(null), 6000)
+    } finally {
+      setAttachmentUploading(false)
+    }
+  }
+
+  const handleAttachFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    stageAttachmentFile(file)
     e.target.value = ''
   }
 
@@ -1076,6 +1131,11 @@ export function SessionDetailScreen({
             pendingMessages={pendingMessages}
             onApprove={id => conversationVM.approvePermission(id)}
             onDeny={id => conversationVM.denyPermission(id)}
+            onFetchAttachmentUrl={
+              attachmentClient
+                ? (id: string) => attachmentClient.getDownloadMeta(id).then(m => m.downloadUrl)
+                : undefined
+            }
           />
         ) : (
           terminalVm ? (
@@ -1124,6 +1184,46 @@ export function SessionDetailScreen({
               <span style={{ color: 'var(--text2)', fontSize: 13, flex: 1 }}>Screenshot ready</span>
               <button
                 onClick={() => setStagedImage(null)}
+                style={{ color: 'var(--text3)', fontSize: 16, padding: 4 }}
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
+          {/* ADR-0053: Attachment upload indicator */}
+          {attachmentUploading && (
+            <div style={{
+              padding: '8px 12px',
+              borderBottom: '1px solid var(--border)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              background: 'var(--surf)',
+            }}>
+              <span style={{ color: 'var(--text2)', fontSize: 13, flex: 1 }}>Uploading…</span>
+            </div>
+          )}
+
+          {/* ADR-0053: Staged attachment preview strip */}
+          {stagedAttachment && !attachmentUploading && (
+            <div
+              data-testid="staged-attachment-strip"
+              style={{
+                padding: '8px 12px',
+                borderBottom: '1px solid var(--border)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                background: 'var(--surf)',
+              }}
+            >
+              <span style={{ fontSize: 18 }}>📎</span>
+              <span style={{ color: 'var(--text2)', fontSize: 13, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {stagedAttachment.filename}
+              </span>
+              <button
+                onClick={() => setStagedAttachment(null)}
                 style={{ color: 'var(--text3)', fontSize: 16, padding: 4 }}
               >
                 ✕
@@ -1208,32 +1308,68 @@ export function SessionDetailScreen({
               </button>
             )}
 
-            {/* Attach button */}
-            <button
-              onClick={handleAttach}
-              style={{
-                width: 32,
-                height: 32,
-                borderRadius: '50%',
-                background: 'var(--surf2)',
-                color: 'var(--text2)',
-                flexShrink: 0,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: 15,
-              }}
-              title="Attach image"
-            >
-              📷
-            </button>
+            {/* ADR-0053: Paperclip attachment button (S3 upload, all file types, 50MB) */}
+            {attachmentClient && (
+              <button
+                data-testid="attachment-button"
+                onClick={handleAttach}
+                disabled={attachmentUploading}
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: '50%',
+                  background: stagedAttachment ? 'rgba(10,132,255,0.15)' : 'var(--surf2)',
+                  color: stagedAttachment ? 'var(--blue)' : (attachmentUploading ? 'var(--text3)' : 'var(--text2)'),
+                  flexShrink: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 15,
+                  opacity: attachmentUploading ? 0.5 : 1,
+                }}
+                title="Attach file (max 50 MB)"
+              >
+                📎
+              </button>
+            )}
+            {/* Hidden file input for S3 attachment uploads */}
             <input
-              ref={fileInputRef}
+              ref={attachFileInputRef}
               type="file"
-              accept="image/*"
               style={{ display: 'none' }}
-              onChange={handleFileChange}
+              onChange={handleAttachFileChange}
             />
+
+            {/* Legacy camera button — image-only, base64 inline (kept for backward compat) */}
+            {!attachmentClient && (
+              <>
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  style={{
+                    width: 32,
+                    height: 32,
+                    borderRadius: '50%',
+                    background: 'var(--surf2)',
+                    color: 'var(--text2)',
+                    flexShrink: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: 15,
+                  }}
+                  title="Attach image"
+                >
+                  📷
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  style={{ display: 'none' }}
+                  onChange={handleFileChange}
+                />
+              </>
+            )}
 
             {/* Textarea wrapper — relative so keyboard icon can be positioned inside */}
             <div style={{ flex: 1, position: 'relative' }}>
@@ -1323,12 +1459,12 @@ export function SessionDetailScreen({
             {inputMode === 'text' && (
               <button
                 onClick={() => handleSend()}
-                disabled={!input.trim() || !connected}
+                disabled={(!input.trim() && !stagedAttachment) || !connected || attachmentUploading}
                 style={{
                   width: 32,
                   height: 32,
                   borderRadius: '50%',
-                  background: input.trim() ? 'var(--blue)' : 'var(--surf3)',
+                  background: (input.trim() || stagedAttachment) ? 'var(--blue)' : 'var(--surf3)',
                   color: '#fff',
                   flexShrink: 0,
                   display: 'flex',

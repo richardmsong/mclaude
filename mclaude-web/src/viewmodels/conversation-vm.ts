@@ -1,4 +1,5 @@
 import type { INATSClient, ConversationModel, SessionState, PendingMessage } from '@/types'
+import type { AttachmentRef } from '@/transport/attachment-client'
 import type { EventStore } from '@/stores/event-store'
 import type { SessionStore } from '@/stores/session-store'
 import { logger } from '@/logger'
@@ -92,6 +93,29 @@ export class ConversationVM {
       uuid,
       parent_tool_use_id: null,
     }
+    this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
+  }
+
+  /**
+   * Send a message with an attached file (ADR-0053).
+   * The AttachmentRef has already been uploaded and confirmed by the time this is called.
+   */
+  sendMessageWithAttachment(text: string, attachment: AttachmentRef): void {
+    const uuid = crypto.randomUUID()
+    const content = [
+      ...(text ? [{ type: 'text', text }] : []),
+      { type: 'attachment_ref', ...attachment },
+    ]
+    this.eventStore.addPendingMessage(uuid, content as Array<{ type: string; text?: string; source?: { type: string; media_type: string; data: string } }>)
+    const subject = subjSessionsInput(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug, this.sessionSlug as SessionSlug)
+    const payload = {
+      type: 'user',
+      message: { role: 'user', content },
+      session_id: this.sessionId,
+      uuid,
+      parent_tool_use_id: null,
+    }
+    logger.info({ component: 'conversation-vm', sessionId: this.sessionId, attachmentId: attachment.id }, 'sendMessageWithAttachment')
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
   }
 
