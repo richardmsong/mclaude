@@ -4,6 +4,15 @@ import * as path from 'path'
 import * as crypto from 'crypto'
 import { fileURLToPath } from 'url'
 
+function slugifyEmail(email: string): string {
+  return email
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 63)
+    .replace(/-+$/, '')
+}
+
 const TEST_USER_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '.test-user.json')
 
 export default async function globalSetup(_config: FullConfig) {
@@ -44,6 +53,7 @@ export default async function globalSetup(_config: FullConfig) {
   // Propagate credentials to worker processes via environment
   process.env['DEV_EMAIL'] = email
   process.env['DEV_TOKEN'] = token
+  process.env['DEV_USER_SLUG'] = slugifyEmail(email)
 
   fs.writeFileSync(TEST_USER_FILE, JSON.stringify({ userId, email, token }))
 }
