@@ -1,8 +1,9 @@
 # ADR: Fix Missing `gen-host-nkey` Subcommand in control-plane Binary
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-02: accepted — no spec update required (Class A bug)
+- 2026-05-02: implemented — all scope CLEAN
 
 ## Overview
 
