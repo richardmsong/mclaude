@@ -56,6 +56,9 @@ controller:
     tag: "0.1.0"
     pullPolicy: IfNotPresent
   replicas: 1
+  ## Enable leader election (set true when running multiple replicas).
+  ## Ref: docs/spec-k8s-architecture.md
+  leaderElection: false
   resources:
     requests:
       cpu: 100m
@@ -86,7 +89,7 @@ sessionAgent:
     limits:
       cpu: 2000m
       memory: 2Gi
-  terminationGracePeriodSeconds: 120
+  terminationGracePeriodSeconds: 86400
   persistence:
     storageClass: ""
     size: 50Gi

@@ -1,8 +1,8 @@
 apiVersion: v2
 name: mclaude-worker
 description: >-
-  mclaude worker chart — worker NATS (leaf-linked to hub),
-  mclaude-controller-k8s operator, and session-agent template.
+  mclaude worker cluster controller (hub-direct, independently installable) —
+  mclaude-controller-k8s operator and session-agent template.
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
@@ -10,7 +10,6 @@ keywords:
   - mclaude
   - worker
   - controller
-  - nats
   - kubernetes
 maintainers:
   - name: mclaude
