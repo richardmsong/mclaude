@@ -34,6 +34,10 @@ func main() {
 		runInitKeys()
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "gen-host-nkey" {
+		runGenHostNkey()
+		return
+	}
 
 
 	logger := zerolog.New(os.Stdout).With().
