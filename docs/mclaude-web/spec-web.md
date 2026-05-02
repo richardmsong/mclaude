@@ -226,8 +226,8 @@ BASE_URL=https://dev.mclaude.richardmcsong.com npx playwright test --project=chr
 1. Reads `ADMIN_URL`, `ADMIN_TOKEN` (default `dev-admin-token`), and `BASE_URL` from env.
 2. If `DEV_EMAIL` and `DEV_TOKEN` env vars are both set, skips creation: writes `{skipped: true}` to `.test-user.json` and returns.
 3. If `ADMIN_URL` is not set, skips creation: writes `{skipped: true}` and returns — spec files fall back to their hardcoded dev defaults.
-4. Otherwise, calls `POST {ADMIN_URL}/admin/users` with `Authorization: Bearer {ADMIN_TOKEN}`, body `{email: "e2e-{Date.now()}@mclaude.local", name: "E2E Test User", password: "<random 16-char hex>"}`.
-5. Sets `process.env['DEV_EMAIL'] = email` and `process.env['DEV_TOKEN'] = token` so spec files that read from `process.env` inherit the test user credentials.
+4. Generates `userId = crypto.randomUUID()` and calls `POST {ADMIN_URL}/admin/users` with `Authorization: Bearer {ADMIN_TOKEN}`, body `{id: userId, email: "e2e-{Date.now()}@mclaude.local", name: "E2E Test User", password: "<random 16-char hex>"}`. The `id` field is required by the CP `AdminUserRequest` struct.
+5. Computes `userSlug = slugify(email)` (lowercase, replace non-`[a-z0-9]` runs with `-`, trim, truncate to 63 chars). Sets `process.env['DEV_EMAIL'] = email`, `process.env['DEV_TOKEN'] = token`, and `process.env['DEV_USER_SLUG'] = userSlug` so spec files inherit the test user credentials and slug.
 6. Writes `{userId, email, token}` to `e2e/.test-user.json`.
 7. On failure, throws — all tests abort cleanly.
 
@@ -246,7 +246,10 @@ BASE_URL=https://dev.mclaude.richardmcsong.com npx playwright test --project=chr
 2. `e2e/.test-user.json` (written by global setup for the current run).
 3. Hardcoded defaults `dev@mclaude.local` / `dev`.
 
-Spec files that define local credential constants must use `process.env['DEV_EMAIL'] || 'dev@mclaude.local'` — not hardcoded string literals — so that global setup's `process.env` assignments take effect.
+Spec files that define local credential or slug constants must use `process.env` with hardcoded fallbacks — not string literals — so that global setup's `process.env` assignments take effect:
+- `process.env['DEV_EMAIL'] || 'dev@mclaude.local'`
+- `process.env['DEV_TOKEN'] || 'dev'`
+- `process.env['DEV_USER_SLUG'] || 'dev-mclaude-local'` (for user-scoped API URL paths)
 
 `e2e/.test-user.json` is gitignored and ephemeral — it exists only during a `npx playwright test` invocation.
 

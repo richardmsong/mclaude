@@ -29,8 +29,9 @@ Two problems:
 | Skip-on-no-ADMIN_URL | If `ADMIN_URL` is unset, global setup writes `{skipped:true}` and no-ops | Running without port-forward still works; spec files fall back to hardcoded dev defaults |
 | ADMIN_TOKEN default | `dev-admin-token` | Matches the k3d dev cluster secret value; CI can override via env |
 | BASE_URL for k3d | `https://dev.mclaude.richardmcsong.com` | The existing k3d Ingress URL |
-| Credential propagation | Global setup sets `process.env['DEV_EMAIL']`/`['DEV_TOKEN']` in addition to writing `.test-user.json` | Spec files that read `process.env['DEV_EMAIL']` directly inherit the test user credentials |
-| Spec file credential pattern | `process.env['DEV_EMAIL'] \|\| 'dev@mclaude.local'` | All spec files that hardcode credentials should read from env var with hardcoded fallback |
+| Credential propagation | Global setup sets `process.env['DEV_EMAIL']`/`['DEV_TOKEN']`/`['DEV_USER_SLUG']` in addition to writing `.test-user.json` | Spec files that read `process.env` directly inherit the test user credentials and slug |
+| Spec file credential pattern | `process.env['DEV_EMAIL'] \|\| 'dev@mclaude.local'` | All spec files that hardcode credentials or slugs should read from env var with hardcoded fallback |
+| User slug propagation | `process.env['DEV_USER_SLUG'] \|\| 'dev-mclaude-local'` | Global setup computes slug via `slugify(email)` and sets it so user-scoped API URLs use the correct slug |
 | Fixtures fallback | `DEV_EMAIL` / `DEV_TOKEN` env vars take priority; then `.test-user.json`; then hardcoded defaults | CI pipelines that pre-provision users can set env vars to bypass setup |
 
 ## User Flow (developer)
@@ -65,8 +66,8 @@ npx playwright test --project=chromium
 1. Reads `ADMIN_URL` (e.g. `http://localhost:9091` via kubectl port-forward), `ADMIN_TOKEN` (default `dev-admin-token`), and `BASE_URL` from env.
 2. If `DEV_EMAIL` and `DEV_TOKEN` are both set, skips creation: writes `{skipped: true}` to `.test-user.json` and returns.
 3. If `ADMIN_URL` is not set, skips creation: writes `{skipped: true}` and returns — spec files fall back to their hardcoded defaults.
-4. Otherwise, calls `POST {ADMIN_URL}/admin/users` with `Authorization: Bearer {ADMIN_TOKEN}`, body `{email: "e2e-{Date.now()}@mclaude.local", name: "E2E Test User", password: "{random 16-char hex}"}`.
-5. Sets `process.env['DEV_EMAIL'] = email` and `process.env['DEV_TOKEN'] = token` so spec files that read from `process.env` inherit the test user credentials.
+4. Generates `userId = crypto.randomUUID()` and calls `POST {ADMIN_URL}/admin/users` with `Authorization: Bearer {ADMIN_TOKEN}`, body `{id: userId, email: "e2e-{Date.now()}@mclaude.local", name: "E2E Test User", password: "{random 16-char hex}"}`. The `id` field is required by the CP `AdminUserRequest` struct and must be a client-supplied UUID.
+5. Computes `DEV_USER_SLUG = slugify(email)` — lowercase the email, replace runs of non-`[a-z0-9]` with `-`, trim, truncate to 63 chars (same algorithm as the CP's `computeUserSlug`). Sets `process.env['DEV_EMAIL'] = email`, `process.env['DEV_TOKEN'] = token`, and `process.env['DEV_USER_SLUG'] = userSlug` so spec files that read from `process.env` inherit the test user credentials and slug.
 6. Writes `{userId, email, token}` to `e2e/.test-user.json`.
 7. On failure, throws — all tests abort cleanly.
 
@@ -151,9 +152,11 @@ Components implementing the change:
 
 | Test case | What it verifies | Components exercised |
 |-----------|------------------|----------------------|
-| Global setup creates test user | `POST /admin/users` returns 200 with userId; user can log in | mclaude-web (setup), mclaude-control-plane (admin API, auth) |
+| Global setup creates test user | `POST /admin/users` returns 201 with userId; user can log in | mclaude-web (setup), mclaude-control-plane (admin API, auth) |
 | `authenticatedPage` fixture uses test user | Login with dynamically-created email+token succeeds | mclaude-web (fixture, SPA), mclaude-control-plane (auth) |
 | Global teardown deletes test user | `DELETE /admin/users/{userId}` returns 204; user cannot log in after | mclaude-web (teardown), mclaude-control-plane (admin API) |
+
+**Note on implicit verification:** These integration cases are verified implicitly on every `npx playwright test` invocation: if global-setup fails to create the user, all tests abort with a clear error; if the fixture fails to authenticate, auth tests fail immediately; teardown failures are logged. There are no dedicated standalone test cases for the setup/teardown scripts themselves — their correctness is proven by every successful test run.
 
 ### Cross-component interface tests
 
