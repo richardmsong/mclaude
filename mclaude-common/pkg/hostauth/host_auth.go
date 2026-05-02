@@ -6,6 +6,7 @@ package hostauth
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -158,8 +159,14 @@ func (h *HostAuth) Refresh(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("request challenge: %w", err)
 	}
 
-	// Step 2: sign the nonce with the NKey seed.
-	sig, err := h.kp.Sign([]byte(challenge))
+	// Step 2: base64-decode the challenge to raw nonce bytes, then sign those.
+	// The CP returns a base64-encoded random nonce and verifies the signature
+	// over the raw decoded bytes (not the base64 string). ADR-0075.
+	nonceBytes, err := base64.StdEncoding.DecodeString(challenge)
+	if err != nil {
+		return "", fmt.Errorf("decode challenge nonce: %w", err)
+	}
+	sig, err := h.kp.Sign(nonceBytes)
 	if err != nil {
 		return "", fmt.Errorf("sign challenge: %w", err)
 	}

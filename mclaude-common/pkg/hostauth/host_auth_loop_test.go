@@ -5,6 +5,7 @@ package hostauth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -48,11 +49,13 @@ func TestStartRefreshLoop_RefreshesBeforeTTL(t *testing.T) {
 	const refreshedJWT = "refreshed-loop-jwt"
 	var refreshCount atomic.Int32
 
+	// Challenge must be a valid base64-encoded nonce (ADR-0075).
+	loopChallenge := base64.StdEncoding.EncodeToString([]byte("loop-nonce"))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/auth/challenge":
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"challenge": "loop-nonce"})
+			json.NewEncoder(w).Encode(map[string]string{"challenge": loopChallenge})
 		case "/api/auth/verify":
 			refreshCount.Add(1)
 			w.Header().Set("Content-Type", "application/json")
@@ -103,11 +106,13 @@ func TestStartRefreshLoop_RefreshesBeforeTTL(t *testing.T) {
 func TestStartRefreshLoop_StopsOnContextCancel(t *testing.T) {
 	var refreshCount atomic.Int32
 
+	// Challenge must be a valid base64-encoded nonce (ADR-0075).
+	cancelChallenge := base64.StdEncoding.EncodeToString([]byte("cancel-nonce"))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/auth/challenge":
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"challenge": "cancel-nonce"})
+			json.NewEncoder(w).Encode(map[string]string{"challenge": cancelChallenge})
 		case "/api/auth/verify":
 			refreshCount.Add(1)
 			w.Header().Set("Content-Type", "application/json")

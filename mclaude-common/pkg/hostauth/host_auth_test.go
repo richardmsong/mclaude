@@ -2,6 +2,7 @@ package hostauth_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -194,7 +195,9 @@ func TestPublicKey_FromSeed(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestRefresh_FullFlow(t *testing.T) {
-	nonce := "test-challenge-nonce-42"
+	// The CP returns a base64-encoded nonce as the challenge (ADR-0075).
+	rawNonce := []byte("test-challenge-nonce-42")
+	nonce := base64.StdEncoding.EncodeToString(rawNonce)
 	challengeCalled := false
 	verifyCalled := false
 	var receivedPubKey string
@@ -265,11 +268,13 @@ func TestRefresh_FullFlow(t *testing.T) {
 
 func TestRefresh_UpdatesStoredJWT(t *testing.T) {
 	newJWT := "refreshed-jwt-value"
+	// Challenge must be a valid base64-encoded nonce (ADR-0075).
+	b64Challenge := base64.StdEncoding.EncodeToString([]byte("nonce-1"))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/auth/challenge":
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"challenge": "n1"})
+			json.NewEncoder(w).Encode(map[string]string{"challenge": b64Challenge})
 		case "/api/auth/verify":
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "jwt": newJWT})
@@ -332,8 +337,12 @@ func TestRefresh_404ReturnsErrNotRegistered(t *testing.T) {
 
 func TestRefresh_SignatureCorrectness(t *testing.T) {
 	// Verify that the signature produced during Refresh is cryptographically valid.
+	// The challenge is a base64-encoded nonce; the signature must cover the raw
+	// decoded bytes (ADR-0075).
+	rawNonce := []byte("verify-sig-nonce-raw-bytes")
+	b64Challenge := base64.StdEncoding.EncodeToString(rawNonce)
+
 	var capturedPubKey string
-	var capturedNonce string
 	var capturedSig []byte
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -344,9 +353,8 @@ func TestRefresh_SignatureCorrectness(t *testing.T) {
 			}
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			capturedPubKey = req.NKeyPublic
-			capturedNonce = "verify-sig-nonce"
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"challenge": capturedNonce})
+			json.NewEncoder(w).Encode(map[string]string{"challenge": b64Challenge})
 		case "/api/auth/verify":
 			var req struct {
 				NKeyPublic string `json:"nkey_public"`
@@ -371,12 +379,13 @@ func TestRefresh_SignatureCorrectness(t *testing.T) {
 		t.Fatalf("Refresh: %v", err)
 	}
 
-	// Verify the captured signature against the public key.
+	// Verify the captured signature over the raw decoded nonce bytes (not the
+	// base64 string). This matches how the control-plane verifies signatures.
 	verifier, err := nkeys.FromPublicKey(capturedPubKey)
 	if err != nil {
 		t.Fatalf("FromPublicKey(%q): %v", capturedPubKey, err)
 	}
-	if err := verifier.Verify([]byte(capturedNonce), capturedSig); err != nil {
+	if err := verifier.Verify(rawNonce, capturedSig); err != nil {
 		t.Errorf("signature verification failed: %v", err)
 	}
 }
@@ -422,6 +431,75 @@ func TestSignFunc_SignatureVerifiable(t *testing.T) {
 	}
 	if err := verifier.Verify(nonce, sig); err != nil {
 		t.Errorf("signature verification failed: %v", err)
+	}
+}
+
+// --------------------------------------------------------------------------
+// TestRefresh_SignsRawNonceNotBase64 — ADR-0075 requirement
+// --------------------------------------------------------------------------
+
+// TestRefresh_SignsRawNonceNotBase64 verifies that Refresh() base64-decodes the
+// challenge string to raw bytes before signing, matching what the control-plane
+// verifies. The mock CP verifies via nkeys.FromPublicKey(pub).Verify(rawNonce, sig).
+func TestRefresh_SignsRawNonceNotBase64(t *testing.T) {
+	// rawNonce is what the CP would generate and verify against.
+	rawNonce := []byte("abcdefghijklmnopqrstuvwxyz123456") // 32 raw bytes
+	b64Challenge := base64.StdEncoding.EncodeToString(rawNonce)
+
+	var capturedPubKey string
+	var capturedSig []byte
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/auth/challenge":
+			var req struct {
+				NKeyPublic string `json:"nkey_public"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			capturedPubKey = req.NKeyPublic
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"challenge": b64Challenge})
+
+		case "/api/auth/verify":
+			var req struct {
+				NKeyPublic string `json:"nkey_public"`
+				Challenge  string `json:"challenge"`
+				Signature  []byte `json:"signature"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			capturedSig = req.Signature
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "jwt": "raw-nonce-test-jwt"})
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	credsPath, _ := newTestCredsFile(t, "initial-jwt")
+	ha, err := hostauth.NewHostAuthFromCredsFile(credsPath, srv.URL, nopLogger())
+	if err != nil {
+		t.Fatalf("NewHostAuthFromCredsFile: %v", err)
+	}
+
+	if _, err := ha.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	// Verify signature over raw decoded nonce bytes — exactly what the CP does.
+	verifier, err := nkeys.FromPublicKey(capturedPubKey)
+	if err != nil {
+		t.Fatalf("nkeys.FromPublicKey(%q): %v", capturedPubKey, err)
+	}
+	if err := verifier.Verify(rawNonce, capturedSig); err != nil {
+		t.Errorf("signature over raw nonce bytes failed: %v — Refresh() must sign the decoded bytes, not the base64 string (ADR-0075)", err)
+	}
+
+	// Also assert that signing over the base64 string would NOT verify — confirming
+	// the old bug is gone and the test is actually discriminating.
+	if err := verifier.Verify([]byte(b64Challenge), capturedSig); err == nil {
+		t.Error("signature unexpectedly verified over base64 string — test is not discriminating; fix the assertion")
 	}
 }
 
