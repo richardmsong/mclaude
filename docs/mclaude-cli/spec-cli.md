@@ -247,13 +247,15 @@ The JWT is bound to the CLI's `publicKey` (sent in step 1). The CLI signs NATS c
 |------|-----------------------|
 | `TestIntegration_Import_HappyPath` | `mclaude import` against the pre-registered host: archive uploaded to S3, project created in CP, session-agent unpacks. Completion detected by polling `GET /api/users/{uslug}/projects/{pslug}` (`Authorization: Bearer <jwt>` from `.test-creds.json`) every 2s until `importRef` is null (session-agent cleared it after successful unpack), timeout 60s. Sessions asserted visible: connect to NATS with test-user JWT + NKey seed, call `kv.Watch("hosts.{hslug}.projects.{pslug}.sessions.>")` on `mclaude-sessions-{uslug}` bucket, drain `watcher.Updates()` until nil (initial values exhausted), assert at least 1 entry received, call `watcher.Stop()`. |
 | `TestIntegration_Import_SlugCollision` | Import once (project created), re-import same CWD: CP returns slug unavailable, CLI prompts for new name (injected via `ImportFlags.Input`), second import succeeds. Assert `result.ProjectSlug == "my-project-2"`. Confirm by calling `GET /api/users/{uslug}/projects/my-project-2` and asserting HTTP 200. |
-| `TestIntegration_Login_DeviceCode` | `mclaude login` against an `httptest.Server` mock (login uses HTTP only — no NATS or S3). `auth.json` written with valid `{jwt, nkeySeed, userSlug}`; NKey seed is a valid U-key. |
+| `TestIntegration_Login_DeviceCode` | `mclaude login` against an `httptest.Server` mock (login uses HTTP only — no NATS or S3). The mock `/api/auth/device-code/poll` endpoint returns `{"status":"pending"}` on the first call and `{"status":"authorized","jwt":"...","userSlug":"..."}` on the second. `auth.json` written with valid `{jwt, nkeySeed, userSlug}`; NKey seed is a valid U-key. |
 
 Test files (all with `//go:build integration`): `cmd/integration_main_test.go` (TestMain), `cmd/integration_import_test.go` (import tests), `cmd/integration_login_test.go` (login test).
 
 `ImportFlags.Input io.Reader` allows tests to inject simulated user input for slug collision prompts (falls back to `os.Stdin`).
 
 ### Error cases
+
+These error paths are verified by unit tests in `cmd/import_test.go` and `cmd/login_test.go`, not integration tests.
 
 | Error | Assertion |
 |-------|-----------|
