@@ -32,8 +32,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nkeys"
 	clicontext "mclaude-cli/context"
 )
+
+// natsRequestTimeout is the maximum time to wait for a NATS request/reply response.
+const natsRequestTimeout = 10 * time.Second
 
 // ImportFlags holds parsed flags for "mclaude import".
 type ImportFlags struct {
@@ -51,6 +56,16 @@ type ImportFlags struct {
 	CWD string
 	// Input is the reader for user prompts (default: os.Stdin).
 	Input io.Reader
+	// NATSConn allows injecting a pre-connected NATS connection for tests.
+	// If nil, RunImport connects to NATS using the JWT + NKeySeed from auth.
+	NATSConn NATSConn
+}
+
+// NATSConn is the subset of nats.Conn used by RunImport.
+// Extracted as an interface to allow test injection without a live NATS server.
+type NATSConn interface {
+	Request(subj string, data []byte, timeout time.Duration) (*nats.Msg, error)
+	Close()
 }
 
 // ImportResult is returned by RunImport on success.
@@ -72,6 +87,52 @@ type ImportMetadata struct {
 	ImportedAt        time.Time `json:"importedAt"`
 	SessionIDs        []string  `json:"sessionIds"`
 	ClaudeCodeVersion string    `json:"claudeCodeVersion,omitempty"`
+}
+
+// checkSlugRequest is the NATS request payload for check-slug.
+// Subject: mclaude.users.{uslug}.hosts.{hslug}.projects.check-slug
+type checkSlugRequest struct {
+	Slug string `json:"slug"`
+}
+
+// checkSlugResponse is the NATS response payload for check-slug.
+type checkSlugResponse struct {
+	Available  bool   `json:"available"`
+	Suggestion string `json:"suggestion,omitempty"`
+}
+
+// importRequestPayload is the NATS request payload for import.request.
+// Subject: mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.import.request
+// Spec: spec-nats-payload-schema.md §import.request
+type importRequestPayload struct {
+	ID        string `json:"id"`
+	Ts        int64  `json:"ts"`
+	Slug      string `json:"slug"`
+	SizeBytes int64  `json:"sizeBytes"`
+}
+
+// importRequestResponse is the NATS response from import.request.
+type importRequestResponse struct {
+	ID        string `json:"id"`
+	UploadURL string `json:"uploadUrl"`
+	// Error fields for rejection (e.g. size limit exceeded)
+	Error string `json:"error,omitempty"`
+	Code  string `json:"code,omitempty"`
+}
+
+// importConfirmPayload is the NATS request payload for import.confirm.
+// Subject: mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.import.confirm
+// Spec: spec-nats-payload-schema.md §import.confirm
+type importConfirmPayload struct {
+	ID       string `json:"id"`
+	Ts       int64  `json:"ts"`
+	ImportID string `json:"importId"`
+}
+
+// importConfirmResponse is the NATS response from import.confirm.
+type importConfirmResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
 }
 
 // EncodeCWD derives the encoded CWD from an absolute path using Claude Code's
@@ -295,6 +356,117 @@ func UploadToS3(signedURL string, r io.Reader, sizeBytes int64) error {
 	return nil
 }
 
+// connectNATS connects to the NATS server using the JWT + NKey seed.
+// The NATS URL is derived from the control-plane server URL:
+//
+//	https://... → wss://...+/nats
+//	http://...  → ws://...+/nats
+//
+// (mirrors the SPA's derivation algorithm)
+func connectNATS(natsURL, jwt, nkeySeed string) (*nats.Conn, error) {
+	kp, err := nkeys.FromSeed([]byte(nkeySeed))
+	if err != nil {
+		return nil, fmt.Errorf("parse nkey seed: %w", err)
+	}
+
+	nc, err := nats.Connect(natsURL,
+		nats.UserJWT(
+			func() (string, error) { return jwt, nil },
+			func(nonce []byte) ([]byte, error) { return kp.Sign(nonce) },
+		),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("connect to NATS at %s: %w\nTroubleshooting: verify NATS server is reachable and credentials are valid", natsURL, err)
+	}
+	return nc, nil
+}
+
+// checkSlugAvailability sends a NATS request to check if a project slug is
+// available. Returns (available, suggestion, error).
+// Subject: mclaude.users.{uslug}.hosts.{hslug}.projects.check-slug
+func checkSlugAvailability(nc NATSConn, uslug, hslug, slug string) (bool, string, error) {
+	subject := fmt.Sprintf("mclaude.users.%s.hosts.%s.projects.check-slug", uslug, hslug)
+	reqData, err := json.Marshal(checkSlugRequest{Slug: slug})
+	if err != nil {
+		return false, "", fmt.Errorf("marshal check-slug request: %w", err)
+	}
+	msg, err := nc.Request(subject, reqData, natsRequestTimeout)
+	if err != nil {
+		return false, "", fmt.Errorf("check-slug request to %s: %w", subject, err)
+	}
+	var resp checkSlugResponse
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		return false, "", fmt.Errorf("parse check-slug response: %w", err)
+	}
+	return resp.Available, resp.Suggestion, nil
+}
+
+// requestImportURL sends a NATS request for a pre-signed S3 upload URL.
+// Subject: mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.import.request
+// Returns (importId, uploadUrl, error).
+func requestImportURL(nc NATSConn, uslug, hslug, pslug string, sizeBytes int64) (string, string, error) {
+	subject := fmt.Sprintf("mclaude.users.%s.hosts.%s.projects.%s.import.request", uslug, hslug, pslug)
+	payload := importRequestPayload{
+		ID:        generateID(),
+		Ts:        time.Now().UnixMilli(),
+		Slug:      pslug,
+		SizeBytes: sizeBytes,
+	}
+	reqData, err := json.Marshal(payload)
+	if err != nil {
+		return "", "", fmt.Errorf("marshal import.request: %w", err)
+	}
+	msg, err := nc.Request(subject, reqData, natsRequestTimeout)
+	if err != nil {
+		return "", "", fmt.Errorf("import.request to %s: %w", subject, err)
+	}
+	var resp importRequestResponse
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		return "", "", fmt.Errorf("parse import.request response: %w", err)
+	}
+	if resp.Error != "" {
+		return "", "", fmt.Errorf("import.request rejected: %s (code: %s)", resp.Error, resp.Code)
+	}
+	if resp.UploadURL == "" {
+		return "", "", fmt.Errorf("import.request: server returned empty uploadUrl")
+	}
+	return resp.ID, resp.UploadURL, nil
+}
+
+// confirmImport sends a NATS request to confirm the S3 upload and trigger provisioning.
+// Subject: mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.import.confirm
+func confirmImport(nc NATSConn, uslug, hslug, pslug, importID string) error {
+	subject := fmt.Sprintf("mclaude.users.%s.hosts.%s.projects.%s.import.confirm", uslug, hslug, pslug)
+	payload := importConfirmPayload{
+		ID:       generateID(),
+		Ts:       time.Now().UnixMilli(),
+		ImportID: importID,
+	}
+	reqData, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal import.confirm: %w", err)
+	}
+	msg, err := nc.Request(subject, reqData, natsRequestTimeout)
+	if err != nil {
+		return fmt.Errorf("import.confirm to %s: %w", subject, err)
+	}
+	var resp importConfirmResponse
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		return fmt.Errorf("parse import.confirm response: %w", err)
+	}
+	if !resp.OK {
+		return fmt.Errorf("import.confirm failed: %s", resp.Error)
+	}
+	return nil
+}
+
+// generateID generates a simple unique ID for NATS message envelopes.
+// Uses a timestamp + small random suffix — not a ULID but sufficient for
+// deduplication within a single CLI invocation.
+func generateID() string {
+	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
 // RunImport performs the full import flow.
 func RunImport(flags ImportFlags, out io.Writer) (*ImportResult, error) {
 	// Resolve context.
@@ -371,24 +543,64 @@ func RunImport(flags ImportFlags, out io.Writer) (*ImportResult, error) {
 	// Collect git info.
 	gitRemote, gitBranch := gitInfo(cwd)
 
-	// 4. Derive project name and slug from last path component of CWD.
+	// 4. Connect to NATS using stored JWT + NKey seed.
+	serverURL := clicontext.ResolveServerURL(flags.ServerURL, ctx)
+	natsURL := clicontext.DeriveNATSURL(serverURL)
+
+	nc := flags.NATSConn
+	if nc == nil {
+		fmt.Fprintf(out, "Connecting to NATS at %s...\n", natsURL)
+		realNC, err := connectNATS(natsURL, creds.JWT, creds.NKeySeed)
+		if err != nil {
+			return nil, err
+		}
+		defer realNC.Close()
+		nc = realNC
+	}
+
+	// 5. Derive project name and slug from last path component of CWD.
 	projectName := filepath.Base(cwd)
 	pslug := slugifyProjectName(projectName)
 	if pslug == "" {
 		pslug = "imported-project"
 	}
 
-	// 5. Connect to NATS and check slug availability.
-	serverURL := clicontext.ResolveServerURL(flags.ServerURL, ctx)
-	_ = serverURL // used when NATS is wired
+	// Check slug availability. Loop until an available slug is confirmed.
+	input := flags.Input
+	if input == nil {
+		input = os.Stdin
+	}
 
-	// TODO: Connect to NATS using creds.JWT + creds.NKeySeed and perform
-	// request/reply to check slug availability. For now, print what would happen.
-	fmt.Fprintf(out, "Project slug:           %s\n", pslug)
-	fmt.Fprintf(out, "  Would check: mclaude.users.%s.hosts.%s.projects.check-slug\n", uslug, hslug)
+	for {
+		fmt.Fprintf(out, "Checking slug availability: %s...\n", pslug)
+		available, suggestion, err := checkSlugAvailability(nc, uslug, hslug, pslug)
+		if err != nil {
+			return nil, fmt.Errorf("slug check failed: %w", err)
+		}
+		if available {
+			fmt.Fprintf(out, "Slug %q is available.\n", pslug)
+			break
+		}
 
-	// 6. Prompt for new name if slug is taken (stub: assume available).
-	// In the full implementation, loop here based on NATS response.
+		// 6. Slug taken — prompt user for a new name. Loop until available.
+		hint := ""
+		if suggestion != "" {
+			hint = fmt.Sprintf(" (suggested: %q)", suggestion)
+		}
+		fmt.Fprintf(out, "Slug %q is already taken%s.\n", pslug, hint)
+
+		newName, err := promptProjectName(input, out)
+		if err != nil {
+			return nil, fmt.Errorf("prompt project name: %w", err)
+		}
+		if newName == "" {
+			return nil, fmt.Errorf("no project name provided")
+		}
+		pslug = slugifyProjectName(newName)
+		if pslug == "" {
+			return nil, fmt.Errorf("could not derive a valid slug from name %q", newName)
+		}
+	}
 
 	// 7. Package data into tar.gz.
 	meta := ImportMetadata{
@@ -410,20 +622,41 @@ func RunImport(flags ImportFlags, out io.Writer) (*ImportResult, error) {
 	}
 	fmt.Fprintf(out, "Archive size: %d bytes\n", archiveSize)
 
-	// 8–11. NATS request/reply operations (stub).
-	// TODO: When NATS is available:
-	// 8. Request pre-signed URL: mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.import.request
-	// 9. Upload archive to S3 via UploadToS3(signedURL, archiveFile, archiveSize)
-	// 10. Confirm: mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.import.confirm {importId}
-	// 11. Wait for provisioning acknowledgement.
-	fmt.Fprintf(out, "\nImport prepared (NATS operations pending control-plane availability):\n")
-	fmt.Fprintf(out, "  User:    %s\n", uslug)
-	fmt.Fprintf(out, "  Host:    %s\n", hslug)
-	fmt.Fprintf(out, "  Project: %s\n", pslug)
-	fmt.Fprintf(out, "  Archive: %s (%d sessions)\n", archivePath, len(sessionIDs))
-	fmt.Fprintf(out, "  Subjects to use:\n")
-	fmt.Fprintf(out, "    import.request:  mclaude.users.%s.hosts.%s.projects.%s.import.request\n", uslug, hslug, pslug)
-	fmt.Fprintf(out, "    import.confirm:  mclaude.users.%s.hosts.%s.projects.%s.import.confirm\n", uslug, hslug, pslug)
+	// 8. Request pre-signed upload URL from CP via NATS.
+	fmt.Fprintf(out, "Requesting upload URL from control-plane...\n")
+	importID, uploadURL, err := requestImportURL(nc, uslug, hslug, pslug, archiveSize)
+	if err != nil {
+		return nil, fmt.Errorf("request import URL: %w", err)
+	}
+	fmt.Fprintf(out, "Upload URL obtained (import ID: %s)\n", importID)
+
+	// 9. Upload archive directly to S3 using the signed URL.
+	fmt.Fprintf(out, "Uploading archive to S3...\n")
+	archiveFile, err := os.Open(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("open archive for upload: %w", err)
+	}
+	defer archiveFile.Close()
+
+	if err := UploadToS3(uploadURL, archiveFile, archiveSize); err != nil {
+		return nil, fmt.Errorf("upload to S3: %w", err)
+	}
+	fmt.Fprintf(out, "Upload complete.\n")
+
+	// 10. Confirm upload via NATS.
+	fmt.Fprintf(out, "Confirming import with control-plane...\n")
+	if err := confirmImport(nc, uslug, hslug, pslug, importID); err != nil {
+		return nil, fmt.Errorf("confirm import: %w", err)
+	}
+
+	// 11. Print success message. Confirm is synchronous per spec.
+	fmt.Fprintf(out, "\nImport complete!\n")
+	fmt.Fprintf(out, "  User:          %s\n", uslug)
+	fmt.Fprintf(out, "  Host:          %s\n", hslug)
+	fmt.Fprintf(out, "  Project:       %s\n", pslug)
+	fmt.Fprintf(out, "  Sessions:      %d\n", len(sessionIDs))
+	fmt.Fprintf(out, "\nProject provisioning has been dispatched. Sessions will appear in the\n")
+	fmt.Fprintf(out, "web UI once the session agent downloads and unpacks the import archive.\n")
 
 	return &ImportResult{
 		ProjectSlug:  pslug,

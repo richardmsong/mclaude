@@ -70,6 +70,30 @@ func ResolveServerURL(override string, ctx *Context) string {
 	return DefaultServerURL
 }
 
+// DeriveNATSURL derives the NATS WebSocket URL from the control-plane server URL.
+// Mirrors the SPA derivation algorithm (App.tsx):
+//
+//	https://... → wss://... + /nats
+//	http://...  → ws://...  + /nats
+//
+// This allows the CLI to connect to NATS using the same base URL as the
+// control-plane HTTP server without requiring a separate natsUrl configuration
+// field. If the serverURL already ends with /nats, it is returned unchanged to
+// allow explicit overrides.
+func DeriveNATSURL(serverURL string) string {
+	if strings.HasSuffix(serverURL, "/nats") {
+		return serverURL
+	}
+	// Replace scheme: https → wss, http → ws.
+	natsURL := strings.TrimSuffix(serverURL, "/")
+	if strings.HasPrefix(natsURL, "https://") {
+		natsURL = "wss://" + natsURL[len("https://"):]
+	} else if strings.HasPrefix(natsURL, "http://") {
+		natsURL = "ws://" + natsURL[len("http://"):]
+	}
+	return natsURL + "/nats"
+}
+
 // Load reads the context file at path and returns the parsed Context.
 // If the file does not exist, an empty Context is returned (not an error).
 // Returns an error if the file exists but cannot be parsed.
