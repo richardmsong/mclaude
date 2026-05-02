@@ -58,6 +58,12 @@ worktrees/
 # Playwright MCP
 .playwright-mcp/
 
+# E2E test user credentials (ephemeral, created by global-setup.ts)
+mclaude-web/e2e/.test-user.json
+
+# CLI integration test credentials (ephemeral, created by TestMain)
+mclaude-cli/cmd/cli-integration/.test-creds.json
+
 # Claude project settings (local)
 .claude/projects/
 

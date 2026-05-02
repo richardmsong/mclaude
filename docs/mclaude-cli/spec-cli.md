@@ -231,24 +231,36 @@ go test -tags integration ./cmd/...
 
 ### Test user setup
 
-`TestMain` creates an ephemeral test user via `POST /admin/users` (same admin API as Playwright). NATS credentials are obtained by automating the device-code flow (no browser needed):
+`TestMain` creates an ephemeral test user via `POST /admin/users` (same admin API as Playwright). The response returns `{id, email, name, slug}`. TestMain supplies its own generated password in the request body; the password is not returned in the response. NATS credentials are obtained by automating the device-code flow (no browser needed):
 
-1. Start `RunLogin(flags)` in a goroutine — POSTs `/api/auth/device-code`, gets `{deviceCode, userCode}`, begins polling
-2. Authenticate as the test user via `POST /auth/login {email, token}` → session cookie
-3. Complete the code: form `POST /api/auth/device-code/verify` with fields `user_code=<userCode>`, `email=<testEmail>`, `password=<testToken>` — the endpoint authenticates inline from form fields, no session cookie needed
-4. `RunLogin`'s poll detects `{"status":"authorized"}` and writes NATS credentials to `cli-integration/.test-creds.json` (gitignored)
+1. Start `RunLogin(flags)` in a goroutine — POSTs `/api/auth/device-code` with `{publicKey}` (CLI-generated NKey public key), gets `{deviceCode, userCode}`, begins polling
+2. Complete the code: form `POST /api/auth/device-code/verify` with fields `user_code=<userCode>`, `email=<testEmail>`, `password=<testToken>` — the endpoint authenticates inline from form fields; no separate login or session cookie needed
+3. `RunLogin`'s poll detects `{"status":"authorized"}` and writes NATS credentials to `cli-integration/.test-creds.json` (gitignored): `{jwt, nkeySeed, userSlug}`
 
-`TestMain` teardown: delete test project via admin API (CP cascades S3 prefix deletion), then delete the test user.
+The JWT is bound to the CLI's `publicKey` (sent in step 1). The CLI signs NATS connections with the matching `nkeySeed`. Tests use this JWT as `Authorization: Bearer <jwt>` for all authenticated CP HTTP calls.
+
+`TestMain` teardown: delete test project via admin API (CP deletes S3 prefix `{uslug}/{hslug}/{pslug}/`), then delete the test user.
 
 ### Test cases
 
 | Test | User behavior verified |
 |------|-----------------------|
-| `TestIntegration_Import_HappyPath` | `mclaude import` against the pre-registered host: archive uploaded to S3, project created in CP, session-agent unpacks. Completion detected by polling `GET /api/users/{uslug}/projects/{pslug}` (with HTTP session token) every 2s until `importRef` is null (session-agent cleared it). Then asserts sessions visible via the `mclaude-sessions-{uslug}` NATS KV bucket. Timeout: 60s. |
-| `TestIntegration_Import_SlugCollision` | Import once (project created), re-import same CWD: CP returns slug unavailable, CLI prompts for new name (injected via `ImportFlags.Stdin`), second import succeeds with the new slug. |
+| `TestIntegration_Import_HappyPath` | `mclaude import` against the pre-registered host: archive uploaded to S3, project created in CP, session-agent unpacks. Completion detected by polling `GET /api/users/{uslug}/projects/{pslug}` (`Authorization: Bearer <jwt>` from `.test-creds.json`) every 2s until `importRef` is null (session-agent cleared it after successful unpack), timeout 60s. Sessions asserted visible: connect to NATS with test-user JWT + NKey seed, call `kv.Watch("hosts.{hslug}.projects.{pslug}.sessions.>")` on `mclaude-sessions-{uslug}` bucket, drain `watcher.Updates()` until nil (initial values exhausted), assert at least 1 entry received, call `watcher.Stop()`. |
+| `TestIntegration_Import_SlugCollision` | Import once (project created), re-import same CWD: CP returns slug unavailable, CLI prompts for new name (injected via `ImportFlags.Input`), second import succeeds. Assert `result.ProjectSlug == "my-project-2"`. Confirm by calling `GET /api/users/{uslug}/projects/my-project-2` and asserting HTTP 200. |
 | `TestIntegration_Login_DeviceCode` | `mclaude login` against an `httptest.Server` mock (login uses HTTP only — no NATS or S3). `auth.json` written with valid `{jwt, nkeySeed, userSlug}`; NKey seed is a valid U-key. |
 
-`ImportFlags.Stdin io.Reader` allows tests to inject simulated user input for slug collision prompts (falls back to `os.Stdin`).
+Test files (all with `//go:build integration`): `cmd/integration_main_test.go` (TestMain), `cmd/integration_import_test.go` (import tests), `cmd/integration_login_test.go` (login test).
+
+`ImportFlags.Input io.Reader` allows tests to inject simulated user input for slug collision prompts (falls back to `os.Stdin`).
+
+### Error cases
+
+| Error | Assertion |
+|-------|-----------|
+| NATS connection refused | `RunImport` returns non-nil error |
+| S3 upload fails (CP returns bad pre-signed URL) | `RunImport` returns upload error |
+| `import.confirm` NATS timeout | `RunImport` returns error after timeout |
+| Device-code poll timeout | `RunLogin` returns error; `auth.json` not written |
 
 ## Dependencies
 
