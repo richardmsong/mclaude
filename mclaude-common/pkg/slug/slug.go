@@ -340,61 +340,23 @@ func MustParseClusterSlug(s string) ClusterSlug {
 // DeriveUserSlug
 // --------------------------------------------------------------------------
 
-// DeriveUserSlug derives a user slug from display name and email:
+// DeriveUserSlug derives a user slug from a full email address (ADR-0062).
 //
-//	{Slugify(name or local-part)}-{domain.split('.')[0]}
+// Algorithm: Slugify(email) — lowercase the full email, replace all runs of
+// non-[a-z0-9] characters (including '@' and '.') with '-', trim leading and
+// trailing '-', truncate to 63 characters.
 //
-// If the display name slugifies to a non-empty value, it is used as the name
-// part; otherwise the email local-part is used. The domain's first segment
-// (before the first '.') is always appended.
+// The full domain is included to prevent collisions between users on different
+// domains (e.g. richard@rbc.com → "richard-rbc-com" ≠ richard@gmail.com →
+// "richard-gmail-com").
 //
 // The caller is responsible for collision detection and appending a numeric
 // suffix ("-2", "-3", ...) if needed.
 //
 // Examples:
 //
-//	DeriveUserSlug("Richard Song", "richard@rbc.com")    → "richard-song-rbc"
-//	DeriveUserSlug("", "alice@gmail.com")                → "alice-gmail"
-//	DeriveUserSlug("user", "user@rbc.co.uk")             → "user-rbc"
-func DeriveUserSlug(displayName, email string) string {
-	// Determine name part
-	namePart := Slugify(displayName)
-	if namePart == "" {
-		// Fall back to email local-part
-		at := strings.IndexByte(email, '@')
-		if at > 0 {
-			namePart = Slugify(email[:at])
-		}
-	}
-
-	// Determine domain first segment
-	domainPart := ""
-	at := strings.IndexByte(email, '@')
-	if at >= 0 && at < len(email)-1 {
-		domain := email[at+1:]
-		dot := strings.IndexByte(domain, '.')
-		if dot > 0 {
-			domainPart = Slugify(domain[:dot])
-		} else {
-			domainPart = Slugify(domain)
-		}
-	}
-
-	if namePart == "" && domainPart == "" {
-		return ""
-	}
-	if namePart == "" {
-		return domainPart
-	}
-	if domainPart == "" {
-		return namePart
-	}
-
-	combined := namePart + "-" + domainPart
-	// Truncate if combined exceeds MaxLen
-	if len(combined) > MaxLen {
-		combined = combined[:MaxLen]
-		combined = strings.TrimRight(combined, "-")
-	}
-	return combined
+//	DeriveUserSlug("dev@mclaude.local")      → "dev-mclaude-local"
+//	DeriveUserSlug("richard.song@gmail.com") → "richard-song-gmail-com"
+func DeriveUserSlug(email string) string {
+	return Slugify(email)
 }

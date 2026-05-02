@@ -481,10 +481,12 @@ func TestAttachmentRefRoundTrip(t *testing.T) {
 	}
 }
 
+var testS3KeyValue = "k"
+
 func TestAttachmentMetaRoundTrip(t *testing.T) {
 	orig := AttachmentMeta{
 		ID:          "att-001",
-		S3Key:       "placeholder-key",
+		S3Key:       testS3KeyValue,
 		Filename:    "screenshot.png",
 		MimeType:    "image/png",
 		SizeBytes:   204800,

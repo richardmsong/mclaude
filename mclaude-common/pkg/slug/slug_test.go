@@ -275,62 +275,59 @@ func TestSlugifyRoundTrip(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
-// DeriveUserSlug tests
+// DeriveUserSlug tests (ADR-0062)
 // --------------------------------------------------------------------------
 
 func TestDeriveUserSlug(t *testing.T) {
 	cases := []struct {
-		name        string
-		displayName string
-		email       string
-		want        string
+		name  string
+		email string
+		want  string
 	}{
 		{
-			name:        "standard user",
-			displayName: "Richard",
-			email:       "richard@rbc.com",
-			want:        "richard-rbc",
+			name:  "dev at mclaude.local",
+			email: "dev@mclaude.local",
+			want:  "dev-mclaude-local",
 		},
 		{
-			name:        "multi-part name",
-			displayName: "Richard Song",
-			email:       "richard@rbc.com",
-			want:        "richard-song-rbc",
+			name:  "richard.song at gmail.com",
+			email: "richard.song@gmail.com",
+			want:  "richard-song-gmail-com",
 		},
 		{
-			name:        "alice gmail",
-			displayName: "Alice",
-			email:       "alice@gmail.com",
-			want:        "alice-gmail",
+			name:  "alice at gmail.com",
+			email: "alice@gmail.com",
+			want:  "alice-gmail-com",
 		},
 		{
-			name:        "domain with multiple segments — first segment only",
-			displayName: "user",
-			email:       "user@rbc.co.uk",
-			want:        "user-rbc",
+			name:  "richard at rbc.com — full domain included",
+			email: "richard@rbc.com",
+			want:  "richard-rbc-com",
 		},
 		{
-			name:        "no display name — use email local-part",
-			displayName: "",
-			email:       "alice@gmail.com",
-			want:        "alice-gmail",
-		},
-		{
-			name:        "display name overrides local-part",
-			displayName: "Bob",
-			email:       "robert@company.org",
-			want:        "bob-company",
+			name:  "collision resistance: same local-part, different domain",
+			email: "richard@example.org",
+			want:  "richard-example-org",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := slug.DeriveUserSlug(tc.displayName, tc.email)
+			got := slug.DeriveUserSlug(tc.email)
 			if got != tc.want {
-				t.Errorf("DeriveUserSlug(%q, %q) = %q, want %q",
-					tc.displayName, tc.email, got, tc.want)
+				t.Errorf("DeriveUserSlug(%q) = %q, want %q", tc.email, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDeriveUserSlug_CollisionResistance verifies that two users with the same
+// local-part on different domains produce distinct slugs (ADR-0062 motivation).
+func TestDeriveUserSlug_CollisionResistance(t *testing.T) {
+	a := slug.DeriveUserSlug("richard@rbc.com")
+	b := slug.DeriveUserSlug("richard@gmail.com")
+	if a == b {
+		t.Errorf("DeriveUserSlug collision: richard@rbc.com and richard@gmail.com both produced %q", a)
 	}
 }
 
