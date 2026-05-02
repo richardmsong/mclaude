@@ -389,6 +389,9 @@ k3d cluster delete mclaude-dev
 | `StatefulSet.apps "mclaude-nats" / "mclaude-postgres" is invalid: spec: Forbidden: updates to statefulset spec for fields other than...` | An older install set `persistence.enabled: false`; chart defaults are now `true` and K8s forbids adding `volumeClaimTemplates` in place. | `helm uninstall mclaude -n mclaude-system` (wipes local NATS KV + postgres state — local dev only), then re-run `/deploy-local-preview`. |
 | Session-agent: `SSL certificate verification failed` | Corporate proxy intercepts TLS; container lacks CA bundle | Mount corporate CA bundle into container and set `NODE_EXTRA_CA_CERTS` |
 | Session-agent: `Not logged in · Please run /login` | `CLAUDE_CODE_OAUTH_TOKEN` not set in pod | Check `user-secrets` Secret has `oauth-token` key; if pod started before token was added, `kubectl rollout restart` |
+| MinIO pod not ready / `CrashLoopBackOff` | Misconfiguration or PVC issue | `kubectl logs deploy/mclaude-minio -n mclaude-system` (replace `mclaude` with your release name if different) |
+| Bucket missing after install | Bucket-creation Job failed or was skipped | Re-run: `kubectl delete job mclaude-minio-bucket -n mclaude-system && helm upgrade mclaude ./charts/mclaude-cp -n mclaude-system -f charts/mclaude-cp/values-k3d-ghcr.yaml ...` |
+| Presigned URL unreachable from CLI/SPA | `S3_ENDPOINT` does not match the external Ingress hostname | Verify `ingress.minioHost` in your values matches the DNS name resolving to the cluster; check `kubectl get ingress mclaude-minio -n mclaude-system` |
 
 ---
 

@@ -40,6 +40,10 @@ controlPlane:
 spa:
   replicas: 2
 
+minio:
+  persistence:
+    storageClass: managed-csi-premium
+
 ingress:
   className: nginx
   annotations:

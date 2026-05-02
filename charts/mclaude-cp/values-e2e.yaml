@@ -70,3 +70,6 @@ namespace:
 
 ingress:
   enabled: false
+
+minio:
+  enabled: false

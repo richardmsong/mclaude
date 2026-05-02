@@ -159,6 +159,42 @@ spa:
   command: []
 
 ## ---------------------------------------------------------------------------
+## MinIO in-cluster S3-compatible object storage (ADR-0067)
+## ---------------------------------------------------------------------------
+minio:
+  enabled: true
+  image:
+    registry: docker.io
+    repository: minio/minio
+    tag: "RELEASE.2025-04-22T22-12-26Z"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  persistence:
+    enabled: true
+    storageClass: ""
+    size: 20Gi
+  ## Bucket to create on first install
+  bucket: mclaude
+  ## Existing Secret with keys "access-key" and "secret-key".
+  ## If unset, chart creates the secret using minio.rootUser / minio.rootPassword.
+  existingSecret: ""
+  rootUser: "minioadmin"
+  rootPassword: "minioadmin"
+  ## Image for the minio/mc bucket-creation Job (separate from minio server image).
+  ## Configurable so air-gapped deployments can mirror from an internal registry.
+  mcImage:
+    registry: docker.io
+    repository: minio/mc
+    tag: "RELEASE.2025-04-16T18-25-19Z"
+    pullPolicy: IfNotPresent
+
+## ---------------------------------------------------------------------------
 ## Ingress
 ## ---------------------------------------------------------------------------
 ingress:
@@ -174,6 +210,10 @@ ingress:
   natsHost: ""
   ## Hostname for leaf-node ingress (cross-cluster WAN deployments)
   leafHost: ""
+  ## Hostname for MinIO S3 API. When set, creates a MinIO Ingress and wires
+  ## S3_ENDPOINT on the control-plane Deployment. Must be a direct subdomain of
+  ## the wildcard TLS cert (e.g. minio.mclaude.richardmcsong.com).
+  minioHost: ""
   tls: []
   ## ExternalDNS A-record target override
   externalDnsTarget: ""

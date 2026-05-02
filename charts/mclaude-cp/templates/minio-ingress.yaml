@@ -1,0 +1,44 @@
+{{- if and .Values.ingress.enabled .Values.ingress.minioHost }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "mclaude-cp.fullname" . }}-minio
+  namespace: {{ include "mclaude-cp.namespace" . }}
+  labels:
+    {{- include "mclaude-cp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio-ingress
+  annotations:
+    {{- $base := deepCopy (.Values.ingress.annotations | default dict) }}
+    {{- $overrides := dict "nginx.ingress.kubernetes.io/proxy-body-size" "0" }}
+    {{- if .Values.ingress.externalDnsTarget }}
+    {{- $_ := set $overrides "external-dns.alpha.kubernetes.io/hostname" .Values.ingress.minioHost }}
+    {{- $_ := set $overrides "external-dns.alpha.kubernetes.io/target" .Values.ingress.externalDnsTarget }}
+    {{- end }}
+    {{- mergeOverwrite $base $overrides | toYaml | nindent 4 }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    {{- range .Values.ingress.tls }}
+    - secretName: {{ .secretName }}
+      hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+        - {{ $.Values.ingress.minioHost | quote }}
+    {{- end }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.minioHost | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "mclaude-cp.fullname" . }}-minio
+                port:
+                  number: 9000
+{{- end }}

@@ -1,0 +1,61 @@
+{{- if .Values.minio.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mclaude-cp.fullname" . }}-minio
+  namespace: {{ include "mclaude-cp.namespace" . }}
+  labels:
+    {{- include "mclaude-cp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "mclaude-cp.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: minio
+  template:
+    metadata:
+      labels:
+        {{- include "mclaude-cp.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: minio
+    spec:
+      {{- include "mclaude-cp.podSecurityContext" . | nindent 6 }}
+      {{- include "mclaude-cp.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: minio
+          image: {{ include "mclaude-cp.image" (dict "imageValues" .Values.minio.image "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.minio.image.pullPolicy }}
+          {{- include "mclaude-cp.securityContext" . | nindent 10 }}
+          command: ["minio", "server", "/data", "--console-address", ":9001"]
+          ports:
+            - name: api
+              containerPort: 9000
+              protocol: TCP
+            - name: console
+              containerPort: 9001
+              protocol: TCP
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ coalesce .Values.minio.existingSecret (printf "%s-minio" (include "mclaude-cp.fullname" .)) }}
+                  key: access-key
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ coalesce .Values.minio.existingSecret (printf "%s-minio" (include "mclaude-cp.fullname" .)) }}
+                  key: secret-key
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.minio.resources | nindent 12 }}
+      volumes:
+        - name: data
+          {{- if .Values.minio.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ printf "%s-minio-data" (include "mclaude-cp.fullname" .) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- end }}

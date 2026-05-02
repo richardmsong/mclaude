@@ -30,6 +30,16 @@ spa:
     repository: mclaude/mclaude-spa
     tag: "0.1.0"
 
+minio:
+  image:
+    registry: registry.internal.example.com
+    repository: minio/minio
+    tag: "RELEASE.2025-04-22T22-12-26Z"
+  mcImage:
+    registry: registry.internal.example.com
+    repository: minio/mc
+    tag: "RELEASE.2025-04-16T18-25-19Z"
+
 tests:
   curl:
     registry: registry.internal.example.com

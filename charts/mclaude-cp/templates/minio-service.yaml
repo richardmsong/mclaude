@@ -1,0 +1,24 @@
+{{- if .Values.minio.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mclaude-cp.fullname" . }}-minio
+  namespace: {{ include "mclaude-cp.namespace" . }}
+  labels:
+    {{- include "mclaude-cp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mclaude-cp.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: api
+      protocol: TCP
+    - name: console
+      port: 9001
+      targetPort: console
+      protocol: TCP
+{{- end }}

@@ -1,0 +1,71 @@
+{{- if .Values.minio.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "mclaude-cp.fullname" . }}-minio-bucket
+  namespace: {{ include "mclaude-cp.namespace" . }}
+  labels:
+    {{- include "mclaude-cp.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio-bucket-job
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  activeDeadlineSeconds: 120
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "mclaude-cp.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: minio-bucket-job
+    spec:
+      restartPolicy: Never
+      {{- include "mclaude-cp.imagePullSecrets" . | nindent 6 }}
+      initContainers:
+        - name: wait-ready
+          image: {{ include "mclaude-cp.image" (dict "imageValues" .Values.minio.mcImage "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.minio.mcImage.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - {{ printf "mc alias set local http://%s-minio:9000 $ACCESS_KEY $SECRET_KEY && i=0; while [ $i -lt 60 ]; do mc ready local && break; i=$((i+1)); sleep 1; done" (include "mclaude-cp.fullname" .) | quote }}
+          env:
+            - name: ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ coalesce .Values.minio.existingSecret (printf "%s-minio" (include "mclaude-cp.fullname" .)) }}
+                  key: access-key
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ coalesce .Values.minio.existingSecret (printf "%s-minio" (include "mclaude-cp.fullname" .)) }}
+                  key: secret-key
+          volumeMounts:
+            - name: mc-config
+              mountPath: /root/.mc
+      containers:
+        - name: create-bucket
+          image: {{ include "mclaude-cp.image" (dict "imageValues" .Values.minio.mcImage "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.minio.mcImage.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - "mc mb --ignore-existing local/{{ .Values.minio.bucket }}"
+          env:
+            - name: ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ coalesce .Values.minio.existingSecret (printf "%s-minio" (include "mclaude-cp.fullname" .)) }}
+                  key: access-key
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ coalesce .Values.minio.existingSecret (printf "%s-minio" (include "mclaude-cp.fullname" .)) }}
+                  key: secret-key
+          volumeMounts:
+            - name: mc-config
+              mountPath: /root/.mc
+      volumes:
+        - name: mc-config
+          emptyDir: {}
+{{- end }}

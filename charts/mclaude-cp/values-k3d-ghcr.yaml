@@ -47,6 +47,7 @@ ingress:
     traefik.ingress.kubernetes.io/router.tls: "true"
   host: "dev.mclaude.richardmcsong.com"
   natsHost: "dev-nats.mclaude.richardmcsong.com"
+  minioHost: "minio.mclaude.richardmcsong.com"
   tls:
     - secretName: mclaude-richardmcsong-tls
       hosts:
