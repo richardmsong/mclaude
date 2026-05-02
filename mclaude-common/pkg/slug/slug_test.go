@@ -350,3 +350,83 @@ func TestMustParseUserSlugValid(t *testing.T) {
 		t.Errorf("expected %q, got %q", "alice-gmail", s)
 	}
 }
+
+// --------------------------------------------------------------------------
+// MustParseProjectSlug tests
+// --------------------------------------------------------------------------
+
+func TestMustParseProjectSlugValid(t *testing.T) {
+	s := slug.MustParseProjectSlug("my-project")
+	if s != "my-project" {
+		t.Errorf("expected %q, got %q", "my-project", s)
+	}
+}
+
+func TestMustParseProjectSlugPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for invalid slug, got none")
+		}
+	}()
+	slug.MustParseProjectSlug("invalid slug!")
+}
+
+// --------------------------------------------------------------------------
+// MustParseSessionSlug tests
+// --------------------------------------------------------------------------
+
+func TestMustParseSessionSlugValid(t *testing.T) {
+	s := slug.MustParseSessionSlug("s-abc123")
+	if s != "s-abc123" {
+		t.Errorf("expected %q, got %q", "s-abc123", s)
+	}
+}
+
+func TestMustParseSessionSlugPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for invalid slug, got none")
+		}
+	}()
+	slug.MustParseSessionSlug("INVALID_UPPER")
+}
+
+// --------------------------------------------------------------------------
+// MustParseHostSlug tests
+// --------------------------------------------------------------------------
+
+func TestMustParseHostSlugValid(t *testing.T) {
+	s := slug.MustParseHostSlug("my-laptop")
+	if s != "my-laptop" {
+		t.Errorf("expected %q, got %q", "my-laptop", s)
+	}
+}
+
+func TestMustParseHostSlugPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for invalid slug, got none")
+		}
+	}()
+	slug.MustParseHostSlug("hosts") // reserved word
+}
+
+// --------------------------------------------------------------------------
+// MustParseClusterSlug tests
+// --------------------------------------------------------------------------
+
+func TestMustParseClusterSlugValid(t *testing.T) {
+	s := slug.MustParseClusterSlug("prod-cluster")
+	if s != "prod-cluster" {
+		t.Errorf("expected %q, got %q", "prod-cluster", s)
+	}
+}
+
+func TestMustParseClusterSlugPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for invalid slug, got none")
+		}
+	}()
+	slug.MustParseClusterSlug("clusters") // reserved word
+}
