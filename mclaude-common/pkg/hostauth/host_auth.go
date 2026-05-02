@@ -189,9 +189,15 @@ func (h *HostAuth) StartRefreshLoop(ctx context.Context) {
 		h.log.Warn().Msg("host_auth: CP URL not configured — host JWT refresh disabled (JWT will expire in 5 min)")
 		return
 	}
+	h.startRefreshLoopWithInterval(ctx, hostJWTTTL-hostJWTRefreshBuffer)
+}
 
+// startRefreshLoopWithInterval is the internal implementation of StartRefreshLoop
+// with a configurable interval. Extracted to enable unit testing with short TTLs
+// without changing the public API or the production constants.
+func (h *HostAuth) startRefreshLoopWithInterval(ctx context.Context, interval time.Duration) {
 	go func() {
-		ticker := time.NewTicker(hostJWTTTL - hostJWTRefreshBuffer)
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
 		for {
