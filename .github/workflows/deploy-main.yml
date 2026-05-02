@@ -179,6 +179,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Pre-pull minio/mc image into k3d
+        env:
+          MINIO_MC_IMAGE: docker.io/minio/mc:RELEASE.2025-04-16T18-25-19Z
+          K3D_CLUSTER: mclaude-dev
+        run: |
+          docker pull "${MINIO_MC_IMAGE}"
+          k3d image import "${MINIO_MC_IMAGE}" -c "${K3D_CLUSTER}"
+
       - name: Helm deploy control-plane
         env:
           IMAGE_TAG: ${{ needs.tag.outputs.image_tag }}

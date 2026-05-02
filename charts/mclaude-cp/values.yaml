@@ -193,6 +193,9 @@ minio:
     repository: minio/mc
     tag: "RELEASE.2025-04-16T18-25-19Z"
     pullPolicy: IfNotPresent
+  ## activeDeadlineSeconds for the minio-bucket hook Job (ADR-0070).
+  ## Increased from 120s to allow time for cold image pulls on k3d nodes.
+  bucketJobDeadlineSeconds: 300
 
 ## ---------------------------------------------------------------------------
 ## Ingress
