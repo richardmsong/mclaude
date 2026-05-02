@@ -40,6 +40,7 @@ type AdminUserResponse struct {
 	ID    string `json:"id"`
 	Email string `json:"email"`
 	Name  string `json:"name"`
+	Slug  string `json:"slug"`
 }
 
 // AdminSessionStopRequest is the body for POST /admin/sessions/stop.
@@ -115,7 +116,7 @@ func (s *Server) adminListUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.db.pool.Query(r.Context(),
-		`SELECT id, email, name FROM users ORDER BY created_at`)
+		`SELECT id, email, name, slug FROM users ORDER BY created_at`)
 	if err != nil {
 		http.Error(w, "query error", http.StatusInternalServerError)
 		return
@@ -125,7 +126,7 @@ func (s *Server) adminListUsers(w http.ResponseWriter, r *http.Request) {
 	var users []AdminUserResponse
 	for rows.Next() {
 		var u AdminUserResponse
-		if err := rows.Scan(&u.ID, &u.Email, &u.Name); err != nil {
+		if err := rows.Scan(&u.ID, &u.Email, &u.Name, &u.Slug); err != nil {
 			http.Error(w, "scan error", http.StatusInternalServerError)
 			return
 		}
@@ -186,6 +187,7 @@ func (s *Server) adminCreateUser(w http.ResponseWriter, r *http.Request) {
 		ID:    user.ID,
 		Email: user.Email,
 		Name:  user.Name,
+		Slug:  user.Slug,
 	})
 }
 
