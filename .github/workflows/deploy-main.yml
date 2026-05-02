@@ -181,7 +181,7 @@ jobs:
 
       - name: Pre-pull minio/mc image into k3d
         env:
-          MINIO_MC_IMAGE: docker.io/minio/mc:RELEASE.2025-04-16T18-25-19Z
+          MINIO_MC_IMAGE: minio/mc:RELEASE.2025-04-16T18-25-19Z
           K3D_CLUSTER: mclaude-dev
         run: |
           docker pull "${MINIO_MC_IMAGE}"
