@@ -53,6 +53,11 @@ ingress:
       hosts:
         - dev.mclaude.richardmcsong.com
 
+minio:
+  resources:
+    requests:
+      memory: 32Mi
+
 global:
   imagePullSecrets:
     - name: ghcr-pull-secret
