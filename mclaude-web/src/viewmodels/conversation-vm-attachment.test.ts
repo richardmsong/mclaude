@@ -52,7 +52,7 @@ describe('ConversationVM.sendMessageWithAttachment (ADR-0053)', () => {
     )
   })
 
-  it('publishes a message with attachment_ref content block', () => {
+  it('publishes type:message format per spec-nats-payload-schema.md', () => {
     mockNats.clearRecorded()
     vm.sendMessageWithAttachment('check this', TEST_ATTACHMENT)
 
@@ -63,45 +63,51 @@ describe('ConversationVM.sendMessageWithAttachment (ADR-0053)', () => {
     )
 
     const payload = parsePublished(msg.data) as {
+      id: string
+      ts: number
       type: string
-      message: { role: string; content: Array<{ type: string; id?: string; filename?: string; mimeType?: string; sizeBytes?: number; text?: string }> }
-      session_id: string
-      uuid: string
+      text: string
+      attachments: Array<{ id: string; filename: string; mimeType: string; sizeBytes: number }>
     }
-    expect(payload.type).toBe('user')
-    expect(payload.message.role).toBe('user')
-    expect(Array.isArray(payload.message.content)).toBe(true)
+    // Must use type:"message" not type:"user" — session-agent only resolves S3 attachments for type:"message"
+    expect(payload.type).toBe('message')
+    expect(payload.text).toBe('check this')
+    expect(Array.isArray(payload.attachments)).toBe(true)
+    expect(payload.attachments).toHaveLength(1)
 
-    const textBlock = payload.message.content.find(c => c.type === 'text')
-    expect(textBlock?.text).toBe('check this')
-
-    const attBlock = payload.message.content.find(c => c.type === 'attachment_ref')
-    expect(attBlock?.id).toBe('att-001')
-    expect(attBlock?.filename).toBe('screenshot.png')
-    expect(attBlock?.mimeType).toBe('image/png')
-    expect(attBlock?.sizeBytes).toBe(245000)
+    const att = payload.attachments[0]
+    expect(att.id).toBe('att-001')
+    expect(att.filename).toBe('screenshot.png')
+    expect(att.mimeType).toBe('image/png')
+    expect(att.sizeBytes).toBe(245000)
   })
 
-  it('omits text block when message text is empty', () => {
+  it('publishes empty text and single attachment when text is empty', () => {
     mockNats.clearRecorded()
     vm.sendMessageWithAttachment('', TEST_ATTACHMENT)
 
     const msg = mockNats.published[0]
     const payload = parsePublished(msg.data) as {
-      message: { content: Array<{ type: string }> }
+      type: string
+      text: string
+      attachments: Array<{ id: string }>
     }
-    const textBlocks = payload.message.content.filter(c => c.type === 'text')
-    expect(textBlocks).toHaveLength(0)
-    const attBlocks = payload.message.content.filter(c => c.type === 'attachment_ref')
-    expect(attBlocks).toHaveLength(1)
+    expect(payload.type).toBe('message')
+    expect(payload.text).toBe('')
+    expect(payload.attachments).toHaveLength(1)
+    expect(payload.attachments[0].id).toBe('att-001')
   })
 
-  it('includes a uuid in the published payload', () => {
+  it('includes envelope id (UUID) and ts (unix millis) in the published payload', () => {
+    const before = Date.now()
     mockNats.clearRecorded()
     vm.sendMessageWithAttachment('hi', TEST_ATTACHMENT)
-    const payload = parsePublished(mockNats.published[0].data) as { uuid: string }
-    expect(typeof payload.uuid).toBe('string')
-    expect(payload.uuid).toMatch(/^[0-9a-f-]{36}$/)
+    const after = Date.now()
+    const payload = parsePublished(mockNats.published[0].data) as { id: string; ts: number }
+    expect(typeof payload.id).toBe('string')
+    expect(payload.id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(payload.ts).toBeGreaterThanOrEqual(before)
+    expect(payload.ts).toBeLessThanOrEqual(after)
   })
 
   it('adds an optimistic user turn with attachment_ref block', () => {
@@ -133,10 +139,15 @@ describe('ConversationVM.sendMessageWithAttachment (ADR-0053)', () => {
     expect(attBlocks).toHaveLength(1)
   })
 
-  it('session_id is included in the NATS payload', () => {
+  it('session slug is encoded in the NATS subject (not the payload)', () => {
+    // Per spec-nats-payload-schema.md: the session is identified by the subject, not a payload field.
+    // The subject is mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.sessions.{sslug}.input
     mockNats.clearRecorded()
     vm.sendMessageWithAttachment('hello', TEST_ATTACHMENT)
-    const payload = parsePublished(mockNats.published[0].data) as { session_id: string }
-    expect(payload.session_id).toBe('session-1')
+    const msg = mockNats.published[0]
+    expect(msg.subject).toContain('sessions.session-1.input')
+    // Payload must NOT contain legacy session_id field
+    const payload = parsePublished(msg.data) as Record<string, unknown>
+    expect(payload).not.toHaveProperty('session_id')
   })
 })

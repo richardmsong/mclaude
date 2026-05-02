@@ -99,6 +99,7 @@ export class ConversationVM {
   /**
    * Send a message with an attached file (ADR-0053).
    * The AttachmentRef has already been uploaded and confirmed by the time this is called.
+   * Publishes `type: "message"` format per spec-nats-payload-schema.md §sessions.{sslug}.input.
    */
   sendMessageWithAttachment(text: string, attachment: AttachmentRef): void {
     const uuid = crypto.randomUUID()
@@ -109,11 +110,18 @@ export class ConversationVM {
     this.eventStore.addPendingMessage(uuid, content as Array<{ type: string; text?: string; source?: { type: string; media_type: string; data: string } }>)
     const subject = subjSessionsInput(this.userSlug as UserSlug, this.hostSlug as HostSlug, this.projectSlug as ProjectSlug, this.sessionSlug as SessionSlug)
     const payload = {
-      type: 'user',
-      message: { role: 'user', content },
-      session_id: this.sessionId,
-      uuid,
-      parent_tool_use_id: null,
+      id: uuid,
+      ts: Date.now(),
+      type: 'message',
+      text,
+      attachments: [
+        {
+          id: attachment.id,
+          filename: attachment.filename,
+          mimeType: attachment.mimeType,
+          sizeBytes: attachment.sizeBytes,
+        },
+      ],
     }
     logger.info({ component: 'conversation-vm', sessionId: this.sessionId, attachmentId: attachment.id }, 'sendMessageWithAttachment')
     this.natsClient.publish(subject, new TextEncoder().encode(JSON.stringify(payload)))
