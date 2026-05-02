@@ -1,8 +1,9 @@
 # ADR: E2E Test Session Seeding and Session-Agent Memory Reduction
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-02: accepted — paired with docs/mclaude-web/spec-web.md, docs/mclaude-controller-k8s/spec-k8s-architecture.md
+- 2026-05-02: implemented — all scope CLEAN
 
 ## Overview
 
