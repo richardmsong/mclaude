@@ -1,8 +1,9 @@
 # ADR: MinIO Bucket Job Image Pre-Pull and Deadline Extension
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-02: accepted — paired with docs/charts-mclaude/spec-helm.md
+- 2026-05-02: implemented — all scope CLEAN
 
 ## Overview
 
