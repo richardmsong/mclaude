@@ -194,6 +194,57 @@ The following helpers in `src/lib/subj.ts` reference removed infrastructure and 
 
 These should be cleaned up in a future commit.
 
+## E2E Test Infrastructure
+
+Playwright tests run against the live k3d cluster at `https://dev.mclaude.richardmcsong.com`. A global setup script creates a fresh test user before each invocation; a global teardown script deletes it after.
+
+### Running tests against k3d
+
+```bash
+BASE_URL=https://dev.mclaude.richardmcsong.com \
+ADMIN_TOKEN=dev-admin-token \
+npx playwright test --project=chromium
+```
+
+`ADMIN_TOKEN` is the break-glass admin bearer token stored in the `mclaude-control-plane` K8s Secret (`admin-token` field). For the k3d dev cluster the value is `dev-admin-token`.
+
+### Test user isolation
+
+**Global setup** (`e2e/global-setup.ts`):
+1. Reads `BASE_URL` and `ADMIN_TOKEN` (default `dev-admin-token`) from env.
+2. If `DEV_EMAIL` and `DEV_TOKEN` env vars are both set, skips creation and writes `{skipped: true}` to `e2e/.test-user.json` — the caller supplies credentials directly.
+3. Otherwise, calls `POST {BASE_URL}/admin/users` with `Authorization: Bearer {ADMIN_TOKEN}`, body `{email: "e2e-{Date.now()}@mclaude.local", name: "E2E Test User", password: "<random 16-char hex>"}`.
+4. Writes `{userId, email, token}` to `e2e/.test-user.json`.
+5. On failure, throws — all tests abort cleanly.
+
+**Global teardown** (`e2e/global-teardown.ts`):
+1. Reads `e2e/.test-user.json`. If missing or `skipped: true`, returns immediately.
+2. Calls `DELETE {BASE_URL}/admin/users/{userId}` with `Authorization: Bearer {ADMIN_TOKEN}`.
+3. Deletes `e2e/.test-user.json`.
+4. Logs a warning on deletion failure (does not throw — teardown runs after tests complete regardless).
+
+**`playwright.config.ts`** declares `globalSetup: './e2e/global-setup.ts'` and `globalTeardown: './e2e/global-teardown.ts'`.
+
+### Fixture credentials
+
+`e2e/fixtures.ts` resolves credentials in priority order:
+1. `DEV_EMAIL` / `DEV_TOKEN` environment variables (CI pre-provisioned user).
+2. `e2e/.test-user.json` (written by global setup for the current run).
+
+`e2e/.test-user.json` is gitignored and ephemeral — it exists only during a `npx playwright test` invocation.
+
+### Credential file schema
+
+```json
+{
+  "userId": "<uuid>",
+  "email": "e2e-1746123456789@mclaude.local",
+  "token": "a3f8c2d1e9b4f7a2"
+}
+```
+
+Or when env-var override is active: `{"skipped": true}`.
+
 ## Dependencies
 
 | Dependency | Purpose |
