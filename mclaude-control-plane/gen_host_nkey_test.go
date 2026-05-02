@@ -184,6 +184,29 @@ func TestGenHostNkey_SecretHasLabel(t *testing.T) {
 	}
 }
 
+// TestGenHostNkey_SecretHasResourcePolicyKeepAnnotation verifies that the created Secret
+// carries helm.sh/resource-policy: keep so Helm does not delete it on helm uninstall
+// or when the chart template is removed (ADR-0074).
+func TestGenHostNkey_SecretHasResourcePolicyKeepAnnotation(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	ctx := context.Background()
+
+	err := genHostNkeyWithClient(ctx, nopGenLogger(), client, "mclaude-system", "worker-host-creds")
+	if err != nil {
+		t.Fatalf("genHostNkeyWithClient: %v", err)
+	}
+
+	secret, err := client.CoreV1().Secrets("mclaude-system").Get(ctx, "worker-host-creds", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get Secret: %v", err)
+	}
+
+	got := secret.Annotations["helm.sh/resource-policy"]
+	if got != "keep" {
+		t.Errorf("annotation helm.sh/resource-policy = %q; want %q", got, "keep")
+	}
+}
+
 // TestGenHostNkey_SeedRoundTrip verifies that the stored seed can be parsed back
 // by nkeys.ParseDecoratedUserNKey (the function used by mclaude-controller-k8s
 // via hostauth.NewHostAuthFromSeed).

@@ -93,12 +93,18 @@ func genHostNkeyWithClient(ctx context.Context, logger zerolog.Logger, clientset
 	}
 
 	// Create K8s Secret with the seed.
+	// The helm.sh/resource-policy: keep annotation prevents Helm from deleting this Secret
+	// on helm uninstall or when the chart template is removed (ADR-0074). The NKey seed
+	// is a stable host identity — losing it would require re-running mclaude host register.
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: namespace,
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "mclaude-gen-host-nkey",
+			},
+			Annotations: map[string]string{
+				"helm.sh/resource-policy": "keep",
 			},
 		},
 		Type: corev1.SecretTypeOpaque,
