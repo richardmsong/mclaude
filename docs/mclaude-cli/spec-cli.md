@@ -45,8 +45,8 @@ Authenticates the user against the control-plane using a device-code flow and pe
 2. CLI sends `POST /api/auth/device-code` to the control-plane with `{ publicKey }` (the NKey public key).
 3. Control-plane returns `{ deviceCode, userCode, verificationUrl, expiresIn, interval }`.
 4. CLI displays the verification URL and user code, instructing the user to open the URL in a browser and enter the code.
-5. CLI polls `POST /api/auth/device-code/poll` with `{ deviceCode }` at the specified interval until the user completes authentication or the code expires (15-minute TTL).
-6. On success, the poll response returns `{ jwt, userSlug }` — a signed NATS JWT and the user's slug. No seed or NKey material comes from the server.
+5. CLI polls `POST /api/auth/device-code/poll` with `{ deviceCode }` at the specified interval until the user completes authentication or the code expires (15-minute TTL). The control-plane always responds HTTP 200. The response body is `{ "status": "pending" | "authorized", "jwt": "...", "userSlug": "..." }` — `jwt` and `userSlug` are omitted when status is `"pending"`.
+6. On `status == "authorized"`, the poll response contains `{ status, jwt, userSlug }` — a signed NATS JWT and the user's slug. No seed or NKey material comes from the server.
 7. CLI writes credentials to `~/.mclaude/auth.json` (mode `0600`) in the format: `{ "jwt": "<nats-jwt>", "nkeySeed": "<local-nkey-seed>", "userSlug": "<uslug>" }`.
 
 The credentials are user-scoped (not host-scoped): a single login covers operations across all of the user's hosts. Re-running `mclaude login` regenerates the NKey pair and overwrites the file.
@@ -208,6 +208,47 @@ The CLI uses NATS request/reply for:
 - Slug availability checks (`mclaude.users.{uslug}.hosts.{hslug}.projects.check-slug`)
 - Import upload URL requests (`…projects.{pslug}.import.request`)
 - Import confirmation (`…projects.{pslug}.import.confirm`)
+
+## Smoke Tests (CLI e2e)
+
+CLI smoke tests prove user behaviors work end-to-end against a real deployed stack. They are the CLI subset of the full deployment certification suite (web Playwright + CLI smoke tests together certify any deployment). Run with `//go:build integration`:
+
+```bash
+# Forward admin port first:
+kubectl port-forward -n mclaude-system svc/mclaude-cp-control-plane 9091:9091 &
+
+ADMIN_URL=http://localhost:9091 \
+ADMIN_TOKEN=dev-admin-token \
+MCLAUDE_TEST_HOST_SLUG=dev-local \
+MCLAUDE_TEST_SERVER_URL=https://api.mclaude.internal \
+go test -tags integration ./cmd/...
+```
+
+### Prerequisites
+
+- `ADMIN_URL` must be set (e.g. `http://localhost:9091` via `kubectl port-forward`). If unset, `TestMain` writes `{skipped:true}` to `cli-integration/.test-creds.json` and exits without error — tests are skipped, not failed. This matches the Playwright global-setup skip behavior (ADR-0064).
+- `MCLAUDE_TEST_HOST_SLUG` must refer to a host that is already registered in the cluster and has a running session-agent. `TestMain` does **not** register a throwaway host — the host is pre-existing infrastructure. Default: `dev-local`.
+
+### Test user setup
+
+`TestMain` creates an ephemeral test user via `POST /admin/users` (same admin API as Playwright). NATS credentials are obtained by automating the device-code flow (no browser needed):
+
+1. Start `RunLogin(flags)` in a goroutine — POSTs `/api/auth/device-code`, gets `{deviceCode, userCode}`, begins polling
+2. Authenticate as the test user via `POST /auth/login {email, token}` → session cookie
+3. Complete the code: form `POST /api/auth/device-code/verify` with fields `user_code=<userCode>`, `email=<testEmail>`, `password=<testToken>` — the endpoint authenticates inline from form fields, no session cookie needed
+4. `RunLogin`'s poll detects `{"status":"authorized"}` and writes NATS credentials to `cli-integration/.test-creds.json` (gitignored)
+
+`TestMain` teardown: delete test project via admin API (CP cascades S3 prefix deletion), then delete the test user.
+
+### Test cases
+
+| Test | User behavior verified |
+|------|-----------------------|
+| `TestIntegration_Import_HappyPath` | `mclaude import` against the pre-registered host: archive uploaded to S3, project created in CP, session-agent unpacks. Completion detected by polling `GET /api/users/{uslug}/projects/{pslug}` (with HTTP session token) every 2s until `importRef` is null (session-agent cleared it). Then asserts sessions visible via the `mclaude-sessions-{uslug}` NATS KV bucket. Timeout: 60s. |
+| `TestIntegration_Import_SlugCollision` | Import once (project created), re-import same CWD: CP returns slug unavailable, CLI prompts for new name (injected via `ImportFlags.Stdin`), second import succeeds with the new slug. |
+| `TestIntegration_Login_DeviceCode` | `mclaude login` against an `httptest.Server` mock (login uses HTTP only — no NATS or S3). `auth.json` written with valid `{jwt, nkeySeed, userSlug}`; NKey seed is a valid U-key. |
+
+`ImportFlags.Stdin io.Reader` allows tests to inject simulated user input for slug collision prompts (falls back to `os.Stdin`).
 
 ## Dependencies
 

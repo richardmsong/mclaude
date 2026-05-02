@@ -7,7 +7,7 @@
 //  3. Control-plane returns { deviceCode, userCode, verificationUrl, expiresIn, interval }.
 //  4. CLI displays the verification URL and user code.
 //  5. CLI polls POST /api/auth/device-code/poll with { deviceCode } at the specified interval.
-//  6. On success, the poll response returns { jwt, userSlug }.
+//  6. On success, the poll response returns { status: "authorized", jwt, userSlug }.
 //  7. CLI writes credentials to ~/.mclaude/auth.json (mode 0600).
 package cmd
 
