@@ -63,13 +63,14 @@ type deviceCodePollRequest struct {
 }
 
 // deviceCodePollResponse is the POST /api/auth/device-code/poll response body.
-// On success, JWT and UserSlug are populated.
-// On pending, both are empty.
+// Status is "pending" while the user has not yet verified the code, or
+// "authorized" once the user completes authentication.
+// On "authorized", JWT and UserSlug are populated.
 type deviceCodePollResponse struct {
-	JWT      string `json:"jwt"`
-	UserSlug string `json:"userSlug"`
-	// Pending is true when the user has not yet verified the code.
-	Pending bool `json:"pending,omitempty"`
+	// Status is "pending" or "authorized".
+	Status   string `json:"status"`
+	JWT      string `json:"jwt,omitempty"`
+	UserSlug string `json:"userSlug,omitempty"`
 	// Error is set when the code has expired or an error occurred.
 	Error string `json:"error,omitempty"`
 }
@@ -143,11 +144,11 @@ func RunLogin(flags LoginFlags, out io.Writer) (*LoginResult, error) {
 		if pollResp.Error != "" {
 			return nil, fmt.Errorf("authentication failed: %s", pollResp.Error)
 		}
-		if pollResp.Pending {
+		if pollResp.Status == "pending" {
 			// User hasn't completed authentication yet — keep polling.
 			continue
 		}
-		if pollResp.JWT != "" {
+		if pollResp.Status == "authorized" && pollResp.JWT != "" {
 			jwt = pollResp.JWT
 			userSlug = pollResp.UserSlug
 			break
@@ -223,10 +224,6 @@ func pollDeviceCode(serverURL, deviceCode string) (*deviceCodePollResponse, erro
 		return nil, fmt.Errorf("POST /api/auth/device-code/poll: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusAccepted {
-		// 202: pending — user hasn't authenticated yet.
-		return &deviceCodePollResponse{Pending: true}, nil
-	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("POST /api/auth/device-code/poll: unexpected status %d", resp.StatusCode)
 	}

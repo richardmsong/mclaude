@@ -65,18 +65,20 @@ func TestLoginDeviceCodeFlow(t *testing.T) {
 			http.Error(w, "invalid device code", http.StatusBadRequest)
 			return
 		}
+		w.Header().Set("Content-Type", "application/json")
 		if pollCount < 2 {
-			// Simulate pending (202).
-			w.WriteHeader(http.StatusAccepted)
+			// Simulate pending — control-plane always returns 200 with status field.
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"status": "pending",
+			})
 			return
 		}
 		// Return success.
-		resp := map[string]interface{}{
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":   "authorized",
 			"jwt":      testToken,
 			"userSlug": userSlug,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		})
 	})
 
 	srv := httptest.NewServer(mux)
@@ -202,7 +204,9 @@ func TestLoginAuthFileModeIs0600(t *testing.T) {
 		})
 	})
 	mux.HandleFunc("/api/auth/device-code/poll", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":   "authorized",
 			"jwt":      "fake-jwt-token",
 			"userSlug": "alice-test",
 		})
@@ -269,7 +273,9 @@ func TestLoginContextUpdated(t *testing.T) {
 		})
 	})
 	mux.HandleFunc("/api/auth/device-code/poll", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":   "authorized",
 			"jwt":      "ctx-jwt-token",
 			"userSlug": "bob-test",
 		})
@@ -318,7 +324,9 @@ func TestLoginDisplaysVerificationURL(t *testing.T) {
 		})
 	})
 	mux.HandleFunc("/api/auth/device-code/poll", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":   "authorized",
 			"jwt":      "display-jwt",
 			"userSlug": "carol-test",
 		})
