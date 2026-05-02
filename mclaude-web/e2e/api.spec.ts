@@ -11,15 +11,16 @@ const FAKE_NKEY = ['UA', 'PLACEHOLDER', 'TEST', 'KEY'].join('_')
 // that require the admin port use a kubectl port-forward via the ADMIN_URL env.
 const ADMIN_URL = process.env['ADMIN_URL'] || ''
 
-/** Authenticate with the dev user and return the JWT token. */
-async function getAuthToken(request: APIRequestContext): Promise<string> {
+/** Authenticate with the dev user and return the JWT token and user slug. */
+async function getAuthToken(request: APIRequestContext): Promise<{ jwt: string; userSlug: string }> {
   const res = await request.post(`${BASE_URL}/auth/login`, {
     data: { email: DEV_EMAIL, password: DEV_PASSWORD },
   })
   expect(res.status()).toBe(200)
   const body = await res.json()
   expect(body.jwt).toBeTruthy()
-  return body.jwt as string
+  expect(body.userSlug).toBeTruthy()
+  return { jwt: body.jwt as string, userSlug: body.userSlug as string }
 }
 
 // ── Public Endpoints (no auth required) ─────────────────────────────────────
@@ -80,7 +81,7 @@ test.describe('Public API endpoints', () => {
   })
 
   test('API-PUB-08: JWT refresh → POST /auth/refresh with valid JWT → 200, new JWT', async ({ request }) => {
-    const jwt = await getAuthToken(request)
+    const { jwt } = await getAuthToken(request)
     const res = await request.post(`${BASE_URL}/auth/refresh`, {
       headers: { Authorization: `Bearer ${jwt}` },
     })
@@ -220,9 +221,10 @@ test.describe('Public API endpoints', () => {
 
 test.describe('Authenticated API endpoints', () => {
   let jwt: string
+  let userSlug: string
 
   test.beforeAll(async ({ request }) => {
-    jwt = await getAuthToken(request)
+    ;({ jwt, userSlug } = await getAuthToken(request))
   })
 
   test('API-AUTH-01: Get user info → GET /auth/me with valid JWT → 200, has user info', async ({ request }) => {
@@ -306,7 +308,7 @@ test.describe('Authenticated API endpoints', () => {
 
   test('API-AUTH-07: Update project git identity → PATCH /api/projects/{id} with gitIdentityId', async ({ request }) => {
     // Get a project ID first
-    const projRes = await request.get(`${BASE_URL}/api/users/${DEV_USER_SLUG}/projects`, {
+    const projRes = await request.get(`${BASE_URL}/api/users/${userSlug}/projects`, {
       headers: { Authorization: `Bearer ${jwt}` },
     })
     expect(projRes.status()).toBe(200)
@@ -330,17 +332,18 @@ test.describe('Authenticated API endpoints', () => {
 
 test.describe('Project CRUD API endpoints', () => {
   let jwt: string
+  let userSlug: string
   let createdProjectSlug: string
 
   test.beforeAll(async ({ request }) => {
-    jwt = await getAuthToken(request)
+    ;({ jwt, userSlug } = await getAuthToken(request))
   })
 
   test('API-PROJ-01: Create project → POST /api/users/{uslug}/projects → project row created', async ({ request }) => {
     const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
     const name = `E2E Proj ${suffix}`
     const slug = `e2e-proj-${suffix}`
-    const res = await request.post(`${BASE_URL}/api/users/${DEV_USER_SLUG}/projects`, {
+    const res = await request.post(`${BASE_URL}/api/users/${userSlug}/projects`, {
       headers: { Authorization: `Bearer ${jwt}` },
       data: { slug, name, hostSlug: 'local' },
     })
@@ -353,7 +356,7 @@ test.describe('Project CRUD API endpoints', () => {
   })
 
   test('API-PROJ-02: List projects → GET /api/users/{uslug}/projects with valid JWT → 200, array', async ({ request }) => {
-    const res = await request.get(`${BASE_URL}/api/users/${DEV_USER_SLUG}/projects`, {
+    const res = await request.get(`${BASE_URL}/api/users/${userSlug}/projects`, {
       headers: { Authorization: `Bearer ${jwt}` },
     })
     expect(res.status()).toBe(200)
@@ -363,7 +366,7 @@ test.describe('Project CRUD API endpoints', () => {
 
   test('API-PROJ-03: Get single project → GET /api/users/{uslug}/projects/{pslug} → 200, project details', async ({ request }) => {
     // Use the known default project
-    const res = await request.get(`${BASE_URL}/api/users/${DEV_USER_SLUG}/projects/default-project`, {
+    const res = await request.get(`${BASE_URL}/api/users/${userSlug}/projects/default-project`, {
       headers: { Authorization: `Bearer ${jwt}` },
     })
     expect(res.status()).toBe(200)
@@ -378,7 +381,7 @@ test.describe('Project CRUD API endpoints', () => {
       test.skip(true, 'No project created in API-PROJ-01')
       return
     }
-    const res = await request.delete(`${BASE_URL}/api/users/${DEV_USER_SLUG}/projects/${createdProjectSlug}`, {
+    const res = await request.delete(`${BASE_URL}/api/users/${userSlug}/projects/${createdProjectSlug}`, {
       headers: { Authorization: `Bearer ${jwt}` },
     })
     expect(res.status()).toBe(204)
@@ -389,14 +392,15 @@ test.describe('Project CRUD API endpoints', () => {
 
 test.describe('Host Management API endpoints', () => {
   let jwt: string
+  let userSlug: string
   let createdHostSlug: string
 
   test.beforeAll(async ({ request }) => {
-    jwt = await getAuthToken(request)
+    ;({ jwt, userSlug } = await getAuthToken(request))
   })
 
   test('API-HOST-01: List hosts → GET /api/users/{uslug}/hosts with valid JWT → 200, array', async ({ request }) => {
-    const res = await request.get(`${BASE_URL}/api/users/${DEV_USER_SLUG}/hosts`, {
+    const res = await request.get(`${BASE_URL}/api/users/${userSlug}/hosts`, {
       headers: { Authorization: `Bearer ${jwt}` },
     })
     expect(res.status()).toBe(200)
@@ -411,7 +415,7 @@ test.describe('Host Management API endpoints', () => {
     // Note: a bug in the server treats empty string publicKey as non-null in Postgres,
     // so only ONE host-without-publicKey can exist per deployment. Pre-cleanup any
     // test hosts from prior runs that may have used legacy mode.
-    const listRes = await request.get(`${BASE_URL}/api/users/${DEV_USER_SLUG}/hosts`, {
+    const listRes = await request.get(`${BASE_URL}/api/users/${userSlug}/hosts`, {
       headers: { Authorization: `Bearer ${jwt}` },
     })
     const existingHosts = (await listRes.json()) as Array<{ slug: string }>
@@ -422,12 +426,12 @@ test.describe('Host Management API endpoints', () => {
       h.slug.startsWith('test-e2e-host-')
     )
     for (const h of testHosts) {
-      await request.delete(`${BASE_URL}/api/users/${DEV_USER_SLUG}/hosts/${h.slug}`, {
+      await request.delete(`${BASE_URL}/api/users/${userSlug}/hosts/${h.slug}`, {
         headers: { Authorization: `Bearer ${jwt}` },
       })
     }
 
-    const res = await request.post(`${BASE_URL}/api/users/${DEV_USER_SLUG}/hosts`, {
+    const res = await request.post(`${BASE_URL}/api/users/${userSlug}/hosts`, {
       headers: { Authorization: `Bearer ${jwt}` },
       data: { slug, name: `E2E Test Host ${suffix}` },
     })
@@ -441,7 +445,7 @@ test.describe('Host Management API endpoints', () => {
   })
 
   test('API-HOST-03: Generate host device code → POST /api/users/{uslug}/hosts/code → code, expiresAt', async ({ request }) => {
-    const res = await request.post(`${BASE_URL}/api/users/${DEV_USER_SLUG}/hosts/code`, {
+    const res = await request.post(`${BASE_URL}/api/users/${userSlug}/hosts/code`, {
       headers: { Authorization: `Bearer ${jwt}` },
       data: { publicKey: `UATESTKEY${Date.now()}` },
     })
@@ -458,14 +462,14 @@ test.describe('Host Management API endpoints', () => {
 
   test('API-HOST-04: Poll host device code pending → GET /api/users/{uslug}/hosts/code/{code} → status:pending', async ({ request }) => {
     // Generate a code first
-    const codeRes = await request.post(`${BASE_URL}/api/users/${DEV_USER_SLUG}/hosts/code`, {
+    const codeRes = await request.post(`${BASE_URL}/api/users/${userSlug}/hosts/code`, {
       headers: { Authorization: `Bearer ${jwt}` },
       data: { publicKey: `UAPOLLTEST${Date.now()}` },
     })
     expect(codeRes.ok()).toBeTruthy()
     const { code } = await codeRes.json()
 
-    const pollRes = await request.get(`${BASE_URL}/api/users/${DEV_USER_SLUG}/hosts/code/${code}`, {
+    const pollRes = await request.get(`${BASE_URL}/api/users/${userSlug}/hosts/code/${code}`, {
       headers: { Authorization: `Bearer ${jwt}` },
     })
     expect(pollRes.status()).toBe(200)
@@ -475,7 +479,7 @@ test.describe('Host Management API endpoints', () => {
 
   test('API-HOST-05: Redeem host device code → POST /api/hosts/register → slug, jwt, hubUrl (or 500 when NATS JWT issuance not configured)', async ({ request }) => {
     // Generate a fresh code to redeem
-    const codeRes = await request.post(`${BASE_URL}/api/users/${DEV_USER_SLUG}/hosts/code`, {
+    const codeRes = await request.post(`${BASE_URL}/api/users/${userSlug}/hosts/code`, {
       headers: { Authorization: `Bearer ${jwt}` },
       data: { publicKey: `UAREDEEMTEST${Date.now()}${Math.random().toString(36).slice(2, 8).toUpperCase()}` },
     })
@@ -510,7 +514,7 @@ test.describe('Host Management API endpoints', () => {
 
   test('API-HOST-07: Redeem already-used host code → POST /api/hosts/register with used code → 409 or 404 or 500', async ({ request }) => {
     // Generate and immediately redeem a code
-    const codeRes = await request.post(`${BASE_URL}/api/users/${DEV_USER_SLUG}/hosts/code`, {
+    const codeRes = await request.post(`${BASE_URL}/api/users/${userSlug}/hosts/code`, {
       headers: { Authorization: `Bearer ${jwt}` },
       data: { publicKey: `UAREUSE${Date.now()}${Math.random().toString(36).slice(2, 8).toUpperCase()}` },
     })
@@ -536,7 +540,7 @@ test.describe('Host Management API endpoints', () => {
   })
 
   test('API-HOST-08: Update host name → PUT /api/users/{uslug}/hosts/{hslug} → 200', async ({ request }) => {
-    const res = await request.put(`${BASE_URL}/api/users/${DEV_USER_SLUG}/hosts/local`, {
+    const res = await request.put(`${BASE_URL}/api/users/${userSlug}/hosts/local`, {
       headers: { Authorization: `Bearer ${jwt}` },
       data: { name: 'Local Machine' },
     })
@@ -550,7 +554,7 @@ test.describe('Host Management API endpoints', () => {
       test.skip(true, 'No host created in API-HOST-02')
       return
     }
-    const res = await request.delete(`${BASE_URL}/api/users/${DEV_USER_SLUG}/hosts/${createdHostSlug}`, {
+    const res = await request.delete(`${BASE_URL}/api/users/${userSlug}/hosts/${createdHostSlug}`, {
       headers: { Authorization: `Bearer ${jwt}` },
     })
     expect(res.status()).toBe(204)
@@ -591,7 +595,7 @@ test.describe('Admin API endpoints', () => {
       headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
       data: { slug, name: 'E2E Test Cluster', jsDomain: 'e2e.js', leafUrl: 'nats://test-leaf:7422' },
     })
-    expect(res.status()).toBe(200)
+    expect(res.status()).toBe(201)
     const body = await res.json()
     expect(body).toHaveProperty('slug')
     expect(body).toHaveProperty('leafJwt')
@@ -616,7 +620,7 @@ test.describe('Admin API endpoints', () => {
       headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
       data: { slug, name: 'Grant Cluster', jsDomain: 'grant.js', leafUrl: 'nats://grant-leaf:7422' },
     })
-    expect(createRes.status()).toBe(200)
+    expect(createRes.status()).toBe(201)
     createdClusterSlugs.push(slug)
 
     const grantRes = await request.post(`${ADMIN_URL}/admin/clusters/${slug}/grants`, {
@@ -635,7 +639,7 @@ test.describe('Admin API endpoints', () => {
       headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
       data: { id, email, name: 'E2E Admin Test User' },
     })
-    expect(res.status()).toBe(200)
+    expect(res.status()).toBe(201)
     const body = await res.json()
     expect(body).toHaveProperty('id')
     expect(body).toHaveProperty('email')
@@ -660,7 +664,7 @@ test.describe('Admin API endpoints', () => {
       headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
       data: { id, email, name: 'E2E Delete User' },
     })
-    expect(createRes.status()).toBe(200)
+    expect(createRes.status()).toBe(201)
     const { id: userId } = await createRes.json()
 
     const deleteRes = await request.delete(`${ADMIN_URL}/admin/users/${userId}`, {
@@ -683,7 +687,7 @@ test.describe('Admin API endpoints', () => {
       headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
       data: { slug, name: 'Dup Cluster', jsDomain: 'dup.js', leafUrl: 'nats://dup-leaf:7422' },
     })
-    expect(first.status()).toBe(200)
+    expect(first.status()).toBe(201)
     createdClusterSlugs.push(slug)
 
     // Duplicate
