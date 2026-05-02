@@ -11,6 +11,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"github.com/rs/zerolog"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -859,6 +860,265 @@ func TestADR0063_AgentNKeyMountedInPodTemplate(t *testing.T) {
 	}
 	if !foundEnv {
 		t.Error("AGENT_NKEY_PATH env var not found in pod template")
+	}
+}
+
+// TestGap1_DeploymentOwnerReference verifies that the project Deployment created by
+// reconcileDeployment carries an ownerReference back to the MCProject CR with
+// Controller=true. Per spec-k8s-architecture.md:99 — "All Deployments, PVCs, and
+// Secrets materialized per project carry ownerReferences back to the MCProject CR
+// via controllerutil.SetControllerReference."
+//
+// Note: controller-runtime rejects cross-namespace owner references. The Deployment
+// normally lives in mclaude-{userSlug} while the MCProject lives in mclaude-system.
+// This test uses the same namespace for both so SetControllerReference succeeds and the
+// reference is verifiable — matching the pattern used in TestADR0063_AgentNKeyOwnerReference.
+func TestGap1_DeploymentOwnerReference(t *testing.T) {
+	ns := "mclaude-system"
+	mcp := testMCProject("alice-my-project", ns)
+	mcp.Spec.UserSlug = "alice"
+	mcp.Spec.ProjectID = "proj-456"
+
+	scheme := newTestScheme()
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(mcp).
+		WithStatusSubresource(&MCProject{}).
+		Build()
+
+	r := &MCProjectReconciler{
+		client:         cl,
+		scheme:         scheme,
+		controlPlaneNs: ns,
+		clusterSlug:    "us-east",
+		logger:         zerolog.Nop(),
+	}
+
+	ctx := context.Background()
+	tpl := defaultTemplate()
+	tpl.hostSlug = "us-east"
+
+	if err := r.reconcileDeployment(ctx, mcp, ns, tpl); err != nil {
+		t.Fatalf("reconcileDeployment: %v", err)
+	}
+
+	deployName := "project-" + mcp.Spec.ProjectID
+	deploy := &appsv1.Deployment{}
+	if err := cl.Get(ctx, types.NamespacedName{Name: deployName, Namespace: ns}, deploy); err != nil {
+		t.Fatalf("get deployment %q: %v", deployName, err)
+	}
+
+	var found bool
+	for _, ref := range deploy.OwnerReferences {
+		if ref.Kind == "MCProject" && ref.Name == mcp.Name {
+			found = true
+			if ref.Controller == nil || !*ref.Controller {
+				t.Errorf("ownerReference.Controller: expected true, got %v", ref.Controller)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("deployment %q missing ownerReference with Kind=MCProject, Name=%q", deployName, mcp.Name)
+	}
+}
+
+// TestGap2_PVCOwnerReferences verifies that both the project PVC and the nix PVC created
+// by ensurePVCCR carry ownerReferences back to the MCProject CR with Controller=true.
+// Per spec-k8s-architecture.md:99 — ownerReferences cascade to PVCs on MCProject deletion.
+//
+// Note: same-namespace constraint applies (see TestGap1_DeploymentOwnerReference comment).
+func TestGap2_PVCOwnerReferences(t *testing.T) {
+	ns := "mclaude-system"
+	mcp := testMCProject("alice-my-project", ns)
+	mcp.Spec.ProjectID = "proj-456"
+
+	scheme := newTestScheme()
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(mcp).
+		WithStatusSubresource(&MCProject{}).
+		Build()
+
+	r := &MCProjectReconciler{
+		client:         cl,
+		scheme:         scheme,
+		controlPlaneNs: ns,
+		clusterSlug:    "us-east",
+		logger:         zerolog.Nop(),
+	}
+
+	ctx := context.Background()
+
+	projectPVCName := "project-" + mcp.Spec.ProjectID
+	nixPVCName := "nix-" + mcp.Spec.ProjectID
+
+	if err := r.ensurePVCCR(ctx, mcp, ns, projectPVCName, "10Gi", ""); err != nil {
+		t.Fatalf("ensurePVCCR (project): %v", err)
+	}
+	if err := r.ensurePVCCR(ctx, mcp, ns, nixPVCName, "10Gi", ""); err != nil {
+		t.Fatalf("ensurePVCCR (nix): %v", err)
+	}
+
+	for _, pvcName := range []string{projectPVCName, nixPVCName} {
+		pvc := &corev1.PersistentVolumeClaim{}
+		if err := cl.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: ns}, pvc); err != nil {
+			t.Fatalf("get pvc %q: %v", pvcName, err)
+		}
+
+		var found bool
+		for _, ref := range pvc.OwnerReferences {
+			if ref.Kind == "MCProject" && ref.Name == mcp.Name {
+				found = true
+				if ref.Controller == nil || !*ref.Controller {
+					t.Errorf("pvc %q ownerReference.Controller: expected true, got %v", pvcName, ref.Controller)
+				}
+				break
+			}
+		}
+		if !found {
+			t.Errorf("pvc %q missing ownerReference with Kind=MCProject, Name=%q", pvcName, mcp.Name)
+		}
+	}
+}
+
+// TestGap3_CorporateCAInjection verifies the Corporate CA injection behavior when
+// corporateCAEnabled is "true" in the session-agent-template ConfigMap.
+// Per spec-k8s-architecture.md:129-132.
+//
+// The test verifies:
+//  1. The user namespace gets the label mclaude.io/user-namespace: "true".
+//  2. The pod template has a corporate-ca volume.
+//  3. The pod template has a volume mount at /etc/ssl/certs/corporate-ca-certificates.crt.
+//  4. The pod template has the NODE_EXTRA_CA_CERTS env var.
+//  5. The pod template annotation mclaude.io/ca-bundle-hash is set.
+func TestGap3_CorporateCAInjection(t *testing.T) {
+	const (
+		userSlug  = "alice"
+		projectID = "proj-456"
+		caCMName  = "trust-manager-ca-bundle"
+	)
+
+	ns := "mclaude-system"
+	userNs := "mclaude-" + userSlug
+
+	mcp := testMCProject("alice-my-project", ns)
+	mcp.Spec.UserSlug = userSlug
+	mcp.Spec.ProjectID = projectID
+
+	// Create the CA ConfigMap in the user namespace so buildPodTemplate can find it.
+	caCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: caCMName, Namespace: userNs},
+		Data:       map[string]string{"ca-certificates.crt": "-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n"},
+	}
+
+	// Create the session-agent-template ConfigMap with corporateCAEnabled=true.
+	templateCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "mclaude-session-agent-template", Namespace: ns},
+		Data: map[string]string{
+			"corporateCAEnabled":      "true",
+			"corporateCAConfigMapName": caCMName,
+			"corporateCAConfigMapKey": "ca-certificates.crt",
+		},
+	}
+
+	userNamespace := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: userNs},
+	}
+
+	scheme := newTestScheme()
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(mcp, caCM, templateCM, userNamespace).
+		WithStatusSubresource(&MCProject{}).
+		Build()
+
+	r := &MCProjectReconciler{
+		client:                 cl,
+		scheme:                 scheme,
+		controlPlaneNs:         ns,
+		releaseName:            "mclaude",
+		sessionAgentTemplateCM: "mclaude-session-agent-template",
+		clusterSlug:            "us-east",
+		logger:                 zerolog.Nop(),
+	}
+
+	ctx := context.Background()
+
+	// --- Verify (1): namespace label ---
+	tpl, err := r.loadTemplate(ctx)
+	if err != nil {
+		t.Fatalf("loadTemplate: %v", err)
+	}
+	if !tpl.corporateCAEnabled {
+		t.Fatal("expected tpl.corporateCAEnabled to be true after loading template")
+	}
+
+	if err := r.reconcileNamespace(ctx, mcp, userNs, tpl); err != nil {
+		t.Fatalf("reconcileNamespace: %v", err)
+	}
+
+	nsObj := &corev1.Namespace{}
+	if err := cl.Get(ctx, types.NamespacedName{Name: userNs}, nsObj); err != nil {
+		t.Fatalf("get namespace %q: %v", userNs, err)
+	}
+	if nsObj.Labels["mclaude.io/user-namespace"] != "true" {
+		t.Errorf("namespace label mclaude.io/user-namespace: got %q, want %q",
+			nsObj.Labels["mclaude.io/user-namespace"], "true")
+	}
+
+	// --- Verify (2)-(5): pod template corporate-ca injection ---
+	podTpl := r.buildPodTemplate(ctx, mcp, userNs, tpl)
+
+	// (2) corporate-ca volume.
+	foundVolume := false
+	for _, v := range podTpl.Spec.Volumes {
+		if v.Name == "corporate-ca" {
+			foundVolume = true
+			if v.VolumeSource.ConfigMap == nil || v.VolumeSource.ConfigMap.LocalObjectReference.Name != caCMName {
+				t.Errorf("corporate-ca volume ConfigMap name: got %v, want %q", v.VolumeSource.ConfigMap, caCMName)
+			}
+			break
+		}
+	}
+	if !foundVolume {
+		t.Error("pod template missing corporate-ca volume")
+	}
+
+	// (3) volume mount at /etc/ssl/certs/corporate-ca-certificates.crt.
+	foundMount := false
+	for _, m := range podTpl.Spec.Containers[0].VolumeMounts {
+		if m.Name == "corporate-ca" {
+			foundMount = true
+			if m.MountPath != "/etc/ssl/certs/corporate-ca-certificates.crt" {
+				t.Errorf("corporate-ca mount path: got %q, want %q", m.MountPath, "/etc/ssl/certs/corporate-ca-certificates.crt")
+			}
+			break
+		}
+	}
+	if !foundMount {
+		t.Error("pod template missing corporate-ca volume mount")
+	}
+
+	// (4) NODE_EXTRA_CA_CERTS env var.
+	foundEnv := false
+	for _, e := range podTpl.Spec.Containers[0].Env {
+		if e.Name == "NODE_EXTRA_CA_CERTS" {
+			foundEnv = true
+			if e.Value != "/etc/ssl/certs/corporate-ca-certificates.crt" {
+				t.Errorf("NODE_EXTRA_CA_CERTS: got %q, want %q", e.Value, "/etc/ssl/certs/corporate-ca-certificates.crt")
+			}
+			break
+		}
+	}
+	if !foundEnv {
+		t.Error("pod template missing NODE_EXTRA_CA_CERTS env var")
+	}
+
+	// (5) mclaude.io/ca-bundle-hash annotation is set.
+	hash := podTpl.ObjectMeta.Annotations["mclaude.io/ca-bundle-hash"]
+	if hash == "" {
+		t.Error("pod template annotation mclaude.io/ca-bundle-hash is not set")
 	}
 }
 
