@@ -20,7 +20,7 @@ Single Deployment in `mclaude-system` on the worker cluster. Built with kubebuil
    and retry every 5s with exponential backoff capped at 60s. Controller does not proceed until JWT is acquired.
 4. Decode the host slug (`hslug`) from the received JWT. Use this slug for all subsequent NATS subscriptions — do not read `host.name` from Helm.
 5. Connect to hub NATS at `HUB_NATS_URL` using the host JWT.
-6. Subscribe to `mclaude.hosts.{hslug}.users.*.projects.*.create` and `mclaude.hosts.{hslug}.users.*.projects.*.delete`.
+6. Subscribe to `mclaude.hosts.{hslug}.>` (single wildcard). Messages are dispatched internally by subject suffix.
 7. Background loop refreshes the host JWT before TTL expiry (5-minute TTL) via the same challenge-response code path.
 
 ## Registration Flow (One-Time Operator Action)
@@ -49,10 +49,9 @@ mclaude host deregister --slug us-east   # publishes deregister from workstation
 helm uninstall mclaude-worker -n mclaude-system
 ```
 
-**Option B (Helm pre-delete Job):**
-The `mclaude-worker` Helm chart includes a pre-delete hook Job that uses the host's stored NKey seed to perform challenge-response auth and then publishes the deregister subject before Helm tears down the controller. This ensures the host is deregistered even if the operator forgets to run `mclaude host deregister` first.
+**Option B (Helm pre-delete Job) — deferred:** A pre-delete hook Job that reads the NKey seed, performs challenge-response, and publishes the deregister subject is a planned future enhancement. Not implemented in V1 — use Option A.
 
-In both cases, all MCProject CRs and their owned resources (Deployments, PVCs, Secrets) are cleaned up by `helm uninstall` via `ownerReferences` cascade or Helm-tracked resource deletion.
+All MCProject CRs and their owned resources (Deployments, PVCs, Secrets) are cleaned up by `helm uninstall` via `ownerReferences` cascade or Helm-tracked resource deletion.
 
 ## Configuration
 
@@ -77,12 +76,13 @@ Dropped from prior spec (no longer used):
 
 ## NATS Subscriptions
 
-Subscribes via host JWT (`mclaude.hosts.{hslug}.>`, zero JetStream access):
+Subscribes via host JWT to the single wildcard `mclaude.hosts.{hslug}.>` (zero JetStream access). The JWT permission scope is `mclaude.hosts.{hslug}.>`. Messages are dispatched internally by subject suffix:
 
-| Subject | Behavior |
-|---------|----------|
-| `mclaude.hosts.{hslug}.users.*.projects.*.create` | Request/reply. CP fan-out provisioning (ADR-0054). Resolves `userSlug`, `hostSlug`, `projectSlug` from subject + payload; creates the `MCProject` CR; returns success when reconcile reaches `Ready`. |
-| `mclaude.hosts.{hslug}.users.*.projects.*.delete` | Request/reply. Deletes the `MCProject` CR; owner references cascade to project Deployment/PVC/Secret. |
+| Subject suffix (within `mclaude.hosts.{hslug}.`) | Behavior |
+|---------------------------------------------------|----------|
+| `users.*.projects.*.create` | Request/reply. CP fan-out provisioning (ADR-0054). Resolves `userSlug`, `hostSlug`, `projectSlug` from subject + payload; creates the `MCProject` CR; returns success when reconcile reaches `Ready`. |
+| `users.*.projects.*.delete` | Request/reply. Deletes the `MCProject` CR; owner references cascade to project Deployment/PVC/Secret. |
+| `users.*.projects.*.update` | Request/reply. Re-reconciles `user-secrets` for the project (e.g. OAuth token rotation). Resolves `userSlug`, `hostSlug`, `projectSlug` from subject + payload; triggers `reconcileSecrets`. |
 
 ## Kubernetes Resources
 
@@ -105,23 +105,24 @@ On each reconcile cycle:
 1. Loads the session-agent-template ConfigMap for image, resource, and PVC configuration.
 2. Ensures the user namespace `mclaude-{userSlug}` exists with correct labels (ADR-0062: namespace derived from `userSlug`, not UUID).
 3. Ensures RBAC resources (ServiceAccount, Role, RoleBinding).
-4. Ensures the `user-config` ConfigMap and `user-secrets` Secret. The `user-secrets` Secret contains `oauth-token` (from `DEV_OAUTH_TOKEN` if set) and OAuth connection tokens. It does **not** contain `nats-creds` — session-agent pods self-bootstrap NATS credentials via challenge-response (see Session-Agent Auth below).
+4. Ensures the `user-config` ConfigMap and `user-secrets` Secret. The `user-secrets` Secret contains `oauth-token` (from `DEV_OAUTH_TOKEN` if set) and OAuth connection tokens. It does **not** contain NATS credentials.
 5. Copies imagePullSecrets from the controller's namespace.
 6. Ensures the project PVC and Nix PVC (with `ownerReferences` back to MCProject).
-7. Ensures the session-agent Deployment (with `ownerReferences` back to MCProject) using `Recreate` strategy. Pod env vars include `USER_ID`, `USER_SLUG`, `HOST_SLUG`, `PROJECT_ID`, `PROJECT_SLUG`, `NATS_URL` (= `HUB_NATS_URL`), `CONTROL_PLANE_URL` (injected from the controller's own `CONTROL_PLANE_URL` env, not from the session-agent-template ConfigMap).
+6b. Ensures the per-project `agent-nkey-{projectId}` Secret: generates an NKey pair for the agent, writes the decorated seed to field `nkey_seed`, registers the public key with CP via NATS `agents.register`, sets `ownerReferences` back to MCProject. Idempotent — skips the NATS registration call if the Secret already exists with a matching key.
+7. Ensures the session-agent Deployment (with `ownerReferences` back to MCProject) using `Recreate` strategy. Pod env vars include `USER_ID`, `USER_SLUG`, `HOST_SLUG`, `PROJECT_ID`, `PROJECT_SLUG`, `NATS_URL` (= `HUB_NATS_URL`), `CONTROL_PLANE_URL` (injected from the controller's own `CONTROL_PLANE_URL` env, not from the session-agent-template ConfigMap). Pod mounts `agent-nkey-{projectId}` Secret at `/etc/mclaude/agent-nkey/`.
 8. Updates `MCProject` status: phase (`Pending → Provisioning → Ready` or `Failed`) and conditions.
 
 ## Session-Agent Auth
 
-The controller no longer mints session-agent JWTs. Session-agent pods self-bootstrap per ADR-0054:
+The controller no longer mints session-agent JWTs. Session-agent pods self-bootstrap:
 
-1. Agent generates its own NKey pair at pod startup.
-2. Agent passes its public key to the controller via local IPC.
-3. Controller publishes `mclaude.hosts.{hslug}.api.agents.register {nkey_public, userSlug, hostSlug, projectSlug}` to hub NATS; CP stores the key in `agent_credentials`.
-4. Agent calls `POST /api/auth/challenge` + `POST /api/auth/verify` to obtain its per-project JWT.
-5. Agent connects to hub NATS (`HUB_NATS_URL`) with its JWT.
+1. During reconciliation, the controller generates an NKey pair for the agent (`nkeys.CreateUser()`), stores the decorated seed string in the per-project `agent-nkey-{projectId}` Secret (field: `nkey_seed`), and registers the public key with CP via NATS request `mclaude.hosts.{hslug}.api.agents.register {nkey_public, user_slug, project_slug}` — the host slug is implicit in the NATS subject and is not included in the payload. The controller does not retain the seed after writing to the Secret.
+2. The session-agent pod mounts the `agent-nkey-{projectId}` Secret, reads the NKey seed, and performs HTTP challenge-response (`POST /api/auth/challenge` + `POST /api/auth/verify`) against `CONTROL_PLANE_URL` to obtain its per-project JWT.
+3. Agent connects to hub NATS (`HUB_NATS_URL`) with the per-project JWT.
 
-The `nats-creds` Secret key is not written by `reconcileSecrets`. The `user-secrets` Secret retains only `oauth-token` and OAuth connection entries.
+K8s-specific note: Unlike the BYOH variant (where the agent is a subprocess and can pass its public key to the controller via stdout), K8s controller and session-agent pods run in separate pods across different namespaces. The controller therefore generates the agent NKey pair during reconciliation and injects it via Secret mount. The seed is briefly held in-process by the controller before writing to the Secret.
+
+The `nats-creds` key is not written to `user-secrets`. The per-project `agent-nkey-{projectId}` Secret carries `ownerReferences` back to the MCProject CR and is deleted when the CR is deleted.
 
 ## Corporate CA Support
 

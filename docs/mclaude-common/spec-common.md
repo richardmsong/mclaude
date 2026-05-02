@@ -130,7 +130,7 @@ Shared NKey challenge-response authentication logic for host controllers. Both `
 
 `NewHostAuthFromSeed(seedPath string, cpURL string, log zerolog.Logger) (*HostAuth, error)` — reads only the NKey seed from `seedPath`. No pre-existing JWT required. Used by `mclaude-controller-k8s` where the Helm pre-install Job writes only the seed and the operator runs `mclaude host register` separately.
 
-**`Refresh() (jwt string, err error)`**
+**`Refresh(ctx context.Context) (jwt string, err error)`**
 
 Performs HTTP challenge-response against `cpURL`:
 1. `POST /api/auth/challenge {nkey_public}` → `{challenge}`
@@ -146,6 +146,12 @@ NKey <pubkey> not registered with control-plane. To complete registration run:
 Callers must implement the retry loop. The recommended pattern for K8s: retry every 5s with exponential backoff capped at 60s.
 
 **`PublicKey() string`** — returns the NKey public key (U-prefix). Used to extract the key for logging or NOTES.txt display before JWT acquisition.
+
+**`JWTFunc() nats.AuthTokenHandler`** — returns a function suitable for passing to `nats.UserJWT(...)`. The returned handler returns the cached JWT on each call. Callers must call `Refresh(ctx)` (via the boot loop) before connecting to NATS to ensure the JWT is populated. Used to wire HostAuth into the NATS client options.
+
+**`SignFunc() nats.SignatureHandler`** — returns the NKey sign function for NATS challenge-response connection. Passed to `nats.Nkey(pubkey, signFunc)` alongside the public key.
+
+**`StartRefreshLoop(ctx context.Context)`** — background goroutine that proactively refreshes the host JWT before the 5-minute TTL expires. Calls `Refresh(ctx)` when TTL is within a safety margin; the NATS client picks up the updated JWT via `JWTFunc()` on the next reconnect challenge. Stops when `ctx` is cancelled.
 
 ### Package `types`
 
