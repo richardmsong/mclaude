@@ -121,9 +121,10 @@ This ADR adds **no new API surface**. The K8s worker chart is a packaging mechan
 
 | Kind | Name | Purpose |
 |------|------|---------|
-| Job | `{release}-gen-host-nkey` | Pre-install hook (weight `-10`). Generates NKey pair via `nkeys.CreateUser()` (`U`-prefix, matching `mclaude-controller-local/host_auth.go`'s `ParseDecoratedUserNKey`). Writes the **decorated seed string** (`SUAB...`) to Secret data field `nkey_seed`. Prints the **public key** (`UABC...`) to the Job log + Helm NOTES.txt. Idempotent — skips if Secret exists. |
+| ServiceAccount / Role / RoleBinding | `{release}-gen-host-nkey` | Pre-install hook RBAC (weight `-20`). Grants the Job permission to create/get the `{release}-host-creds` Secret. |
+| Job | `{release}-gen-host-nkey` | Pre-install hook (weight `-10`). Runs `control-plane gen-host-nkey` subcommand. Generates NKey pair (`U`-prefix), writes the **decorated seed string** (`SUAB...`) to Secret data field `nkey_seed`, and prints the **public key** (`UABC...`) to the Job log. Idempotent — skips if Secret exists. |
 | Secret | `{release}-host-creds` | Single field: `nkey_seed` (decorated `S`-prefix seed string). JWT is **not** persisted here — controller acquires it in-memory via challenge-response on every boot. |
-| Deployment | `{release}-controller-k8s` | Mounts `{release}-host-creds` as a volume at `/etc/mclaude/host-creds/`. Env: `HUB_NATS_URL` (from `host.hubNatsUrl`), `CONTROL_PLANE_URL` (from `controlPlane.url`), `HOST_NKEY_SEED_PATH=/etc/mclaude/host-creds/nkey_seed`. The `host.name` Helm value is rendered into NOTES.txt only — controller decodes its actual slug from the JWT. |
+| Deployment | `{release}-controller` | Mounts `{release}-host-creds` as a volume at `/etc/mclaude/host-creds/`. Env: `HUB_NATS_URL` (from `host.hubNatsUrl`), `CONTROL_PLANE_URL` (from `controlPlane.url`), `HOST_NKEY_SEED_PATH=/etc/mclaude/host-creds/nkey_seed`. The `host.name` Helm value is rendered into NOTES.txt only — controller decodes its actual slug from the JWT. |
 | ConfigMap | `{release}-session-agent-template` | Pod template referenced by the controller when materializing per-project session-agent pods (existing). |
 | ClusterRole / ClusterRoleBinding | `{release}-controller` | Lets the controller manage Namespace, Deployment, PVC, Secret, MCProject CRs. |
 | NOTES.txt | (Helm template) | Post-install message instructing the operator to read the public key (`kubectl logs job/{release}-gen-host-nkey`) and run `mclaude host register --type cluster --name "$HOST_NAME" --nkey-public <key>`, where `$HOST_NAME` is rendered from `.Values.host.name` (a memorable display name; CP slugifies it). |
@@ -258,7 +259,7 @@ Components implementing the change (handled by `/feature-change` after this ADR 
 - `charts/mclaude-worker/` — strip + retain (drop NATS StatefulSet/ConfigMap/Service, drop gen-leaf-creds-job, add gen-host-nkey-job + host-creds Secret + NOTES.txt; controller env reshape)
 - `charts/mclaude-cp/` — **no changes**; existing NATS WS Ingress and WebSocket listener are already in place. Documentation work only (note the `ingress.natsHost` operator value).
 - `mclaude-controller-k8s/` — set owner references on materialized resources; decode host slug from JWT; drop dual-subscription code; drop unused env vars (`NATS_ACCOUNT_SEED`, `NATS_CREDENTIALS_PATH`, `JS_DOMAIN`, `CLUSTER_SLUG`); rename `NATS_URL`→`HUB_NATS_URL`; add `HOST_NKEY_SEED_PATH` + `CONTROL_PLANE_URL`; remove `loadAccountKey()`, `IssueSessionAgentJWT()`, `accountKP` field
-- `mclaude-common/pkg/hostauth/` — **new package**: `host_auth.go` moved here from `mclaude-controller-local/`; add `NewHostAuthFromSeed` constructor with 5s/60s-capped retry boot loop; both controllers import `mclaude.io/common/pkg/hostauth`
+- `mclaude-common/pkg/hostauth/` — **new package**: `host_auth.go` moved here from `mclaude-controller-local/`; add `NewHostAuthFromSeed` constructor (`ErrNotRegistered` on 404, callers implement the retry loop); add `JWTFunc()`, `SignFunc()`, `StartRefreshLoop(ctx)` helpers; both controllers import `mclaude.io/common/pkg/hostauth`
 - `mclaude-controller-local/` — remove local `host_auth.go`, update import to `mclaude.io/common/pkg/hostauth`
 
 ## Scope
@@ -277,6 +278,7 @@ Components implementing the change (handled by `/feature-change` after this ADR 
 - **Per-user namespace lifecycle (reap-empty + user-deletion cascade)** — needs its own ADR. Empty namespaces are harmless until a focused design lands.
 - HA controller (multiple replicas with leader election) — `LEADER_ELECTION` env var is set in Helm but not read by the binary today
 - Tailscale / relay-fronted hub NATS as alternative to public Ingress (operators can layer this on top of the public NATS endpoint without spec changes)
+- Integration tests for boot challenge-response and agent NKey registration against a real NATS cluster with operator-mode JWT enforcement — requires test infrastructure (embedded NATS operator cluster) that is not yet part of the controller-k8s test suite. Unit tests against httptest servers cover the logic paths; full integration coverage is a separate infrastructure investment.
 
 ## Open questions
 
@@ -297,7 +299,7 @@ Components implementing the change (handled by `/feature-change` after this ADR 
 | `mclaude-controller-k8s/nkeys.go` (drop account-key path) | -100 | 30k | Remove `loadAccountKey()`, `IssueSessionAgentJWT()`, `accountKP` field. Agent JWTs now issued by CP. |
 | `mclaude-control-plane/sys_subscriber.go` (CONNECT dispatch fix) | +10 / -30 | 30k | Remove type filter from `"Client"` branch (lookup by `public_key`, no type filter); drop `"Leafnode"` branch |
 | `mclaude-control-plane/db.go` + migration (drop CHECK constraint) | +15 / -5 | 20k | Drop `CHECK (type = 'machine' OR (...))` constraint; migrate `js_domain`/`leaf_url`/`account_jwt` columns if still present |
-| `mclaude-common/pkg/hostauth/` (new package, move + extend) | +80 | 40k | Move `host_auth.go` from `mclaude-controller-local/`; add `NewHostAuthFromSeed` with 5s/60s-capped boot retry loop |
+| `mclaude-common/pkg/hostauth/` (new package, move + extend) | +80 | 40k | Move `host_auth.go` from `mclaude-controller-local/`; add `NewHostAuthFromSeed` (returns `ErrNotRegistered` on 404 — callers implement retry); add `JWTFunc()`, `SignFunc()`, `StartRefreshLoop(ctx)` |
 | `mclaude-controller-local/` (import update) | -50 / +5 | 10k | Remove local `host_auth.go`; update import to `mclaude.io/common/pkg/hostauth` |
 
 **Total estimated tokens:** 430k
