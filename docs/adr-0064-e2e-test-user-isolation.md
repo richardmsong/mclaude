@@ -1,8 +1,9 @@
 # ADR: E2E Test User Isolation and K3d Best Practices
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-01: accepted
+- 2026-05-02: implemented — all scope CLEAN
 
 ## Overview
 
