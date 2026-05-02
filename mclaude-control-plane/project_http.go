@@ -13,12 +13,13 @@ import (
 
 // ProjectResponse is the HTTP response for a single project.
 type ProjectResponse struct {
-	ID       string  `json:"id"`
-	Slug     string  `json:"slug"`
-	Name     string  `json:"name"`
-	GitURL   string  `json:"gitUrl"`
-	Status   string  `json:"status"`
-	HostSlug string  `json:"hostSlug,omitempty"`
+	ID        string  `json:"id"`
+	Slug      string  `json:"slug"`
+	Name      string  `json:"name"`
+	GitURL    string  `json:"gitUrl"`
+	Status    string  `json:"status"`
+	HostSlug  string  `json:"hostSlug,omitempty"`
+	ImportRef *string `json:"importRef,omitempty"`
 }
 
 // ProjectCreateRequest is the body for POST /api/users/{uslug}/projects.
@@ -205,13 +206,13 @@ func (s *Server) handleGetProjectHTTP(w http.ResponseWriter, r *http.Request, us
 	}
 
 	row := s.db.pool.QueryRow(r.Context(), `
-		SELECT p.id, p.slug, p.name, p.git_url, p.status, COALESCE(h.slug, '')
+		SELECT p.id, p.slug, p.name, p.git_url, p.status, COALESCE(h.slug, ''), p.import_ref
 		FROM projects p
 		LEFT JOIN hosts h ON h.id = p.host_id
 		WHERE p.user_id = $1 AND p.slug = $2`, userID, pslug)
 
 	var resp ProjectResponse
-	if err := row.Scan(&resp.ID, &resp.Slug, &resp.Name, &resp.GitURL, &resp.Status, &resp.HostSlug); err != nil {
+	if err := row.Scan(&resp.ID, &resp.Slug, &resp.Name, &resp.GitURL, &resp.Status, &resp.HostSlug, &resp.ImportRef); err != nil {
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
 	}
