@@ -13,12 +13,13 @@ import (
 // cliDeviceCodeEntry stores a pending CLI device-code auth flow.
 // Distinct from the host device-code flow in hosts.go.
 type cliDeviceCodeEntry struct {
-	UserCode     string
-	ExpiresAt    time.Time
-	Completed    bool
-	UserID       string
-	UserSlug     string
-	JWT          string
+	UserCode  string
+	ExpiresAt time.Time
+	Completed bool
+	PublicKey string // CLI-generated NKey public key; empty if flow initiated by browser
+	UserID    string
+	UserSlug  string
+	JWT       string
 }
 
 // cliDeviceCodeStore is an in-memory store for CLI device-code auth flows.
@@ -32,7 +33,9 @@ var globalCLIDeviceCodeStore = &cliDeviceCodeStore{
 }
 
 // CLIDeviceCodeRequest is the body for POST /api/auth/device-code.
-type CLIDeviceCodeRequest struct{}
+type CLIDeviceCodeRequest struct {
+	PublicKey string `json:"publicKey"` // CLI-generated NKey public key; empty if initiated by browser
+}
 
 // CLIDeviceCodeResponse is returned for POST /api/auth/device-code.
 type CLIDeviceCodeResponse struct {
@@ -94,6 +97,13 @@ func (s *Server) handleCLIDeviceCodeCreate(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Decode optional request body (publicKey is optional — browser-initiated flows omit it).
+	var req CLIDeviceCodeRequest
+	if r.Body != nil {
+		// Ignore decode errors — empty body is valid (browser-initiated flow).
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+
 	deviceCode, err := generateCLIDeviceCode()
 	if err != nil {
 		http.Error(w, "failed to generate device code", http.StatusInternalServerError)
@@ -112,6 +122,7 @@ func (s *Server) handleCLIDeviceCodeCreate(w http.ResponseWriter, r *http.Reques
 	globalCLIDeviceCodeStore.codes[deviceCode] = &cliDeviceCodeEntry{
 		UserCode:  userCode,
 		ExpiresAt: expiresAt,
+		PublicKey: req.PublicKey,
 	}
 	globalCLIDeviceCodeStore.mu.Unlock()
 
@@ -242,15 +253,23 @@ func (s *Server) handleCLIDeviceCodeVerify(w http.ResponseWriter, r *http.Reques
 			}
 		}
 		if entry != nil {
-			// Issue JWT for the user
+			// Determine which public key to use for JWT issuance (ADR-0065):
+			// 1. entry.PublicKey — set by CLI during POST /api/auth/device-code.
+			// 2. user.NKeyPublic — stored from a previous NKey-based login.
+			// 3. Neither available — return HTTP 400.
 			expirySecs := int64(s.jwtExpiry.Seconds())
 			var jwt string
-			if user.NKeyPublic != nil && *user.NKeyPublic != "" {
-				hostSlugs, _ := s.db.GetHostAccessSlugs(r.Context(), user.ID)
-				jwt, _ = IssueUserJWT(*user.NKeyPublic, user.ID, user.Slug, hostSlugs, s.accountKP, expirySecs)
-			} else {
-				jwt, _, _ = IssueUserJWTLegacy(user.ID, user.Slug, s.accountKP, expirySecs)
+			var publicKey string
+			if entry.PublicKey != "" {
+				publicKey = entry.PublicKey
+			} else if user.NKeyPublic != nil && *user.NKeyPublic != "" {
+				publicKey = *user.NKeyPublic
 			}
+			if publicKey != "" {
+				hostSlugs, _ := s.db.GetHostAccessSlugs(r.Context(), user.ID)
+				jwt, _ = IssueUserJWT(publicKey, user.ID, user.Slug, hostSlugs, s.accountKP, expirySecs)
+			}
+			// jwt is empty if no public key available; detected below after unlock.
 			entry.Completed = true
 			entry.UserID = user.ID
 			entry.UserSlug = user.Slug
@@ -260,6 +279,11 @@ func (s *Server) handleCLIDeviceCodeVerify(w http.ResponseWriter, r *http.Reques
 
 		if entry == nil || deviceCode == "" {
 			http.Error(w, "invalid or expired user code", http.StatusBadRequest)
+			return
+		}
+
+		if entry.JWT == "" {
+			http.Error(w, "no public key available for JWT issuance", http.StatusBadRequest)
 			return
 		}
 
