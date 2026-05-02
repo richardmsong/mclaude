@@ -481,12 +481,12 @@ func (r *MCProjectReconciler) reconcileDeployment(ctx context.Context, mcp *MCPr
 }
 
 // agentRegisterRequest is the NATS payload for mclaude.hosts.{hslug}.api.agents.register
-// (ADR-0063 Session-Agent Auth).
+// (ADR-0063 Session-Agent Auth). The host slug is NOT sent in the payload — CP extracts
+// it from the NATS subject (mclaude.hosts.{hslug}.api.agents.register).
 type agentRegisterRequest struct {
 	NKeyPublic  string `json:"nkey_public"`
-	UserSlug    string `json:"userSlug"`
-	HostSlug    string `json:"hostSlug"`
-	ProjectSlug string `json:"projectSlug"`
+	UserSlug    string `json:"user_slug"`
+	ProjectSlug string `json:"project_slug"`
 }
 
 // agentRegisterReply is the expected NATS reply from CP.
@@ -580,7 +580,7 @@ func (r *MCProjectReconciler) reconcileAgentNKey(ctx context.Context, mcp *MCPro
 
 // registerAgentNKey sends the NATS request to register the agent's public key
 // with the control-plane. Subject: mclaude.hosts.{hslug}.api.agents.register
-// Payload: {nkey_public, userSlug, hostSlug, projectSlug}
+// Payload: {nkey_public, user_slug, project_slug} — host slug is implicit in the subject.
 // Expected reply: {ok: true}
 func (r *MCProjectReconciler) registerAgentNKey(ctx context.Context, mcp *MCProject, pubKey string) error {
 	subject := fmt.Sprintf("mclaude.hosts.%s.api.agents.register", r.clusterSlug)
@@ -588,7 +588,6 @@ func (r *MCProjectReconciler) registerAgentNKey(ctx context.Context, mcp *MCProj
 	payload, err := json.Marshal(agentRegisterRequest{
 		NKeyPublic:  pubKey,
 		UserSlug:    mcp.Spec.UserSlug,
-		HostSlug:    r.clusterSlug,
 		ProjectSlug: mcp.Spec.ProjectSlug,
 	})
 	if err != nil {

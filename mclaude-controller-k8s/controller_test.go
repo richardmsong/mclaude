@@ -729,9 +729,7 @@ func TestADR0063_AgentNKeyNATSRegistration(t *testing.T) {
 	if payload.UserSlug != "alice" {
 		t.Errorf("payload.UserSlug: got %q, want %q", payload.UserSlug, "alice")
 	}
-	if payload.HostSlug != "us-east" {
-		t.Errorf("payload.HostSlug: got %q, want %q", payload.HostSlug, "us-east")
-	}
+	// HostSlug is NOT sent in the payload — CP extracts it from the NATS subject.
 	if payload.ProjectSlug != "my-project" {
 		t.Errorf("payload.ProjectSlug: got %q, want %q", payload.ProjectSlug, "my-project")
 	}
