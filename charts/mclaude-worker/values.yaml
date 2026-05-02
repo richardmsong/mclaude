@@ -85,7 +85,7 @@ sessionAgent:
   resources:
     requests:
       cpu: 200m
-      memory: 256Mi
+      memory: 64Mi
     limits:
       cpu: 2000m
       memory: 2Gi

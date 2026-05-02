@@ -822,7 +822,7 @@ func applyDefaultResources(tpl *sessionAgentTpl) {
 	if tpl.resources.Requests == nil {
 		tpl.resources.Requests = corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("200m"),
-			corev1.ResourceMemory: resource.MustParse("256Mi"),
+			corev1.ResourceMemory: resource.MustParse("64Mi"),
 		}
 	}
 	if tpl.resources.Limits == nil {
