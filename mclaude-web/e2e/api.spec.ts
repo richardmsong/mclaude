@@ -365,15 +365,18 @@ test.describe('Project CRUD API endpoints', () => {
   })
 
   test('API-PROJ-03: Get single project → GET /api/users/{uslug}/projects/{pslug} → 200, project details', async ({ request }) => {
-    // Use the known default project
-    const res = await request.get(`${BASE_URL}/api/users/${userSlug}/projects/default-project`, {
+    if (!createdProjectSlug) {
+      test.skip(true, 'API-PROJ-01 did not create a project')
+      return
+    }
+    const res = await request.get(`${BASE_URL}/api/users/${userSlug}/projects/${createdProjectSlug}`, {
       headers: { Authorization: `Bearer ${jwt}` },
     })
     expect(res.status()).toBe(200)
     const body = await res.json()
     expect(body).toHaveProperty('id')
     expect(body).toHaveProperty('slug')
-    expect(body.slug).toBe('default-project')
+    expect(body.slug).toBe(createdProjectSlug)
   })
 
   test('API-PROJ-04: Delete project → DELETE /api/users/{uslug}/projects/{pslug} → 204', async ({ request }) => {
