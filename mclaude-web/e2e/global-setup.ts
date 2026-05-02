@@ -23,6 +23,7 @@ export default async function globalSetup(_config: FullConfig) {
   }
 
   const adminToken = process.env['ADMIN_TOKEN'] || 'dev-admin-token'
+  const userId = crypto.randomUUID()
   const email = `e2e-${Date.now()}@mclaude.local`
   const token = crypto.randomBytes(8).toString('hex')
 
@@ -32,7 +33,7 @@ export default async function globalSetup(_config: FullConfig) {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${adminToken}`,
     },
-    body: JSON.stringify({ email, name: 'E2E Test User', password: token }),
+    body: JSON.stringify({ id: userId, email, name: 'E2E Test User', password: token }),
   })
 
   if (!res.ok) {
@@ -40,11 +41,9 @@ export default async function globalSetup(_config: FullConfig) {
     throw new Error(`global-setup: POST /admin/users failed ${res.status}: ${body}`)
   }
 
-  const data = await res.json() as { id: string }
-
   // Propagate credentials to worker processes via environment
   process.env['DEV_EMAIL'] = email
   process.env['DEV_TOKEN'] = token
 
-  fs.writeFileSync(TEST_USER_FILE, JSON.stringify({ userId: data.id, email, token }))
+  fs.writeFileSync(TEST_USER_FILE, JSON.stringify({ userId, email, token }))
 }
