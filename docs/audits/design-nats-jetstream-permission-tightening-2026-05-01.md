@@ -44,3 +44,7 @@
 3. **Cross-table NKey uniqueness assertion is factually incorrect** — The `users` table modification section states: "Cross-table lookup order for `/api/auth/challenge`: `users.nkey_public` → `hosts.public_key` → `agent_credentials.nkey_public` (first match wins...). All three columns have UNIQUE constraints, so at most one row matches across all tables." Per-column UNIQUE constraints guarantee at most one row **per table**, not across all tables. The same NKey public key value could exist in both `users.nkey_public` and `hosts.public_key` simultaneously — per-column UNIQUE does not prevent this. While cryptographically infeasible with Ed25519 keys, the assertion is logically incorrect. A developer relying on this guarantee might not implement defensive handling (e.g., logging a warning if multiple tables match) and could assume any lookup order is equivalent (negating the first-match-wins specification). The ordered lookup behavior is correctly specified; the supporting assertion is wrong.
    - **Doc**: "All three columns have UNIQUE constraints, so at most one row matches across all tables."
    - **Code**: No cross-table UNIQUE constraint exists or is proposed. Each table has independent UNIQUE on its NKey column.
+
+## Run: 2026-05-01T08:00:00Z
+
+(This run evaluates ADR-0063-k8s-architecture-spec.md, not the above ADR-0054. Appended here per naming convention conflict — doc path shares the same date prefix.)
