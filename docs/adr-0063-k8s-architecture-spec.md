@@ -1,9 +1,10 @@
 # ADR: Kubernetes Architecture Spec — Consolidate, Drop Worker NATS, Reflect ADR-0054 Reality
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-01: draft
 - 2026-05-01: accepted — paired with docs/mclaude-controller-k8s/spec-k8s-architecture.md (new), docs/mclaude-controller-local/spec-controller-local.md (new), docs/charts-mclaude/spec-helm.md (worker section rewrite), docs/spec-state-schema.md (5 DDL corrections, PVC ownerRefs, SYS dispatch, constraint drop note), docs/mclaude-control-plane/spec-control-plane.md (gen-leaf-creds removed, broken refs fixed, SYS dispatch updated), docs/mclaude-common/spec-common.md (pkg/hostauth section), docs/spec-nats-payload-schema.md (nkey_public snake_case, user_id column), docs/spec-nats-activity.md (user_id column)
+- 2026-05-01: implemented — all scope CLEAN (impl-evaluator r7: 0 GAP, 0 PARTIAL, 0 UNSPEC'd)
 
 ## Overview
 
