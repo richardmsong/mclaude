@@ -1,8 +1,9 @@
 # ADR: Fix init-keys Job failing on fresh namespace install
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-03: accepted — Class A bug fix; POSTGRES_PASSWORD secretKeyRef must be optional
+- 2026-05-03: implemented — all scope CLEAN
 
 ## Overview
 
