@@ -32,6 +32,7 @@ func TestIntegration_Login_DeviceCode(t *testing.T) {
 		mockUserCode   = "TSTCDE"
 		mockJWT        = "test-integration-jwt-value"
 		mockUserSlug   = "integration-test-user"
+		mockNATSUrl    = "wss://mock-nats.example.com"
 	)
 
 	// pollCount tracks how many times poll was called so we can simulate pending→authorized.
@@ -81,6 +82,7 @@ func TestIntegration_Login_DeviceCode(t *testing.T) {
 			"status":   "authorized",
 			"jwt":      mockJWT,
 			"userSlug": mockUserSlug,
+			"natsUrl":  mockNATSUrl,
 		})
 	})
 
@@ -126,6 +128,9 @@ func TestIntegration_Login_DeviceCode(t *testing.T) {
 	}
 	if creds.UserSlug != mockUserSlug {
 		t.Errorf("UserSlug = %q; want %q", creds.UserSlug, mockUserSlug)
+	}
+	if creds.NATSUrl != mockNATSUrl {
+		t.Errorf("NATSUrl = %q; want %q", creds.NATSUrl, mockNATSUrl)
 	}
 
 	// Verify NKey seed is a valid U-key (User key).
