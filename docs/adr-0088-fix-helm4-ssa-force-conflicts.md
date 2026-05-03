@@ -1,8 +1,9 @@
 # ADR: Add --force-conflicts to helm upgrade for Helm 4 SSA normal-upgrade conflicts
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-03: accepted — Class C spec gap; ADR-0084 covered failed-state SSA recovery but not normal-upgrade SSA conflicts
+- 2026-05-03: implemented — all scope CLEAN
 
 ## Overview
 
