@@ -1,8 +1,9 @@
 # ADR: Fix Helm SSA conflicts from failed releases via --force flag
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-03: accepted — Class A bug fix; Helm SSA ownership from failed releases blocks subsequent upgrades
+- 2026-05-03: implemented — all scope CLEAN
 
 ## Overview
 
