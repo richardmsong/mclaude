@@ -487,11 +487,12 @@ func (s *Server) adminGrantCluster(w http.ResponseWriter, r *http.Request, cslug
 
 	// Look up the cluster's shared fields from an existing host row.
 	// ADR-0063: js_domain, leaf_url, account_jwt columns dropped.
-	var directNATSURL, publicKey *string
+	// ADR-0086: public_key is the cluster controller's NKey identity — do not copy to per-user rows.
+	var directNATSURL *string
 	err := s.db.pool.QueryRow(r.Context(), `
-		SELECT direct_nats_url, public_key
+		SELECT direct_nats_url
 		FROM hosts WHERE slug = $1 AND type = 'cluster' LIMIT 1`, cslug).
-		Scan(&directNATSURL, &publicKey)
+		Scan(&directNATSURL)
 	if err != nil {
 		http.Error(w, "cluster not found", http.StatusNotFound)
 		return
@@ -514,10 +515,10 @@ func (s *Server) adminGrantCluster(w http.ResponseWriter, r *http.Request, cslug
 
 	hostID := uuid.NewString()
 	_, err = s.db.pool.Exec(r.Context(), `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, direct_nats_url, public_key, user_jwt)
-		VALUES ($1, $2, $3, $4, 'cluster', 'user', $5, $6, $7)
+		INSERT INTO hosts (id, user_id, slug, name, type, role, direct_nats_url, user_jwt)
+		VALUES ($1, $2, $3, $4, 'cluster', 'user', $5, $6)
 		ON CONFLICT (user_id, slug) DO NOTHING`,
-		hostID, user.ID, cslug, cslug, directNATSURL, publicKey, userJWT)
+		hostID, user.ID, cslug, cslug, directNATSURL, userJWT)
 	if err != nil {
 		http.Error(w, "failed to grant cluster access", http.StatusInternalServerError)
 		return
