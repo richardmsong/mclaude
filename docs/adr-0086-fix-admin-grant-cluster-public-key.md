@@ -1,8 +1,9 @@
 # ADR: Fix adminGrantCluster copying cluster public_key to per-user hosts row
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-03: accepted — Class A bug; INSERT fails with unique constraint violation when cluster has a public_key
+- 2026-05-03: implemented — all scope CLEAN
 
 ## Overview
 
