@@ -580,6 +580,7 @@ port: 4222                    # client connections
 http_port: 8222               # monitoring
 websocket.port: 8080          # browser clients
 max_payload: 8MB              # large tool results
+max_control_line: 16384       # NATS protocol line limit (ADR-0087); default 4096 is too small for multi-host user JWTs (~240 bytes per host grant; 16384 handles ~62 hosts)
 jetstream.store_dir: /data/jetstream
 jetstream.max_file_store: configurable
 jetstream.domain: hub         # hub's own JetStream domain

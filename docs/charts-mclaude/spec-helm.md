@@ -107,6 +107,7 @@ S3-compatible object storage for import archives and chat attachments per ADR-00
 | `nats.enabled` | `true` | Deploy hub NATS. |
 | `nats.persistence.size` | `10Gi` | Hub JetStream PVC size. |
 | `nats.leafNodes.listenPort` | `7422` | Leaf-node listen port on hub NATS. |
+| `nats.config.maxControlLine` | `"16384"` | Max NATS protocol control-line length in bytes (ADR-0087). Default NATS value is 4096, which is too small for user JWTs with multiple host grants (~240 bytes per additional host). 16384 supports ~62 concurrent host grants per user. |
 | `postgres.enabled` | `true` | Deploy Postgres. |
 | `postgres.persistence.size` | `20Gi` | Postgres PVC size. |
 | `controlPlane.externalUrl` | `""` | **Required.** External URL (e.g. `https://dev.mclaude.richardmcsong.com`). Chart fails if unset. |
