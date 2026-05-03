@@ -1,8 +1,9 @@
 # ADR: Fix import.confirm success reply missing ok:true
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-03: accepted — Class A bug fix; CLI contract expects ok:true, CP omits it
+- 2026-05-03: implemented — all scope CLEAN
 
 ## Overview
 
