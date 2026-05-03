@@ -769,7 +769,7 @@ type CheckSlugRequest struct {
 	Slug string `json:"slug"`
 }
 
-// handleCheckSlug processes mclaude.users.{uslug}.hosts.{hslug}.projects.*.check-slug.
+// handleCheckSlug processes mclaude.users.{uslug}.hosts.{hslug}.projects.check-slug.
 // Returns {available: bool, suggestion: string (if not available)}.
 func (s *Server) handleCheckSlug(msg *nats.Msg) {
 	if s.db == nil {
@@ -777,7 +777,7 @@ func (s *Server) handleCheckSlug(msg *nats.Msg) {
 		return
 	}
 
-	// Extract from subject: mclaude.users.{uslug}.hosts.{hslug}.projects.*.check-slug
+	// Extract from subject: mclaude.users.{uslug}.hosts.{hslug}.projects.check-slug
 	parts := strings.Split(msg.Subject, ".")
 	if len(parts) < 7 {
 		replyNATSError(msg, "malformed subject")
