@@ -121,10 +121,10 @@ The loopback-only port (bound to `127.0.0.1`) hosts admin break-glass endpoints 
 | `POST` | `/admin/clusters/{cslug}/grants` | Grants user access (`{userSlug}`). Creates a new `hosts` row for that user with `public_key = NULL` (the cluster's NKey belongs only to the owner row — per-user rows authenticate via `user_jwt`); copies `direct_nats_url` from the cluster owner row; mints a per-user JWT scoped to `mclaude.users.{userSlug}.hosts.{cslug}.>` via `IssueHostJWTLegacy(user.Slug, cslug, accountKP)`. Idempotent — if the user/cluster pair already exists (`ON CONFLICT (user_id, slug) DO NOTHING`), returns 201 without creating a duplicate row. |
 | `DELETE` | `/admin/clusters/{cslug}` | Removes the cluster. **Not yet implemented** — deferred per ADR-0035. Use direct SQL as a workaround. |
 | `POST` | `/admin/users` | Creates a user (id, email, name, optional password). **Known gap:** spec says optional `isAdmin` field, but `AdminUserRequest` struct has no `IsAdmin` field — new users are always non-admin. |
-| `POST` | `/admin/users/{uslug}/promote` | Sets `users.is_admin = true`. **Not yet implemented** — DB method `SetUserAdmin` exists but HTTP handler is not wired. Use direct SQL as a workaround. |
+| `POST` | `/admin/users/{uslug}/promote` | Sets `users.is_admin = true`. |
 | `GET` | `/admin/users` | Lists all users. |
 | `DELETE` | `/admin/users/{id}` | Deletes a user from Postgres (cascades to hosts, projects, oauth_connections). **Known gap:** does not revoke the user's NATS JWT (remains valid until expiry) and does not publish NATS delete requests to controllers — orphaned K8s resources persist until manual cleanup. |
-| `POST` | `/admin/sessions/stop` | Break-glass session stop. **Known bug:** handler executes `UPDATE sessions SET status = 'stopped'` against a `sessions` table that does not exist in the schema (session state lives in NATS KV, not Postgres). Endpoint is effectively non-functional. |
+| `POST` | `/admin/sessions/stop` | Break-glass session stop. Publishes a sessions.delete message to the session-agent's host-scoped NATS subject (`mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.delete`). Looks up user slug and project/host slugs from the request body's `userId` + `projectId`, then publishes. Returns 202 Accepted immediately (fire-and-forget). If NATS is unavailable or slug lookup fails, logs a warning and still returns 202. |
 
 ### NATS Subjects
 
