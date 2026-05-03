@@ -209,6 +209,8 @@ jobs:
           RESOLVER_PRELOAD=$(kubectl get secret operator-keys -n mclaude-system -o jsonpath='{.data.resolverPreload}' | base64 -d)
           ACCOUNT_PUBLIC_KEY=$(kubectl get secret operator-keys -n mclaude-system -o jsonpath='{.data.accountPublicKey}' | base64 -d)
 
+          kubectl delete configmap mclaude-worker-session-agent-template -n mclaude-system --ignore-not-found=true
+
           helm upgrade --install "mclaude-worker" ./charts/mclaude-worker \
             -f ./charts/mclaude-worker/values-k3d-ghcr.yaml \
             --set controlPlane.image.tag="${IMAGE_TAG}" \
