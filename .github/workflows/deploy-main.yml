@@ -211,6 +211,7 @@ jobs:
             --set controlPlane.devOAuthToken="${DEV_OAUTH_TOKEN}" \
             --set "ingress.externalDnsTarget=${TS_IP}" \
             --namespace mclaude-system \
+            --force-conflicts \
             --wait --timeout 5m
 
       - name: Cleanup failed worker release
@@ -247,4 +248,5 @@ jobs:
             --set trustChain.accountPublicKey="${ACCOUNT_PUBLIC_KEY}" \
             --set trustChain.resolverPreload="${RESOLVER_PRELOAD}" \
             --namespace mclaude-system \
+            --force-conflicts \
             --wait --timeout 5m
