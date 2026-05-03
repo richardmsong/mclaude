@@ -573,25 +573,27 @@ func (s *Server) handleNATSImportConfirm(msg *nats.Msg) {
 		}
 	}
 
-	// Dispatch provisioning request to controller.
+	reply, _ := json.Marshal(map[string]any{"ok": true, "projectId": projID, "projectSlug": proj.Slug})
+	if msg.Reply != "" {
+		_ = msg.Respond(reply)
+	}
+
+	// Dispatch provisioning in background — non-fatal, CLI already replied.
 	if s.nc != nil {
 		provReq := ProvisionRequest{
-			UserID:    user.ID,
-			UserSlug:  uslug,
-			HostSlug:  hslug,
-			ProjectID: projID,
+			UserID:      user.ID,
+			UserSlug:    uslug,
+			HostSlug:    hslug,
+			ProjectID:   projID,
 			ProjectSlug: proj.Slug,
 		}
 		provData, _ := json.Marshal(provReq)
 		provSubject := "mclaude.hosts." + hslug + ".users." + uslug + ".projects." + proj.Slug + ".create"
-		if _, reqErr := s.nc.Request(provSubject, provData, 30*time.Second); reqErr != nil {
-			log.Warn().Err(reqErr).Str("projectId", projID).Msg("import confirm: provisioning request (non-fatal)")
-		}
-	}
-
-	reply, _ := json.Marshal(map[string]any{"ok": true, "projectId": projID, "projectSlug": proj.Slug})
-	if msg.Reply != "" {
-		_ = msg.Respond(reply)
+		go func() {
+			if _, reqErr := s.nc.Request(provSubject, provData, 30*time.Second); reqErr != nil {
+				log.Warn().Err(reqErr).Str("projectId", projID).Msg("import confirm: provisioning request (non-fatal)")
+			}
+		}()
 	}
 }
 
