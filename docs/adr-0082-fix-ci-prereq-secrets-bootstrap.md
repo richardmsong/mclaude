@@ -1,8 +1,9 @@
 # ADR: Fix CI not bootstrapping prerequisite secrets on fresh namespace
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-03: accepted — Class A bug fix; CI deploy fails on fresh namespace because prerequisite secrets are absent
+- 2026-05-03: implemented — all scope CLEAN
 
 ## Overview
 
