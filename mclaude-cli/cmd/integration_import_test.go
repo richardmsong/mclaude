@@ -39,6 +39,7 @@ func seedImportDir(t *testing.T) (claudeProjectsDir, fakeCWD, authPath string) {
 		JWT:      intJWT,
 		NKeySeed: intNKeySeed,
 		UserSlug: intUserSlug,
+		NATSUrl:  intNATSURL,
 	}); err != nil {
 		t.Fatalf("seedImportDir: SaveAuth: %v", err)
 	}
