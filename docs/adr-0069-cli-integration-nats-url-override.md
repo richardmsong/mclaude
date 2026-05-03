@@ -1,9 +1,10 @@
 # ADR: CLI propagates natsWsUrl from device-code poll response
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-03: draft
 - 2026-05-03: accepted — paired with docs/mclaude-cli/spec-cli.md, docs/mclaude-control-plane/spec-control-plane.md
+- 2026-05-03: implemented — all scope CLEAN
 
 ## Overview
 
