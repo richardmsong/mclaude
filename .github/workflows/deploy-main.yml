@@ -190,6 +190,13 @@ jobs:
             --namespace mclaude-system \
             --dry-run=client -o yaml | kubectl apply -f -
 
+      - name: Cleanup failed control-plane release
+        run: |
+          if helm status mclaude-cp -n mclaude-system 2>/dev/null | grep -q "STATUS: failed"; then
+            echo "Release mclaude-cp is in failed state — uninstalling to clear SSA ownership"
+            helm uninstall mclaude-cp -n mclaude-system
+          fi
+
       - name: Helm deploy control-plane
         env:
           IMAGE_TAG: ${{ needs.tag.outputs.image_tag }}
@@ -204,7 +211,14 @@ jobs:
             --set controlPlane.devOAuthToken="${DEV_OAUTH_TOKEN}" \
             --set "ingress.externalDnsTarget=${TS_IP}" \
             --namespace mclaude-system \
-            --force --wait --timeout 5m
+            --wait --timeout 5m
+
+      - name: Cleanup failed worker release
+        run: |
+          if helm status mclaude-worker -n mclaude-system 2>/dev/null | grep -q "STATUS: failed"; then
+            echo "Release mclaude-worker is in failed state — uninstalling to clear SSA ownership"
+            helm uninstall mclaude-worker -n mclaude-system
+          fi
 
       - name: Helm deploy worker
         env:
@@ -233,4 +247,4 @@ jobs:
             --set trustChain.accountPublicKey="${ACCOUNT_PUBLIC_KEY}" \
             --set trustChain.resolverPreload="${RESOLVER_PRELOAD}" \
             --namespace mclaude-system \
-            --force --wait --timeout 5m
+            --wait --timeout 5m
