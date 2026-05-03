@@ -500,7 +500,7 @@ func (s *Server) handleNATSImportRequest(msg *nats.Msg) {
 		return
 	}
 
-	reply, _ := json.Marshal(map[string]string{"importId": importID, "uploadUrl": uploadURL})
+	reply, _ := json.Marshal(map[string]string{"id": importID, "uploadUrl": uploadURL})
 	if msg.Reply != "" {
 		_ = msg.Respond(reply)
 	}
