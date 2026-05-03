@@ -65,7 +65,7 @@ Imports existing Claude Code session data from the local machine into mclaude. C
 
 **Prerequisites:** User must be logged in (`mclaude login`). An active host must be registered and selected (`mclaude host register` + `mclaude host use`).
 
-**CWD encoding algorithm:** The CLI derives an encoded CWD from the current directory using Claude Code's path encoding: take the absolute path (e.g. `/Users/rsong/work/mclaude`), replace every `/` with `-`, strip the leading `-` (e.g. `Users-rsong-work-mclaude`). This matches the directory names under `~/.claude/projects/`. The CLI verifies at runtime that the derived path exists under `~/.claude/projects/`; if it doesn't, the CLI lists available encoded directories and errors with a hint.
+**CWD encoding algorithm:** The CLI derives an encoded CWD from the current directory using Claude Code's path encoding: take the absolute path (e.g. `/Users/rsong/work/mclaude`), replace every `/` with `-` (e.g. `-Users-rsong-work-mclaude`). The leading `-` is preserved — it is the artifact of the leading `/` being replaced. This matches the directory names under `~/.claude/projects/`. The CLI verifies at runtime that the derived path exists under `~/.claude/projects/`; if it doesn't, the CLI lists available encoded directories and errors with a hint.
 
 **Flow:**
 
@@ -233,7 +233,11 @@ The CP returns `natsUrl` in its device-code poll response (`s.natsWsURL`). The C
 
 ### Test user setup
 
-`TestMain` creates an ephemeral test user via `POST /admin/users` (same admin API as Playwright). The response returns `{id, email, name, slug}`. TestMain supplies its own generated password in the request body; the password is not returned in the response. NATS credentials are obtained by automating the device-code flow (no browser needed):
+`TestMain` creates an ephemeral test user via `POST /admin/users` (same admin API as Playwright). The response returns `{id, email, name, slug}`. TestMain supplies its own generated password in the request body; the password is not returned in the response.
+
+After creating the user, `TestMain` calls `grantClusterAccess(adminURL, adminToken, hslug, user.Slug)` (defined in `integration_main_test.go`) which calls `POST /admin/clusters/{hslug}/grants` with `{userSlug}`. This step is required before the device-code login: the user JWT is issued during login and includes only cluster slugs for which a `hosts` row already exists; without the grant the reconciler fails with "user does not have access to host" when provisioning the test project. The call is made unconditionally for every test run regardless of cluster type — the CP endpoint is idempotent (`ON CONFLICT DO NOTHING`) so re-running is safe. If the grant call fails, `TestMain` deletes the test user and exits 1.
+
+NATS credentials are then obtained by automating the device-code flow (no browser needed):
 
 1. Start `RunLogin(flags)` in a goroutine — POSTs `/api/auth/device-code` with `{publicKey}` (CLI-generated NKey public key), gets `{deviceCode, userCode}`, begins polling
 2. Complete the code: form `POST /api/auth/device-code/verify` with fields `user_code=<userCode>`, `email=<testEmail>`, `password=<testToken>` — the endpoint authenticates inline from form fields; no separate login or session cookie needed
@@ -241,7 +245,7 @@ The CP returns `natsUrl` in its device-code poll response (`s.natsWsURL`). The C
 
 The JWT is bound to the CLI's `publicKey` (sent in step 1). The CLI signs NATS connections with the matching `nkeySeed`. Tests use this JWT as `Authorization: Bearer <jwt>` for all authenticated CP HTTP calls.
 
-`TestMain` teardown: delete test project via admin API (CP deletes S3 prefix `{uslug}/{hslug}/{pslug}/`), then delete the test user.
+`TestMain` teardown: delete test project via admin API (CP deletes S3 prefix `{uslug}/{hslug}/{pslug}/`), then delete the test user. No explicit revoke is needed — `deleteTestUser` cascades to all `hosts` rows for the user via the FK constraint, which drops the cluster grant automatically.
 
 ### Test cases
 
