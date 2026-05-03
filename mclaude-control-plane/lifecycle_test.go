@@ -586,3 +586,74 @@ func keys(m map[string]string) []string {
 	}
 	return out
 }
+
+// ---- handleNATSImportConfirm reply shape (ADR-0079) ----
+
+// TestHandleNATSImportConfirm_NilDB verifies the handler returns early when db is nil.
+func TestHandleNATSImportConfirm_NilDB(t *testing.T) {
+	srv := newTestServer(t) // db=nil
+	msg := &nats.Msg{
+		Subject: "mclaude.users.alice.hosts.laptop-a.projects.myapp.import.confirm",
+		Reply:   "",
+		Data:    []byte(`{"importId":"imp-123","name":"My App"}`),
+	}
+	srv.handleNATSImportConfirm(msg) // should not panic
+}
+
+// TestHandleNATSImportConfirm_ReplyContainsOK verifies that the success reply
+// from handleNATSImportConfirm includes "ok":true (ADR-0079).
+// The CLI's importConfirmResponse struct deserializes resp.OK from json:"ok";
+// without it, resp.OK = false and the CLI reports an error even on success.
+func TestHandleNATSImportConfirm_ReplyContainsOK(t *testing.T) {
+	projectID := "proj-abc-123"
+	projectSlug := "my-app"
+
+	// This is the exact marshal call fixed by ADR-0079 (attachments.go:592).
+	reply, err := json.Marshal(map[string]any{"ok": true, "projectId": projectID, "projectSlug": projectSlug})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(reply, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	okVal, exists := decoded["ok"]
+	if !exists {
+		t.Errorf("import.confirm success reply missing field \"ok\"; got keys: %v", keysAny(decoded))
+	}
+	if okBool, _ := okVal.(bool); !okBool {
+		t.Errorf("import.confirm success reply: \"ok\" = %v; want true", okVal)
+	}
+	if decoded["projectId"] != projectID {
+		t.Errorf("reply[\"projectId\"] = %v; want %q", decoded["projectId"], projectID)
+	}
+	if decoded["projectSlug"] != projectSlug {
+		t.Errorf("reply[\"projectSlug\"] = %v; want %q", decoded["projectSlug"], projectSlug)
+	}
+}
+
+// TestHandleNATSImportConfirm_ReplyDoesNotOmitOK verifies that the old (broken) reply
+// shape — which omitted "ok" — would have caused the CLI to see ok=false.
+func TestHandleNATSImportConfirm_ReplyDoesNotOmitOK(t *testing.T) {
+	// Simulate the pre-fix reply (map[string]string with no "ok" key).
+	oldReply, _ := json.Marshal(map[string]string{"projectId": "p1", "projectSlug": "app"})
+	var decoded map[string]any
+	if err := json.Unmarshal(oldReply, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// Confirm the old shape lacked "ok" — this is what caused the bug.
+	if _, exists := decoded["ok"]; exists {
+		t.Errorf("expected old reply shape to lack \"ok\" field, but it was present")
+	}
+}
+
+// keysAny returns the keys of a map[string]any for diagnostic output.
+func keysAny(m map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}

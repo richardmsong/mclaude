@@ -589,7 +589,7 @@ func (s *Server) handleNATSImportConfirm(msg *nats.Msg) {
 		}
 	}
 
-	reply, _ := json.Marshal(map[string]string{"projectId": projID, "projectSlug": proj.Slug})
+	reply, _ := json.Marshal(map[string]any{"ok": true, "projectId": projID, "projectSlug": proj.Slug})
 	if msg.Reply != "" {
 		_ = msg.Respond(reply)
 	}
