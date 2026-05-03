@@ -309,6 +309,111 @@ func TestLoginContextUpdated(t *testing.T) {
 	}
 }
 
+// TestRunLogin_StoresNatsUrl verifies that when the poll response contains
+// natsUrl, RunLogin writes it to auth.json so RunImport can use it (ADR-0069).
+func TestRunLogin_StoresNatsUrl(t *testing.T) {
+	const wantNATSUrl = "wss://mock-nats.example.com"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/auth/device-code", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"deviceCode":      "DCNATS",
+			"userCode":        "NT1234",
+			"verificationUrl": "https://mclaude.example.com/auth/device/NT1234",
+			"expiresIn":       900,
+			"interval":        1,
+		})
+	})
+	mux.HandleFunc("/api/auth/device-code/poll", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":   "authorized",
+			"jwt":      "nats-url-test-jwt",
+			"userSlug": "test-user",
+			"natsUrl":  wantNATSUrl,
+		})
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	authPath := filepath.Join(dir, "auth.json")
+
+	if _, err := cmd.RunLogin(cmd.LoginFlags{
+		ServerURL:   srv.URL,
+		AuthPath:    authPath,
+		ContextPath: filepath.Join(dir, "context.json"),
+	}, new(bytes.Buffer)); err != nil {
+		t.Fatalf("RunLogin: %v", err)
+	}
+
+	creds, err := cmd.LoadAuth(authPath)
+	if err != nil {
+		t.Fatalf("LoadAuth: %v", err)
+	}
+	if creds.NATSUrl != wantNATSUrl {
+		t.Errorf("auth.json NATSUrl = %q; want %q", creds.NATSUrl, wantNATSUrl)
+	}
+}
+
+// TestRunLogin_NatsUrlOmittedWhenEmpty verifies that when the poll response
+// does not include natsUrl, auth.json is written without the field (omitempty).
+func TestRunLogin_NatsUrlOmittedWhenEmpty(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/auth/device-code", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"deviceCode":      "DCNONAT",
+			"userCode":        "NN5678",
+			"verificationUrl": "https://mclaude.example.com/auth/device/NN5678",
+			"expiresIn":       900,
+			"interval":        1,
+		})
+	})
+	mux.HandleFunc("/api/auth/device-code/poll", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// No natsUrl field — simulates older CP deployments.
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":   "authorized",
+			"jwt":      "no-nats-url-jwt",
+			"userSlug": "test-user2",
+		})
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	authPath := filepath.Join(dir, "auth.json")
+
+	if _, err := cmd.RunLogin(cmd.LoginFlags{
+		ServerURL:   srv.URL,
+		AuthPath:    authPath,
+		ContextPath: filepath.Join(dir, "context.json"),
+	}, new(bytes.Buffer)); err != nil {
+		t.Fatalf("RunLogin: %v", err)
+	}
+
+	creds, err := cmd.LoadAuth(authPath)
+	if err != nil {
+		t.Fatalf("LoadAuth: %v", err)
+	}
+	if creds.NATSUrl != "" {
+		t.Errorf("auth.json NATSUrl = %q; want empty string when CP returns no natsUrl", creds.NATSUrl)
+	}
+
+	// Verify the raw JSON does not contain "natsUrl" key (omitempty).
+	raw, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatalf("read auth.json: %v", err)
+	}
+	if strings.Contains(string(raw), "natsUrl") {
+		t.Errorf("auth.json contains natsUrl key when it should be omitted: %s", raw)
+	}
+}
+
 // TestLoginDisplaysVerificationURL checks that the output contains the URL and user code.
 func TestLoginDisplaysVerificationURL(t *testing.T) {
 	expectedURL := "https://mclaude.example.com/auth/device/HELLO1"

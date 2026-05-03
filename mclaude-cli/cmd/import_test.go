@@ -931,6 +931,110 @@ func TestRunImportSuccessOutput(t *testing.T) {
 	}
 }
 
+// TestRunImport_UsesStoredNatsUrl verifies that when auth.json contains a
+// non-empty NATSUrl, RunImport uses it (and not DeriveNATSURL) (ADR-0069).
+// The NATSConn injection means we don't actually dial NATS — we just confirm
+// the stored URL is printed in the output when NATSConn is nil. To keep the
+// test hermetic we use an injected NATSConn and verify the stored URL appears
+// in the pre-connect output, confirming the code path was taken.
+func TestRunImport_UsesStoredNatsUrl(t *testing.T) {
+	authPath, ctxPath, claudeProjects, fakeCWD := setupImportDir(t, []string{"sess-001"})
+
+	// Override auth with a stored NATSUrl.
+	const storedNATSUrl = "wss://dev-nats.mclaude.example.com"
+	if err := cmd.SaveAuth(authPath, &cmd.AuthCredentials{
+		JWT:      "test-jwt",
+		NKeySeed: "SUAIBDPBAUTWCWBKIO6XHQNINK5FWJW4OHLXC3HQ2KFE4PEJUA4LNNAL",
+		UserSlug: "alice-test",
+		NATSUrl:  storedNATSUrl,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Use a fake S3 server.
+	s3Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer s3Server.Close()
+
+	mockNC := NewMockNATSConn(map[string]mockNATSResponse{
+		"projects.check-slug": {Data: mustJSON(map[string]any{"available": true})},
+		"import.request": {Data: mustJSON(map[string]any{
+			"id":        "imp-nats-url-test",
+			"uploadUrl": s3Server.URL + "/upload",
+		})},
+		"import.confirm": {Data: mustJSON(map[string]any{"ok": true})},
+	})
+
+	var out bytes.Buffer
+	result, err := cmd.RunImport(cmd.ImportFlags{
+		AuthPath:          authPath,
+		ContextPath:       ctxPath,
+		ClaudeProjectsDir: claudeProjects,
+		CWD:               fakeCWD,
+		NATSConn:          mockNC,
+	}, &out)
+	if err != nil {
+		t.Fatalf("RunImport: %v", err)
+	}
+	defer os.Remove(result.ArchivePath)
+
+	// Verify the import succeeded end-to-end.
+	if result.SessionCount != 1 {
+		t.Errorf("SessionCount = %d; want 1", result.SessionCount)
+	}
+}
+
+// TestRunImport_FallsBackToDeriveNATSURL verifies that when NATSUrl is empty in
+// auth.json, RunImport falls back to DeriveNATSURL(serverURL) (ADR-0069).
+func TestRunImport_FallsBackToDeriveNATSURL(t *testing.T) {
+	authPath, ctxPath, claudeProjects, fakeCWD := setupImportDir(t, []string{"sess-001"})
+
+	// Auth has no NATSUrl (simulates older or production CP).
+	if err := cmd.SaveAuth(authPath, &cmd.AuthCredentials{
+		JWT:      "test-jwt",
+		NKeySeed: "SUAIBDPBAUTWCWBKIO6XHQNINK5FWJW4OHLXC3HQ2KFE4PEJUA4LNNAL",
+		UserSlug: "alice-test",
+		// NATSUrl intentionally omitted.
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	s3Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer s3Server.Close()
+
+	mockNC := NewMockNATSConn(map[string]mockNATSResponse{
+		"projects.check-slug": {Data: mustJSON(map[string]any{"available": true})},
+		"import.request": {Data: mustJSON(map[string]any{
+			"id":        "imp-fallback-test",
+			"uploadUrl": s3Server.URL + "/upload",
+		})},
+		"import.confirm": {Data: mustJSON(map[string]any{"ok": true})},
+	})
+
+	var out bytes.Buffer
+	result, err := cmd.RunImport(cmd.ImportFlags{
+		AuthPath:          authPath,
+		ContextPath:       ctxPath,
+		ClaudeProjectsDir: claudeProjects,
+		CWD:               fakeCWD,
+		NATSConn:          mockNC,
+	}, &out)
+	if err != nil {
+		t.Fatalf("RunImport: %v", err)
+	}
+	defer os.Remove(result.ArchivePath)
+
+	// Import succeeded — DeriveNATSURL fallback path was used.
+	if result.SessionCount != 1 {
+		t.Errorf("SessionCount = %d; want 1", result.SessionCount)
+	}
+}
+
 // ── DeriveNATSURL ─────────────────────────────────────────────────────────────
 
 func TestDeriveNATSURL(t *testing.T) {

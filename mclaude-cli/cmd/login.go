@@ -66,11 +66,16 @@ type deviceCodePollRequest struct {
 // Status is "pending" while the user has not yet verified the code, or
 // "authorized" once the user completes authentication.
 // On "authorized", JWT and UserSlug are populated.
+// NATSUrl is the NATS WebSocket URL returned by the control-plane (ADR-0069).
+// Empty string means "derive from server URL".
 type deviceCodePollResponse struct {
 	// Status is "pending" or "authorized".
 	Status   string `json:"status"`
 	JWT      string `json:"jwt,omitempty"`
 	UserSlug string `json:"userSlug,omitempty"`
+	// NATSUrl is the NATS WebSocket URL to use for subsequent connections.
+	// When empty, the CLI falls back to DeriveNATSURL(serverURL).
+	NATSUrl string `json:"natsUrl,omitempty"`
 	// Error is set when the code has expired or an error occurred.
 	Error string `json:"error,omitempty"`
 }
@@ -132,7 +137,7 @@ func RunLogin(flags LoginFlags, out io.Writer) (*LoginResult, error) {
 		deadline = time.Now().Add(15 * time.Minute)
 	}
 
-	var jwt, userSlug string
+	var jwt, userSlug, natsURL string
 	for time.Now().Before(deadline) {
 		time.Sleep(interval)
 
@@ -151,6 +156,7 @@ func RunLogin(flags LoginFlags, out io.Writer) (*LoginResult, error) {
 		if pollResp.Status == "authorized" && pollResp.JWT != "" {
 			jwt = pollResp.JWT
 			userSlug = pollResp.UserSlug
+			natsURL = pollResp.NATSUrl
 			break
 		}
 	}
@@ -168,6 +174,7 @@ func RunLogin(flags LoginFlags, out io.Writer) (*LoginResult, error) {
 		JWT:      jwt,
 		NKeySeed: string(seed),
 		UserSlug: userSlug,
+		NATSUrl:  natsURL,
 	}
 	if err := SaveAuth(authPath, creds); err != nil {
 		return nil, fmt.Errorf("save credentials: %w", err)

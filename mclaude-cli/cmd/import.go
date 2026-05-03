@@ -545,7 +545,10 @@ func RunImport(flags ImportFlags, out io.Writer) (*ImportResult, error) {
 
 	// 4. Connect to NATS using stored JWT + NKey seed.
 	serverURL := clicontext.ResolveServerURL(flags.ServerURL, ctx)
-	natsURL := clicontext.DeriveNATSURL(serverURL)
+	natsURL := creds.NATSUrl
+	if natsURL == "" {
+		natsURL = clicontext.DeriveNATSURL(serverURL)
+	}
 
 	nc := flags.NATSConn
 	if nc == nil {

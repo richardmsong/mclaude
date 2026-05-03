@@ -40,6 +40,9 @@ var (
 	intHSlug    string
 	intAdminURL string
 	intServerURL string
+	// intNATSURL is the NATS WebSocket URL read from auth.json (ADR-0069).
+	// If empty, tests fall back to DeriveNATSURL(intServerURL).
+	intNATSURL string
 	// intProjectSlug is set by TestIntegration_Import_HappyPath and deleted in teardown.
 	intProjectSlug string
 )
@@ -54,6 +57,7 @@ type testCreds struct {
 	JWT      string `json:"jwt"`
 	NKeySeed string `json:"nkeySeed"`
 	UserSlug string `json:"userSlug"`
+	NATSUrl  string `json:"natsUrl,omitempty"`
 	Skipped  bool   `json:"skipped,omitempty"`
 }
 
@@ -254,6 +258,10 @@ func runTests(m *testing.M) int {
 	intHSlug = hslug
 	intAdminURL = adminURL
 	intServerURL = serverURL
+	intNATSURL = creds.NATSUrl
+	if intNATSURL == "" {
+		intNATSURL = clicontext.DeriveNATSURL(serverURL)
+	}
 
 	// codeReady is already closed by the verify goroutine (which broke out of the loop).
 	// We don't need to wait on it here since we already waited on loginCh and verifyErrCh.

@@ -156,8 +156,9 @@ func TestIntegration_Import_HappyPath(t *testing.T) {
 	t.Log("importRef is null — session-agent unpacked successfully")
 
 	// Connect to NATS and assert sessions visible in KV.
-	natsURL := clicontext.DeriveNATSURL(serverURL)
-	nc, err := connectTestNATS(natsURL, intJWT, intNKeySeed)
+	// Use the stored NATS URL from auth.json (ADR-0069); intNATSURL is populated
+	// by TestMain with fallback to DeriveNATSURL.
+	nc, err := connectTestNATS(intNATSURL, intJWT, intNKeySeed)
 	if err != nil {
 		t.Fatalf("connect NATS: %v", err)
 	}
