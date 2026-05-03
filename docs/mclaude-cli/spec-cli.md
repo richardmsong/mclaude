@@ -45,9 +45,9 @@ Authenticates the user against the control-plane using a device-code flow and pe
 2. CLI sends `POST /api/auth/device-code` to the control-plane with `{ publicKey }` (the NKey public key).
 3. Control-plane returns `{ deviceCode, userCode, verificationUrl, expiresIn, interval }`.
 4. CLI displays the verification URL and user code, instructing the user to open the URL in a browser and enter the code.
-5. CLI polls `POST /api/auth/device-code/poll` with `{ deviceCode }` at the specified interval until the user completes authentication or the code expires (15-minute TTL). The control-plane always responds HTTP 200. The response body is `{ "status": "pending" | "authorized", "jwt": "...", "userSlug": "..." }` — `jwt` and `userSlug` are omitted when status is `"pending"`.
-6. On `status == "authorized"`, the poll response contains `{ status, jwt, userSlug }` — a signed NATS JWT and the user's slug. No seed or NKey material comes from the server.
-7. CLI writes credentials to `~/.mclaude/auth.json` (mode `0600`) in the format: `{ "jwt": "<nats-jwt>", "nkeySeed": "<local-nkey-seed>", "userSlug": "<uslug>" }`.
+5. CLI polls `POST /api/auth/device-code/poll` with `{ deviceCode }` at the specified interval until the user completes authentication or the code expires (15-minute TTL). The control-plane always responds HTTP 200. The response body is `{ "status": "pending" | "authorized", "jwt": "...", "userSlug": "...", "natsUrl": "..." }` — `jwt`, `userSlug`, and `natsUrl` are omitted when status is `"pending"`.
+6. On `status == "authorized"`, the poll response contains `{ status, jwt, userSlug, natsUrl }` — a signed NATS JWT, the user's slug, and the NATS WebSocket URL (empty when the server expects the client to derive it from the control-plane URL). No seed or NKey material comes from the server.
+7. CLI writes credentials to `~/.mclaude/auth.json` (mode `0600`) in the format: `{ "jwt": "<nats-jwt>", "nkeySeed": "<local-nkey-seed>", "userSlug": "<uslug>", "natsUrl": "<wss-url>" }`. The `natsUrl` field is omitted when the poll response returned an empty value.
 
 The credentials are user-scoped (not host-scoped): a single login covers operations across all of the user's hosts. Re-running `mclaude login` regenerates the NKey pair and overwrites the file.
 
@@ -202,7 +202,7 @@ No reconnection. If the unix socket drops, the CLI exits immediately. The user r
 
 ### NATS connection
 
-The CLI connects to NATS for import operations and slug availability checks. Connection uses the JWT + NKey seed stored in `~/.mclaude/auth.json` (written by `mclaude login`). The NATS server URL is derived from the control-plane server URL in `~/.mclaude/context.json` (or the `--server` flag).
+The CLI connects to NATS for import operations and slug availability checks. Connection uses the JWT + NKey seed stored in `~/.mclaude/auth.json` (written by `mclaude login`). The NATS server WebSocket URL is read from `natsUrl` in `~/.mclaude/auth.json` when non-empty; otherwise derived from the control-plane server URL by replacing the scheme (`https` → `wss`) and appending `/nats`.
 
 The CLI uses NATS request/reply for:
 - Slug availability checks (`mclaude.users.{uslug}.hosts.{hslug}.projects.check-slug`)
@@ -214,15 +214,17 @@ The CLI uses NATS request/reply for:
 CLI smoke tests prove user behaviors work end-to-end against a real deployed stack. They are the CLI subset of the full deployment certification suite (web Playwright + CLI smoke tests together certify any deployment). Run with `//go:build integration`:
 
 ```bash
-# Forward admin port first:
-kubectl port-forward -n mclaude-system svc/mclaude-cp-control-plane 9091:9091 &
+# Forward admin port first (admin port is 9091 externally, pod listens on 9090):
+kubectl port-forward -n mclaude-system svc/mclaude-cp-control-plane 9091:9090 &
 
 ADMIN_URL=http://localhost:9091 \
 ADMIN_TOKEN=dev-admin-token \
 MCLAUDE_TEST_HOST_SLUG=dev-local \
-MCLAUDE_TEST_SERVER_URL=https://api.mclaude.internal \
+MCLAUDE_TEST_SERVER_URL=https://<control-plane-domain> \
 go test -tags integration ./cmd/...
 ```
+
+The CP returns `natsUrl` in its device-code poll response (`s.natsWsURL`). The CLI stores it in `auth.json` and uses it for NATS connections — no separate NATS URL env var is needed.
 
 ### Prerequisites
 
@@ -235,7 +237,7 @@ go test -tags integration ./cmd/...
 
 1. Start `RunLogin(flags)` in a goroutine — POSTs `/api/auth/device-code` with `{publicKey}` (CLI-generated NKey public key), gets `{deviceCode, userCode}`, begins polling
 2. Complete the code: form `POST /api/auth/device-code/verify` with fields `user_code=<userCode>`, `email=<testEmail>`, `password=<testToken>` — the endpoint authenticates inline from form fields; no separate login or session cookie needed
-3. `RunLogin`'s poll detects `{"status":"authorized"}` and writes NATS credentials to `cli-integration/.test-creds.json` (gitignored): `{jwt, nkeySeed, userSlug}`
+3. `RunLogin`'s poll detects `{"status":"authorized"}` and writes NATS credentials to `cli-integration/.test-creds.json` (gitignored): `{jwt, nkeySeed, userSlug, natsUrl}` — `natsUrl` is whatever the CP returned in the poll response (the correct NATS WebSocket URL for this deployment)
 
 The JWT is bound to the CLI's `publicKey` (sent in step 1). The CLI signs NATS connections with the matching `nkeySeed`. Tests use this JWT as `Authorization: Bearer <jwt>` for all authenticated CP HTTP calls.
 
@@ -245,9 +247,9 @@ The JWT is bound to the CLI's `publicKey` (sent in step 1). The CLI signs NATS c
 
 | Test | User behavior verified |
 |------|-----------------------|
-| `TestIntegration_Import_HappyPath` | `mclaude import` against the pre-registered host: archive uploaded to S3, project created in CP, session-agent unpacks. Completion detected by polling `GET /api/users/{uslug}/projects/{pslug}` (`Authorization: Bearer <jwt>` from `.test-creds.json`) every 2s until `importRef` is null (session-agent cleared it after successful unpack), timeout 60s. Sessions asserted visible: connect to NATS with test-user JWT + NKey seed, call `kv.Watch("hosts.{hslug}.projects.{pslug}.sessions.>")` on `mclaude-sessions-{uslug}` bucket, drain `watcher.Updates()` until nil (initial values exhausted), assert at least 1 entry received, call `watcher.Stop()`. |
+| `TestIntegration_Import_HappyPath` | `mclaude import` against the pre-registered host: archive uploaded to S3, project created in CP, session-agent unpacks. Completion detected by polling `GET /api/users/{uslug}/projects/{pslug}` (`Authorization: Bearer <jwt>` from `.test-creds.json`) every 2s until `importRef` is null (session-agent cleared it after successful unpack), timeout 60s. Sessions asserted visible: connect to NATS using `natsUrl` from `.test-creds.json` (populated by `RunLogin` from the poll response) with test-user JWT + NKey seed, call `kv.Watch("hosts.{hslug}.projects.{pslug}.sessions.>")` on `mclaude-sessions-{uslug}` bucket, drain `watcher.Updates()` until nil (initial values exhausted), assert at least 1 entry received, call `watcher.Stop()`. |
 | `TestIntegration_Import_SlugCollision` | Import once (project created), re-import same CWD: CP returns slug unavailable, CLI prompts for new name (injected via `ImportFlags.Input`), second import succeeds. Assert `result.ProjectSlug == "my-project-2"`. Confirm by calling `GET /api/users/{uslug}/projects/my-project-2` and asserting HTTP 200. |
-| `TestIntegration_Login_DeviceCode` | `mclaude login` against an `httptest.Server` mock (login uses HTTP only — no NATS or S3). The mock `/api/auth/device-code/poll` endpoint returns `{"status":"pending"}` on the first call and `{"status":"authorized","jwt":"...","userSlug":"..."}` on the second. `auth.json` written with valid `{jwt, nkeySeed, userSlug}`; NKey seed is a valid U-key. |
+| `TestIntegration_Login_DeviceCode` | `mclaude login` against an `httptest.Server` mock (login uses HTTP only — no NATS or S3). The mock `/api/auth/device-code/poll` endpoint returns `{"status":"pending"}` on the first call and `{"status":"authorized","jwt":"...","userSlug":"...","natsUrl":"wss://mock-nats.example.com"}` on the second. `auth.json` written with valid `{jwt, nkeySeed, userSlug, natsUrl}`; NKey seed is a valid U-key. |
 
 Test files (all with `//go:build integration`): `cmd/integration_main_test.go` (TestMain), `cmd/integration_import_test.go` (import tests), `cmd/integration_login_test.go` (login test).
 
@@ -259,7 +261,7 @@ These error paths are verified by unit tests in `cmd/import_test.go` and `cmd/lo
 
 | Error | Assertion |
 |-------|-----------|
-| NATS connection refused | `RunImport` returns non-nil error |
+| NATS connection refused or stale `natsUrl` in `auth.json` (e.g. cluster reconfigured) | `RunImport` returns a NATS connection error; user re-runs `mclaude login` to refresh `auth.json` with the current URL |
 | S3 upload fails (CP returns bad pre-signed URL) | `RunImport` returns upload error |
 | `import.confirm` NATS timeout | `RunImport` returns error after timeout |
 | Device-code poll timeout | `RunLogin` returns error; `auth.json` not written |
@@ -269,6 +271,6 @@ These error paths are verified by unit tests in `cmd/import_test.go` and `cmd/lo
 - **Session agent unix socket** -- the attach command connects to a session agent's socket at `/tmp/mclaude-session-{id}.sock` (or a custom path).
 - **NATS** -- the import command connects to NATS using JWT + NKey credentials for request/reply operations with the control-plane.
 - **`~/.mclaude/context.json`** -- optional; provides default user/project/host slugs and control-plane server URL.
-- **`~/.mclaude/auth.json`** -- NATS credentials (`{ jwt, nkeySeed, userSlug }`) written by `mclaude login`. Required for import and admin operations.
+- **`~/.mclaude/auth.json`** -- NATS credentials (`{ jwt, nkeySeed, userSlug, natsUrl }`) written by `mclaude login`. `natsUrl` is the NATS WebSocket URL from the CP poll response; omitted when empty (CLI falls back to deriving from server URL). Required for import and admin operations.
 - **mclaude-common (`mclaude.io/common`)** -- shared slug validation (`pkg/slug`) and NATS subject construction (`pkg/subj`).
 - **zerolog** -- structured logging.
