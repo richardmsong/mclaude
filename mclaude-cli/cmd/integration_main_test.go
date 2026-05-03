@@ -131,6 +131,15 @@ func runTests(m *testing.M) int {
 	}
 	fmt.Fprintf(os.Stderr, "integration: created test user slug=%s\n", user.Slug)
 
+	// Grant access to the test cluster host so the reconciler can provision.
+	// Must happen before device-code login: the user JWT is issued during login
+	// and includes only cluster slugs for which a hosts row already exists.
+	if err := grantClusterAccess(adminURL, adminToken, hslug, user.Slug); err != nil {
+		fmt.Fprintf(os.Stderr, "integration: grant cluster access: %v\n", err)
+		_ = deleteTestUser(adminURL, adminToken, user.ID)
+		return 1
+	}
+
 	// Acquire NATS credentials via device-code flow.
 	// Two concurrent goroutines: RunLogin polls; a helper submits the code via form POST.
 	credsPath := testCredsPath()
@@ -379,6 +388,29 @@ func createTestUser(adminURL, adminToken string, req adminUserRequest) (*adminUs
 		return nil, fmt.Errorf("/admin/users response missing slug field; body: %s", respBody)
 	}
 	return &user, nil
+}
+
+// grantClusterAccess grants the test user access to the named cluster host.
+// Called before device-code login so the user's JWT includes the cluster slug.
+// The CP endpoint is idempotent (ON CONFLICT DO NOTHING) so re-running is safe.
+func grantClusterAccess(adminURL, adminToken, hslug, userSlug string) error {
+	body, _ := json.Marshal(map[string]string{"userSlug": userSlug})
+	reqURL := fmt.Sprintf("%s/admin/clusters/%s/grants", adminURL, hslug)
+	httpReq, _ := http.NewRequest(http.MethodPost, reqURL, bytes.NewReader(body))
+	httpReq.Header.Set("Content-Type", "application/json")
+	if adminToken != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+adminToken)
+	}
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("POST /admin/clusters/%s/grants: %w", hslug, err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("POST /admin/clusters/%s/grants returned %d: %s", hslug, resp.StatusCode, respBody)
+	}
+	return nil
 }
 
 // deleteTestUser deletes the test user via DELETE /admin/users/{id}.
