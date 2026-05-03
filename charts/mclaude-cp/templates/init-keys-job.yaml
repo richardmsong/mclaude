@@ -42,6 +42,7 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.postgres.auth.existingSecret | default "mclaude-postgres" }}
                   key: postgres-password
+                  optional: true
             - name: DATABASE_URL
               value: "postgres://mclaude:$(POSTGRES_PASSWORD)@{{ include "mclaude-cp.fullname" . }}-postgres.{{ include "mclaude-cp.namespace" . }}.svc:5432/mclaude?sslmode=disable"
             - name: OPERATOR_KEYS_SECRET
