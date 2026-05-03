@@ -1,8 +1,9 @@
 # ADR: Fix import.confirm async provisioning to avoid CLI timeout
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-03: accepted — Class A bug fix; confirm handler must reply before provisioning
+- 2026-05-03: implemented — all scope CLEAN
 
 ## Overview
 
