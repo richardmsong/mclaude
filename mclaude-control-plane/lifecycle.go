@@ -78,9 +78,9 @@ func (s *Server) StartLifecycleSubscribers(nc *nats.Conn) error {
 		return err
 	}
 
-	// check-slug: mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.check-slug
-	// (ADR-0053 — slug availability check before project creation)
-	if _, err := nc.Subscribe("mclaude.users.*.hosts.*.projects.*.check-slug", func(msg *nats.Msg) {
+	// check-slug: mclaude.users.{uslug}.hosts.{hslug}.projects.check-slug
+	// (ADR-0053, ADR-0077 — slug availability check before project creation)
+	if _, err := nc.Subscribe("mclaude.users.*.hosts.*.projects.check-slug", func(msg *nats.Msg) {
 		s.handleCheckSlug(msg)
 	}); err != nil {
 		return err
