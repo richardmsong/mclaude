@@ -1,8 +1,9 @@
 # ADR: Fix Helm 4 SSA conflict recovery — uninstall failed release before upgrade
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-03: accepted — Class A bug fix; supersedes ADR-0083 which used --force (invalid with Helm 4 + SSA)
+- 2026-05-03: implemented — all scope CLEAN
 
 ## Overview
 
