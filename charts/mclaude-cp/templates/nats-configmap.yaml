@@ -50,6 +50,9 @@ data:
     # Max message payload: 8MB for large tool results
     max_payload: {{ .Values.nats.config.maxPayload }}
 
+    # Max NATS protocol control line: increase from default 4096 for multi-host user JWTs
+    max_control_line: {{ .Values.nats.config.maxControlLine }}
+
     # Cluster name for JetStream
     server_name: $POD_NAME
 

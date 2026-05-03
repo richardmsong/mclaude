@@ -43,6 +43,10 @@ nats:
     maxPayload: "8388608"
     ## JetStream max file store in bytes (10GB default).
     maxFileStoreSize: "10737418240"
+    ## Max NATS protocol control line in bytes. Default NATS value is 4096, which
+    ## is too small for user JWTs with multiple host grants (~240 bytes per host).
+    ## 16384 supports ~62 concurrent host grants per user.
+    maxControlLine: "16384"
   service:
     clientPort: 4222
     monitorPort: 8222
