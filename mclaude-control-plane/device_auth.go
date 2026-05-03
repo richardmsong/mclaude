@@ -56,6 +56,7 @@ type CLIDeviceCodePollResponse struct {
 	Status   string `json:"status"`             // "pending" or "authorized"
 	JWT      string `json:"jwt,omitempty"`
 	UserSlug string `json:"userSlug,omitempty"`
+	NATSUrl  string `json:"natsUrl,omitempty"`
 }
 
 // generateCLIDeviceCode generates an opaque device code (URL-safe random string).
@@ -176,6 +177,7 @@ func (s *Server) handleCLIDeviceCodePoll(w http.ResponseWriter, r *http.Request)
 			Status:   "authorized",
 			JWT:      entry.JWT,
 			UserSlug: entry.UserSlug,
+			NATSUrl:  s.natsWsURL,
 		})
 		return
 	}
