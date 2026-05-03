@@ -1,8 +1,9 @@
 # ADR: Fix integration TestMain missing cluster-grant step
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-03: accepted — Class C spec gap; TestMain fixture setup omits cluster-grant, causing reconciler to fail with "user does not have access to host"
+- 2026-05-03: implemented — all scope CLEAN
 
 ## Overview
 
