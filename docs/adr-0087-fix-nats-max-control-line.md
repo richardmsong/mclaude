@@ -1,8 +1,9 @@
 # ADR: Increase NATS max_control_line to accommodate multi-host user JWTs
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-03: accepted — Class C spec gap; NATS max_control_line undocumented and unset; default 4096 bytes broken by multi-host JWTs
+- 2026-05-03: implemented — all scope CLEAN
 
 ## Overview
 
