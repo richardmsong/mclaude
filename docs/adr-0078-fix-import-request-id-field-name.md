@@ -1,8 +1,9 @@
 # ADR: Fix import.request reply field name mismatch
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-03: accepted — Class A bug fix; spec is correct, code is wrong
+- 2026-05-03: implemented — all scope CLEAN
 
 ## Overview
 
