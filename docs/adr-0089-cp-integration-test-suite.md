@@ -39,7 +39,7 @@ Together these make the CP independently deployable and testable via standard au
 | `ADMIN_TOKEN` env var | Remove from CP binary, Helm chart, and all test infrastructure | Replaced by JWT auth; no backwards compat needed (internal only) |
 | Two-phase CI gate | Phase 1: `go test -tags integration` must pass before Phase 2 starts | Tests run against testcontainers (no cluster needed); fast enough to be a blocking gate |
 | CI Phase 2 auth | Bootstrap admin logs in via `POST /auth/login` with `BOOTSTRAP_ADMIN_EMAIL` + `BOOTSTRAP_ADMIN_PASSWORD` CI secrets | Same flow a human operator would use; no special mechanism |
-| Test approach | Unit-style `httptest.NewRecorder()` + direct handler calls; `newTestServer(t, db, nc)` helper | Mirrors existing pattern; testcontainers provide real DB + NATS; no extra Docker overhead |
+| Test approach | Unit-style `httptest.NewRecorder()` + direct handler calls; `newIntegrationServer(t, db, nc)` helper | Mirrors existing pattern; testcontainers provide real DB + NATS; no extra Docker overhead |
 
 ## Deployment Flow
 
@@ -177,7 +177,7 @@ jobs:
 
 ### mclaude-control-plane `integration_test.go`
 
-All new tests use `httptest.NewRecorder()` + direct handler call. `newTestServer(t, db, nc) *Server` helper constructs the server with a test `accountKP` and a real DB + NATS from testcontainers. No admin token needed — admin tests create an `is_admin=true` user via `db.CreateUser` + `db.SetUserAdmin`, log in via `handleLogin`, and use the resulting JWT.
+All new tests use `httptest.NewRecorder()` + direct handler call. `newIntegrationServer(t, db, nc) *Server` helper constructs the server with a test `accountKP` and a real DB + NATS from testcontainers. No admin token needed — admin tests create an `is_admin=true` user via `db.CreateUser` + `db.SetUserAdmin`, log in via `handleLogin`, and use the resulting JWT.
 
 **Deleted tests:**
 - `TestIntegration_SeedDev_WritesLocalHostKV` — removed with seedDev
