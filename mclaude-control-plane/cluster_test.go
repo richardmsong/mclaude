@@ -411,27 +411,116 @@ func TestCluster_AuthMiddlewareAcceptsValidJWT(t *testing.T) {
 	}
 }
 
-// ---- ADR-0038: Project KV write on login (seedDev path) ----
+// ---- ADR-0089: Admin JWT helper ----
 
-func TestCluster_DevUserProjectInKV(t *testing.T) {
-	// Login as the dev user and verify the project exists in KV
-	body, _ := json.Marshal(map[string]string{"email": "dev@mclaude.local", "password": "dev"})
+// adminJWT obtains a JWT for the bootstrap admin by logging in via
+// POST /auth/login using CLUSTER_TEST_ADMIN_EMAIL + CLUSTER_TEST_ADMIN_PASSWORD.
+func adminJWT(t *testing.T) string {
+	t.Helper()
+	email := os.Getenv("CLUSTER_TEST_ADMIN_EMAIL")
+	password := os.Getenv("CLUSTER_TEST_ADMIN_PASSWORD")
+	if email == "" || password == "" {
+		t.Skip("CLUSTER_TEST_ADMIN_EMAIL and CLUSTER_TEST_ADMIN_PASSWORD not set — skipping admin test")
+	}
+	body, _ := json.Marshal(map[string]string{"email": email, "password": password})
 	resp, err := http.Post(cluster.CPURL+"/auth/login", "application/json", bytes.NewReader(body))
 	if err != nil {
-		t.Fatalf("login: %v", err)
+		t.Fatalf("admin login request: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("login status: %d", resp.StatusCode)
+		t.Fatalf("admin login status: %d", resp.StatusCode)
+	}
+	var lr LoginResponse
+	if err := json.NewDecoder(resp.Body).Decode(&lr); err != nil {
+		t.Fatalf("decode admin login response: %v", err)
+	}
+	if lr.JWT == "" {
+		t.Fatal("admin login returned empty JWT")
+	}
+	return lr.JWT
+}
+
+// ---- ADR-0089: User project KV test (replaces TestCluster_DevUserProjectInKV) ----
+
+func TestCluster_UserProjectInKV(t *testing.T) {
+	jwt := adminJWT(t)
+
+	// Create ephemeral user via POST /admin/users
+	userID := fmt.Sprintf("cluster-test-proj-%d", time.Now().UnixNano())
+	email := fmt.Sprintf("%s@test.mclaude.local", userID)
+	password := "test-password-proj"
+
+	createBody, _ := json.Marshal(AdminUserRequest{
+		ID:       userID,
+		Email:    email,
+		Name:     "Cluster Project Test User",
+		Password: password,
+	})
+	req, _ := http.NewRequest(http.MethodPost, cluster.CPURL+"/admin/users", bytes.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("admin create user: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("admin create user status: %d", resp.StatusCode)
 	}
 
-	var loginResp LoginResponse
-	json.NewDecoder(resp.Body).Decode(&loginResp)
+	var created AdminUserResponse
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode create user response: %v", err)
+	}
 
-	userKP, _ := nkeys.FromSeed([]byte(loginResp.NKeySeed))
+	// Cleanup: delete user after test via direct DB access
+	ctx := context.Background()
+	pgPass, err := exec.Command("kubectl", "get", "secret", "mclaude-postgres",
+		"-n", "mclaude-system",
+		"-o", "jsonpath={.data.postgres-password}").Output()
+	if err != nil {
+		t.Fatalf("get pg password: %v", err)
+	}
+	decoded, err := exec.Command("bash", "-c", fmt.Sprintf("echo %s | base64 -d", string(pgPass))).Output()
+	if err != nil {
+		t.Fatalf("decode pg password: %v", err)
+	}
+	pgPort := envOrDefault("CLUSTER_TEST_PG_PORT", "15432")
+	dsn := fmt.Sprintf("postgres://mclaude:%s@localhost:%s/mclaude?sslmode=disable",
+		strings.TrimSpace(string(decoded)), pgPort)
+	db, err := ConnectDB(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect db: %v", err)
+	}
+	t.Cleanup(func() {
+		db.DeleteUser(ctx, userID) //nolint:errcheck
+		db.Close()
+	})
+
+	// Login as the new user
+	loginBody, _ := json.Marshal(map[string]string{"email": email, "password": password})
+	loginResp, err := http.Post(cluster.CPURL+"/auth/login", "application/json", bytes.NewReader(loginBody))
+	if err != nil {
+		t.Fatalf("user login: %v", err)
+	}
+	defer loginResp.Body.Close()
+	if loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("user login status: %d", loginResp.StatusCode)
+	}
+	var lr LoginResponse
+	if err := json.NewDecoder(loginResp.Body).Decode(&lr); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+
+	// Connect to NATS as the user
+	userKP, err := nkeys.FromSeed([]byte(lr.NKeySeed))
+	if err != nil {
+		t.Fatalf("parse user nkey seed: %v", err)
+	}
 	nc, err := nats.Connect(cluster.NATSAddr,
 		nats.UserJWT(
-			func() (string, error) { return loginResp.JWT, nil },
+			func() (string, error) { return lr.JWT, nil },
 			func(nonce []byte) ([]byte, error) { return userKP.Sign(nonce) },
 		),
 		nats.MaxReconnects(0),
@@ -442,27 +531,46 @@ func TestCluster_DevUserProjectInKV(t *testing.T) {
 	}
 	defer nc.Close()
 
-	js, _ := nc.JetStream()
-	kv, err := js.KeyValue("mclaude-projects")
+	// Publish a project-create NATS message
+	projectID := fmt.Sprintf("proj-%d", time.Now().UnixNano())
+	subject := fmt.Sprintf("mclaude.users.%s.api.projects.create", lr.UserID)
+	type projectCreateReq struct {
+		Name string `json:"name"`
+		Slug string `json:"slug"`
+	}
+	projBody, _ := json.Marshal(projectCreateReq{Name: "Cluster Test Project", Slug: projectID})
+	msg, err := nc.Request(subject, projBody, 5*time.Second)
 	if err != nil {
-		t.Fatalf("kv: %v", err)
+		t.Fatalf("project-create NATS request: %v", err)
+	}
+	if msg == nil || len(msg.Data) == 0 {
+		t.Fatal("project-create returned empty response")
 	}
 
-	// List keys for this user
-	keys, err := kv.Keys()
+	// Verify KV entry exists
+	js, err := nc.JetStream()
 	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	kv, err := js.KeyValue("mclaude-projects")
+	if err != nil {
+		t.Fatalf("kv mclaude-projects: %v", err)
+	}
+
+	keys, err := kv.Keys()
+	if err != nil && err != nats.ErrNoKeysFound {
 		t.Fatalf("kv keys: %v", err)
 	}
 
 	found := false
 	for _, k := range keys {
-		if strings.HasPrefix(k, loginResp.UserID+".") {
+		if strings.HasPrefix(k, lr.UserID+".") {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("no project found in KV for dev user %s (keys: %v)", loginResp.UserID, keys)
+		t.Errorf("no project found in KV for user %s (keys: %v)", lr.UserID, keys)
 	}
 }
 
