@@ -26,6 +26,9 @@ data:
       store_dir: /data/jetstream
       max_file_store: {{ .Values.nats.config.maxFileStoreSize }}
       domain: hub
+      {{- if .Values.nats.config.jetstream.encryption.storeKeySecret }}
+      key: $STORE_KEY
+      {{- end }}
     }
 
     # WebSocket — browser clients connect via /nats WebSocket proxy

@@ -48,10 +48,6 @@ spec:
               value: {{ .Values.controller.leaderElection | toString | quote }}
             - name: SESSION_AGENT_TEMPLATE_CM
               value: {{ include "mclaude-worker.fullname" . }}-session-agent-template
-            {{- if .Values.controller.config.devOAuthToken }}
-            - name: DEV_OAUTH_TOKEN
-              value: {{ .Values.controller.config.devOAuthToken | quote }}
-            {{- end }}
           volumeMounts:
             - name: host-creds
               mountPath: /etc/mclaude/host-creds

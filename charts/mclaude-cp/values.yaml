@@ -47,6 +47,15 @@ nats:
     ## is too small for user JWTs with multiple host grants (~240 bytes per host).
     ## 16384 supports ~62 concurrent host grants per user.
     maxControlLine: "16384"
+    jetstream:
+      encryption:
+        ## ADR-0091. Name of a Kubernetes Secret holding the JetStream at-rest
+        ## encryption key under field "store-key". When set, the NATS ConfigMap
+        ## renders a jetstream { ... key: $STORE_KEY } stanza and the NATS
+        ## StatefulSet mounts the Secret. Required to protect plaintext tokens
+        ## in mclaude-user-info-{uslug} on disk.
+        ## Generate with: openssl rand -base64 32
+        storeKeySecret: ""
   service:
     clientPort: 4222
     monitorPort: 8222
@@ -124,8 +133,6 @@ controlPlane:
   ## Name of existing Secret containing:
   ##   database-url — Postgres connection string
   existingSecret: "mclaude-control-plane"
-  ## Dev OAuth token (for dev environments only)
-  devOAuthToken: ""
   ## Override container command (e.g. for e2e stubs)
   command: []
   ## Whether to run dbmate schema migrations as an init container

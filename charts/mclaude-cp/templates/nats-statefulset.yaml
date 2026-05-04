@@ -49,6 +49,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            {{- if .Values.nats.config.jetstream.encryption.storeKeySecret }}
+            - name: STORE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.nats.config.jetstream.encryption.storeKeySecret | quote }}
+                  key: store-key
+            {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/nats

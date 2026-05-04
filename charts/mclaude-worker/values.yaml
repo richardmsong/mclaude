@@ -70,8 +70,6 @@ controller:
     metricsPort: 9091
   config:
     logLevel: info
-    ## Claude API OAuth token for dev environments (injected into per-user secrets).
-    devOAuthToken: ""
 
 ## ---------------------------------------------------------------------------
 ## Session Agent pod template (controller instantiates per project)
@@ -101,6 +99,23 @@ sessionAgent:
     bundleName: ""
     configMapName: ""
     configMapKey: "ca-certificates.crt"
+
+## ---------------------------------------------------------------------------
+## User Agent pod template (ADR-0091 — per-user-namespace Deployment)
+## Controller instantiates one per (user, host) namespace.
+## ---------------------------------------------------------------------------
+userAgent:
+  image:
+    ## Container image for the user-agent Deployment.
+    repository: ghcr.io/richardmcsong/mclaude-user-agent
+    ## Image tag. Empty string uses the chart appVersion.
+    tag: ""
+  ## Resource requests/limits for user-agent pods.
+  resources: {}
+  templateConfigMap:
+    ## Override the name of the {release}-user-agent-template ConfigMap.
+    ## When empty (default), the chart renders {release}-user-agent-template.
+    name: ""
 
 ## ---------------------------------------------------------------------------
 ## Helm test configuration

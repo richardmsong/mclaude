@@ -184,18 +184,14 @@ jobs:
           POSTGRES_PASSWORD=$(bw get password "mclaude postgres password")
           BOOTSTRAP_ADMIN_PASSWORD=$(bw get password "mclaude bootstrap admin password")
           BOOTSTRAP_ADMIN_EMAIL=$(bw get password "mclaude bootstrap admin email")
-          DEV_OAUTH_TOKEN=$(bw get password "mclaude dev oauth token")
           [[ -n "$POSTGRES_PASSWORD" ]] || { echo "ERROR: mclaude postgres password is empty"; exit 1; }
           [[ -n "$BOOTSTRAP_ADMIN_PASSWORD" ]] || { echo "ERROR: mclaude bootstrap admin password is empty"; exit 1; }
           [[ -n "$BOOTSTRAP_ADMIN_EMAIL" ]] || { echo "ERROR: mclaude bootstrap admin email is empty"; exit 1; }
-          [[ -n "$DEV_OAUTH_TOKEN" ]] || { echo "ERROR: mclaude dev oauth token is empty"; exit 1; }
           echo "::add-mask::$POSTGRES_PASSWORD"
           echo "::add-mask::$BOOTSTRAP_ADMIN_PASSWORD"
-          echo "::add-mask::$DEV_OAUTH_TOKEN"
           echo "POSTGRES_PASSWORD=$POSTGRES_PASSWORD" >> "$GITHUB_ENV"
           echo "BOOTSTRAP_ADMIN_PASSWORD=$BOOTSTRAP_ADMIN_PASSWORD" >> "$GITHUB_ENV"
           echo "BOOTSTRAP_ADMIN_EMAIL=$BOOTSTRAP_ADMIN_EMAIL" >> "$GITHUB_ENV"
-          echo "DEV_OAUTH_TOKEN=$DEV_OAUTH_TOKEN" >> "$GITHUB_ENV"
 
       - uses: actions/checkout@v4
 
@@ -228,7 +224,6 @@ jobs:
             -f ./charts/mclaude-cp/values-k3d-ghcr.yaml \
             --set controlPlane.image.tag="${IMAGE_TAG}" \
             --set spa.image.tag="${IMAGE_TAG}" \
-            --set controlPlane.devOAuthToken="${DEV_OAUTH_TOKEN}" \
             --set "controlPlane.bootstrapAdminEmail=${BOOTSTRAP_ADMIN_EMAIL}" \
             --set "controlPlane.bootstrapAdminPassword=${BOOTSTRAP_ADMIN_PASSWORD}" \
             --set "ingress.externalDnsTarget=${TS_IP}" \
@@ -258,7 +253,6 @@ jobs:
       - name: Helm deploy worker
         env:
           IMAGE_TAG: ${{ needs.tag.outputs.image_tag }}
-          DEV_OAUTH_TOKEN: ${{ secrets.DEV_OAUTH_TOKEN }}
         run: |
           echo "Deploying worker at tag: ${IMAGE_TAG}"
 
@@ -276,7 +270,6 @@ jobs:
             --set controlPlane.image.tag="${IMAGE_TAG}" \
             --set controller.image.tag="${IMAGE_TAG}" \
             --set sessionAgent.image.tag="${IMAGE_TAG}" \
-            --set controller.config.devOAuthToken="${DEV_OAUTH_TOKEN}" \
             --set trustChain.operatorJwt="${OPERATOR_JWT}" \
             --set trustChain.accountJwt="${ACCOUNT_JWT}" \
             --set trustChain.accountPublicKey="${ACCOUNT_PUBLIC_KEY}" \

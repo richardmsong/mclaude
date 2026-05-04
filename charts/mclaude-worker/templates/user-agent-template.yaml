@@ -1,0 +1,19 @@
+## ConfigMap containing the user-agent pod template.
+## The mclaude-controller-k8s reads this when creating the per-(user, host)
+## user-agent Deployment in the user namespace (mclaude-{uslug}) on grant.
+## Per ADR-0091: user-agent takes over session pod lifecycle from the controller.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  {{- $cmName := coalesce .Values.userAgent.templateConfigMap.name (printf "%s-user-agent-template" (include "mclaude-worker.fullname" .)) }}
+  name: {{ $cmName }}
+  namespace: {{ include "mclaude-worker.namespace" . }}
+  labels:
+    {{- include "mclaude-worker.labels" . | nindent 4 }}
+    app.kubernetes.io/component: user-agent-template
+data:
+  {{- $tag := coalesce .Values.userAgent.image.tag .Chart.AppVersion }}
+  image: {{ printf "%s:%s" .Values.userAgent.image.repository $tag | quote }}
+  imagePullPolicy: IfNotPresent
+  resourcesJson: |
+    {{ toJson .Values.userAgent.resources }}
