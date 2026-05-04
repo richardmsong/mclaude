@@ -1,33 +1,36 @@
 #!/usr/bin/env bash
 # register-platform-host.sh — Phase 2 CI entry point for registering a platform host.
 #
-# Implements both sides of the BYOH device-code exchange:
-#   1. Admin login  → adminJWT
-#   2. GET /auth/me  → userSlug
-#   3. Generate NKey pair (or accept HOST_NKEY_PUBLIC from caller)
-#   4. POST /api/users/{userSlug}/hosts/code  → code
-#   5. POST /api/hosts/register              → slug, jwt, hubUrl
-#   6. Print: export HOST_SLUG=... HOST_JWT=... HOST_HUB_URL=...
+# Authenticates as the bootstrap admin via POST /auth/login, then registers
+# the first platform host using the BYOH device-code flow. This is the same
+# flow a human operator runs manually.
+#
+# Flow:
+#   1. POST /auth/login                          → adminJWT + userSlug
+#   2. POST /api/users/{userSlug}/hosts/code     → device code
+#   3. POST /api/hosts/register (no auth)        → slug, jwt, hubUrl
+#   4. Print: export HOST_SLUG=... HOST_JWT=... HOST_HUB_URL=... HOST_NKEY_SEED=...
 #
 # Required env vars:
 #   CP_URL                    Control-plane base URL (e.g. https://dev.mclaude.example.com)
 #   BOOTSTRAP_ADMIN_EMAIL     Bootstrap admin email
 #   BOOTSTRAP_ADMIN_PASSWORD  Bootstrap admin password
+#   HOST_NKEY_PUBLIC          Pre-generated NATS NKey public key for the host
+#   HOST_NKEY_SEED            Corresponding NKey seed (passed through to output)
 #
 # Optional env vars:
 #   HOST_NAME         Display name for the host (default: k3d-dev)
-#   HOST_NKEY_PUBLIC  Pre-generated NATS NKey public key for the host.
-#                     If unset, the script attempts to call `mclaude nkeys generate`
-#                     (if the binary is on PATH) to generate an ephemeral key pair.
-#                     The seed is printed as: export HOST_NKEY_SEED=...
-#                     If neither is available, the script exits with an error.
+#
+# Generating HOST_NKEY_PUBLIC / HOST_NKEY_SEED:
+#   Use nsc or nk to generate a NATS User NKey pair before calling this script:
+#     nk -gen user
+#   Or use the nsc tool:
+#     nsc generate nkey --account
 #
 # Usage (CI):
-#   eval "$(scripts/register-platform-host.sh)"
-#   helm upgrade --install ... \
-#     --set host.slug="$HOST_SLUG" \
-#     --set host.jwt="$HOST_JWT" \
-#     --set hub.url="$HOST_HUB_URL"
+#   eval "$(CP_URL=... BOOTSTRAP_ADMIN_EMAIL=... BOOTSTRAP_ADMIN_PASSWORD=... \
+#             HOST_NKEY_PUBLIC=... HOST_NKEY_SEED=... \
+#             scripts/register-platform-host.sh)"
 
 set -euo pipefail
 
@@ -37,8 +40,10 @@ set -euo pipefail
 : "${CP_URL:?Required env var CP_URL is not set}"
 : "${BOOTSTRAP_ADMIN_EMAIL:?Required env var BOOTSTRAP_ADMIN_EMAIL is not set}"
 : "${BOOTSTRAP_ADMIN_PASSWORD:?Required env var BOOTSTRAP_ADMIN_PASSWORD is not set}"
+: "${HOST_NKEY_PUBLIC:?Required env var HOST_NKEY_PUBLIC is not set (generate with: nk -gen user)}"
 
 HOST_NAME="${HOST_NAME:-k3d-dev}"
+HOST_NKEY_SEED="${HOST_NKEY_SEED:-}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -94,84 +99,23 @@ split_response "$raw"
 check_response "POST /auth/login" "$RESP_CODE" "$RESP_BODY"
 
 ADMIN_JWT="$(echo "$RESP_BODY" | jq -r '.jwt // empty')"
+USER_SLUG="$(echo "$RESP_BODY" | jq -r '.userSlug // empty')"
 if [[ -z "$ADMIN_JWT" ]]; then
   echo "ERROR: POST /auth/login succeeded but response contains no jwt field" >&2
   echo "Response body: $RESP_BODY" >&2
   exit 1
 fi
-
-# ---------------------------------------------------------------------------
-# Step 2: Determine user slug
-# ---------------------------------------------------------------------------
-echo "# Step 2: Fetching user slug..." >&2
-
-raw="$(curl_json GET "${CP_URL}/auth/me" \
-  -H "Authorization: Bearer ${ADMIN_JWT}")"
-split_response "$raw"
-check_response "GET /auth/me" "$RESP_CODE" "$RESP_BODY"
-
-USER_SLUG="$(echo "$RESP_BODY" | jq -r '.user.slug // .slug // empty')"
 if [[ -z "$USER_SLUG" ]]; then
-  echo "ERROR: GET /auth/me succeeded but response contains no user slug" >&2
+  echo "ERROR: POST /auth/login succeeded but response contains no userSlug field" >&2
   echo "Response body: $RESP_BODY" >&2
   exit 1
 fi
-echo "# User slug: ${USER_SLUG}" >&2
+echo "# Logged in as user slug: ${USER_SLUG}" >&2
 
 # ---------------------------------------------------------------------------
-# Step 3: Obtain NKey public key
-#
-# NATS NKeys are Ed25519 keys with a type-prefixed base32 encoding.
-# The caller SHOULD pre-generate the key pair and pass HOST_NKEY_PUBLIC
-# (and optionally HOST_NKEY_SEED) as env vars.
-#
-# If HOST_NKEY_PUBLIC is not set, this script attempts to call
-# `mclaude nkeys generate`, which prints:
-#   HOST_NKEY_PUBLIC=<nkey-public>
-#   HOST_NKEY_SEED=<nkey-seed>
-# The seed is captured and re-exported so the caller can use it for the
-# k8s controller Helm values.
-#
-# If neither is available, the script fails with instructions.
+# Step 2: Get device code
 # ---------------------------------------------------------------------------
-echo "# Step 3: Obtaining NKey public key..." >&2
-
-HOST_NKEY_SEED="${HOST_NKEY_SEED:-}"
-
-if [[ -z "${HOST_NKEY_PUBLIC:-}" ]]; then
-  if command -v mclaude >/dev/null 2>&1 && mclaude nkeys generate >/dev/null 2>&1; then
-    # mclaude nkeys generate prints: HOST_NKEY_PUBLIC=... and HOST_NKEY_SEED=...
-    nkey_output="$(mclaude nkeys generate)"
-    HOST_NKEY_PUBLIC="$(echo "$nkey_output" | grep '^HOST_NKEY_PUBLIC=' | cut -d= -f2-)"
-    HOST_NKEY_SEED="$(echo "$nkey_output" | grep '^HOST_NKEY_SEED=' | cut -d= -f2-)"
-    if [[ -z "$HOST_NKEY_PUBLIC" ]]; then
-      echo "ERROR: mclaude nkeys generate did not output HOST_NKEY_PUBLIC" >&2
-      echo "Output was: $nkey_output" >&2
-      exit 1
-    fi
-    echo "# NKey pair generated via mclaude nkeys generate" >&2
-  else
-    echo "ERROR: HOST_NKEY_PUBLIC is not set and mclaude nkeys generate is unavailable." >&2
-    echo "" >&2
-    echo "To fix: generate a NATS NKey pair and export HOST_NKEY_PUBLIC (and HOST_NKEY_SEED)" >&2
-    echo "before running this script. Example using the mclaude CLI:" >&2
-    echo "" >&2
-    echo "  eval \"\$(mclaude nkeys generate)\"" >&2
-    echo "  export HOST_NKEY_PUBLIC HOST_NKEY_SEED" >&2
-    echo "" >&2
-    echo "Or with nsc (if installed):" >&2
-    echo "  nkey_output=\"\$(nsc generate nkey --host-key)\"" >&2
-    echo "  export HOST_NKEY_PUBLIC=\"\$(echo \"\$nkey_output\" | grep '^public:' | awk '{print \$2}')\"" >&2
-    exit 1
-  fi
-else
-  echo "# Using pre-supplied HOST_NKEY_PUBLIC" >&2
-fi
-
-# ---------------------------------------------------------------------------
-# Step 4: Get device code
-# ---------------------------------------------------------------------------
-echo "# Step 4: Requesting device code for host registration..." >&2
+echo "# Step 2: Requesting device code for host registration..." >&2
 
 raw="$(curl_json POST "${CP_URL}/api/users/${USER_SLUG}/hosts/code" \
   -H "Authorization: Bearer ${ADMIN_JWT}" \
@@ -188,9 +132,9 @@ fi
 echo "# Device code obtained" >&2
 
 # ---------------------------------------------------------------------------
-# Step 5: Redeem code — register the host
+# Step 3: Redeem code — register the host
 # ---------------------------------------------------------------------------
-echo "# Step 5: Registering host '${HOST_NAME}'..." >&2
+echo "# Step 3: Registering host '${HOST_NAME}'..." >&2
 
 raw="$(curl_json POST "${CP_URL}/api/hosts/register" \
   -d "{\"code\":\"${DEVICE_CODE}\",\"name\":\"${HOST_NAME}\"}")"
@@ -215,7 +159,7 @@ fi
 echo "# Host registered: ${HOST_SLUG}" >&2
 
 # ---------------------------------------------------------------------------
-# Step 6: Output — eval-able export statements for CI
+# Step 4: Output — eval-able export statements for CI
 # ---------------------------------------------------------------------------
 echo "export HOST_SLUG=${HOST_SLUG}"
 echo "export HOST_JWT=${HOST_JWT}"
