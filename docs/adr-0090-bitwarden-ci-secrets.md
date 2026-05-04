@@ -1,9 +1,10 @@
 # ADR: Bitwarden CI Secrets
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-04: draft
 - 2026-05-04: accepted — no specs touched (CI-only change)
+- 2026-05-04: implemented — all scope CLEAN
 
 ## Overview
 
@@ -65,7 +66,7 @@ The deploy-main workflow previously had a mix of hardcoded values (`dev-postgres
 - `bw get password` is called with the exact item name (e.g. `"mclaude postgres password"`). Item names are unique in the vault; `bw` matches by name.
 - "Ensure prerequisite secrets" step: `${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}` → `$BOOTSTRAP_ADMIN_PASSWORD`; hardcoded `dev-postgres-password-k3d` → `$POSTGRES_PASSWORD`.
 - "Helm deploy control-plane" step: `${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}` → `$BOOTSTRAP_ADMIN_PASSWORD`; `${{ secrets.DEV_OAUTH_TOKEN }}` → already in env as `DEV_OAUTH_TOKEN`.
-- `secrets.BOOTSTRAP_ADMIN_PASSWORD` and `secrets.DEV_OAUTH_TOKEN` references removed from workflow.
+- `secrets.BOOTSTRAP_ADMIN_PASSWORD` and `secrets.DEV_OAUTH_TOKEN` references removed from `deploy-cp` steps. (The disabled `deploy-worker` job still references `secrets.DEV_OAUTH_TOKEN` — that is deferred per Scope.)
 
 ## Data Model
 
