@@ -1,10 +1,15 @@
-// mclaude-controller-k8s: kubebuilder operator for MCProject CRDs.
-// Extracted from mclaude-control-plane per ADR-0035 (stage 5).
-// ADR-0063: boot via hostauth.NewHostAuthFromSeed, decode hslug from JWT,
-// connect to hub NATS with host JWT, drop account-key and leaf-NATS code paths.
+// mclaude-controller-k8s: Kubernetes controller for per-user namespace management.
 //
-// Subscribes to NATS provisioning subjects for its cluster and creates
-// MCProject CRs which the reconciler then provisions as K8s resources.
+// Per ADR-0091, this controller's scope is reduced to:
+//   - Boot via hostauth.NewHostAuthFromSeed, decode hslug from JWT (ADR-0063).
+//   - Subscribe to mclaude.hosts.{hslug}.grants.create → run per-user reconciler.
+//   - Keep users.*.projects.*.update handler for OAuth token rotation (user-secrets only).
+//
+// Removed per ADR-0091:
+//   - MCProject CRD reconciliation (delegated to user-agent).
+//   - Per-project Deployment, PVCs, agent-nkey-{projectId} Secret.
+//   - users.*.projects.*.create and .delete handlers.
+//   - DEV_OAUTH_TOKEN env var.
 package main
 
 import (
@@ -19,12 +24,13 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"mclaude.io/common/pkg/hostauth"
 )
@@ -43,23 +49,19 @@ func main() {
 		Logger().
 		Level(logLevel)
 
-	// ADR-0063: env vars — HUB_NATS_URL replaces NATS_URL; HOST_NKEY_SEED_PATH and
-	// CONTROL_PLANE_URL replace NATS_ACCOUNT_SEED / NATS_CREDENTIALS_PATH / CLUSTER_SLUG.
+	// ADR-0063 / ADR-0091: env vars.
+	// DEV_OAUTH_TOKEN removed per ADR-0091.
 	hubNATSURL := envOr("HUB_NATS_URL", "nats://localhost:4222")
 	controlPlaneURL := os.Getenv("CONTROL_PLANE_URL")
 	if controlPlaneURL == "" {
 		logger.Fatal().Msg("CONTROL_PLANE_URL is required — set to the control-plane base URL (e.g. https://cp.mclaude.example)")
 	}
 	seedPath := envOr("HOST_NKEY_SEED_PATH", "/etc/mclaude/host-creds/nkey_seed")
-
 	helmReleaseName := envOr("HELM_RELEASE_NAME", "mclaude-worker")
-	sessionAgentTemplateCM := envOr("SESSION_AGENT_TEMPLATE_CM", helmReleaseName+"-session-agent-template")
-	devOAuthToken := os.Getenv("DEV_OAUTH_TOKEN")
 
 	// ADR-0063 boot sequence:
 	// 1. Load NKey seed from mounted Secret file.
-	// 2. Refresh() → HTTP challenge-response → receive host JWT.
-	//    Retry on ErrNotRegistered: 5s initial, doubling, 60s cap.
+	// 2. Refresh() → HTTP challenge-response → receive host JWT. Retry on ErrNotRegistered.
 	// 3. Decode hslug from the JWT name ("host-{hslug}").
 	// 4. Connect to hub NATS with the host JWT.
 	// 5. Start background JWT refresh loop.
@@ -79,13 +81,10 @@ func main() {
 	}
 	logger.Info().Str("hslug", hslug).Msg("host slug decoded from JWT")
 
-	// Set up controller-runtime scheme.
+	// Set up controller-runtime scheme (standard Kubernetes types only — no MCProject CRD per ADR-0091).
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		logger.Fatal().Err(err).Msg("add client-go scheme")
-	}
-	if err := AddToScheme(scheme); err != nil {
-		logger.Fatal().Err(err).Msg("add MCProject scheme")
 	}
 
 	restCfg := ctrl.GetConfigOrDie()
@@ -111,24 +110,8 @@ func main() {
 		logger.Fatal().Err(err).Msg("setup ready check")
 	}
 
-	// Determine control-plane namespace.
+	// Determine controller namespace.
 	controlPlaneNs := detectNamespace()
-
-	reconciler := &MCProjectReconciler{
-		client:                 mgr.GetClient(),
-		scheme:                 mgr.GetScheme(),
-		controlPlaneNs:         controlPlaneNs,
-		releaseName:            helmReleaseName,
-		sessionAgentTemplateCM: sessionAgentTemplateCM,
-		sessionAgentNATSURL:    hubNATSURL, // session-agents inherit HUB_NATS_URL directly (ADR-0063)
-		controlPlaneURL:        controlPlaneURL,
-		devOAuthToken:          devOAuthToken,
-		clusterSlug:            hslug, // decoded from JWT, not from env
-		logger:                 logger.With().Str("reconciler", "mcproject").Logger(),
-	}
-	if err := reconciler.SetupWithManager(mgr); err != nil {
-		logger.Fatal().Err(err).Msg("setup MCProject reconciler")
-	}
 
 	// Connect to hub NATS using the host JWT (ADR-0063).
 	nc, err := nats.Connect(hubNATSURL,
@@ -141,25 +124,32 @@ func main() {
 	}
 	defer nc.Close()
 
-	// Wire the NATS connection into the reconciler for agent NKey registration (ADR-0063 step 6b).
-	reconciler.nc = nc
-
 	// Start background JWT refresh loop (ADR-0063).
 	auth.StartRefreshLoop(ctx)
 
-	// Start NATS provisioning subscriber.
-	provisioner := &NATSProvisioner{
+	// Per-user reconciler (ADR-0091).
+	userReconciler := &UserReconciler{
+		client:          mgr.GetClient(),
+		controlPlaneNs:  controlPlaneNs,
+		releaseName:     helmReleaseName,
+		hslug:           hslug,
+		controlPlaneURL: controlPlaneURL,
+		hubNATSURL:      hubNATSURL,
+		nc:              nc,
+		logger:          logger.With().Str("reconciler", "user").Logger(),
+	}
+
+	// NATS subscriber — grants.create + projects.update.
+	subscriber := &NATSSubscriber{
 		nc:             nc,
-		k8sClient:      mgr.GetClient(),
-		controlPlaneNs: controlPlaneNs,
-		clusterSlug:    hslug,
-		reconciler:     reconciler,
-		logger:         logger.With().Str("subscriber", "provisioner").Logger(),
+		hslug:          hslug,
+		userReconciler: userReconciler,
+		logger:         logger.With().Str("subscriber", "nats").Logger(),
 	}
-	if err := provisioner.StartNATSSubscriber(); err != nil {
-		logger.Fatal().Err(err).Msg("start NATS provisioning subscriber")
+	if err := subscriber.StartNATSSubscriber(); err != nil {
+		logger.Fatal().Err(err).Msg("start NATS subscriber")
 	}
-	logger.Info().Str("hslug", hslug).Msg("NATS provisioning subscriber started")
+	logger.Info().Str("hslug", hslug).Msg("NATS subscriber started")
 
 	logger.Info().Msg("starting controller-runtime manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
@@ -205,7 +195,6 @@ func hostSlugFromJWT(token string) (string, error) {
 	if len(parts) != 3 {
 		return "", fmt.Errorf("invalid JWT: expected 3 parts, got %d", len(parts))
 	}
-	// Decode the payload (second part) — base64url without padding.
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
 		return "", fmt.Errorf("decode JWT payload: %w", err)
@@ -216,7 +205,6 @@ func hostSlugFromJWT(token string) (string, error) {
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return "", fmt.Errorf("unmarshal JWT payload: %w", err)
 	}
-	// Host JWTs are named "host-{hslug}" (see control-plane nkeys.go IssueHostJWT).
 	if !strings.HasPrefix(claims.Name, "host-") {
 		return "", fmt.Errorf("unexpected JWT name %q — expected 'host-{slug}' prefix", claims.Name)
 	}
