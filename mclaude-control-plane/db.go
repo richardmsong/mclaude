@@ -226,6 +226,13 @@ func (db *DB) SetUserAdmin(ctx context.Context, id string, isAdmin bool) error {
 	return err
 }
 
+// UpdateUserPassword sets the password_hash for a user by ID.
+// Used by init-keys to store the BOOTSTRAP_ADMIN_PASSWORD hash on an existing user.
+func (db *DB) UpdateUserPassword(ctx context.Context, id, passwordHash string) error {
+	_, err := db.pool.Exec(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, passwordHash, id)
+	return err
+}
+
 // DeleteUser removes a user by ID.
 func (db *DB) DeleteUser(ctx context.Context, id string) error {
 	_, err := db.pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)

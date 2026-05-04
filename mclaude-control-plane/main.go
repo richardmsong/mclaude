@@ -11,7 +11,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -46,11 +45,9 @@ func main() {
 		Logger()
 
 	port := envOr("PORT", "8080")
-	adminPort := envOr("ADMIN_PORT", "9091")
 	databaseDSN := envOr("DATABASE_URL", envOr("DATABASE_DSN", "")) // DATABASE_URL is the k8s/helm convention
 	natsURL := envOr("NATS_URL", "nats://localhost:4222")
 	natsWsURL := envOr("NATS_WS_URL", "") // external WebSocket URL for browser clients; empty = client derives from origin
-	adminToken := envOr("ADMIN_TOKEN", "")
 
 	jwtExpiry := 8 * time.Hour
 	if v := os.Getenv("JWT_EXPIRY_SECONDS"); v != "" {
@@ -101,7 +98,7 @@ func main() {
 		logger.Fatal().Err(err).Msg("account nkey")
 	}
 
-	srv := NewServer(db, accountKP, natsURL, natsWsURL, jwtExpiry, adminToken)
+	srv := NewServer(db, accountKP, natsURL, natsWsURL, jwtExpiry)
 	srv.providers = provReg
 	srv.SetExternalURL(externalURL)
 
@@ -174,17 +171,11 @@ func main() {
 		}
 	}
 
-	// Main API mux (public + protected routes)
+	// Main API mux (public, protected, admin, and metrics routes — all on one port).
+	// Admin routes are protected by isAdminMiddleware (JWT + is_admin=true in DB).
+	// Metrics are unauthenticated (internal k8s scraping).
 	mux := http.NewServeMux()
 	srv.RegisterRoutes(mux)
-
-	// Admin mux on separate port
-	go func() {
-		logger.Info().Str("port", adminPort).Msg("admin listener starting")
-		if err := http.ListenAndServe("127.0.0.1:"+adminPort, srv.AdminMux()); err != nil {
-			log.Printf("admin listener: %v", err)
-		}
-	}()
 
 	logger.Info().Str("port", port).Msg("starting")
 	if err := http.ListenAndServe(":"+port, mux); err != nil {

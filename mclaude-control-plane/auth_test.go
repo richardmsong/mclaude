@@ -53,7 +53,7 @@ func newTestServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("create account key: %v", err)
 	}
-	return NewServer(nil, accountKP, "nats://localhost:4222", "", 8*time.Hour, "test-admin-token")
+	return NewServer(nil, accountKP, "nats://localhost:4222", "", 8*time.Hour)
 }
 
 func TestHandleLogin_MissingFields(t *testing.T) {
@@ -133,7 +133,7 @@ func TestHandleRefresh_MalformedToken(t *testing.T) {
 // by TestIntegration_HandleRefresh_ReturnsSlug in integration_test.go.
 func TestHandleRefresh_NilDB(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
-	srv := NewServer(nil, accountKP, "nats://localhost:4222", "", 8*time.Hour, "admin")
+	srv := NewServer(nil, accountKP, "nats://localhost:4222", "", 8*time.Hour)
 
 	expiresAt := int64(8 * 60 * 60) // 8 hours in seconds
 	jwt, _, err := IssueUserJWTLegacy("refresh-user-uuid", "refresh-user-slug", accountKP, expiresAt)
@@ -156,7 +156,7 @@ func TestHandleRefresh_WrongAccountKey(t *testing.T) {
 	// JWT signed by accountA, server has accountB → should reject.
 	accountA, _ := nkeys.CreateAccount()
 	accountB, _ := nkeys.CreateAccount()
-	srv := NewServer(nil, accountB, "nats://localhost:4222", "", time.Hour, "admin")
+	srv := NewServer(nil, accountB, "nats://localhost:4222", "", time.Hour)
 
 	jwt, _, _ := IssueUserJWTLegacy("user", "user-slug", accountA, int64(time.Hour.Seconds()))
 
@@ -192,7 +192,7 @@ func TestAuthMiddleware_NoToken(t *testing.T) {
 
 func TestAuthMiddleware_ValidToken_InjectsUserID(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
-	srv := NewServer(nil, accountKP, "nats://test", "", time.Hour, "admin")
+	srv := NewServer(nil, accountKP, "nats://test", "", time.Hour)
 
 	// Use legacy JWT issuance to produce a JWT with userID in claims.Name.
 	jwt, _, _ := IssueUserJWTLegacy("middleware-user", "middleware-slug", accountKP, int64(time.Hour.Seconds()))
@@ -236,39 +236,24 @@ func TestAuthMiddleware_InvalidToken(t *testing.T) {
 
 // ---- Admin middleware ----
 
-func TestAdminAuthMiddleware_Enforced(t *testing.T) {
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", time.Hour, "secret-admin-token")
+// TestIsAdminMiddleware_RejectsNoToken verifies that isAdminMiddleware returns 401
+// when no Bearer token is present (ADR-0089: 401 if no JWT).
+func TestIsAdminMiddleware_RejectsNoToken(t *testing.T) {
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", time.Hour)
 	called := false
-	handler := srv.adminAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := srv.isAdminMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	cases := []struct {
-		name   string
-		bearer string
-		want   int
-	}{
-		{"no token", "", http.StatusForbidden},
-		{"wrong token", "wrong", http.StatusForbidden},
-		{"correct token", "secret-admin-token", http.StatusOK},
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d; want 401", rec.Code)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			called = false
-			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
-			if tc.bearer != "" {
-				req.Header.Set("Authorization", "Bearer "+tc.bearer)
-			}
-			handler.ServeHTTP(rec, req)
-			if rec.Code != tc.want {
-				t.Errorf("status = %d; want %d", rec.Code, tc.want)
-			}
-			if tc.want == http.StatusOK && !called {
-				t.Error("handler not called for valid admin token")
-			}
-		})
+	if called {
+		t.Error("handler should not be called without token")
 	}
 }
 
@@ -382,7 +367,7 @@ func TestHandleRefresh_UsesNatsWsURL(t *testing.T) {
 	// natsURL vs natsWsURL and confirm handleLogin (which always worked correctly)
 	// returns natsWsURL.
 	accountKP, _ := nkeys.CreateAccount()
-	srv := NewServer(nil, accountKP, "nats://internal:4222", "wss://external/nats", 8*time.Hour, "admin")
+	srv := NewServer(nil, accountKP, "nats://internal:4222", "wss://external/nats", 8*time.Hour)
 
 	// handleLogin with nil DB returns 503, but we can inspect the server fields directly.
 	if srv.natsURL == srv.natsWsURL {

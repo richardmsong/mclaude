@@ -72,7 +72,6 @@ type Server struct {
 	natsWsURL   string // external WebSocket URL returned to browser clients on login; empty = client derives from origin
 	externalURL string // externally-accessible base URL for device-code verification links
 	jwtExpiry   time.Duration
-	adminToken  string          // break-glass admin bearer token
 	providers   *providerRegistry // OAuth provider config and state store; nil when no providers configured
 	nc          *nats.Conn      // NATS connection for KV writes from HTTP handlers; nil when NATS unavailable
 	hostsKV     nats.KeyValue   // mclaude-hosts KV bucket; nil until StartProjectsSubscriber sets it (ADR-0046)
@@ -89,14 +88,13 @@ type Server struct {
 // NewServer constructs a Server. accountKP must be an account-level NKey pair —
 // it signs per-user JWTs. natsWsURL is the WebSocket URL returned to browser clients
 // on login; if empty the client derives it from window.location.origin.
-func NewServer(db *DB, accountKP nkeys.KeyPair, natsURL, natsWsURL string, jwtExpiry time.Duration, adminToken string) *Server {
+func NewServer(db *DB, accountKP nkeys.KeyPair, natsURL, natsWsURL string, jwtExpiry time.Duration) *Server {
 	return &Server{
-		db:         db,
-		accountKP:  accountKP,
-		natsURL:    natsURL,
-		natsWsURL:  natsWsURL,
-		jwtExpiry:  jwtExpiry,
-		adminToken: adminToken,
+		db:        db,
+		accountKP: accountKP,
+		natsURL:   natsURL,
+		natsWsURL: natsWsURL,
+		jwtExpiry: jwtExpiry,
 	}
 }
 

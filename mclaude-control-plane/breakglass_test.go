@@ -9,90 +9,43 @@ import (
 	"testing"
 )
 
-// Break-glass tests exercise the admin port endpoints (:9091) without NATS.
-// All tests use an in-process httptest.Server pointed at AdminMux.
-// DB-backed tests are unit tests using a nil DB (expect 503) — the full
-// DB-backed path is tested in the integration category.
+// breakglass_test.go exercises admin route handlers directly (without DB).
+// The admin port (9091) and static ADMIN_TOKEN are removed per ADR-0089.
+// Admin routes now live on the main port behind isAdminMiddleware.
+// These tests call handlers directly to verify nil-DB guard behavior —
+// the full auth+DB path is covered in the integration category.
 
-// ---- AdminMux wiring ----
+// newTestMux returns a main mux with admin routes registered.
+// Admin routes require a real JWT from isAdminMiddleware, so these tests
+// call the handler functions directly (bypassing middleware) to exercise
+// nil-DB guards and input validation.
+func newTestMux(t *testing.T) (*Server, *http.ServeMux) {
+	t.Helper()
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0)
+	mux := http.NewServeMux()
+	srv.RegisterRoutes(mux)
+	return srv, mux
+}
 
-func TestAdminMux_MetricsEndpoint(t *testing.T) {
-	srv := newTestServer(t)
-	mux := srv.AdminMux()
+// ---- Metrics endpoint (unauthenticated on main mux) ----
+
+func TestMetricsEndpoint_MainMux(t *testing.T) {
+	_, mux := newTestMux(t)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-	req.Header.Set("Authorization", "Bearer test-admin-token")
 	mux.ServeHTTP(rec, req)
 
 	// Metrics endpoint is implemented (not 404). Content verified in monitoring category.
 	if rec.Code == http.StatusNotFound {
-		t.Error("/metrics returned 404 — endpoint not registered on admin mux")
+		t.Error("/metrics returned 404 — endpoint not registered on main mux")
 	}
 }
 
-// ---- Admin bearer token enforcement ----
-
-func TestAdminMux_TokenRequired(t *testing.T) {
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0, "my-secret-token")
-	mux := srv.AdminMux()
-
-	cases := []struct {
-		name   string
-		path   string
-		method string
-		body   string
-		bearer string
-		want   int
-	}{
-		{
-			name:   "no token GET users",
-			path:   "/admin/users",
-			method: "GET",
-			want:   http.StatusForbidden,
-		},
-		{
-			name:   "wrong token POST users",
-			path:   "/admin/users",
-			method: "POST",
-			body:   `{"id":"u1","email":"a@b.com","name":"A"}`,
-			bearer: "wrong-token",
-			want:   http.StatusForbidden,
-		},
-		{
-			name:   "correct token GET users (no DB → 503)",
-			path:   "/admin/users",
-			method: "GET",
-			bearer: "my-secret-token",
-			want:   http.StatusServiceUnavailable,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var body *bytes.Buffer
-			if tc.body != "" {
-				body = bytes.NewBufferString(tc.body)
-			} else {
-				body = bytes.NewBuffer(nil)
-			}
-			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(tc.method, tc.path, body)
-			if tc.bearer != "" {
-				req.Header.Set("Authorization", "Bearer "+tc.bearer)
-			}
-			mux.ServeHTTP(rec, req)
-			if rec.Code != tc.want {
-				t.Errorf("status = %d; want %d", rec.Code, tc.want)
-			}
-		})
-	}
-}
-
-// ---- Create user validation ----
+// ---- Create user validation (direct handler calls bypass middleware) ----
 
 func TestAdminCreateUser_MissingFields(t *testing.T) {
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0, "token")
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0)
 
 	cases := []struct {
 		name string
@@ -111,8 +64,8 @@ func TestAdminCreateUser_MissingFields(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "/admin/users",
 				bytes.NewBufferString(tc.body))
-			req.Header.Set("Authorization", "Bearer token")
-			srv.AdminMux().ServeHTTP(rec, req)
+			req.Header.Set("Content-Type", "application/json")
+			srv.adminCreateUser(rec, req)
 			if rec.Code != tc.want {
 				t.Errorf("status = %d; want %d; body: %s", rec.Code, tc.want, rec.Body.String())
 			}
@@ -123,11 +76,10 @@ func TestAdminCreateUser_MissingFields(t *testing.T) {
 // ---- Delete user ----
 
 func TestAdminDeleteUser_NilDB(t *testing.T) {
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0, "token")
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodDelete, "/admin/users/some-user-id", nil)
-	req.Header.Set("Authorization", "Bearer token")
-	srv.AdminMux().ServeHTTP(rec, req)
+	srv.adminDeleteUser(rec, req, "some-user-id")
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d; want 503", rec.Code)
 	}
@@ -136,7 +88,7 @@ func TestAdminDeleteUser_NilDB(t *testing.T) {
 // ---- Session stop ----
 
 func TestAdminStopSession_MissingFields(t *testing.T) {
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0, "token")
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0)
 	cases := []struct {
 		name string
 		body string
@@ -152,8 +104,8 @@ func TestAdminStopSession_MissingFields(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "/admin/sessions/stop",
 				bytes.NewBufferString(tc.body))
-			req.Header.Set("Authorization", "Bearer token")
-			srv.AdminMux().ServeHTTP(rec, req)
+			req.Header.Set("Content-Type", "application/json")
+			srv.adminStopSession(rec, req)
 			if rec.Code != tc.want {
 				t.Errorf("status = %d; want %d", rec.Code, tc.want)
 			}
@@ -163,26 +115,25 @@ func TestAdminStopSession_MissingFields(t *testing.T) {
 
 func TestAdminStopSession_ValidRequest(t *testing.T) {
 	// Valid request with nil DB → 202 (best-effort break-glass).
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0, "token")
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0)
 	body := `{"userId":"u1","projectId":"p1","sessionId":"s1"}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/admin/sessions/stop",
 		bytes.NewBufferString(body))
-	req.Header.Set("Authorization", "Bearer token")
-	srv.AdminMux().ServeHTTP(rec, req)
+	req.Header.Set("Content-Type", "application/json")
+	srv.adminStopSession(rec, req)
 	if rec.Code != http.StatusAccepted {
 		t.Errorf("status = %d; want 202", rec.Code)
 	}
 }
 
-// ---- Unknown route on admin mux ----
+// ---- Unknown route on admin routes handler ----
 
-func TestAdminMux_UnknownRoute(t *testing.T) {
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0, "token")
+func TestAdminRoutes_UnknownRoute(t *testing.T) {
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/admin/unknown", nil)
-	req.Header.Set("Authorization", "Bearer token")
-	srv.AdminMux().ServeHTTP(rec, req)
+	srv.handleAdminRoutes(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d; want 404", rec.Code)
 	}
@@ -193,13 +144,12 @@ func TestAdminMux_UnknownRoute(t *testing.T) {
 // TestAdminGrantCluster_NilDB verifies that the grant endpoint returns 503
 // when the database is not configured (nil DB guard, same pattern as other admin endpoints).
 func TestAdminGrantCluster_NilDB(t *testing.T) {
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0, "token")
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/admin/clusters/k3d-dev/grants",
 		bytes.NewBufferString(`{"userSlug":"test-user"}`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer token")
-	srv.AdminMux().ServeHTTP(rec, req)
+	srv.adminGrantCluster(rec, req, "k3d-dev")
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d; want 503 (nil DB)", rec.Code)
 	}

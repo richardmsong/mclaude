@@ -9,7 +9,8 @@ import (
 // Public routes (no auth): /auth/login, /auth/refresh, /version, /health
 // Protected routes (NATS JWT auth): /auth/me, /api/*
 // OAuth callback (no auth — redirects): /auth/providers/*/callback
-// Admin routes (admin bearer token): /admin/* on separate mux (see AdminMux)
+// Admin routes (isAdminMiddleware — JWT + is_admin=true): /admin/*, /scim/v2/
+// Metrics (unauthenticated): /metrics
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	// Public
 	mux.HandleFunc("/auth/login", s.handleLogin)
@@ -124,30 +125,44 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	// Device-code registration (ADR-0035)
 	mux.HandleFunc("/api/hosts/register", s.handleHostRegister)
 
-	// KNOWN-20: SCIM 2.0 endpoints (no auth middleware — SCIM uses its own bearer token).
-	mux.Handle("/scim/v2/", s.adminAuthMiddleware(http.HandlerFunc(s.handleSCIMRoutes)))
-}
+	// Admin routes — on main port, behind isAdminMiddleware (JWT + is_admin=true in DB).
+	// Returns 401 if no JWT, 403 if JWT valid but user is not admin.
+	mux.Handle("/admin/", s.isAdminMiddleware(http.HandlerFunc(s.handleAdminRoutes)))
 
-// AdminMux returns an http.ServeMux for the break-glass admin port (:9091).
-// All routes require the static admin bearer token (env ADMIN_TOKEN).
-// This port must not be exposed externally — bind to 127.0.0.1 in production.
-func (s *Server) AdminMux() *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.Handle("/admin/", s.adminAuthMiddleware(http.HandlerFunc(s.handleAdminRoutes)))
+	// SCIM 2.0 endpoints — on main port, behind isAdminMiddleware.
+	mux.Handle("/scim/v2/", s.isAdminMiddleware(http.HandlerFunc(s.handleSCIMRoutes)))
+
+	// Prometheus metrics — unauthenticated on main port.
+	// Acceptable since the port is behind the cluster ingress (not externally reachable without auth).
 	mux.HandleFunc("/metrics", s.handleMetrics)
-	return mux
 }
 
-// adminAuthMiddleware enforces the static admin bearer token on admin routes.
-func (s *Server) adminAuthMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token := bearerToken(r)
-		if token == "" || token != s.adminToken {
+// isAdminMiddleware enforces admin-only access on protected routes.
+// It calls authMiddleware first (parses + validates JWT, injects userID into context),
+// then fetches the user from Postgres and checks is_admin == true.
+// Returns 401 if no JWT, 403 if JWT valid but user is not admin.
+func (s *Server) isAdminMiddleware(next http.Handler) http.Handler {
+	return s.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		userID, ok := r.Context().Value(contextKeyUserID).(string)
+		if !ok || userID == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if s.db == nil {
+			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		user, err := s.db.GetUserByID(r.Context(), userID)
+		if err != nil || user == nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !user.IsAdmin {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
-	})
+	}))
 }
 
 // handleMetrics serves Prometheus metrics from MetricsRegistry.

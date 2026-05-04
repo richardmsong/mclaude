@@ -18,7 +18,7 @@ func newTestServerWithNatsWsURL(t *testing.T, natsWsURL string) *Server {
 	if err != nil {
 		t.Fatalf("create account key: %v", err)
 	}
-	return NewServer(nil, accountKP, "nats://localhost:4222", natsWsURL, 8*time.Hour, "test-admin-token")
+	return NewServer(nil, accountKP, "nats://localhost:4222", natsWsURL, 8*time.Hour)
 }
 
 // setupAuthorizedDeviceCode inserts a completed (authorized) device code entry into the

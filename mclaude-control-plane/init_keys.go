@@ -34,6 +34,7 @@ func runInitKeys() {
 	secretName := envOr("OPERATOR_KEYS_SECRET", "operator-keys")
 	databaseURL := envOr("DATABASE_URL", "")
 	bootstrapEmail := os.Getenv("BOOTSTRAP_ADMIN_EMAIL")
+	bootstrapPassword := os.Getenv("BOOTSTRAP_ADMIN_PASSWORD")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -109,7 +110,7 @@ func runInitKeys() {
 
 	// 6. Optionally bootstrap admin user in Postgres.
 	if bootstrapEmail != "" && databaseURL != "" {
-		if err := bootstrapAdminUser(ctx, logger, databaseURL, bootstrapEmail); err != nil {
+		if err := bootstrapAdminUser(ctx, logger, databaseURL, bootstrapEmail, bootstrapPassword); err != nil {
 			logger.Fatal().Err(err).Msg("bootstrap admin user")
 		}
 	} else if bootstrapEmail != "" {
@@ -121,7 +122,10 @@ func runInitKeys() {
 
 // bootstrapAdminUser connects to Postgres and inserts a bootstrap admin user
 // if one doesn't already exist with the given email. Idempotent.
-func bootstrapAdminUser(ctx context.Context, logger zerolog.Logger, databaseURL, email string) error {
+// If password is non-empty, it is hashed and stored. If the user already exists
+// and has no password hash, the password is set. Empty password is handled
+// gracefully — existing OAuth-only admins continue to work.
+func bootstrapAdminUser(ctx context.Context, logger zerolog.Logger, databaseURL, email, password string) error {
 	db, err := ConnectDB(ctx, databaseURL)
 	if err != nil {
 		return fmt.Errorf("connect to postgres: %w", err)
@@ -146,11 +150,32 @@ func bootstrapAdminUser(ctx context.Context, logger zerolog.Logger, databaseURL,
 			}
 			logger.Info().Str("email", email).Msg("promoted existing user to admin")
 		}
+		// If password is provided and user has no password hash, set it now.
+		if password != "" && existing.PasswordHash == "" {
+			hash, hashErr := HashPassword(password)
+			if hashErr != nil {
+				return fmt.Errorf("hash bootstrap admin password: %w", hashErr)
+			}
+			if err := db.UpdateUserPassword(ctx, existing.ID, hash); err != nil {
+				return fmt.Errorf("update bootstrap admin password: %w", err)
+			}
+			logger.Info().Str("email", email).Msg("set password for existing bootstrap admin")
+		}
 		return nil
 	}
 
-	// Create the bootstrap admin user (no password, SSO-only).
-	user, err := db.CreateUser(ctx, uuid.NewString(), email, "Admin", "")
+	// Hash password if provided.
+	var passwordHash string
+	if password != "" {
+		var hashErr error
+		passwordHash, hashErr = HashPassword(password)
+		if hashErr != nil {
+			return fmt.Errorf("hash bootstrap admin password: %w", hashErr)
+		}
+	}
+
+	// Create the bootstrap admin user.
+	user, err := db.CreateUser(ctx, uuid.NewString(), email, "Admin", passwordHash)
 	if err != nil {
 		return fmt.Errorf("create admin user: %w", err)
 	}

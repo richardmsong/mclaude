@@ -155,15 +155,16 @@ func TestMetrics_HTTPLatencyHistogramRegistered(t *testing.T) {
 }
 
 func TestMetrics_AdminMetricsEndpointServes(t *testing.T) {
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0, "token")
-	mux := srv.AdminMux()
+	// /metrics is served on the main mux, unauthenticated (ADR-0089).
+	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0)
+	mux := http.NewServeMux()
+	srv.RegisterRoutes(mux)
 
 	// Record some metrics so there's something to serve.
 	RecordProvisioningError("test_op")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
-	req.Header.Set("Authorization", "Bearer token")
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {

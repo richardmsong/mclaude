@@ -43,7 +43,7 @@ func TestIntegration_HandleGetProjectHTTP_ImportRefNull(t *testing.T) {
 	}
 
 	accountKP, _ := nkeys.CreateAccount()
-	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour, "admin")
+	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour)
 
 	// Issue a JWT for the user so the auth middleware provides userID.
 	jwt, _, err := IssueUserJWTLegacy(userID, proj.Slug, accountKP, int64(8*time.Hour.Seconds()))
@@ -107,7 +107,7 @@ func TestIntegration_HandleGetProjectHTTP_ImportRefNonNull(t *testing.T) {
 	}
 
 	accountKP, _ := nkeys.CreateAccount()
-	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour, "admin")
+	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour)
 
 	jwt, _, err := IssueUserJWTLegacy(userID, proj.Slug, accountKP, int64(8*time.Hour.Seconds()))
 	if err != nil {
@@ -215,7 +215,7 @@ func TestIntegration_CLIDeviceCodeVerify_PublicKeyFromEntry(t *testing.T) {
 
 	accountKP, _ := nkeys.CreateAccount()
 	accountPub, _ := accountKP.PublicKey()
-	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour, "admin")
+	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour)
 
 	// Submit the verify form.
 	rec := submitVerifyForm(srv, userCode, email, password)
@@ -290,7 +290,7 @@ func TestIntegration_CLIDeviceCodeVerify_FallbackToNKeyPublic(t *testing.T) {
 
 	accountKP, _ := nkeys.CreateAccount()
 	accountPub, _ := accountKP.PublicKey()
-	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour, "admin")
+	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour)
 
 	rec := submitVerifyForm(srv, userCode, email, password)
 	if rec.Code != http.StatusOK {
@@ -350,7 +350,7 @@ func TestIntegration_CLIDeviceCodeVerify_NoPublicKey_Returns400(t *testing.T) {
 	_, userCode := setupDeviceCodeEntry(t, "" /* no publicKey in entry */)
 
 	accountKP, _ := nkeys.CreateAccount()
-	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour, "admin")
+	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour)
 
 	rec := submitVerifyForm(srv, userCode, email, password)
 
@@ -372,7 +372,7 @@ func TestIntegration_AdminCreateUser_SlugInResponse(t *testing.T) {
 	db := mustConnectDB(t, ctx)
 
 	accountKP, _ := nkeys.CreateAccount()
-	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour, "test-admin-token")
+	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour)
 
 	email := "adr0065-admin-slug@example.com"
 	body := `{"id":"adr0065-admin-slug-u1","email":"` + email + `","name":"ADR0065AdminSlug"}`
@@ -382,9 +382,9 @@ func TestIntegration_AdminCreateUser_SlugInResponse(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/admin/users",
 		bytes.NewBufferString(body))
-	req.Header.Set("Authorization", "Bearer test-admin-token")
 	req.Header.Set("Content-Type", "application/json")
-	srv.AdminMux().ServeHTTP(rec, req)
+	// Call adminCreateUser directly (bypass isAdminMiddleware for unit-style test).
+	srv.adminCreateUser(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d; want 201; body: %s", rec.Code, rec.Body.String())
