@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
+	"github.com/rs/zerolog"
 )
 
 // ---- Postgres CRUD ----
@@ -889,6 +890,117 @@ func TestIntegration_CreateUser_NoLocalHost(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("CreateUser created %d local host row(s); want 0 (ADR-0076)", count)
+	}
+}
+
+// TestIntegration_BootstrapAdminUser_FreshWithPassword verifies that
+// bootstrapAdminUser on an empty DB with a non-empty password creates a user
+// row with a non-empty password_hash, is_admin=true, and that POST /auth/login
+// succeeds with those credentials (ADR-0089 Phase 1 invariant).
+func TestIntegration_BootstrapAdminUser_FreshWithPassword(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	email := "bootstrap-fresh-" + uuid.NewString()[:8] + "@test.example.com"
+	password := "test-bootstrap-pw-" + uuid.NewString()[:8]
+
+	logger := zerolog.Nop()
+	if err := bootstrapAdminUser(ctx, logger, integDeps.PostgresDSN, email, password); err != nil {
+		t.Fatalf("bootstrapAdminUser: %v", err)
+	}
+	t.Cleanup(func() {
+		u, _ := db.GetUserByEmail(ctx, email)
+		if u != nil {
+			db.DeleteUser(ctx, u.ID) //nolint:errcheck
+		}
+	})
+
+	// Verify user row exists with non-empty password_hash and is_admin=true.
+	user, err := db.GetUserByEmail(ctx, email)
+	if err != nil {
+		t.Fatalf("GetUserByEmail: %v", err)
+	}
+	if user == nil {
+		t.Fatal("user not found after bootstrapAdminUser")
+	}
+	if user.PasswordHash == "" {
+		t.Error("password_hash is empty; want non-empty after bootstrapAdminUser with password")
+	}
+	if !user.IsAdmin {
+		t.Error("is_admin = false; want true after bootstrapAdminUser")
+	}
+
+	// Verify login succeeds.
+	accountKP, _ := nkeys.CreateAccount()
+	srv := NewServer(db, accountKP, integDeps.NATSAddr, "", 8*time.Hour)
+	srv.SetExternalURL("http://localhost:8080")
+
+	loginBody := fmt.Sprintf(`{"email":%q,"password":%q}`, email, password)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(loginBody))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("login status = %d; want 200; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestIntegration_BootstrapAdminUser_ExistingUserGetsPassword verifies that
+// bootstrapAdminUser called on an existing user with empty password_hash writes
+// a non-empty hash and login succeeds afterward (ADR-0089 Phase 1 invariant).
+func TestIntegration_BootstrapAdminUser_ExistingUserGetsPassword(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	// Create user with empty password hash (simulates OAuth-only user).
+	userID := "bootstrap-existing-" + uuid.NewString()[:8]
+	email := userID + "@test.example.com"
+	user, err := db.CreateUser(ctx, userID, email, "ExistingBootstrap", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Verify no password hash initially.
+	if user.PasswordHash != "" {
+		t.Fatalf("expected empty password_hash initially; got %q", user.PasswordHash)
+	}
+
+	password := "new-bootstrap-pw-" + uuid.NewString()[:8]
+	logger := zerolog.Nop()
+	if err := bootstrapAdminUser(ctx, logger, integDeps.PostgresDSN, email, password); err != nil {
+		t.Fatalf("bootstrapAdminUser: %v", err)
+	}
+
+	// Verify password_hash is now non-empty.
+	updated, err := db.GetUserByEmail(ctx, email)
+	if err != nil {
+		t.Fatalf("GetUserByEmail: %v", err)
+	}
+	if updated == nil {
+		t.Fatal("user not found after bootstrapAdminUser")
+	}
+	if updated.PasswordHash == "" {
+		t.Error("password_hash is still empty; want non-empty after bootstrapAdminUser with password")
+	}
+	if !updated.IsAdmin {
+		t.Error("is_admin = false; want true after bootstrapAdminUser")
+	}
+
+	// Verify login succeeds.
+	accountKP, _ := nkeys.CreateAccount()
+	srv := NewServer(db, accountKP, integDeps.NATSAddr, "", 8*time.Hour)
+	srv.SetExternalURL("http://localhost:8080")
+
+	loginBody := fmt.Sprintf(`{"email":%q,"password":%q}`, email, password)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(loginBody))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("login status = %d; want 200; body: %s", rec.Code, rec.Body.String())
 	}
 }
 
