@@ -2,8 +2,6 @@ name: Deploy main
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
 
 jobs:
   tag:
@@ -172,9 +170,10 @@ jobs:
             ghcr.io/richardmsong/mclaude-controller-k8s:${{ needs.tag.outputs.image_tag }}
             ghcr.io/richardmsong/mclaude-controller-k8s:main
 
-  deploy:
-    name: Deploy main
-    needs: [tag, build-control-plane, build-spa, build-session-agent, build-controller-k8s]
+  deploy-cp:
+    name: Deploy control-plane
+    needs: [tag, build-control-plane, build-spa]
+    if: always() && !failure() && !cancelled()
     runs-on: [self-hosted, tailscale]
     steps:
       - uses: actions/checkout@v4
@@ -186,7 +185,7 @@ jobs:
             --namespace mclaude-system \
             --dry-run=client -o yaml | kubectl apply -f -
           kubectl create secret generic mclaude-control-plane \
-            --from-literal=admin-token="dev-admin-token" \
+            --from-literal=bootstrap-admin-password="${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}" \
             --namespace mclaude-system \
             --dry-run=client -o yaml | kubectl apply -f -
 
@@ -209,10 +208,22 @@ jobs:
             --set controlPlane.image.tag="${IMAGE_TAG}" \
             --set spa.image.tag="${IMAGE_TAG}" \
             --set controlPlane.devOAuthToken="${DEV_OAUTH_TOKEN}" \
+            --set "controlPlane.bootstrapAdminPassword=${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}" \
             --set "ingress.externalDnsTarget=${TS_IP}" \
             --namespace mclaude-system \
             --force-conflicts \
             --wait --timeout 5m
+
+      - name: Done
+        run: echo "✓ CP deployed"
+
+  deploy-worker:
+    name: Deploy worker
+    needs: [tag, deploy-cp, build-session-agent, build-controller-k8s]
+    if: always() && !failure() && !cancelled()
+    runs-on: [self-hosted, tailscale]
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Cleanup failed worker release
         run: |
@@ -250,3 +261,6 @@ jobs:
             --namespace mclaude-system \
             --force-conflicts \
             --wait --timeout 5m
+
+      - name: Done
+        run: echo "✓ Worker deployed"
