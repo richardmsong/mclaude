@@ -25,8 +25,8 @@ The new design gives the host cluster a cryptographic guarantee of privacy: the 
 | Decryption point | Session-agent process (mounts ciphertext Secret + host key Secret) | Controller-k8s never sees plaintext; decryption stays inside the session boundary |
 | CP role | Stores (token_ct, K_wrapped) as opaque blobs in `user_host_tokens` table | Blind to plaintext; only routes ciphertext to the target host |
 | DEV_OAUTH_TOKEN | Removed from controller-k8s, CP chart, CI workflow | Per-user host-encrypted token replaces the global dev token |
-| Token entry — primary | Claude.ai OAuth PKCE flow from SPA | Browser generates K, fetches host X25519 public key, encrypts token client-side, wraps K — CP never sees plaintext |
-| Token entry — CLI | `mclaude auth anthropic` CLI command (also OAuth, opens browser) | Same crypto as SPA |
+| Token entry — OAuth | Claude.ai PKCE flow from SPA or CLI | Browser/CLI obtains token from Anthropic, then runs same client-side encrypt + wrap path |
+| Token entry — manual paste | Write-only input in SPA or `--token` flag in CLI | User pastes token; same client-side encrypt + wrap path as OAuth; token never displayed again |
 | Token origin | OAuth access token from claude.ai — not a static API key | Token is ephemeral; expiry or revocation requires re-running the OAuth flow |
 | Token re-auth | When token expires/revoked, user re-runs OAuth flow in SPA or CLI; new token overwrites old row | Expected explicit user action; no silent refresh in v1 |
 | Missing token at session start | Session creation fails with clear error | Fail fast; user sees "Connect Claude account in Settings" |
@@ -35,22 +35,31 @@ The new design gives the host cluster a cryptographic guarantee of privacy: the 
 
 1. During host registration, host generates an X25519 keypair and registers the public key with CP.
 
-**Via SPA (primary):**
-2. User navigates to Settings → Anthropic → clicks "Connect Claude account".
-3. SPA redirects to claude.ai OAuth authorization endpoint (PKCE flow; code_challenge sent).
-4. User approves on claude.ai → redirected back to SPA with `code`.
-5. SPA exchanges `code` for access token directly with Anthropic (client-side; PKCE verifier).
-6. SPA generates fresh ephemeral symmetric key K (32 random bytes).
-7. SPA fetches host X25519 public key from CP (public info endpoint).
-8. SPA encrypts: `token_ct = AES-256-GCM(K, access_token)`.
-9. SPA wraps: `K_wrapped = X25519-ECDH-encrypt(host_x25519_public, K)`.
-10. SPA POSTs `(token_ct, K_wrapped)` to CP: `POST /api/users/{uslug}/hosts/{hslug}/anthropic-token`.
-11. CP stores blobs; cannot decrypt. Notifies host via NATS: `mclaude.hosts.{hslug}.token.updated`.
-12. Host controller decrypts K from `K_wrapped` using X25519 private key, stores K in `mclaude-host-key.sym-key`.
+Both OAuth and manual-paste paths converge to the same encrypt+wrap+POST step. The only difference is how the plaintext token is obtained.
 
-**Via CLI (alternate):**
-2. `mclaude auth anthropic [--host <hslug>]` opens browser to claude.ai OAuth; handles PKCE callback locally.
-3. CLI generates K, encrypts token, wraps K with host X25519 public key; POSTs to CP.
+**Client-side encrypt + wrap (shared by all paths):**
+- Client generates fresh ephemeral symmetric key K (32 random bytes).
+- Client fetches host X25519 public key from CP (`GET /api/hosts/{hslug}/public-key`).
+- `token_ct = AES-256-GCM(K, access_token)`.
+- `K_wrapped = X25519-ECDH-encrypt(host_x25519_public, K)`.
+- Client POSTs `(token_ct, K_wrapped)` to CP: `POST /api/users/{uslug}/hosts/{hslug}/anthropic-token`.
+- CP stores blobs blindly; notifies host via NATS: `mclaude.hosts.{hslug}.token.updated`.
+- Host decrypts K from `K_wrapped`, stores in `mclaude-host-key.sym-key`.
+
+**OAuth path (SPA):**
+2. User clicks "Connect Claude account" → SPA redirects to claude.ai (PKCE; code_challenge sent).
+3. User approves → redirected back to SPA with `code`.
+4. SPA exchanges `code` for access token client-side (PKCE verifier) → runs encrypt+wrap+POST.
+
+**OAuth path (CLI):**
+2. `mclaude auth anthropic [--host <hslug>]` opens browser to claude.ai; handles PKCE callback on loopback → runs encrypt+wrap+POST.
+
+**Manual paste path (SPA):**
+2. User clicks "Enter token manually" → write-only password input.
+3. User pastes token → SPA runs encrypt+wrap+POST. Input cleared immediately; value never shown again.
+
+**Manual paste path (CLI):**
+2. `mclaude auth anthropic --token <value> [--host <hslug>]` → runs encrypt+wrap+POST directly.
 
 **Re-auth (token expired or revoked):**
 User re-runs OAuth flow in SPA or CLI. New `(token_ct, K_wrapped)` overwrites old row. Host re-caches new K.
@@ -203,8 +212,9 @@ If host X25519 private key is lost (full cluster reset, host re-registers):
 
 **In v1:**
 - X25519 keypair at host registration.
-- Claude.ai PKCE OAuth flow in SPA (Settings → Anthropic).
-- `mclaude auth anthropic` CLI command (also OAuth).
+- Claude.ai PKCE OAuth flow in SPA and CLI.
+- Manual token paste in SPA (write-only) and CLI (`--token` flag).
+- `mclaude auth anthropic` CLI command.
 - `user_host_tokens` DB table.
 - CP endpoints for store/status/delete.
 - CP writes `(token_ct, K_wrapped)` to per-session k8s Secret.
