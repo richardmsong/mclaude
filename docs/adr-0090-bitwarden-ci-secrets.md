@@ -75,6 +75,7 @@ Three Bitwarden vault items, each using the built-in password field:
 | Item name | Secret |
 |-----------|--------|
 | `mclaude postgres password` | Postgres DB password |
+| `mclaude bootstrap admin email` | `BOOTSTRAP_ADMIN_EMAIL` for init-keys Job |
 | `mclaude bootstrap admin password` | `BOOTSTRAP_ADMIN_PASSWORD` for init-keys Job |
 | `mclaude dev oauth token` | `DEV_OAUTH_TOKEN` for Anthropic OAuth |
 
