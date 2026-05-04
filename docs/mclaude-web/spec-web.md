@@ -239,9 +239,11 @@ Global setup logs in as the bootstrap admin via `POST /auth/login` to obtain an 
 ### Fixture credentials and spec file pattern
 
 `e2e/fixtures.ts` resolves credentials in priority order:
-1. `DEV_EMAIL` / `DEV_TOKEN` / `DEV_USER_SLUG` / `DEV_PROJECT_SLUG` / `DEV_SESSION_SLUG` environment variables (set by global setup or CI).
+1. `DEV_EMAIL` / `DEV_TOKEN` / `DEV_PROJECT_SLUG` / `DEV_SESSION_SLUG` environment variables (set by global setup or CI).
 2. `e2e/.test-user.json` (written by global setup for the current run).
 3. Hardcoded defaults.
+
+`DEV_USER_SLUG` is not resolved through `fixtures.ts` — spec files that need the user slug read it directly from `process.env['DEV_USER_SLUG']` (it can also be derived from the email via `slugify`).
 
 Spec files that define local credential or slug constants must use `process.env` with hardcoded fallbacks — not string literals — so that global setup's `process.env` assignments take effect:
 - `process.env['DEV_EMAIL'] || 'dev@mclaude.local'`
@@ -253,8 +255,10 @@ Spec files that define local credential or slug constants must use `process.env`
 **Admin operations in spec files:** Spec files that need to call admin-only API endpoints must obtain an admin JWT by logging in as the bootstrap admin, using the `loginAsAdmin` helper:
 
 ```typescript
-const adminJWT = await loginAsAdmin(page, process.env['BOOTSTRAP_ADMIN_EMAIL']!, process.env['BOOTSTRAP_ADMIN_PASSWORD']!)
+const adminJWT = await loginAsAdmin(ADMIN_URL, process.env['BOOTSTRAP_ADMIN_EMAIL']!, process.env['BOOTSTRAP_ADMIN_PASSWORD']!)
 ```
+
+`loginAsAdmin(baseURL, email, password)` makes a direct `fetch()` call to `POST {baseURL}/auth/login` and returns the JWT string. No Playwright `page` object is involved.
 
 No spec file may use a static `ADMIN_TOKEN` string or the `|| 'dev-admin-token'` fallback pattern. The `ADMIN_TOKEN` env var and static admin token concept no longer exist.
 

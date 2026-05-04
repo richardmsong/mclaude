@@ -74,10 +74,14 @@ At end of Phase 1: CP healthy, DB clean, admin API reachable via JWT on main por
 ```
 CI: scripts/register-platform-host.sh
     → POST /auth/login {email: BOOTSTRAP_ADMIN_EMAIL, password: BOOTSTRAP_ADMIN_PASSWORD}
-      → JWT (is_admin=true user)
-    → (optional) POST /admin/users — create a dedicated CI service user
-    → mclaude login (device-code or password flow for service user)
-    → mclaude host register --slug k3d-dev
+      → adminJWT (is_admin=true user)
+    → GET /auth/me (adminJWT) → userSlug
+    → generate NKey pair (Ed25519) → publicKey, privateSeed
+    → POST /api/users/{userSlug}/hosts/code {publicKey} (adminJWT)
+      → {code, expiresAt}
+    → POST /api/hosts/register {code, name: HOST_NAME} (no auth — code is credential)
+      → {slug, jwt, hubUrl}
+    → outputs HOST_SLUG, HOST_JWT, HOST_HUB_URL for Helm chart use
     → host row in DB: public_key + user_jwt populated
     → $SYS CONNECT event fires → CP writes KV entry (online=true)
 
@@ -235,7 +239,8 @@ Line 574: remove `|| 'dev-admin-token'` fallback. The admin token concept is gon
 const ADMIN_TOKEN = process.env['ADMIN_TOKEN'] || 'dev-admin-token'
 
 // After: acquire admin JWT via login
-const adminJWT = await loginAsAdmin(page, process.env['BOOTSTRAP_ADMIN_EMAIL']!, process.env['BOOTSTRAP_ADMIN_PASSWORD']!)
+// loginAsAdmin(baseURL, email, password) — direct fetch(), no Playwright page
+const adminJWT = await loginAsAdmin(ADMIN_URL, process.env['BOOTSTRAP_ADMIN_EMAIL']!, process.env['BOOTSTRAP_ADMIN_PASSWORD']!)
 ```
 
 ### Helm chart (`charts/mclaude-cp/`)
