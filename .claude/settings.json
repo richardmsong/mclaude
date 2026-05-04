@@ -6,18 +6,17 @@
       "Grep",
       "Edit",
       "Write",
-      "Update",
       "Bash",
       "WebFetch",
       "WebSearch",
       "Agent",
       "mcp__playwright__*",
-      "mcp__plugin_spec-driven-dev_docs__*"
+      "mcp__docs__*"
     ],
     "deny": []
   },
-  "effortLevel": "high",
   "enabledPlugins": {
     "spec-driven-dev@agent-plugins": true
-  }
+  },
+  "effortLevel": "high"
 }
