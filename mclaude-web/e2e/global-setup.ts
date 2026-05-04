@@ -33,17 +33,32 @@ export default async function globalSetup(_config: FullConfig) {
   }
 
   const baseURL = process.env['BASE_URL'] || 'https://dev.mclaude.richardmcsong.com'
-  const adminToken = process.env['ADMIN_TOKEN'] || 'dev-admin-token'
   const userId = crypto.randomUUID()
   const email = `e2e-${Date.now()}@mclaude.local`
   const token = crypto.randomBytes(8).toString('hex')
 
-  // Step 4: Create test user via admin API
+  // Step 4: Login as bootstrap admin to obtain adminJWT
+  const adminLoginRes = await fetch(`${adminURL}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      email: process.env['BOOTSTRAP_ADMIN_EMAIL'],
+      password: process.env['BOOTSTRAP_ADMIN_PASSWORD'],
+    }),
+  })
+  if (!adminLoginRes.ok) {
+    const body = await adminLoginRes.text()
+    throw new Error(`global-setup: admin login failed ${adminLoginRes.status}: ${body}`)
+  }
+  const adminLoginBody = await adminLoginRes.json() as { jwt: string }
+  const adminJWT = adminLoginBody.jwt
+
+  // Step 5: Create test user via admin API
   const res = await fetch(`${adminURL}/admin/users`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${adminToken}`,
+      'Authorization': `Bearer ${adminJWT}`,
     },
     body: JSON.stringify({ id: userId, email, name: 'E2E Test User', password: token }),
   })
@@ -53,13 +68,13 @@ export default async function globalSetup(_config: FullConfig) {
     throw new Error(`global-setup: POST /admin/users failed ${res.status}: ${body}`)
   }
 
-  // Step 5: Propagate credentials to worker processes via environment
+  // Step 6: Propagate credentials to worker processes via environment
   process.env['DEV_EMAIL'] = email
   process.env['DEV_TOKEN'] = token
   const uslug = slugifyEmail(email)
   process.env['DEV_USER_SLUG'] = uslug
 
-  // Step 6: Login to obtain JWT/nkeySeed for NATS authentication
+  // Step 7: Login to obtain JWT/nkeySeed for NATS authentication
   const loginRes = await fetch(`${baseURL}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -81,7 +96,7 @@ export default async function globalSetup(_config: FullConfig) {
   const nc = await connect({ servers: [natsWsUrl], authenticator: jwtAuthenticator(jwt, seed) })
 
   try {
-    // Step 7: Seed project via NATS request
+    // Step 8: Seed project via NATS request
     const projectSubject = `mclaude.users.${uslug}.hosts.local.api.projects.create`
     const projectPayload = new TextEncoder().encode(JSON.stringify({ name: 'e2e-default', hostSlug: 'local' }))
     const projectReply = await nc.request(projectSubject, projectPayload, { timeout: 30000 })
@@ -121,7 +136,7 @@ export default async function globalSetup(_config: FullConfig) {
 
     process.env['DEV_PROJECT_SLUG'] = projectSlug
 
-    // Step 8: Seed session via NATS publish
+    // Step 9: Seed session via NATS publish
     const sessionSubject = `mclaude.users.${uslug}.hosts.local.projects.${projectSlug}.sessions.create`
     const sessionPayload = new TextEncoder().encode(JSON.stringify({}))
     nc.publish(sessionSubject, sessionPayload)

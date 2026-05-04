@@ -6,9 +6,8 @@ const DEV_PASSWORD = process.env['DEV_TOKEN'] || 'dev'
 const DEV_USER_SLUG = process.env['DEV_USER_SLUG'] || 'dev-mclaude-local'
 const FAKE_NKEY = ['UA', 'PLACEHOLDER', 'TEST', 'KEY'].join('_')
 
-// Admin is on port 9090 (ADMIN_PORT env var in the control-plane pod).
-// In the dev k3d deployment the admin port is NOT exposed via ingress — tests
-// that require the admin port use a kubectl port-forward via the ADMIN_URL env.
+// Admin routes are served on the main port behind isAdminMiddleware (JWT auth).
+// ADMIN_URL should point to the control-plane base URL (same as BASE_URL in most deployments).
 const ADMIN_URL = process.env['ADMIN_URL'] || ''
 
 /** Authenticate with the dev user and return the JWT token and user slug. */
@@ -565,21 +564,38 @@ test.describe('Host Management API endpoints', () => {
 })
 
 // ── Admin Endpoints ─────────────────────────────────────────────────────────
-// Admin is on port 9090. Access requires ADMIN_URL env var pointing to the
-// admin base (e.g. http://localhost:19090 via kubectl port-forward).
+/** Authenticate as the bootstrap admin and return the admin JWT. */
+async function loginAsAdmin(baseURL: string, email: string, password: string): Promise<string> {
+  const resp = await fetch(`${baseURL}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password })
+  })
+  if (!resp.ok) throw new Error(`admin login failed ${resp.status}`)
+  const data = await resp.json() as { jwt: string }
+  return data.jwt
+}
+
+// ── Admin Endpoints ─────────────────────────────────────────────────────────
+// Admin routes are served on the main port behind isAdminMiddleware (JWT auth).
+// Access requires ADMIN_URL env var pointing to the control-plane base URL.
 
 test.describe('Admin API endpoints', () => {
-  test.skip(!ADMIN_URL, 'Requires ADMIN_URL env var (kubectl port-forward to admin port 9090)')
+  test.skip(!ADMIN_URL, 'Requires ADMIN_URL env var')
 
-  const ADMIN_TOKEN = process.env['ADMIN_TOKEN'] || 'dev-admin-token'
+  let adminJWT = ''
   let createdUserIds: string[] = []
   let createdClusterSlugs: string[] = []
+
+  test.beforeAll(async () => {
+    adminJWT = await loginAsAdmin(ADMIN_URL, process.env['BOOTSTRAP_ADMIN_EMAIL']!, process.env['BOOTSTRAP_ADMIN_PASSWORD']!)
+  })
 
   test.afterAll(async ({ request }) => {
     // Cleanup: delete users created during tests
     for (const id of createdUserIds) {
       await request.delete(`${ADMIN_URL}/admin/users/${id}`, {
-        headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+        headers: { Authorization: `Bearer ${adminJWT}` },
       }).catch(() => {})
     }
   })
@@ -595,7 +611,7 @@ test.describe('Admin API endpoints', () => {
   test('API-ADMIN-02: Register cluster → POST /admin/clusters → slug, leafJwt, leafSeed, jsDomain', async ({ request }) => {
     const slug = `e2e-cluster-${Date.now()}`
     const res = await request.post(`${ADMIN_URL}/admin/clusters`, {
-      headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+      headers: { Authorization: `Bearer ${adminJWT}` },
       data: { slug, name: 'E2E Test Cluster', jsDomain: 'e2e.js', leafUrl: 'nats://test-leaf:7422' },
     })
     expect(res.status()).toBe(201)
@@ -609,7 +625,7 @@ test.describe('Admin API endpoints', () => {
 
   test('API-ADMIN-03: List clusters → GET /admin/clusters → array (deduplicated)', async ({ request }) => {
     const res = await request.get(`${ADMIN_URL}/admin/clusters`, {
-      headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+      headers: { Authorization: `Bearer ${adminJWT}` },
     })
     expect(res.status()).toBe(200)
     const body = await res.json()
@@ -620,14 +636,14 @@ test.describe('Admin API endpoints', () => {
     // Create a cluster to grant on
     const slug = `e2e-grant-cluster-${Date.now()}`
     const createRes = await request.post(`${ADMIN_URL}/admin/clusters`, {
-      headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+      headers: { Authorization: `Bearer ${adminJWT}` },
       data: { slug, name: 'Grant Cluster', jsDomain: 'grant.js', leafUrl: 'nats://grant-leaf:7422' },
     })
     expect(createRes.status()).toBe(201)
     createdClusterSlugs.push(slug)
 
     const grantRes = await request.post(`${ADMIN_URL}/admin/clusters/${slug}/grants`, {
-      headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+      headers: { Authorization: `Bearer ${adminJWT}` },
       data: { userSlug: DEV_USER_SLUG },
     })
     expect(grantRes.status()).toBe(201)
@@ -639,7 +655,7 @@ test.describe('Admin API endpoints', () => {
     const id = `e2e-admin-user-${Date.now()}`
     const email = `e2e-admin-${Date.now()}@test.local`
     const res = await request.post(`${ADMIN_URL}/admin/users`, {
-      headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+      headers: { Authorization: `Bearer ${adminJWT}` },
       data: { id, email, name: 'E2E Admin Test User' },
     })
     expect(res.status()).toBe(201)
@@ -651,7 +667,7 @@ test.describe('Admin API endpoints', () => {
 
   test('API-ADMIN-06: List users → GET /admin/users → array of users', async ({ request }) => {
     const res = await request.get(`${ADMIN_URL}/admin/users`, {
-      headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+      headers: { Authorization: `Bearer ${adminJWT}` },
     })
     expect(res.status()).toBe(200)
     const body = await res.json()
@@ -664,14 +680,14 @@ test.describe('Admin API endpoints', () => {
     const id = `e2e-delete-user-${Date.now()}`
     const email = `e2e-delete-${Date.now()}@test.local`
     const createRes = await request.post(`${ADMIN_URL}/admin/users`, {
-      headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+      headers: { Authorization: `Bearer ${adminJWT}` },
       data: { id, email, name: 'E2E Delete User' },
     })
     expect(createRes.status()).toBe(201)
     const { id: userId } = await createRes.json()
 
     const deleteRes = await request.delete(`${ADMIN_URL}/admin/users/${userId}`, {
-      headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+      headers: { Authorization: `Bearer ${adminJWT}` },
     })
     expect(deleteRes.status()).toBe(204)
   })
@@ -687,7 +703,7 @@ test.describe('Admin API endpoints', () => {
     const slug = `e2e-dup-cluster-${Date.now()}`
     // First creation
     const first = await request.post(`${ADMIN_URL}/admin/clusters`, {
-      headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+      headers: { Authorization: `Bearer ${adminJWT}` },
       data: { slug, name: 'Dup Cluster', jsDomain: 'dup.js', leafUrl: 'nats://dup-leaf:7422' },
     })
     expect(first.status()).toBe(201)
@@ -695,7 +711,7 @@ test.describe('Admin API endpoints', () => {
 
     // Duplicate
     const second = await request.post(`${ADMIN_URL}/admin/clusters`, {
-      headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+      headers: { Authorization: `Bearer ${adminJWT}` },
       data: { slug, name: 'Dup Cluster 2', jsDomain: 'dup.js', leafUrl: 'nats://dup-leaf:7422' },
     })
     expect(second.status()).toBe(409)
@@ -703,7 +719,7 @@ test.describe('Admin API endpoints', () => {
 
   test('API-ADMIN-10: Duplicate user email → POST /admin/users with existing email → 409', async ({ request }) => {
     const res = await request.post(`${ADMIN_URL}/admin/users`, {
-      headers: { Authorization: `Bearer ${ADMIN_TOKEN}` },
+      headers: { Authorization: `Bearer ${adminJWT}` },
       data: { id: 'dup-user-attempt', email: 'dev@mclaude.local', name: 'Duplicate Dev' },
     })
     expect(res.status()).toBe(409)
