@@ -175,18 +175,36 @@ jobs:
     needs: [tag, build-control-plane, build-spa]
     if: always() && !failure() && !cancelled()
     runs-on: [self-hosted, tailscale]
+    environment: deploy
     steps:
+      - name: Fetch secrets from Bitwarden
+        env:
+          BW_SESSION: ${{ secrets.BW_SESSION }}
+        run: |
+          POSTGRES_PASSWORD=$(bw get password "mclaude postgres password")
+          BOOTSTRAP_ADMIN_PASSWORD=$(bw get password "mclaude bootstrap admin password")
+          DEV_OAUTH_TOKEN=$(bw get password "mclaude dev oauth token")
+          [[ -n "$POSTGRES_PASSWORD" ]] || { echo "ERROR: mclaude postgres password is empty"; exit 1; }
+          [[ -n "$BOOTSTRAP_ADMIN_PASSWORD" ]] || { echo "ERROR: mclaude bootstrap admin password is empty"; exit 1; }
+          [[ -n "$DEV_OAUTH_TOKEN" ]] || { echo "ERROR: mclaude dev oauth token is empty"; exit 1; }
+          echo "::add-mask::$POSTGRES_PASSWORD"
+          echo "::add-mask::$BOOTSTRAP_ADMIN_PASSWORD"
+          echo "::add-mask::$DEV_OAUTH_TOKEN"
+          echo "POSTGRES_PASSWORD=$POSTGRES_PASSWORD" >> "$GITHUB_ENV"
+          echo "BOOTSTRAP_ADMIN_PASSWORD=$BOOTSTRAP_ADMIN_PASSWORD" >> "$GITHUB_ENV"
+          echo "DEV_OAUTH_TOKEN=$DEV_OAUTH_TOKEN" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
 
       - name: Ensure prerequisite secrets
         run: |
           kubectl create namespace mclaude-system --dry-run=client -o yaml | kubectl apply -f -
           kubectl create secret generic mclaude-postgres \
-            --from-literal=postgres-password="dev-postgres-password-k3d" \
+            --from-literal=postgres-password="$POSTGRES_PASSWORD" \
             --namespace mclaude-system \
             --dry-run=client -o yaml | kubectl apply -f -
           kubectl create secret generic mclaude-control-plane \
-            --from-literal=bootstrap-admin-password="${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}" \
+            --from-literal=bootstrap-admin-password="$BOOTSTRAP_ADMIN_PASSWORD" \
             --namespace mclaude-system \
             --dry-run=client -o yaml | kubectl apply -f -
 
@@ -200,7 +218,6 @@ jobs:
       - name: Helm deploy control-plane
         env:
           IMAGE_TAG: ${{ needs.tag.outputs.image_tag }}
-          DEV_OAUTH_TOKEN: ${{ secrets.DEV_OAUTH_TOKEN }}
         run: |
           echo "Deploying control-plane at tag: ${IMAGE_TAG}"
           TS_IP=$(tailscale ip -4)
@@ -209,7 +226,7 @@ jobs:
             --set controlPlane.image.tag="${IMAGE_TAG}" \
             --set spa.image.tag="${IMAGE_TAG}" \
             --set controlPlane.devOAuthToken="${DEV_OAUTH_TOKEN}" \
-            --set "controlPlane.bootstrapAdminPassword=${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}" \
+            --set "controlPlane.bootstrapAdminPassword=${BOOTSTRAP_ADMIN_PASSWORD}" \
             --set "ingress.externalDnsTarget=${TS_IP}" \
             --namespace mclaude-system \
             --force-conflicts \
@@ -223,6 +240,7 @@ jobs:
     needs: [tag, deploy-cp, build-session-agent, build-controller-k8s]
     if: false
     runs-on: [self-hosted, tailscale]
+    environment: deploy
     steps:
       - uses: actions/checkout@v4
 
