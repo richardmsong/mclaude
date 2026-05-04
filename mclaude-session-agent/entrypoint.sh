@@ -25,8 +25,25 @@ export PATH="/nix/var/nix/profiles/default/bin:/home/node/.nix-profile/bin:$PATH
 }
 [ -f "/home/node/.user-secrets/.gitconfig" ] && \
     cp /home/node/.user-secrets/.gitconfig "$HOME/.gitconfig"
-[ -f "/home/node/.user-secrets/oauth-token" ] && \
-    export CLAUDE_CODE_OAUTH_TOKEN=$(cat /home/node/.user-secrets/oauth-token)
+
+# Read model-provider token from the per-user secret mounted by the user-agent
+# (ADR-0091). Fail fast if the token file is missing or empty — user-agent
+# should never have created this pod without a valid token; a missing file
+# indicates a control-plane bug.
+if [ -z "${TOKEN_PROVIDER}" ]; then
+    echo "[entrypoint] FATAL: TOKEN_PROVIDER env var is not set" >&2
+    exit 1
+fi
+token_file="/secrets/tokens/${TOKEN_PROVIDER}"
+if [ ! -f "${token_file}" ]; then
+    echo "[entrypoint] FATAL: token file not found: ${token_file}" >&2
+    exit 1
+fi
+export CLAUDE_CODE_OAUTH_TOKEN=$(cat "${token_file}")
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN}" ]; then
+    echo "[entrypoint] FATAL: token file is empty: ${token_file}" >&2
+    exit 1
+fi
 
 # Seed user config (emptyDir is fresh each boot — always copy)
 for f in CLAUDE.md settings.json; do
@@ -67,10 +84,13 @@ done) &
 [ "${DOCKER_ENABLED}" = "true" ] && \
     while [ ! -S /var/run/docker.sock ]; do sleep 0.5; done
 
-# Hand off to session agent — no tmux, spawns Claude as child processes
+# Hand off to session agent — no tmux, spawns Claude as child processes.
+# --auth-url activates HTTP challenge-response self-bootstrap (ADR-0054/ADR-0091);
+# --nats-creds is NOT passed — the per-project nats-creds Secret key was removed
+# by ADR-0063 and the session-agent self-bootstraps via HTTP challenge-response.
 exec session-agent \
     --nats-url    "${NATS_URL}" \
-    --nats-creds  "/home/node/.user-secrets/nats-creds" \
+    --auth-url    "${CONTROL_PLANE_URL}" \
     --user-id     "${USER_ID}" \
     --project-id  "${PROJECT_ID}" \
     --data-dir    /data \
