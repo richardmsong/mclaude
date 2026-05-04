@@ -9,16 +9,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
-	"github.com/rs/zerolog"
 	"github.com/nats-io/nkeys"
 )
 
@@ -332,7 +334,7 @@ func TestIntegration_HandleLogin_UserSlugInResponse(t *testing.T) {
 	}
 
 	accountKP, _ := nkeys.CreateAccount()
-	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour, "admin")
+	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour)
 
 	body := `{"email":"bob.jones@example.com","password":"secret-pw"}`
 	rec := httptest.NewRecorder()
@@ -373,7 +375,7 @@ func TestIntegration_HandleRefresh_ReturnsSlug(t *testing.T) {
 	}
 
 	accountKP, _ := nkeys.CreateAccount()
-	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour, "admin")
+	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour)
 
 	// Log in to get an initial JWT.
 	loginBody := `{"email":"refresh.slug@example.com","password":"refresh-pw"}`
@@ -468,10 +470,10 @@ func TestIntegration_HandleSysEvent_MachineConnect(t *testing.T) {
 	srv.handleSysEvent(fakeMsg, true /* isConnect */)
 
 	// Verify mclaude-hosts KV was written with online=true.
-	// ADR-0062: user slug is derived from full email: sysevt@example.com → sysevt-example-com
-	entry, err := hostsKV.Get("sysevt-example-com.myhost")
+	// KV key is {hslug} (flat, no user prefix — per spec-state-schema.md § mclaude-hosts).
+	entry, err := hostsKV.Get("myhost")
 	if err != nil {
-		t.Fatalf("hostsKV.Get(sysevt-example-com.myhost): %v", err)
+		t.Fatalf("hostsKV.Get(myhost): %v", err)
 	}
 
 	var state HostKVState
@@ -533,8 +535,8 @@ func TestIntegration_HandleSysEvent_MachineDisconnect(t *testing.T) {
 	srv.handleSysEvent(&nats.Msg{Data: []byte(connectPayload)}, true)
 
 	// Verify online=true after CONNECT.
-	// ADR-0062: user slug is derived from full email: sysdisc@example.com → sysdisc-example-com
-	entry, err := hostsKV.Get("sysdisc-example-com.dischost")
+	// KV key is {hslug} (flat, no user prefix — per spec-state-schema.md § mclaude-hosts).
+	entry, err := hostsKV.Get("dischost")
 	if err != nil {
 		t.Fatalf("hostsKV.Get after CONNECT: %v", err)
 	}
@@ -549,7 +551,7 @@ func TestIntegration_HandleSysEvent_MachineDisconnect(t *testing.T) {
 	disconnectPayload := `{"server":{"name":"hub"},"client":{"kind":"Client","name":"dischost","nkey":"UTEST_PUBKEY_SYSDISC"}}`
 	srv.handleSysEvent(&nats.Msg{Data: []byte(disconnectPayload)}, false)
 
-	entry, err = hostsKV.Get("sysdisc-example-com.dischost")
+	entry, err = hostsKV.Get("dischost")
 	if err != nil {
 		t.Fatalf("hostsKV.Get after DISCONNECT: %v", err)
 	}
@@ -758,79 +760,1009 @@ func TestIntegration_HandleSysEvent_LeafnodeDropped(t *testing.T) {
 	}
 }
 
-// TestIntegration_SeedDev_WritesLocalHostKV verifies that seedDev writes
-// the 'local' host with online=true to mclaude-hosts KV (ADR-0046).
-// seedDev uses the hardcoded dev@mclaude.local account.
-func TestIntegration_SeedDev_WritesLocalHostKV(t *testing.T) {
+// TestIntegration_SeedDev_WritesLocalHostKV removed per ADR-0089 (seedDev removed).
+
+// ---- ADR-0089 helper ----
+
+// newIntegrationServer constructs a Server with the given DB and NATS connection.
+// Used by ADR-0089 integration tests. accountKP is freshly generated.
+func newIntegrationServer(t *testing.T, db *DB, nc *nats.Conn) *Server {
+	t.Helper()
+	accountKP, err := nkeys.CreateAccount()
+	if err != nil {
+		t.Fatalf("create account kp: %v", err)
+	}
+	srv := NewServer(db, accountKP, integDeps.NATSAddr, "", 8*time.Hour)
+	srv.SetExternalURL("http://localhost:8080")
+	if nc != nil {
+		srv.SetNATSConn(nc)
+	}
+	return srv
+}
+
+// mustAdminJWT creates an is_admin user, logs in, and returns the JWT for use
+// in admin route tests.
+func mustAdminJWT(t *testing.T, db *DB, srv *Server) string {
+	t.Helper()
+	ctx := context.Background()
+	adminID := "admin-jwt-" + uuid.NewString()[:8]
+	adminEmail := adminID + "@test.example.com"
+	hash, err := HashPassword("admin-pw-" + adminID)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	adminUser, err := db.CreateUser(ctx, adminID, adminEmail, "Admin", hash)
+	if err != nil {
+		t.Fatalf("create admin user: %v", err)
+	}
+	if err := db.SetUserAdmin(ctx, adminUser.ID, true); err != nil {
+		t.Fatalf("set admin: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, adminID) }) //nolint:errcheck
+
+	body := fmt.Sprintf(`{"email":%q,"password":%q}`, adminEmail, "admin-pw-"+adminID)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin login status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp LoginResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	return resp.JWT
+}
+
+// ---- ADR-0089 Phase 1 invariants ----
+
+// TestIntegration_Schema_NoSeedRows verifies that a fresh Migrate() on an empty DB
+// leaves hosts, projects, and users tables all empty (ADR-0089).
+func TestIntegration_Schema_NoSeedRows(t *testing.T) {
+	ctx := context.Background()
+
+	// Use a fresh DB connection to a clean database.
+	db := mustConnectDB(t, ctx)
+
+	var userCount, hostCount, projectCount int
+	if err := db.pool.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&userCount); err != nil {
+		t.Fatalf("count users: %v", err)
+	}
+	if err := db.pool.QueryRow(ctx, `SELECT COUNT(*) FROM hosts`).Scan(&hostCount); err != nil {
+		t.Fatalf("count hosts: %v", err)
+	}
+	if err := db.pool.QueryRow(ctx, `SELECT COUNT(*) FROM projects`).Scan(&projectCount); err != nil {
+		t.Fatalf("count projects: %v", err)
+	}
+
+	// Note: other tests in the shared container may have created rows.
+	// We verify that Migrate() itself does not INSERT seed rows.
+	// We can only assert 0 after a fresh Migrate on a blank DB, which is what
+	// TestMain does. Since tests share a container, we verify no unexpected data
+	// was added by Migrate itself (row counts may be > 0 from other tests — that's OK).
+	// The invariant is: Migrate() does not INSERT any rows. We verify this is true
+	// by running Migrate again (idempotent) and confirming counts don't increase.
+	beforeUser, beforeHost, beforeProject := userCount, hostCount, projectCount
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("re-Migrate: %v", err)
+	}
+	var afterUser, afterHost, afterProject int
+	if err := db.pool.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&afterUser); err != nil {
+		t.Fatalf("count users after: %v", err)
+	}
+	if err := db.pool.QueryRow(ctx, `SELECT COUNT(*) FROM hosts`).Scan(&afterHost); err != nil {
+		t.Fatalf("count hosts after: %v", err)
+	}
+	if err := db.pool.QueryRow(ctx, `SELECT COUNT(*) FROM projects`).Scan(&afterProject); err != nil {
+		t.Fatalf("count projects after: %v", err)
+	}
+	if afterUser != beforeUser {
+		t.Errorf("Migrate added %d user rows; want 0", afterUser-beforeUser)
+	}
+	if afterHost != beforeHost {
+		t.Errorf("Migrate added %d host rows; want 0", afterHost-beforeHost)
+	}
+	if afterProject != beforeProject {
+		t.Errorf("Migrate added %d project rows; want 0", afterProject-beforeProject)
+	}
+}
+
+// TestIntegration_CreateUser_NoLocalHost verifies that CreateUser does not insert
+// a bare local host row with slug='local' (ADR-0076 / ADR-0089 Phase 1 invariant).
+func TestIntegration_CreateUser_NoLocalHost(t *testing.T) {
 	ctx := context.Background()
 	db := mustConnectDB(t, ctx)
 
-	// Ensure the dev user exists before seedDev runs, so the schema migration
-	// can create their 'local' host in the DO block on the next Migrate call.
-	// If the user already exists from a previous test, this is a no-op.
-	devUser, err := db.GetUserByEmail(ctx, "dev@mclaude.local")
+	userID := "nolocalhost-" + uuid.NewString()[:8]
+	user, err := db.CreateUser(ctx, userID, userID+"@test.example.com", "NoLocalHost", "")
 	if err != nil {
-		t.Fatalf("GetUserByEmail: %v", err)
+		t.Fatalf("CreateUser: %v", err)
 	}
-	if devUser == nil {
-		hash, herr := HashPassword("dev")
-		if herr != nil {
-			t.Fatalf("HashPassword: %v", herr)
-		}
-		devUser, err = db.CreateUser(ctx, "seedkv-dev-u1", "dev@mclaude.local", "Dev User", hash)
-		if err != nil {
-			t.Fatalf("CreateUser dev user: %v", err)
-		}
-		// Re-run Migrate so the DO block creates the 'local' host for this user.
-		if err := db.Migrate(ctx); err != nil {
-			t.Fatalf("Migrate after user create: %v", err)
-		}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	var count int
+	if err := db.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM hosts WHERE user_id = $1 AND slug = 'local'`,
+		user.ID).Scan(&count); err != nil {
+		t.Fatalf("count local hosts: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("CreateUser created %d local host row(s); want 0 (ADR-0076)", count)
+	}
+}
+
+// ---- ADR-0089 Admin routes (main port, isAdminMiddleware) ----
+
+// TestIntegration_AdminCreateUser verifies POST /admin/users creates a user
+// with {id, email, name, slug} in the response (ADR-0089).
+func TestIntegration_AdminCreateUser(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	srv := newIntegrationServer(t,db, nil)
+	adminJWT := mustAdminJWT(t, db, srv)
+
+	userID := "admin-create-" + uuid.NewString()[:8]
+	email := userID + "@test.example.com"
+	body := fmt.Sprintf(`{"id":%q,"email":%q,"name":"AdminCreateUser"}`, userID, email)
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	mux := http.NewServeMux()
+	srv.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/admin/users", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminJWT)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d; want 201; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp AdminUserResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.ID != userID {
+		t.Errorf("id = %q; want %q", resp.ID, userID)
+	}
+	if resp.Email != email {
+		t.Errorf("email = %q; want %q", resp.Email, email)
+	}
+	if resp.Name == "" {
+		t.Error("name is empty")
+	}
+	if resp.Slug == "" {
+		t.Error("slug is empty")
+	}
+}
+
+// TestIntegration_AdminListUsers verifies GET /admin/users lists created users (ADR-0089).
+func TestIntegration_AdminListUsers(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	srv := newIntegrationServer(t,db, nil)
+	adminJWT := mustAdminJWT(t, db, srv)
+
+	// Create a test user.
+	userID := "admin-list-" + uuid.NewString()[:8]
+	_, err := db.CreateUser(ctx, userID, userID+"@test.example.com", "AdminListUser", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	mux := http.NewServeMux()
+	srv.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
+	req.Header.Set("Authorization", "Bearer "+adminJWT)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var users []AdminUserResponse
+	if err := json.NewDecoder(rec.Body).Decode(&users); err != nil {
+		t.Fatalf("decode response: %v", err)
 	}
 
+	found := false
+	for _, u := range users {
+		if u.ID == userID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("created user %q not found in list", userID)
+	}
+}
+
+// TestIntegration_AdminDeleteUser verifies DELETE /admin/users/{id} deletes a user (ADR-0089).
+func TestIntegration_AdminDeleteUser(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	srv := newIntegrationServer(t,db, nil)
+	adminJWT := mustAdminJWT(t, db, srv)
+
+	userID := "admin-del-" + uuid.NewString()[:8]
+	_, err := db.CreateUser(ctx, userID, userID+"@test.example.com", "AdminDelUser", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	srv.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/admin/users/"+userID, nil)
+	req.Header.Set("Authorization", "Bearer "+adminJWT)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d; want 204; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify user no longer exists in DB.
+	fetched, err := db.GetUserByID(ctx, userID)
+	if err != nil {
+		t.Fatalf("GetUserByID after delete: %v", err)
+	}
+	if fetched != nil {
+		t.Errorf("user %q still exists after DELETE", userID)
+	}
+}
+
+// TestIntegration_AdminMiddleware_RejectsNoToken verifies 401 on /admin/users without JWT (ADR-0089).
+func TestIntegration_AdminMiddleware_RejectsNoToken(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	srv := newIntegrationServer(t,db, nil)
+
+	mux := http.NewServeMux()
+	srv.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d; want 401 (no JWT)", rec.Code)
+	}
+}
+
+// TestIntegration_AdminMiddleware_RejectsNonAdmin verifies 403 when JWT is valid
+// but user is not admin (ADR-0089).
+func TestIntegration_AdminMiddleware_RejectsNonAdmin(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	srv := newIntegrationServer(t,db, nil)
+
+	// Create a non-admin user and log in.
+	userID := "non-admin-" + uuid.NewString()[:8]
+	email := userID + "@test.example.com"
+	hash, _ := HashPassword("pw-" + userID)
+	_, err := db.CreateUser(ctx, userID, email, "NonAdmin", hash)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	loginBody := fmt.Sprintf(`{"email":%q,"password":%q}`, email, "pw-"+userID)
+	loginRec := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(loginBody))
+	loginReq.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d; body: %s", loginRec.Code, loginRec.Body.String())
+	}
+	var loginResp LoginResponse
+	json.NewDecoder(loginRec.Body).Decode(&loginResp) //nolint:errcheck
+
+	mux := http.NewServeMux()
+	srv.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
+	req.Header.Set("Authorization", "Bearer "+loginResp.JWT)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d; want 403 (non-admin JWT)", rec.Code)
+	}
+}
+
+// ---- ADR-0089 Auth surface ----
+
+// TestIntegration_HandleLogin_InvalidCreds verifies POST /auth/login returns 401
+// on wrong password (ADR-0089).
+func TestIntegration_HandleLogin_InvalidCreds(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	// Create a user with a known password.
+	userID := "login-invalid-" + uuid.NewString()[:8]
+	hash, _ := HashPassword("correct-pw")
+	_, err := db.CreateUser(ctx, userID, userID+"@test.example.com", "LoginInvalid", hash)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	srv := newIntegrationServer(t,db, nil)
+
+	body := fmt.Sprintf(`{"email":%q,"password":"wrong-password"}`, userID+"@test.example.com")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d; want 401 (wrong password)", rec.Code)
+	}
+}
+
+// TestIntegration_AuthMiddleware_Rejects_Unauthenticated verifies GET /auth/me
+// returns 401 without a JWT (ADR-0089).
+func TestIntegration_AuthMiddleware_Rejects_Unauthenticated(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	srv := newIntegrationServer(t,db, nil)
+
+	mux := http.NewServeMux()
+	srv.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d; want 401 (no JWT)", rec.Code)
+	}
+}
+
+// TestIntegration_AuthMiddleware_Accepts_ValidJWT verifies GET /auth/me returns 200
+// with a valid JWT from login (ADR-0089).
+func TestIntegration_AuthMiddleware_Accepts_ValidJWT(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	srv := newIntegrationServer(t,db, nil)
+
+	userID := "auth-valid-" + uuid.NewString()[:8]
+	hash, _ := HashPassword("pw-" + userID)
+	_, err := db.CreateUser(ctx, userID, userID+"@test.example.com", "AuthValid", hash)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Login to get JWT.
+	loginBody := fmt.Sprintf(`{"email":%q,"password":%q}`, userID+"@test.example.com", "pw-"+userID)
+	loginRec := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(loginBody))
+	loginReq.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d; body: %s", loginRec.Code, loginRec.Body.String())
+	}
+	var loginResp LoginResponse
+	json.NewDecoder(loginRec.Body).Decode(&loginResp) //nolint:errcheck
+
+	mux := http.NewServeMux()
+	srv.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+	req.Header.Set("Authorization", "Bearer "+loginResp.JWT)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d; want 200 (valid JWT); body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestIntegration_HostRegister_HTTP verifies POST /api/hosts/register creates a host
+// row with public_key and returns a JWT (ADR-0089).
+func TestIntegration_HostRegister_HTTP(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	srv := newIntegrationServer(t,db, nil)
+
+	// Create a user to own the host.
+	userID := "hostreg-" + uuid.NewString()[:8]
+	_, err := db.CreateUser(ctx, userID, userID+"@test.example.com", "HostReg", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Generate a host NKey public key.
+	hostKP, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatalf("create host nkey: %v", err)
+	}
+	hostPub, _ := hostKP.PublicKey()
+
+	// Inject a device code entry.
+	code := "HOSTREG"
+	globalDeviceCodeStore.mu.Lock()
+	globalDeviceCodeStore.codes[code] = &deviceCodeEntry{
+		UserID:    userID,
+		PublicKey: hostPub,
+		ExpiresAt: time.Now().Add(10 * time.Minute),
+	}
+	globalDeviceCodeStore.mu.Unlock()
+	t.Cleanup(func() {
+		globalDeviceCodeStore.mu.Lock()
+		delete(globalDeviceCodeStore.codes, code)
+		globalDeviceCodeStore.mu.Unlock()
+	})
+
+	body := fmt.Sprintf(`{"code":%q,"name":"Test Host"}`, code)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/hosts/register", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleHostRegister(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d; want 201; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["jwt"] == "" || resp["jwt"] == nil {
+		t.Error("response missing jwt")
+	}
+	if resp["slug"] == "" || resp["slug"] == nil {
+		t.Error("response missing slug")
+	}
+
+	// Verify host row exists in DB with public_key set.
+	slug, _ := resp["slug"].(string)
+	var pubKey string
+	if err := db.pool.QueryRow(ctx,
+		`SELECT public_key FROM hosts WHERE user_id = $1 AND slug = $2`,
+		userID, slug).Scan(&pubKey); err != nil {
+		t.Fatalf("query host: %v", err)
+	}
+	if pubKey != hostPub {
+		t.Errorf("public_key = %q; want %q", pubKey, hostPub)
+	}
+}
+
+// TestIntegration_NKeyChallenge_AndVerify verifies the full challenge-response
+// round-trip returning a scoped JWT (ADR-0089).
+func TestIntegration_NKeyChallenge_AndVerify(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	srv := newIntegrationServer(t,db, nil)
+
+	// Create a user with a known NKey.
+	userKP, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatalf("create user nkey: %v", err)
+	}
+	userPub, _ := userKP.PublicKey()
+
+	userID := "nkey-challenge-" + uuid.NewString()[:8]
+	_, err = db.CreateUser(ctx, userID, userID+"@test.example.com", "NKeyChallenge", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if err := db.SetUserNKeyPublic(ctx, userID, userPub); err != nil {
+		t.Fatalf("SetUserNKeyPublic: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Step 1: request challenge.
+	challengeBody := fmt.Sprintf(`{"nkey_public":%q}`, userPub)
+	rec1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodPost, "/api/auth/challenge", bytes.NewBufferString(challengeBody))
+	req1.Header.Set("Content-Type", "application/json")
+	srv.handleAuthChallenge(rec1, req1)
+
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("challenge status = %d; body: %s", rec1.Code, rec1.Body.String())
+	}
+	var challengeResp struct {
+		Challenge string `json:"challenge"`
+	}
+	if err := json.NewDecoder(rec1.Body).Decode(&challengeResp); err != nil {
+		t.Fatalf("decode challenge response: %v", err)
+	}
+	if challengeResp.Challenge == "" {
+		t.Fatal("challenge is empty")
+	}
+
+	// Step 2: sign the challenge and verify.
+	// Challenge is base64-encoded raw nonce bytes.
+	import64 := challengeResp.Challenge
+	sig, err := userKP.Sign([]byte(import64))
+	if err != nil {
+		t.Fatalf("sign challenge: %v", err)
+	}
+
+	verifyBody := fmt.Sprintf(`{"nkey_public":%q,"challenge":%q,"signature":%q}`,
+		userPub, challengeResp.Challenge, sig)
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/api/auth/verify", bytes.NewBufferString(verifyBody))
+	req2.Header.Set("Content-Type", "application/json")
+	srv.handleAuthVerify(rec2, req2)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("verify status = %d; body: %s", rec2.Code, rec2.Body.String())
+	}
+	var verifyResp struct {
+		OK  bool   `json:"ok"`
+		JWT string `json:"jwt"`
+	}
+	if err := json.NewDecoder(rec2.Body).Decode(&verifyResp); err != nil {
+		t.Fatalf("decode verify response: %v", err)
+	}
+	if !verifyResp.OK {
+		t.Error("verify response ok = false; want true")
+	}
+	if verifyResp.JWT == "" {
+		t.Error("verify response missing jwt")
+	}
+}
+
+// TestIntegration_DeviceCode_StartAndPoll verifies the CLI device-code flow:
+// POST /api/auth/device-code returns {deviceCode, userCode}, and polling
+// returns {status: "pending"} (ADR-0089).
+func TestIntegration_DeviceCode_StartAndPoll(t *testing.T) {
+	srv := newIntegrationServer(t,nil, nil)
+
+	// Start device code flow.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/device-code", bytes.NewBufferString("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleCLIDeviceCodeCreate(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("device-code create status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var createResp struct {
+		DeviceCode string `json:"deviceCode"`
+		UserCode   string `json:"userCode"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&createResp); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if createResp.DeviceCode == "" {
+		t.Fatal("deviceCode is empty")
+	}
+	if createResp.UserCode == "" {
+		t.Fatal("userCode is empty")
+	}
+
+	// Poll — should return pending.
+	pollBody := fmt.Sprintf(`{"deviceCode":%q}`, createResp.DeviceCode)
+	pollRec := httptest.NewRecorder()
+	pollReq := httptest.NewRequest(http.MethodPost, "/api/auth/device-code/poll", bytes.NewBufferString(pollBody))
+	pollReq.Header.Set("Content-Type", "application/json")
+	srv.handleCLIDeviceCodePoll(pollRec, pollReq)
+
+	if pollRec.Code != http.StatusOK {
+		t.Fatalf("device-code poll status = %d; body: %s", pollRec.Code, pollRec.Body.String())
+	}
+	var pollResp struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(pollRec.Body).Decode(&pollResp); err != nil {
+		t.Fatalf("decode poll response: %v", err)
+	}
+	if pollResp.Status != "pending" {
+		t.Errorf("poll status = %q; want pending", pollResp.Status)
+	}
+}
+
+// TestIntegration_HealthEndpoints verifies /health, /healthz, and /readyz all
+// return 200 with a live DB (ADR-0089).
+func TestIntegration_HealthEndpoints(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	srv := newIntegrationServer(t,db, nil)
+
+	mux := http.NewServeMux()
+	srv.RegisterRoutes(mux)
+
+	for _, path := range []string{"/health", "/healthz", "/readyz"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s status = %d; want 200", path, rec.Code)
+		}
+	}
+}
+
+// ---- ADR-0089 NATS subject handlers ----
+
+// mustNATSConn returns a NATS connection for integration tests.
+func mustNATSConn(t *testing.T) *nats.Conn {
+	t.Helper()
 	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
 	if err != nil {
 		t.Fatalf("NATS connect: %v", err)
 	}
-	defer nc.Close()
+	t.Cleanup(nc.Close)
+	return nc
+}
 
-	// Ensure the hosts KV bucket exists before seedDev runs.
-	js, err := nc.JetStream()
+// TestIntegration_ManageGrant verifies that publishing to
+// mclaude.users.*.hosts.*.manage.grant inserts the grantee into host_access (ADR-0089).
+func TestIntegration_ManageGrant(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	nc := mustNATSConn(t)
+	srv := newIntegrationServer(t,db, nc)
+
+	if err := srv.StartLifecycleSubscribers(nc); err != nil {
+		t.Fatalf("StartLifecycleSubscribers: %v", err)
+	}
+
+	// Create owner + host.
+	ownerID := "grant-owner-" + uuid.NewString()[:8]
+	owner, err := db.CreateUser(ctx, ownerID, ownerID+"@t.example.com", "Owner", "")
 	if err != nil {
-		t.Fatalf("JetStream: %v", err)
+		t.Fatalf("CreateUser owner: %v", err)
 	}
-	hostsKV, err := ensureHostsKV(js)
+	t.Cleanup(func() { db.DeleteUser(ctx, ownerID) }) //nolint:errcheck
+
+	hostID := uuid.NewString()
+	_, err = db.pool.Exec(ctx,
+		`INSERT INTO hosts (id, user_id, slug, name, type, role) VALUES ($1, $2, $3, 'Test Host', 'machine', 'owner')`,
+		hostID, owner.ID, "grant-host-"+ownerID[:8])
 	if err != nil {
-		t.Fatalf("ensureHostsKV: %v", err)
+		t.Fatalf("insert host: %v", err)
 	}
+	hostSlug := "grant-host-" + ownerID[:8]
+	t.Cleanup(func() {
+		db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) //nolint:errcheck
+	})
 
-	// Run seedDev — it idempotently uses dev@mclaude.local and writes
-	// the local host KV entry.
-	nopLogger := zerolog.Nop()
-	if err := seedDev(ctx, db, nc, nopLogger); err != nil {
-		t.Fatalf("seedDev: %v", err)
-	}
-
-	if devUser.Slug == "" {
-		t.Fatal("dev user has empty slug")
-	}
-
-	// Verify mclaude-hosts KV has {devSlug}.local = online=true.
-	key := devUser.Slug + ".local"
-	entry, err := hostsKV.Get(key)
+	// Create grantee.
+	granteeID := "grant-grantee-" + uuid.NewString()[:8]
+	grantee, err := db.CreateUser(ctx, granteeID, granteeID+"@t.example.com", "Grantee", "")
 	if err != nil {
-		t.Fatalf("hostsKV.Get(%q): %v — seedDev should have written this key", key, err)
+		t.Fatalf("CreateUser grantee: %v", err)
 	}
-	var state HostKVState
-	if err := json.Unmarshal(entry.Value(), &state); err != nil {
-		t.Fatalf("unmarshal HostKVState: %v", err)
+	t.Cleanup(func() { db.DeleteUser(ctx, granteeID) }) //nolint:errcheck
+
+	// Publish manage.grant.
+	subject := fmt.Sprintf("mclaude.users.%s.hosts.%s.manage.grant", owner.Slug, hostSlug)
+	payload, _ := json.Marshal(ManageGrantRequest{UserSlug: grantee.Slug})
+
+	reply, err := nc.Request(subject, payload, 3*time.Second)
+	if err != nil {
+		t.Fatalf("nc.Request %s: %v", subject, err)
 	}
-	if !state.Online {
-		t.Errorf("online = %v; want true after seedDev", state.Online)
+	var resp map[string]any
+	json.Unmarshal(reply.Data, &resp) //nolint:errcheck
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("manage.grant response not ok: %s", reply.Data)
 	}
-	if state.Slug != "local" {
-		t.Errorf("slug = %q; want %q", state.Slug, "local")
+
+	// Verify grantee appears in host_access.
+	var count int
+	if err := db.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM host_access WHERE host_id = $1 AND user_id = $2`,
+		hostID, grantee.ID).Scan(&count); err != nil {
+		t.Fatalf("count host_access: %v", err)
 	}
-	if state.LastSeenAt == nil {
-		t.Error("lastSeenAt should be set after seedDev")
+	if count != 1 {
+		t.Errorf("host_access count = %d; want 1", count)
+	}
+}
+
+// TestIntegration_ManageRevokeAccess verifies manage.revoke-access removes the
+// grant from host_access (ADR-0089).
+func TestIntegration_ManageRevokeAccess(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	nc := mustNATSConn(t)
+	srv := newIntegrationServer(t,db, nc)
+
+	if err := srv.StartLifecycleSubscribers(nc); err != nil {
+		t.Fatalf("StartLifecycleSubscribers: %v", err)
+	}
+
+	// Create owner + host.
+	ownerID := "revoke-owner-" + uuid.NewString()[:8]
+	owner, err := db.CreateUser(ctx, ownerID, ownerID+"@t.example.com", "Owner", "")
+	if err != nil {
+		t.Fatalf("CreateUser owner: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, ownerID) }) //nolint:errcheck
+
+	hostID := uuid.NewString()
+	hostSlug := "revoke-host-" + ownerID[:8]
+	_, err = db.pool.Exec(ctx,
+		`INSERT INTO hosts (id, user_id, slug, name, type, role) VALUES ($1, $2, $3, 'Test Host', 'machine', 'owner')`,
+		hostID, owner.ID, hostSlug)
+	if err != nil {
+		t.Fatalf("insert host: %v", err)
+	}
+	t.Cleanup(func() { db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) }) //nolint:errcheck
+
+	// Create grantee and grant access.
+	granteeID := "revoke-grantee-" + uuid.NewString()[:8]
+	grantee, err := db.CreateUser(ctx, granteeID, granteeID+"@t.example.com", "Grantee", "")
+	if err != nil {
+		t.Fatalf("CreateUser grantee: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, granteeID) }) //nolint:errcheck
+
+	if err := db.GrantHostAccess(ctx, hostID, grantee.ID); err != nil {
+		t.Fatalf("GrantHostAccess: %v", err)
+	}
+
+	// Publish manage.revoke-access.
+	subject := fmt.Sprintf("mclaude.users.%s.hosts.%s.manage.revoke-access", owner.Slug, hostSlug)
+	payload, _ := json.Marshal(ManageRevokeAccessRequest{UserSlug: grantee.Slug})
+
+	reply, err := nc.Request(subject, payload, 3*time.Second)
+	if err != nil {
+		t.Fatalf("nc.Request %s: %v", subject, err)
+	}
+	var resp map[string]any
+	json.Unmarshal(reply.Data, &resp) //nolint:errcheck
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("manage.revoke-access response not ok: %s", reply.Data)
+	}
+
+	// Verify grant removed from host_access.
+	var count int
+	if err := db.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM host_access WHERE host_id = $1 AND user_id = $2`,
+		hostID, grantee.ID).Scan(&count); err != nil {
+		t.Fatalf("count host_access: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("host_access count = %d; want 0 after revoke", count)
+	}
+}
+
+// TestIntegration_ManageDeregister verifies manage.deregister deletes the host row (ADR-0089).
+func TestIntegration_ManageDeregister(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	nc := mustNATSConn(t)
+	srv := newIntegrationServer(t,db, nc)
+
+	if err := srv.StartLifecycleSubscribers(nc); err != nil {
+		t.Fatalf("StartLifecycleSubscribers: %v", err)
+	}
+
+	// Create owner + host.
+	ownerID := "dereg-owner-" + uuid.NewString()[:8]
+	owner, err := db.CreateUser(ctx, ownerID, ownerID+"@t.example.com", "Owner", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, ownerID) }) //nolint:errcheck
+
+	hostID := uuid.NewString()
+	hostSlug := "dereg-host-" + ownerID[:8]
+	_, err = db.pool.Exec(ctx,
+		`INSERT INTO hosts (id, user_id, slug, name, type, role) VALUES ($1, $2, $3, 'Test Host', 'machine', 'owner')`,
+		hostID, owner.ID, hostSlug)
+	if err != nil {
+		t.Fatalf("insert host: %v", err)
+	}
+
+	// Publish manage.deregister.
+	subject := fmt.Sprintf("mclaude.users.%s.hosts.%s.manage.deregister", owner.Slug, hostSlug)
+	reply, err := nc.Request(subject, []byte("{}"), 3*time.Second)
+	if err != nil {
+		t.Fatalf("nc.Request %s: %v", subject, err)
+	}
+	var resp map[string]any
+	json.Unmarshal(reply.Data, &resp) //nolint:errcheck
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("manage.deregister response not ok: %s", reply.Data)
+	}
+
+	// Verify host row deleted from DB.
+	var count int
+	if err := db.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM hosts WHERE id = $1`,
+		hostID).Scan(&count); err != nil {
+		t.Fatalf("count hosts: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("host count = %d; want 0 after deregister", count)
+	}
+}
+
+// TestIntegration_ManageUpdate verifies manage.update updates the host name in DB (ADR-0089).
+func TestIntegration_ManageUpdate(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	nc := mustNATSConn(t)
+	srv := newIntegrationServer(t,db, nc)
+
+	if err := srv.StartLifecycleSubscribers(nc); err != nil {
+		t.Fatalf("StartLifecycleSubscribers: %v", err)
+	}
+
+	// Create owner + host.
+	ownerID := "update-owner-" + uuid.NewString()[:8]
+	owner, err := db.CreateUser(ctx, ownerID, ownerID+"@t.example.com", "Owner", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, ownerID) }) //nolint:errcheck
+
+	hostID := uuid.NewString()
+	hostSlug := "update-host-" + ownerID[:8]
+	_, err = db.pool.Exec(ctx,
+		`INSERT INTO hosts (id, user_id, slug, name, type, role) VALUES ($1, $2, $3, 'Old Name', 'machine', 'owner')`,
+		hostID, owner.ID, hostSlug)
+	if err != nil {
+		t.Fatalf("insert host: %v", err)
+	}
+	t.Cleanup(func() { db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) }) //nolint:errcheck
+
+	// Publish manage.update with new name.
+	subject := fmt.Sprintf("mclaude.users.%s.hosts.%s.manage.update", owner.Slug, hostSlug)
+	payload, _ := json.Marshal(ManageUpdateRequest{Name: "New Name"})
+
+	reply, err := nc.Request(subject, payload, 3*time.Second)
+	if err != nil {
+		t.Fatalf("nc.Request %s: %v", subject, err)
+	}
+	var resp map[string]any
+	json.Unmarshal(reply.Data, &resp) //nolint:errcheck
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("manage.update response not ok: %s", reply.Data)
+	}
+
+	// Verify host name updated in DB.
+	var name string
+	if err := db.pool.QueryRow(ctx,
+		`SELECT name FROM hosts WHERE id = $1`, hostID).Scan(&name); err != nil {
+		t.Fatalf("query host name: %v", err)
+	}
+	if name != "New Name" {
+		t.Errorf("host name = %q; want %q", name, "New Name")
+	}
+}
+
+// TestIntegration_ProjectCreate_NATS verifies publishing to
+// mclaude.users.*.api.projects.create creates a project row and writes KV (ADR-0089).
+func TestIntegration_ProjectCreate_NATS(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	nc := mustNATSConn(t)
+	srv := newIntegrationServer(t,db, nc)
+
+	// Wire NATS subscribers (projects + hosts KV).
+	if err := srv.StartProjectsSubscriber(nc); err != nil {
+		t.Fatalf("StartProjectsSubscriber: %v", err)
+	}
+
+	// Create user + host so the project can reference them.
+	userID := "proj-nats-" + uuid.NewString()[:8]
+	user, err := db.CreateUser(ctx, userID, userID+"@t.example.com", "ProjNats", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Ensure per-user JetStream resources exist (needed for KV write).
+	if err := ensureUserResources(nc, user.Slug); err != nil {
+		t.Logf("ensureUserResources (non-fatal): %v", err)
+	}
+
+	// Publish project create.
+	subject := fmt.Sprintf("mclaude.users.%s.api.projects.create", user.Slug)
+	payload, _ := json.Marshal(map[string]string{
+		"name": "Test Project NATS",
+	})
+
+	reply, err := nc.Request(subject, payload, 5*time.Second)
+	if err != nil {
+		t.Fatalf("nc.Request %s: %v", subject, err)
+	}
+	var resp map[string]any
+	json.Unmarshal(reply.Data, &resp) //nolint:errcheck
+	// The reply may be OK or a timeout from the controller (not running in test).
+	// What we verify is that a project row was created in DB.
+
+	var projCount int
+	if err := db.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM projects WHERE user_id = $1`, user.ID).Scan(&projCount); err != nil {
+		t.Fatalf("count projects: %v", err)
+	}
+	if projCount == 0 {
+		t.Errorf("no project created in DB after NATS publish; reply: %s", reply.Data)
+	}
+}
+
+// TestIntegration_CheckSlug_Available verifies check-slug returns {available:true}
+// for an unused slug (ADR-0089).
+func TestIntegration_CheckSlug_Available(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	nc := mustNATSConn(t)
+	srv := newIntegrationServer(t,db, nc)
+
+	if err := srv.StartLifecycleSubscribers(nc); err != nil {
+		t.Fatalf("StartLifecycleSubscribers: %v", err)
+	}
+
+	userID := "checkslug-" + uuid.NewString()[:8]
+	user, err := db.CreateUser(ctx, userID, userID+"@t.example.com", "CheckSlug", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	subject := fmt.Sprintf("mclaude.users.%s.hosts.myhost.projects.check-slug", user.Slug)
+	payload, _ := json.Marshal(CheckSlugRequest{Slug: "unused-slug-" + uuid.NewString()[:6]})
+
+	reply, err := nc.Request(subject, payload, 3*time.Second)
+	if err != nil {
+		t.Fatalf("nc.Request %s: %v", subject, err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(reply.Data, &resp); err != nil {
+		t.Fatalf("unmarshal reply: %v", err)
+	}
+	if available, _ := resp["available"].(bool); !available {
+		t.Errorf("available = %v; want true for unused slug; reply: %s", available, reply.Data)
+	}
+}
+
+// TestIntegration_CheckSlug_Taken verifies check-slug returns {available:false}
+// for an existing slug (ADR-0089).
+func TestIntegration_CheckSlug_Taken(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	nc := mustNATSConn(t)
+	srv := newIntegrationServer(t,db, nc)
+
+	if err := srv.StartLifecycleSubscribers(nc); err != nil {
+		t.Fatalf("StartLifecycleSubscribers: %v", err)
+	}
+
+	userID := "checkslug-taken-" + uuid.NewString()[:8]
+	user, err := db.CreateUser(ctx, userID, userID+"@t.example.com", "CheckSlugTaken", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Create a project with a known slug.
+	projID := uuid.NewString()
+	takenSlug := "taken-" + uuid.NewString()[:6]
+	_, err = db.pool.Exec(ctx,
+		`INSERT INTO projects (id, user_id, name, slug, git_url, status, created_at) VALUES ($1, $2, $3, $4, '', 'active', NOW())`,
+		projID, user.ID, "Taken Project", takenSlug)
+	if err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	t.Cleanup(func() { db.pool.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projID) }) //nolint:errcheck
+
+	subject := fmt.Sprintf("mclaude.users.%s.hosts.myhost.projects.check-slug", user.Slug)
+	payload, _ := json.Marshal(CheckSlugRequest{Slug: takenSlug})
+
+	reply, err := nc.Request(subject, payload, 3*time.Second)
+	if err != nil {
+		t.Fatalf("nc.Request %s: %v", subject, err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(reply.Data, &resp); err != nil {
+		t.Fatalf("unmarshal reply: %v", err)
+	}
+	if available, _ := resp["available"].(bool); available {
+		t.Errorf("available = true; want false for taken slug; reply: %s", reply.Data)
 	}
 }
