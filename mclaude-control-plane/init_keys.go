@@ -164,14 +164,16 @@ func bootstrapAdminUser(ctx context.Context, logger zerolog.Logger, databaseURL,
 		return nil
 	}
 
-	// Hash password if provided.
-	var passwordHash string
-	if password != "" {
-		var hashErr error
-		passwordHash, hashErr = HashPassword(password)
-		if hashErr != nil {
-			return fmt.Errorf("hash bootstrap admin password: %w", hashErr)
-		}
+	// Password is required when creating a new user — an account with no password
+	// hash cannot log in, which is an invalid state.
+	if password == "" {
+		return fmt.Errorf("BOOTSTRAP_ADMIN_PASSWORD is required when BOOTSTRAP_ADMIN_EMAIL is set and no user with that email exists yet")
+	}
+
+	// Hash password.
+	passwordHash, hashErr := HashPassword(password)
+	if hashErr != nil {
+		return fmt.Errorf("hash bootstrap admin password: %w", hashErr)
 	}
 
 	// Create the bootstrap admin user.

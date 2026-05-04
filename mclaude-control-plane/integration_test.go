@@ -946,6 +946,33 @@ func TestIntegration_BootstrapAdminUser_FreshWithPassword(t *testing.T) {
 	}
 }
 
+// TestIntegration_BootstrapAdminUser_EmailWithoutPassword_Errors verifies that
+// bootstrapAdminUser returns an error when BOOTSTRAP_ADMIN_EMAIL is set but
+// BOOTSTRAP_ADMIN_PASSWORD is empty and the user does not yet exist
+// (ADR-0089 Phase 1 invariant — init-keys Job must exit non-zero in this case).
+func TestIntegration_BootstrapAdminUser_EmailWithoutPassword_Errors(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	email := "bootstrap-nopw-" + uuid.NewString()[:8] + "@test.example.com"
+
+	logger := zerolog.Nop()
+	err := bootstrapAdminUser(ctx, logger, integDeps.PostgresDSN, email, "" /* empty password */)
+	if err == nil {
+		t.Fatal("expected error when email set but password empty and user does not exist; got nil")
+	}
+
+	// Verify no user row was created.
+	user, dbErr := db.GetUserByEmail(ctx, email)
+	if dbErr != nil {
+		t.Fatalf("GetUserByEmail: %v", dbErr)
+	}
+	if user != nil {
+		t.Errorf("user row was created despite empty password; want no row created")
+		db.DeleteUser(ctx, user.ID) //nolint:errcheck
+	}
+}
+
 // TestIntegration_BootstrapAdminUser_ExistingUserGetsPassword verifies that
 // bootstrapAdminUser called on an existing user with empty password_hash writes
 // a non-empty hash and login succeeds afterward (ADR-0089 Phase 1 invariant).

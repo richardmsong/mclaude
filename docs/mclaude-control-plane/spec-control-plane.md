@@ -326,6 +326,7 @@ The `go test -tags integration` suite is the Phase 1 CI gate. All tests use `htt
 | `TestIntegration_CreateUser_NoLocalHost` | After `CreateUser`, no row in `hosts` with `slug='local'` for that user |
 | `TestIntegration_BootstrapAdminUser_FreshWithPassword` | `bootstrapAdminUser` with non-empty password on empty DB: user row created with non-empty `password_hash`, `is_admin=true`; login succeeds |
 | `TestIntegration_BootstrapAdminUser_ExistingUserGetsPassword` | `bootstrapAdminUser` called on existing user with empty `password_hash`: hash is written, login succeeds after call |
+| `TestIntegration_BootstrapAdminUser_EmailWithoutPassword_Errors` | `bootstrapAdminUser` with email set and empty password when user does not yet exist: returns a non-nil error; no user row is created |
 
 **Admin routes (main port, `isAdminMiddleware`):**
 
