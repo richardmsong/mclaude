@@ -9,4 +9,5 @@ use (
 	./mclaude-controller-local
 	./mclaude-relay
 	./mclaude-session-agent
+	./mclaude-user-agent
 )
