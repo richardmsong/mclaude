@@ -316,7 +316,7 @@ On project deletion (ADR-0053), in addition to the standard Postgres + KV + prov
 
 ## Integration Tests
 
-The `go test -tags integration` suite is the Phase 1 CI gate. All tests use `httptest.NewRecorder()` + direct handler calls. The `newTestServer(t, db, nc) *Server` helper constructs a test server with a real Postgres (testcontainers) and real NATS (testcontainers). No static admin token — admin tests create an `is_admin=true` user via `db.CreateUser` + `db.SetUserAdmin`, log in via `handleLogin`, and use the resulting JWT.
+The `go test -tags integration` suite is the Phase 1 CI gate. All tests use `httptest.NewRecorder()` + direct handler calls. The `newIntegrationServer(t, db, nc) *Server` helper constructs a test server with a real Postgres (testcontainers) and real NATS (testcontainers). No static admin token — admin tests create an `is_admin=true` user via `db.CreateUser` + `db.SetUserAdmin`, log in via `handleLogin`, and use the resulting JWT.
 
 **Phase 1 invariants:**
 

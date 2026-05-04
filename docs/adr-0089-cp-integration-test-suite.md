@@ -1,9 +1,10 @@
 # ADR: Two-Phase Deployment, Admin Port Removal, and Complete CP Test Suite
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-04: draft
 - 2026-05-04: accepted
+- 2026-05-04: implemented — all scope CLEAN
 
 ## Overview
 
