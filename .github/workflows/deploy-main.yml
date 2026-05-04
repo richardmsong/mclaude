@@ -220,7 +220,7 @@ jobs:
   deploy-worker:
     name: Deploy worker
     needs: [tag, deploy-cp, build-session-agent, build-controller-k8s]
-    if: always() && !failure() && !cancelled()
+    if: false
     runs-on: [self-hosted, tailscale]
     steps:
       - uses: actions/checkout@v4
