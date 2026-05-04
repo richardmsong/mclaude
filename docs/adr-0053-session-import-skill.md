@@ -233,10 +233,10 @@ import-{encoded-cwd}/
 | Session JSONL files corrupted/truncated | CLI | Warn per file but include what's available in archive |
 | Project slug collision | CLI + Control-plane | Control-plane returns 409. CLI prompts user for new name. |
 | Session ID collision (re-import) | Session-agent | Skip the conflicting session with a warning, import remaining sessions |
-| NATS connection failed | CLI | Retry with backoff, clear error with NATS URL and troubleshooting hints |
-| S3 upload failed mid-stream | CLI | Retry from beginning (S3 multipart uploads handle this natively) |
-| Pre-signed URL expired | CLI/Agent | Request a new URL from CP, retry |
-| Archive too large | CLI | Pre-check archive size against configurable limit (default 500MB), warn before upload |
+| NATS connection failed | CLI | Return error immediately with NATS URL and troubleshooting hints. No retry in v1. |
+| S3 upload failed | CLI | Return error immediately. Single-part PUT (not multipart). No retry in v1. |
+| Pre-signed URL expired | CLI/Agent | Return error. URL TTL is 5 min; synchronous flow makes expiry unlikely. URL-expiry retry deferred. |
+| Archive too large | CLI | CP rejects via `import.request` error response if `sizeBytes` exceeds limit (default 500MB). No CLI-side pre-check in v1. |
 | Attachment too large | SPA/Agent | CP rejects upload-url request if sizeBytes exceeds limit (default 50MB) |
 | Unpack fails (disk full, permissions) | Session-agent | Report error via lifecycle event, leave `importRef` set for retry |
 | Device-code expired | CLI + Control-plane | 15-minute TTL. CLI displays "code expired, try again" |

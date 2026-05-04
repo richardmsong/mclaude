@@ -25,6 +25,26 @@ The master session authors ADRs, updates specs, and orchestrates agents. It does
 
 If tests fail, code is missing, or implementation is wrong — invoke dev-harness, don't fix it yourself. If agents are failing (permissions, context limits), fix the agent infrastructure, not the source code.
 
+## All operations must be production-quality — no dev-only paths
+
+Dev is prod with a different domain name and smaller resources. No `DEV_SEED=true` flags, no dev-only endpoints, no special initialization code paths. If a behavior wouldn't run in production, it shouldn't exist in the codebase.
+
+When designing bootstrap, seeding, or setup flows: ask "would this exact code path run in production?" If no — redesign it so it does.
+
+## Ask before making design decisions that affect user flows
+
+When drafting an ADR or spec and a decision has multiple defensible options that affect how users or operators interact with the system, **stop and ask** — do not pick one and iterate when it turns out wrong.
+
+This applies to: new endpoints, new credential flows, new storage locations, changes to registration or setup flows, anything an operator must do to bootstrap an environment. If the decision is yours to make without user input, say so explicitly. Otherwise ask.
+
+## Single code path — Occam's razor
+
+When something needs to happen automatically (dev seed, local host creation, test setup), **automate the normal flow** — don't create a parallel bypass that skips steps.
+
+Example of the violation: `CreateUser` inserting a bare `local` host row with no JWT instead of going through the same attestation flow as BYOH hosts, just called programmatically. The result is a host that looks registered but behaves differently in every downstream system.
+
+When designing initialization or default-creation logic, ask: "does this go through the same flow as the user-facing path, just called programmatically?" If not, redesign it to do so.
+
 ## Parallelism — use subagents for independent work
 
 When requests can be parallelized, use subagents extensively rather than handling them sequentially.
