@@ -309,7 +309,7 @@ Value:
 }
 ```
 
-Writers: control-plane only — single writer. Primary path: `$SYS.ACCOUNT.*.CONNECT` writes the full value object (`slug`, `type`, `name`, `online=true`, `lastSeenAt=now`). `$SYS.ACCOUNT.*.DISCONNECT` writes only `{online: false}` — all other fields (`slug`, `type`, `name`, `lastSeenAt`) are preserved from the previous entry (read-modify-write: fetch current value, set `online=false`, re-put). `lastSeenAt` is **not** rewritten on disconnect. Secondary path (dev only): on `DEV_SEED=true` startup, control-plane writes the bootstrap user's `local` machine host entry with `online=true` because the auto-created `local` host has no NKey and will never trigger a `$SYS` CONNECT event.
+Writers: control-plane only — single writer. `$SYS.ACCOUNT.*.CONNECT` writes the full value object (`slug`, `type`, `name`, `online=true`, `lastSeenAt=now`). `$SYS.ACCOUNT.*.DISCONNECT` writes only `{online: false}` — all other fields (`slug`, `type`, `name`, `lastSeenAt`) are preserved from the previous entry (read-modify-write: fetch current value, set `online=false`, re-put). `lastSeenAt` is **not** rewritten on disconnect.
 Readers: SPA (KV watch for host list + status — scoped per-host in user JWT).
 History: 1
 

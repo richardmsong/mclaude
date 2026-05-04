@@ -214,11 +214,9 @@ The CLI uses NATS request/reply for:
 CLI smoke tests prove user behaviors work end-to-end against a real deployed stack. They are the CLI subset of the full deployment certification suite (web Playwright + CLI smoke tests together certify any deployment). Run with `//go:build integration`:
 
 ```bash
-# Forward admin port first (admin port is 9091 externally, pod listens on 9090):
-kubectl port-forward -n mclaude-system svc/mclaude-cp-control-plane 9091:9090 &
-
-ADMIN_URL=http://localhost:9091 \
-ADMIN_TOKEN=dev-admin-token \
+ADMIN_URL=https://<control-plane-domain> \
+BOOTSTRAP_ADMIN_EMAIL=<admin-email> \
+BOOTSTRAP_ADMIN_PASSWORD=<admin-password> \
 MCLAUDE_TEST_HOST_SLUG=dev-local \
 MCLAUDE_TEST_SERVER_URL=https://<control-plane-domain> \
 go test -tags integration ./cmd/...
@@ -228,14 +226,14 @@ The CP returns `natsUrl` in its device-code poll response (`s.natsWsURL`). The C
 
 ### Prerequisites
 
-- `ADMIN_URL` must be set (e.g. `http://localhost:9091` via `kubectl port-forward`). If unset, `TestMain` writes `{skipped:true}` to `cli-integration/.test-creds.json` and exits without error — tests are skipped, not failed. This matches the Playwright global-setup skip behavior (ADR-0064).
+- `ADMIN_URL` must be set (e.g. `https://dev.mclaude.richardmcsong.com`). No port-forward needed — admin routes are served on the main port. If unset, `TestMain` writes `{skipped:true}` to `cli-integration/.test-creds.json` and exits without error — tests are skipped, not failed. This matches the Playwright global-setup skip behavior (ADR-0064).
 - `MCLAUDE_TEST_HOST_SLUG` must refer to a host that is already registered in the cluster and has a running session-agent. `TestMain` does **not** register a throwaway host — the host is pre-existing infrastructure. Default: `dev-local`.
 
 ### Test user setup
 
 `TestMain` creates an ephemeral test user via `POST /admin/users` (same admin API as Playwright). The response returns `{id, email, name, slug}`. TestMain supplies its own generated password in the request body; the password is not returned in the response.
 
-After creating the user, `TestMain` calls `grantClusterAccess(adminURL, adminToken, hslug, user.Slug)` (defined in `integration_main_test.go`) which calls `POST /admin/clusters/{hslug}/grants` with `{userSlug}`. This step is required before the device-code login: the user JWT is issued during login and includes only cluster slugs for which a `hosts` row already exists; without the grant the reconciler fails with "user does not have access to host" when provisioning the test project. The call is made unconditionally for every test run regardless of cluster type — the CP endpoint is idempotent (`ON CONFLICT DO NOTHING`) so re-running is safe. If the grant call fails, `TestMain` deletes the test user and exits 1.
+After creating the user, `TestMain` calls `grantClusterAccess(adminURL, adminJWT, hslug, user.Slug)` which calls `POST /admin/clusters/{hslug}/grants` with `Authorization: Bearer <adminJWT>` and body `{userSlug}`. The admin JWT is obtained by calling `POST /auth/login` with `BOOTSTRAP_ADMIN_EMAIL` + `BOOTSTRAP_ADMIN_PASSWORD`. This step is required before the device-code login: the user JWT is issued during login and includes only cluster slugs for which a `hosts` row already exists; without the grant the reconciler fails with "user does not have access to host" when provisioning the test project. The call is idempotent (`ON CONFLICT DO NOTHING`). If the grant call fails, `TestMain` deletes the test user and exits 1.
 
 NATS credentials are then obtained by automating the device-code flow (no browser needed):
 

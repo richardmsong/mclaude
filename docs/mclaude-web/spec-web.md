@@ -200,45 +200,39 @@ Playwright tests run against the live k3d cluster at `https://dev.mclaude.richar
 
 ### Running tests against k3d
 
-The admin API binds to `127.0.0.1:9091` inside the pod and is not exposed via the public Ingress. A `kubectl port-forward` is required to reach it:
+Admin routes are served on the main port and are accessible at the same public URL as the CP — no port-forward needed:
 
 ```bash
-# Step 1 — forward the admin port (run in a separate terminal or background):
-kubectl port-forward -n mclaude-system svc/mclaude-cp-control-plane 9091:9091 &
-
-# Step 2 — run tests:
 BASE_URL=https://dev.mclaude.richardmcsong.com \
-ADMIN_URL=http://localhost:9091 \
-ADMIN_TOKEN=dev-admin-token \
+ADMIN_URL=https://dev.mclaude.richardmcsong.com \
+BOOTSTRAP_ADMIN_EMAIL=<admin-email> \
+BOOTSTRAP_ADMIN_PASSWORD=<admin-password> \
 npx playwright test --project=chromium
 ```
 
-`ADMIN_TOKEN` is the break-glass admin bearer token stored in the `mclaude-control-plane` K8s Secret (`admin-token` field). For the k3d dev cluster the value is `dev-admin-token`.
-
-To run tests without a port-forward (skip user creation, use hardcoded dev defaults):
-```bash
-BASE_URL=https://dev.mclaude.richardmcsong.com npx playwright test --project=chromium
-```
+Global setup logs in as the bootstrap admin via `POST /auth/login` to obtain an admin JWT, then uses that JWT for all admin API calls.
 
 ### Test user isolation
 
 **Global setup** (`e2e/global-setup.ts`):
-1. Reads `ADMIN_URL`, `ADMIN_TOKEN` (default `dev-admin-token`), and `BASE_URL` from env.
+1. Reads `ADMIN_URL`, `BOOTSTRAP_ADMIN_EMAIL`, `BOOTSTRAP_ADMIN_PASSWORD`, and `BASE_URL` from env.
 2. If `DEV_EMAIL` and `DEV_TOKEN` env vars are both set, skips creation: writes `{skipped: true}` to `.test-user.json` and returns.
 3. If `ADMIN_URL` is not set, skips creation: writes `{skipped: true}` and returns — spec files fall back to their hardcoded dev defaults.
-4. Generates `userId = crypto.randomUUID()` and calls `POST {ADMIN_URL}/admin/users` with `Authorization: Bearer {ADMIN_TOKEN}`, body `{id: userId, email: "e2e-{Date.now()}@mclaude.local", name: "E2E Test User", password: "<random 16-char hex>"}`. The `id` field is required by the CP `AdminUserRequest` struct.
-5. Computes `userSlug = slugify(email)` (lowercase, replace non-`[a-z0-9]` runs with `-`, trim, truncate to 63 chars). Sets `process.env['DEV_EMAIL'] = email`, `process.env['DEV_TOKEN'] = token`, and `process.env['DEV_USER_SLUG'] = userSlug` so spec files inherit the test user credentials and slug.
-6. **Session seeding** — calls `POST {BASE_URL}/auth/login` with `{email, password: token}` (no `nkey_public` — legacy mode) to receive `{jwt, nkeySeed, natsUrl, userSlug}`. Derives the NATS WebSocket URL: uses `natsUrl` from the response if non-empty; otherwise replaces `https://` with `wss://` in `BASE_URL` and appends `/nats`. Connects to NATS: `connect({ servers: [natsWsUrl], authenticator: jwtAuthenticator(jwt, seed) })` where `seed = new TextEncoder().encode(nkeySeed)`.
-7. **Project seeding** — publishes `{name: "e2e-default", hostSlug: "local"}` to `mclaude.users.{uslug}.hosts.local.api.projects.create` via `nc.request()` (30 s timeout). Throws if the response contains an error. Waits up to 30 s for the project to appear in `mclaude-projects-{uslug}` KV (key prefix `hosts.local.projects.`). Parses the KV entry JSON and reads the `slug` field as `projectSlug`. Throws `"global-setup: timed out waiting for project KV entry"` if not found. Sets `process.env['DEV_PROJECT_SLUG'] = projectSlug`.
-8. **Session seeding** — publishes `{}` to `mclaude.users.{uslug}.hosts.local.projects.{pslug}.sessions.create`. Waits up to 60 s for a session to appear in `mclaude-sessions-{uslug}` KV (key prefix `hosts.local.projects.{pslug}.sessions.`). Reads `sessionSlug` from the last `.`-delimited segment of the KV key. Throws `"global-setup: timed out waiting for session KV entry — check kubectl get pods -n mclaude-system for Pending pods"` if not found. Closes the NATS connection. Sets `process.env['DEV_SESSION_SLUG'] = sessionSlug`.
-9. Writes `{userId, email, token, projectSlug, sessionSlug}` to `e2e/.test-user.json`.
-10. On login failure, throws `"global-setup: login failed {status}: {body}"`. On any other failure, throws — all tests abort cleanly.
+4. Logs in as bootstrap admin: `POST {ADMIN_URL}/auth/login` with `{email: BOOTSTRAP_ADMIN_EMAIL, password: BOOTSTRAP_ADMIN_PASSWORD}`. Throws `"global-setup: admin login failed {status}: {body}"` if the response is not 200. Stores the resulting JWT as `adminJWT`.
+5. Generates `userId = crypto.randomUUID()` and calls `POST {ADMIN_URL}/admin/users` with `Authorization: Bearer {adminJWT}`, body `{id: userId, email: "e2e-{Date.now()}@mclaude.local", name: "E2E Test User", password: "<random 16-char hex>"}`. The `id` field is required by the CP `AdminUserRequest` struct.
+6. Computes `userSlug = slugify(email)` (lowercase, replace non-`[a-z0-9]` runs with `-`, trim, truncate to 63 chars). Sets `process.env['DEV_EMAIL'] = email`, `process.env['DEV_TOKEN'] = token`, and `process.env['DEV_USER_SLUG'] = userSlug` so spec files inherit the test user credentials and slug.
+7. **Session seeding** — calls `POST {BASE_URL}/auth/login` with `{email, password: token}` (no `nkey_public` — legacy mode) to receive `{jwt, nkeySeed, natsUrl, userSlug}`. Derives the NATS WebSocket URL: uses `natsUrl` from the response if non-empty; otherwise replaces `https://` with `wss://` in `BASE_URL` and appends `/nats`. Connects to NATS: `connect({ servers: [natsWsUrl], authenticator: jwtAuthenticator(jwt, seed) })` where `seed = new TextEncoder().encode(nkeySeed)`.
+8. **Project seeding** — publishes `{name: "e2e-default", hostSlug: "local"}` to `mclaude.users.{uslug}.hosts.local.api.projects.create` via `nc.request()` (30 s timeout). Throws if the response contains an error. Waits up to 30 s for the project to appear in `mclaude-projects-{uslug}` KV (key prefix `hosts.local.projects.`). Parses the KV entry JSON and reads the `slug` field as `projectSlug`. Throws `"global-setup: timed out waiting for project KV entry"` if not found. Sets `process.env['DEV_PROJECT_SLUG'] = projectSlug`.
+9. **Session seeding** — publishes `{}` to `mclaude.users.{uslug}.hosts.local.projects.{pslug}.sessions.create`. Waits up to 60 s for a session to appear in `mclaude-sessions-{uslug}` KV (key prefix `hosts.local.projects.{pslug}.sessions.`). Reads `sessionSlug` from the last `.`-delimited segment of the KV key. Throws `"global-setup: timed out waiting for session KV entry — check kubectl get pods -n mclaude-system for Pending pods"` if not found. Closes the NATS connection. Sets `process.env['DEV_SESSION_SLUG'] = sessionSlug`.
+10. Writes `{userId, email, token, projectSlug, sessionSlug}` to `e2e/.test-user.json`.
+11. On login failure, throws `"global-setup: login failed {status}: {body}"`. On any other failure, throws — all tests abort cleanly.
 
 **Global teardown** (`e2e/global-teardown.ts`):
 1. Reads `e2e/.test-user.json`. If missing or `skipped: true`, returns immediately.
 2. Deletes `e2e/.test-user.json` eagerly before the API call (prevents re-read on a subsequent crashed run).
-3. Calls `DELETE {ADMIN_URL}/admin/users/{userId}` with `Authorization: Bearer {ADMIN_TOKEN}`.
-4. Logs a warning on deletion failure (does not throw — teardown runs after tests complete regardless).
+3. Logs in as bootstrap admin: `POST {ADMIN_URL}/auth/login` with `{email: BOOTSTRAP_ADMIN_EMAIL, password: BOOTSTRAP_ADMIN_PASSWORD}`. On login failure, logs a warning and returns.
+4. Calls `DELETE {ADMIN_URL}/admin/users/{userId}` with `Authorization: Bearer {adminJWT}`.
+5. Logs a warning on deletion failure (does not throw — teardown runs after tests complete regardless).
 
 **`playwright.config.ts`** declares `globalSetup: './e2e/global-setup.ts'` and `globalTeardown: './e2e/global-teardown.ts'`.
 
@@ -255,6 +249,14 @@ Spec files that define local credential or slug constants must use `process.env`
 - `process.env['DEV_USER_SLUG'] || 'dev-mclaude-local'` (for user-scoped API URL paths)
 - `process.env['DEV_PROJECT_SLUG'] || 'default-project'` (for project-scoped API URL paths)
 - `process.env['DEV_SESSION_SLUG'] || ''` (empty means no seeded session; tests skip if required)
+
+**Admin operations in spec files:** Spec files that need to call admin-only API endpoints must obtain an admin JWT by logging in as the bootstrap admin, using the `loginAsAdmin` helper:
+
+```typescript
+const adminJWT = await loginAsAdmin(page, process.env['BOOTSTRAP_ADMIN_EMAIL']!, process.env['BOOTSTRAP_ADMIN_PASSWORD']!)
+```
+
+No spec file may use a static `ADMIN_TOKEN` string or the `|| 'dev-admin-token'` fallback pattern. The `ADMIN_TOKEN` env var and static admin token concept no longer exist.
 
 `e2e/.test-user.json` is gitignored and ephemeral — it exists only during a `npx playwright test` invocation.
 

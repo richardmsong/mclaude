@@ -8,7 +8,25 @@ Per ADR-0035 the control-plane is **K8s-free**: no controller-runtime, no K8s cl
 
 ## Deployment
 
-Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central `mclaude-cp` cluster, built from an Alpine-based container image. Listens on two ports: the main API port (default 8080) for public and authenticated routes, and a loopback-only admin port (default 9091, bound to `127.0.0.1`) for `/admin/*` break-glass endpoints and Prometheus metrics. Admin endpoints are protected by a static bearer token (`ADMIN_TOKEN` env var) — this port must not be exposed externally.
+Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central `mclaude-cp` cluster, built from an Alpine-based container image. Listens on a single port: the main API port (default 8080) for all routes — public, authenticated, and admin. Admin endpoints are protected by `isAdminMiddleware`, which validates the caller's JWT via the standard auth middleware and then checks that the authenticated user has `is_admin=true` in Postgres.
+
+### Two-Phase Deployment
+
+Deployment is split into two phases with an explicit CI gate between them:
+
+**Phase 1 — Control Plane:** `helm upgrade --install mclaude-cp`. After this phase the cluster contains exactly 5 running pods in `mclaude-system`: `mclaude-cp-nats-0` (NATS hub), `mclaude-cp-postgres-0` (Postgres), the CP pod, the SPA pod, and the MinIO pod. Two Jobs complete and exit: `init-keys` (generates NKeys, creates bootstrap admin user) and `minio-bucket-job` (creates S3 bucket).
+
+**Phase 1 Postgres state:** `users` — one row (bootstrap admin, `is_admin=true`). `hosts`, `projects`, `agent_credentials` — all empty.
+
+**Phase 1 NATS state:** `mclaude-hosts` KV bucket exists and is empty. No per-user KV buckets or streams (created lazily on first login). No leafnode connections.
+
+**What works at Phase 1:** `POST /auth/login` (bootstrap admin can authenticate, gets JWT), `POST /admin/users` (admin can create additional users), `/readyz` (200), NKey challenge/verify, device-code flow, SPA loads with empty dashboard.
+
+**What requires Phase 2:** Sessions (no controller to provision session-agent pods), NATS provisioning requests (published by CP but nothing subscribed), any `$SYS.ACCOUNT.*.CONNECT` events (no hosts have ever connected).
+
+**Phase 2 — First Platform Host:** `scripts/register-platform-host.sh` authenticates as the bootstrap admin via `POST /auth/login`, then runs `mclaude host register` to create the first host. The host row is created with `public_key` and `user_jwt` populated. `$SYS.ACCOUNT.*.CONNECT` fires and the CP writes the host's entry to `mclaude-hosts` KV as `online=true`.
+
+The `go test -tags integration` suite runs after Phase 1 as the gate before Phase 2 starts.
 
 ### Environment Variables
 
@@ -21,13 +39,11 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 | `NATS_ACCOUNT_SEED` | Yes (production) | (none) | Account NKey seed string. Used directly to sign per-host user JWTs and session-agent JWTs. In production Helm deployments, populated from the `operator-keys` Secret's `accountSeed` key. If not set, generates an ephemeral account key (dev-only — not suitable for production). |
 | `OPERATOR_KEYS_PATH` | No | `/etc/mclaude/operator-keys` | Mount path for the `mclaude-system/operator-keys` Secret. At runtime, provides `operatorSeed` (for re-signing the account JWT during revocation) and `sysAccountSeed` (for publishing to `$SYS.REQ.CLAIMS.UPDATE`). Also used by the `init-keys` subcommand. |
 | `NATS_SYS_ACCOUNT_SEED` | No | (read from `OPERATOR_KEYS_PATH/sysAccountSeed`) | System account NKey seed string. CP uses system account credentials to publish `$SYS.REQ.CLAIMS.UPDATE` for JWT revocation (ADR-0054). In production, populated from the `operator-keys` Secret's `sysAccountSeed` key. If set as an env var, takes precedence over the file-based path. |
-| `ADMIN_TOKEN` | No | (empty) | Static bearer token for the admin port (9091). All `/admin/*` routes require this token via `Authorization: Bearer <token>`. |
-| `BOOTSTRAP_ADMIN_EMAIL` | No | (empty) | Email of the first admin. Read from Helm value; the init-keys Job pre-creates a `users` row with `is_admin=true` and `oauth_id=NULL`; first OAuth login linking that email promotes the user. |
+| `BOOTSTRAP_ADMIN_EMAIL` | No | (empty) | Email of the bootstrap admin user. The `init-keys` Job creates a `users` row with `is_admin=true` and a bcrypt password hash from `BOOTSTRAP_ADMIN_PASSWORD`. Idempotent — if the user already exists, promotes them to admin and updates the password if provided. |
+| `BOOTSTRAP_ADMIN_PASSWORD` | No | (empty) | Password for the bootstrap admin user. Hashed with bcrypt by the `init-keys` Job and stored in `users.password_hash`. Required if CI must authenticate as the bootstrap admin via `POST /auth/login`. If empty, the bootstrap admin can only log in via OAuth. |
 | `PORT` | No | `8080` | Main API listen port |
-| `ADMIN_PORT` | No | `9091` | Loopback-only port (bound to `127.0.0.1`) for `/admin/*` break-glass routes and `/metrics`. |
 | `JWT_EXPIRY_SECONDS` | No | `28800` (8h) | Per-host user JWT lifetime in seconds |
 | `DEV_OAUTH_TOKEN` | No | (empty) | Injected into per-user secrets (cluster controller copies into the user namespace) for dev environments |
-| `DEV_SEED` | No | `false` | When `true`, creates a dev user (`dev@mclaude.local` / `dev`), a default `local` machine host, and a default project on startup |
 | `MIN_CLIENT_VERSION` | No | `0.0.0` | Minimum SPA/CLI version reported by `/version` |
 | `SERVER_VERSION` | No | (empty) | Server version string reported by `/version` |
 | `PROVIDERS_CONFIG_PATH` | No | `/etc/mclaude/providers.json` | Path to OAuth provider config (Helm ConfigMap mount) |
@@ -36,10 +52,10 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 | `S3_BUCKET` | Yes (production) | (none) | S3 bucket name. Single bucket with per-user/host/project key prefixes: `{uslug}/{hslug}/{pslug}/imports/{id}` and `{uslug}/{hslug}/{pslug}/attachments/{id}`. |
 | `S3_ACCESS_KEY_ID` | Yes (production) | (none) | S3 access key ID for pre-signed URL generation. |
 | `S3_SECRET_ACCESS_KEY` | Yes (production) | (none) | S3 secret access key for pre-signed URL generation. |
-| `PROVISION_TIMEOUT_SECONDS` | No | `10` | Per-request timeout for NATS provisioning request/reply. Note: currently a hardcoded constant in code (`const ProvisionTimeoutSeconds = 10`), not yet read from env. `seedDev` uses a longer 30s timeout for the initial provisioning request during startup (controller may not be ready yet). |
+| `PROVISION_TIMEOUT_SECONDS` | No | `10` | Per-request timeout for NATS provisioning request/reply. Note: currently a hardcoded constant in code (`const ProvisionTimeoutSeconds = 10`), not yet read from env. |
 | `LOG_LEVEL` | No | (default) | **Not read by Go code** — injected by the `mclaude-cp` Helm template but not consumed by the binary. Zerolog uses its default level. |
 | `HELM_RELEASE_NAME` | No | (none) | **Not read by Go code** — injected by the `mclaude-cp` Helm template but not consumed by the control-plane binary. (The controller-k8s binary does read this variable for ConfigMap lookup.) |
-| `METRICS_PORT` | No | (none) | **Not read by Go code** — removed from the `mclaude-cp` Helm template (ADR-0052 R7-G10). `/metrics` is served on the admin port (`ADMIN_PORT`). |
+| `METRICS_PORT` | No | (none) | **Not read by Go code.** `/metrics` is served on the main port (`PORT`), unauthenticated. |
 
 ## Interfaces
 
@@ -104,27 +120,22 @@ HTTP handlers for project CRUD are wired and functional. `POST` (create) inserts
 | `DELETE` | `/scim/v2/Users/{id}` | IdP deprovisions user. **Not yet implemented.** |
 | `GET` | `/scim/v2/Users` | IdP syncs user list. **Not yet implemented.** |
 
-### HTTP Endpoints -- Loopback Port (9091)
+**Admin-only (`isAdminMiddleware` — valid JWT where `users.is_admin = true`):**
 
-The loopback-only port (bound to `127.0.0.1`) hosts admin break-glass endpoints and Prometheus metrics. All `/admin/*` routes require the static `ADMIN_TOKEN` bearer token via `Authorization: Bearer <token>`.
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/metrics` | Prometheus metrics |
-
-**Admin-only (static `ADMIN_TOKEN` bearer token on loopback port):**
+Admin routes are served on the main port (8080). `isAdminMiddleware` calls the standard JWT auth middleware first, then fetches the user from Postgres and checks `is_admin = true`. Returns 401 if no JWT, 403 if JWT valid but user is not admin.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/admin/clusters` | Registers a new cluster (`{slug, name, jsDomain, leafUrl, directNatsUrl?}`). Generates a per-cluster NKey pair, creates a `hosts` row, mints a per-cluster leaf/controller JWT scoped to `mclaude.users.*.hosts.{slug}.>`, returns `{slug, leafJwt, leafSeed, jsDomain, directNatsUrl}`. **Known bug:** response omits `accountJwt`/`operatorJwt` (fields exist but unpopulated). **Known bug:** `hosts` row `user_id` is set to `(SELECT id FROM users LIMIT 1)` (arbitrary) instead of the calling admin — the loopback admin token carries no user identity. |
+| `GET` | `/metrics` | Prometheus metrics (unauthenticated — internal scraping) |
+| `POST` | `/admin/clusters` | Registers a new cluster (`{slug, name, jsDomain, leafUrl, directNatsUrl?}`). Generates a per-cluster NKey pair, creates a `hosts` row owned by the calling admin user, mints a per-cluster leaf/controller JWT scoped to `mclaude.users.*.hosts.{slug}.>`, returns `{slug, leafJwt, leafSeed, jsDomain, directNatsUrl}`. **Known bug:** response omits `accountJwt`/`operatorJwt` (fields exist but unpopulated). |
 | `GET` | `/admin/clusters` | Lists registered clusters (deduplicated across user rows). |
-| `POST` | `/admin/clusters/{cslug}/grants` | Grants user access (`{userSlug}`). Creates a new `hosts` row for that user with `public_key = NULL` (the cluster's NKey belongs only to the owner row — per-user rows authenticate via `user_jwt`); copies `direct_nats_url` from the cluster owner row; mints a per-user JWT scoped to `mclaude.users.{userSlug}.hosts.{cslug}.>` via `IssueHostJWTLegacy(user.Slug, cslug, accountKP)`. Idempotent — if the user/cluster pair already exists (`ON CONFLICT (user_id, slug) DO NOTHING`), returns 201 without creating a duplicate row. |
-| `DELETE` | `/admin/clusters/{cslug}` | Removes the cluster. **Not yet implemented** — deferred per ADR-0035. Use direct SQL as a workaround. |
-| `POST` | `/admin/users` | Creates a user (id, email, name, optional password). **Known gap:** spec says optional `isAdmin` field, but `AdminUserRequest` struct has no `IsAdmin` field — new users are always non-admin. |
+| `POST` | `/admin/clusters/{cslug}/grants` | Grants user access (`{userSlug}`). Creates a new `hosts` row for that user with `public_key = NULL`; copies `direct_nats_url` from the cluster owner row; mints a per-user JWT scoped to `mclaude.users.{userSlug}.hosts.{cslug}.>`. Idempotent (`ON CONFLICT DO NOTHING`). |
+| `DELETE` | `/admin/clusters/{cslug}` | Removes the cluster. **Not yet implemented** — deferred per ADR-0035. |
+| `POST` | `/admin/users` | Creates a user (`{id, email, name, password?, isAdmin?}`). Returns `{id, email, name, slug}`. |
 | `POST` | `/admin/users/{uslug}/promote` | Sets `users.is_admin = true`. |
 | `GET` | `/admin/users` | Lists all users. |
-| `DELETE` | `/admin/users/{id}` | Deletes a user from Postgres (cascades to hosts, projects, oauth_connections). **Known gap:** does not revoke the user's NATS JWT (remains valid until expiry) and does not publish NATS delete requests to controllers — orphaned K8s resources persist until manual cleanup. |
-| `POST` | `/admin/sessions/stop` | Break-glass session stop. Publishes a sessions.delete message to the session-agent's host-scoped NATS subject (`mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.delete`). Looks up user slug and project/host slugs from the request body's `userId` + `projectId`, then publishes. Returns 202 Accepted immediately (fire-and-forget). If NATS is unavailable or slug lookup fails, logs a warning and still returns 202. |
+| `DELETE` | `/admin/users/{id}` | Deletes a user from Postgres (cascades to hosts, projects, oauth_connections). **Known gap:** does not revoke the user's NATS JWT or publish NATS delete requests to controllers — orphaned K8s resources persist until manual cleanup. |
+| `POST` | `/admin/sessions/stop` | Break-glass session stop. Publishes a sessions.delete NATS message to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.delete`. Returns 202 Accepted (fire-and-forget). |
 
 ### NATS Subjects
 
@@ -169,7 +180,7 @@ The control-plane manages two categories of JetStream resources:
 
 **Shared (created on deployment startup):**
 
-- **`mclaude-hosts`** -- shared KV bucket; created by `ensureHostsKV`. Control-plane is the sole writer. Production writes driven by `$SYS.ACCOUNT.*.CONNECT/DISCONNECT`. Read access is per-host in user JWTs (each user's JWT lists explicit host slugs they can read — NATS enforces host visibility). Dev-seed path: on `DEV_SEED=true`, `seedDev` writes the bootstrap user's `local` host entry with `online=true`.
+- **`mclaude-hosts`** -- shared KV bucket; created by `ensureHostsKV`. Control-plane is the sole writer. Writes are driven by `$SYS.ACCOUNT.*.CONNECT/DISCONNECT` events — a host entry is written only after the host's NKey authenticates to NATS. Read access is per-host in user JWTs (each user's JWT lists explicit host slugs they can read — NATS enforces host visibility).
 
 **Per-user (created on user registration / first login):**
 
@@ -216,10 +227,9 @@ At runtime, the control-plane mounts one K8s Secret as a file:
 6. Ensures the shared `mclaude-hosts` KV bucket exists — it must exist before the `$SYS` subscriber starts so CONNECT events can write to it immediately. Per-user KV buckets (`mclaude-sessions-{uslug}`, `mclaude-projects-{uslug}`) and the per-user sessions stream (`MCLAUDE_SESSIONS_{uslug}`) are created on user registration / first login, not at startup (ADR-0054).
 7. Subscribes to `$SYS.ACCOUNT.*.CONNECT` and `$SYS.ACCOUNT.*.DISCONNECT` for host liveness. Also subscribes to host lifecycle subjects (`mclaude.users.*.hosts.*.manage.>`, `mclaude.users.*.hosts._.register`), agent registration (`mclaude.hosts.*.api.agents.register`), and import/attachment NATS handlers.
 8. Starts the GitLab token refresh goroutine (every 15 minutes).
-9. Optionally seeds a dev user, a default `local` machine host for that user, and a default project on the `local` host when `DEV_SEED=true`. Also creates per-user KV buckets and the sessions stream for the dev user. Writes the `local` host's `mclaude-hosts` KV entry with `online=true` (dev-only path — the auto-created `local` host has no NKey, so no `$SYS` CONNECT event fires for it). After writing KV entries, publishes a NATS provisioning request (`mclaude.hosts.local.users.{uslug}.projects.{pslug}.create`) for the default project so the controller creates per-project resources (ADR-0050). Non-fatal on failure (controller may not be running yet during startup race).
-10. Starts the main HTTP listener and the loopback metrics listener.
+9. Starts the main HTTP listener on `PORT` (default 8080).
 
-If `BOOTSTRAP_ADMIN_EMAIL` is set on first boot, control-plane upserts a `users` row with that email, `is_admin=true`, `oauth_id=NULL`. The first OAuth login matching that email links the OAuth identity to the bootstrap row.
+The bootstrap admin is a normal user with `is_admin=true`. The `init-keys` Job creates the row before the CP pod starts: email from `BOOTSTRAP_ADMIN_EMAIL`, bcrypt password hash from `BOOTSTRAP_ADMIN_PASSWORD` (if set), `is_admin=true`. Idempotent — if the user already exists, promotes them to admin and updates the password if `BOOTSTRAP_ADMIN_PASSWORD` is provided. Per-user JetStream resources are created lazily on first login, same as any other user.
 
 ### Authentication and JWT Signing
 
@@ -245,7 +255,7 @@ Per ADR-0054, all identity types (user, host, agent) generate their own NKey pai
 
 **Per-user resource provisioning:** On user registration (first login), CP creates per-user KV buckets (`mclaude-sessions-{uslug}`, `mclaude-projects-{uslug}`) and the per-user sessions stream (`MCLAUDE_SESSIONS_{uslug}`). These resources are created once per user and persist.
 
-The auth middleware on protected routes decodes and validates the JWT against the account public key, extracts the user UUID into the request context, and enforces access boundaries: returns 403 Forbidden when the JWT subject (user slug) does not match the URL `{uslug}` parameter. Admin users bypass this check. Admin routes use a separate static `ADMIN_TOKEN` middleware on the loopback port (not per-user `is_admin` checks).
+The auth middleware on protected routes decodes and validates the JWT against the account public key, extracts the user UUID into the request context, and enforces access boundaries: returns 403 Forbidden when the JWT subject (user slug) does not match the URL `{uslug}` parameter. Admin users bypass the slug-match check. Admin routes additionally require `isAdminMiddleware`: after JWT validation, the user's `is_admin` flag is fetched from Postgres; 403 Forbidden is returned if false. Admin = a normal user with `is_admin=true` — no separate token or port.
 
 ### JWT Revocation
 
@@ -303,6 +313,60 @@ On project deletion (ADR-0053), in addition to the standard Postgres + KV + prov
 - **Device-code expired (>10 min)**: `POST /api/hosts/register` returns 410 Gone with `{error: "code expired, restart registration"}`.
 - **Device-code already redeemed**: returns 409 Conflict.
 - **Admin endpoint called by non-admin**: returns 403 Forbidden.
+
+## Integration Tests
+
+The `go test -tags integration` suite is the Phase 1 CI gate. All tests use `httptest.NewRecorder()` + direct handler calls. The `newTestServer(t, db, nc) *Server` helper constructs a test server with a real Postgres (testcontainers) and real NATS (testcontainers). No static admin token — admin tests create an `is_admin=true` user via `db.CreateUser` + `db.SetUserAdmin`, log in via `handleLogin`, and use the resulting JWT.
+
+**Phase 1 invariants:**
+
+| Test name | What it verifies |
+|-----------|-----------------|
+| `TestIntegration_Schema_NoSeedRows` | Fresh `Migrate()` on empty DB: `hosts`, `projects`, `users` tables all empty |
+| `TestIntegration_CreateUser_NoLocalHost` | After `CreateUser`, no row in `hosts` with `slug='local'` for that user |
+
+**Admin routes (main port, `isAdminMiddleware`):**
+
+| Test name | Method / Path | What it verifies |
+|-----------|--------------|-----------------|
+| `TestIntegration_AdminCreateUser` | `POST /admin/users` | Creates user; response has `{id, email, name, slug}` |
+| `TestIntegration_AdminListUsers` | `GET /admin/users` | Lists created users |
+| `TestIntegration_AdminDeleteUser` | `DELETE /admin/users/{id}` | Deletes user; subsequent DB fetch returns nil |
+| `TestIntegration_AdminMiddleware_RejectsNoToken` | `GET /admin/users` (no auth) | 401 without JWT |
+| `TestIntegration_AdminMiddleware_RejectsNonAdmin` | `GET /admin/users` (non-admin JWT) | 403 with valid JWT for a non-admin user |
+
+**Auth surface:**
+
+| Test name | Method / Path | What it verifies |
+|-----------|--------------|-----------------|
+| `TestIntegration_HandleLogin_InvalidCreds` | `POST /auth/login` | 401 on wrong password |
+| `TestIntegration_AuthMiddleware_Rejects_Unauthenticated` | `GET /auth/me` | 401 without JWT |
+| `TestIntegration_AuthMiddleware_Accepts_ValidJWT` | `GET /auth/me` | 200 with valid JWT from login |
+| `TestIntegration_HostRegister_HTTP` | `POST /api/hosts/register` | Creates host row with `public_key`; response contains JWT |
+| `TestIntegration_NKeyChallenge_AndVerify` | `POST /api/auth/challenge` + verify | Full round-trip; returns scoped JWT |
+| `TestIntegration_DeviceCode_StartAndPoll` | `POST /api/auth/device-code` + poll | Returns `{deviceCode, userCode}`; poll returns `pending` |
+| `TestIntegration_HealthEndpoints` | `GET /health`, `/healthz`, `/readyz` | All return 200 with DB up |
+
+**NATS subject handlers:**
+
+NATS subject tests use `nc.Request` with a 3s timeout; `t.Fatal` on timeout.
+
+| Test name | Subject | What it verifies |
+|-----------|---------|-----------------|
+| `TestIntegration_ManageGrant` | `mclaude.users.*.hosts.*.manage.grant` | Grantee appears in host access list after publish |
+| `TestIntegration_ManageRevokeAccess` | `mclaude.users.*.hosts.*.manage.revoke-access` | Grant removed from DB |
+| `TestIntegration_ManageDeregister` | `mclaude.users.*.hosts.*.manage.deregister` | Host row deleted from DB |
+| `TestIntegration_ManageUpdate` | `mclaude.users.*.hosts.*.manage.update` | Host name updated in DB |
+| `TestIntegration_ProjectCreate_NATS` | `mclaude.users.*.api.projects.create` | Project row created; KV entry written |
+| `TestIntegration_CheckSlug_Available` | `mclaude.users.*.hosts.*.projects.check-slug` | `{available:true}` for unused slug |
+| `TestIntegration_CheckSlug_Taken` | `mclaude.users.*.hosts.*.projects.check-slug` | `{available:false}` for existing slug |
+
+**`cluster_test.go`:**
+
+- `TestCluster_UserProjectInKV` — replaces `TestCluster_DevUserProjectInKV`. Creates an ephemeral user via `POST /admin/users` using an admin JWT obtained from `POST /auth/login` (not `ADMIN_TOKEN`). Publishes a project-create NATS message, verifies the KV entry, then tears down. All uses of `ADMIN_TOKEN` env var removed from `cluster_test.go`.
+
+**Deleted tests (ADR-0089):**
+- `TestIntegration_SeedDev_WritesLocalHostKV` — removed with seedDev
 - **`$SYS` event for unknown account**: logged at info level and ignored.
 - **OAuth callback errors**: browser redirected to return URL with `?error={code}` (csrf, denied, exchange_failed, profile_failed, storage, gitlab_one_identity).
 - **OAuth token exchange failure**: logged; browser redirected with error.
