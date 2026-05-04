@@ -109,19 +109,19 @@ controlPlane:
     limits:
       cpu: 500m
       memory: 512Mi
+  ## Password for the bootstrap admin. Hashed by the init-keys Job and stored
+  ## in users.password_hash. Required for CI to authenticate without OAuth.
+  ## If empty, the admin can only log in via OAuth.
+  bootstrapAdminPassword: ""
   service:
     type: ClusterIP
     httpPort: 8080
-    adminPort: 9090
-    metricsPort: 9091
   config:
     logLevel: info
     jwtExpirySeconds: 28800
     jwtRefreshThresholdSeconds: 900
-    devSeed: false
     natsWsUrl: ""
   ## Name of existing Secret containing:
-  ##   admin-token  — break-glass bearer token
   ##   database-url — Postgres connection string
   existingSecret: "mclaude-control-plane"
   ## Dev OAuth token (for dev environments only)

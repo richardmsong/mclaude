@@ -17,8 +17,6 @@ controlPlane:
     pullPolicy: Never
   migrations:
     enabled: false
-  config:
-    devSeed: true
   probe:
     liveness:
       path: /healthz

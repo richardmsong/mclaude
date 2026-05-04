@@ -53,6 +53,10 @@ spec:
             - name: BOOTSTRAP_ADMIN_EMAIL
               value: {{ .Values.controlPlane.bootstrapAdminEmail | quote }}
             {{- end }}
+            {{- if .Values.controlPlane.bootstrapAdminPassword }}
+            - name: BOOTSTRAP_ADMIN_PASSWORD
+              value: {{ .Values.controlPlane.bootstrapAdminPassword | quote }}
+            {{- end }}
           resources:
             requests:
               cpu: 50m

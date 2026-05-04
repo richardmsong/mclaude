@@ -58,17 +58,12 @@ spec:
             - name: http
               containerPort: {{ .Values.controlPlane.service.httpPort }}
               protocol: TCP
-            - name: admin
-              containerPort: {{ .Values.controlPlane.service.adminPort }}
-              protocol: TCP
 
           env:
             - name: LOG_LEVEL
               value: {{ .Values.controlPlane.config.logLevel | quote }}
             - name: HTTP_PORT
               value: {{ .Values.controlPlane.service.httpPort | quote }}
-            - name: ADMIN_PORT
-              value: {{ .Values.controlPlane.service.adminPort | quote }}
 
             - name: JWT_EXPIRY_SECONDS
               value: {{ .Values.controlPlane.config.jwtExpirySeconds | quote }}
@@ -94,15 +89,6 @@ spec:
                   key: postgres-password
             - name: DATABASE_URL
               value: "postgres://mclaude:$(POSTGRES_PASSWORD)@{{ include "mclaude-cp.fullname" . }}-postgres.{{ include "mclaude-cp.namespace" . }}.svc:5432/mclaude?sslmode=disable"
-            {{- if .Values.controlPlane.config.devSeed }}
-            - name: DEV_SEED
-              value: "true"
-            {{- end }}
-            - name: ADMIN_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.controlPlane.existingSecret }}
-                  key: admin-token
             ## Operator keys mounted from the init-keys Job Secret
             - name: OPERATOR_KEYS_PATH
               value: /etc/mclaude/operator-keys
