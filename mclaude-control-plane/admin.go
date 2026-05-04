@@ -12,9 +12,11 @@ import (
 	"mclaude.io/common/pkg/subj"
 )
 
-// Admin endpoints are served on the break-glass admin port (:9091).
-// They operate entirely through Postgres — no NATS required — so they work
-// even when NATS is down. All endpoints require the admin bearer token.
+// Admin endpoints are served on the main port (8080) behind isAdminMiddleware.
+// isAdminMiddleware validates the caller's JWT via the standard authMiddleware,
+// then checks that the authenticated user has users.is_admin = true in Postgres.
+// Returns 401 if no JWT is present; 403 if JWT is valid but user is not admin.
+// No static admin token — admin identity is a normal user with the is_admin flag.
 //
 // Routes (all under /admin/):
 //
