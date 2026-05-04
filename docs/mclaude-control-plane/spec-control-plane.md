@@ -14,7 +14,7 @@ Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central
 
 Deployment is split into two phases with an explicit CI gate between them:
 
-**Phase 1 — Control Plane:** `helm upgrade --install mclaude-cp`. After this phase the cluster contains exactly 5 running pods in `mclaude-system`: `mclaude-cp-nats-0` (NATS hub), `mclaude-cp-postgres-0` (Postgres), the CP pod, the SPA pod, and the MinIO pod. Two Jobs complete and exit: `init-keys` (generates NKeys, creates bootstrap admin user) and `minio-bucket-job` (creates S3 bucket).
+**Phase 1 — Control Plane:** `helm upgrade --install mclaude-cp`. After this phase the `mclaude-system` namespace contains exactly 5 running pods (other namespaces like `kube-system` contain standard k3d infrastructure and are not counted): `mclaude-cp-nats-0` (NATS hub), `mclaude-cp-postgres-0` (Postgres), the CP pod, the SPA pod, and the MinIO pod. Two Jobs complete and exit: `init-keys` (generates NKeys, creates bootstrap admin user) and `minio-bucket-job` (creates S3 bucket).
 
 **Phase 1 Postgres state:** `users` — one row (bootstrap admin, `is_admin=true`). `hosts`, `projects`, `agent_credentials` — all empty.
 
