@@ -9,7 +9,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -17,14 +16,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	natsjwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"github.com/rs/zerolog"
-
-	"mclaude.io/common/pkg/slug"
-	"mclaude.io/common/pkg/subj"
 )
 
 func main() {
@@ -164,13 +159,6 @@ func main() {
 	srv.StartGitLabRefreshGoroutine(ctx)
 	logger.Info().Msg("GitLab token refresh goroutine started")
 
-	// Dev seed: create a known account + default project when DEV_SEED=true and DB is available.
-	if os.Getenv("DEV_SEED") == "true" && db != nil {
-		if err := seedDev(ctx, db, nc, logger); err != nil {
-			logger.Error().Err(err).Msg("dev seed failed")
-		}
-	}
-
 	// Main API mux (public, protected, admin, and metrics routes — all on one port).
 	// Admin routes are protected by isAdminMiddleware (JWT + is_admin=true in DB).
 	// Metrics are unauthenticated (internal k8s scraping).
@@ -181,140 +169,6 @@ func main() {
 	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		logger.Fatal().Err(err).Msg("listen and serve")
 	}
-}
-
-// seedDev creates a dev user and default project if they don't exist.
-// Only called when DEV_SEED=true. Safe to call on every startup — idempotent.
-func seedDev(ctx context.Context, db *DB, nc *nats.Conn, logger zerolog.Logger) error {
-	const devEmail = "dev@mclaude.local"
-	const devPassword = "dev"
-
-	user, err := db.GetUserByEmail(ctx, devEmail)
-	if err != nil {
-		return fmt.Errorf("check dev user: %w", err)
-	}
-
-	if user == nil {
-		hash, err := HashPassword(devPassword)
-		if err != nil {
-			return fmt.Errorf("hash dev password: %w", err)
-		}
-		user, err = db.CreateUser(ctx, uuid.NewString(), devEmail, "Dev User", hash)
-		if err != nil {
-			return fmt.Errorf("create dev user: %w", err)
-		}
-		logger.Warn().
-			Str("email", devEmail).
-			Str("password", devPassword).
-			Msg("DEV_SEED: created dev account — do not use in production")
-	} else {
-		logger.Info().Str("email", devEmail).Msg("dev user already exists")
-	}
-
-	// Ensure per-user JetStream resources exist (idempotent).
-	// Previously this was only called during login, so existing dev users
-	// created before ADR-0054 would never get their per-user KV buckets.
-	if err := ensureUserResources(nc, user.Slug); err != nil {
-		logger.Error().Err(err).Msg("DEV_SEED: ensureUserResources failed (non-fatal)")
-	}
-
-	// Seed a default project for the dev user.
-	projects, err := db.GetProjectsByUser(ctx, user.ID)
-	if err != nil {
-		return fmt.Errorf("check dev projects: %w", err)
-	}
-	if len(projects) == 0 {
-		proj, err := db.CreateProject(ctx, uuid.NewString(), user.ID, "Default Project", "")
-		if err != nil {
-			return fmt.Errorf("create dev project: %w", err)
-		}
-		projects = []*Project{proj}
-		logger.Warn().Str("userId", user.ID).Str("projectId", proj.ID).Msg("DEV_SEED: created default project")
-	}
-	// Always rewrite KV entries.
-	// ADR-0050: pass userSlug ("local" host known for dev seed) so value includes slug fields.
-	for _, proj := range projects {
-		hostSlug := "local" // dev projects are always on the local machine host
-		if proj.HostSlug != "" {
-			hostSlug = proj.HostSlug
-		}
-		if err := writeProjectKV(nc, user.ID, user.Slug, hostSlug, proj); err != nil {
-			logger.Error().Err(err).Str("projectId", proj.ID).Msg("DEV_SEED: write project KV failed (non-fatal)")
-		}
-	}
-
-	// Write the local machine host to mclaude-hosts KV so the SPA renders it
-	// as online. The local dev host has no NKey, so no $SYS CONNECT fires (ADR-0046).
-	if user.Slug != "" {
-		var localHostSlug, localHostName, localHostType string
-		qerr := db.pool.QueryRow(ctx, `
-			SELECT slug, name, type FROM hosts
-			WHERE user_id = $1 AND slug = 'local' LIMIT 1`,
-			user.ID).Scan(&localHostSlug, &localHostName, &localHostType)
-		if qerr == nil {
-			js, jerr := nc.JetStream()
-			if jerr == nil {
-				hostsKV, kerr := ensureHostsKV(js)
-				if kerr == nil {
-					now := time.Now().UTC().Format(time.RFC3339)
-					state := HostKVState{
-						Slug:       localHostSlug,
-						Type:       localHostType,
-						Name:       localHostName,
-						Online:     true,
-						LastSeenAt: &now,
-					}
-					if val, merr := json.Marshal(state); merr == nil {
-						// ADR-0054: flat key format {hslug} — hosts are globally unique.
-						key := localHostSlug
-						if _, perr := hostsKV.Put(key, val); perr != nil {
-							logger.Error().Err(perr).Str("key", key).Msg("DEV_SEED: write local host KV failed (non-fatal)")
-						} else {
-							logger.Info().Str("key", key).Msg("DEV_SEED: wrote local host to mclaude-hosts KV")
-						}
-					}
-				}
-			}
-
-			// ADR-0050: publish NATS provisioning request for each dev project so the
-			// K8s controller creates the MCProject CR and session-agent pod.
-			// Non-fatal on failure — controller may not be running yet during startup race.
-			for _, proj := range projects {
-				provReq := ProvisionRequest{
-					UserID:      user.ID,
-					UserSlug:    user.Slug,
-					HostSlug:    localHostSlug,
-					ProjectID:   proj.ID,
-					ProjectSlug: proj.Slug,
-				}
-				provData, merr := json.Marshal(provReq)
-				if merr != nil {
-					logger.Error().Err(merr).Str("projectId", proj.ID).Msg("DEV_SEED: marshal provision request failed (non-fatal)")
-					continue
-				}
-				// ADR-0054: host-scoped fan-out subject.
-			provSubject := subj.HostUserProjectsCreate(slug.HostSlug(localHostSlug), slug.UserSlug(user.Slug), slug.ProjectSlug(proj.Slug))
-				provReply, reqErr := nc.Request(provSubject, provData, 30*time.Second)
-				if reqErr != nil {
-					logger.Warn().Err(reqErr).
-						Str("projectId", proj.ID).
-						Str("subject", provSubject).
-						Msg("DEV_SEED: provisioning request failed (non-fatal — controller may not be up yet)")
-				} else {
-					var reply ProvisionReply
-					if jsonErr := json.Unmarshal(provReply.Data, &reply); jsonErr == nil {
-						if reply.OK {
-							logger.Info().Str("projectId", proj.ID).Msg("DEV_SEED: provisioning request accepted by controller")
-						} else {
-							logger.Warn().Str("projectId", proj.ID).Str("error", reply.Error).Msg("DEV_SEED: controller returned provisioning error (non-fatal)")
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return nil
 }
 
 // generateNATSUserCreds creates an ephemeral user JWT signed by the account key,
