@@ -5,6 +5,8 @@ const isLive = baseURL.startsWith('https://')
 
 export default defineConfig({
   testDir: './e2e',
+  globalSetup: './e2e/global-setup.ts',
+  globalTeardown: './e2e/global-teardown.ts',
   fullyParallel: false,
   forbidOnly: !!process.env['CI'],
   retries: 0,

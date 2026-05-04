@@ -48,6 +48,10 @@ mclaude-connector/mclaude-connector
 mclaude-relay/relay-linux
 mclaude-relay/mclaude-relay
 mclaude-relay/mclaude-connector
+mclaude-controller-local/mclaude-controller-local
+
+# Playwright test results
+mclaude-web/test-results/
 scripts/._*
 .claude/.feature-ok*
 
