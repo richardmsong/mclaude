@@ -65,10 +65,12 @@ Single source of truth for both BYOH machines and K8s clusters per ADR-0035 (whi
 | `nats_jwt` | TEXT | | Host JWT scoped to `mclaude.hosts.{hslug}.>` with zero JetStream access. NULL until issued by control-plane via HTTP challenge-response. 5-minute TTL; host controller proactively refreshes via the same HTTP auth flow. |
 | `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
 | `last_seen_at` | TIMESTAMPTZ | | Updated by `$SYS.ACCOUNT.*.CONNECT` subscription on hub NATS. Authoritative historical record. The current `online` boolean lives in `mclaude-hosts` KV, not Postgres. |
+| `is_default_platform` | BOOLEAN | NOT NULL DEFAULT FALSE | Per ADR-0091. At most one host can be the default platform; new users are auto-granted access on registration and the grant is auto-accepted on their behalf. Set during cluster registration (`POST /admin/clusters` with `defaultPlatform: true`); admin-only. |
 
 Constraints:
 - `UNIQUE (user_id, slug)` — slugs are unique per user (not globally). Host lookup by CP uses `public_key` (globally unique NKey).
 - `CHECK (type IN ('machine', 'cluster'))` — valid host types.
+- Partial unique index `idx_hosts_default_platform ON hosts (is_default_platform) WHERE is_default_platform = true` — at most one default platform globally.
 
 Note: the legacy constraint `CHECK (type = 'machine' OR (js_domain IS NOT NULL AND leaf_url IS NOT NULL AND account_jwt IS NOT NULL))` was dropped as part of the ADR-0063 migration (columns `js_domain`, `leaf_url`, `account_jwt` are deprecated per ADR-0054).
 
@@ -117,6 +119,48 @@ Constraints:
 
 Writers: control-plane (on `mclaude.hosts.{hslug}.api.agents.register` from host controller).
 Readers: control-plane (validates agent HTTP challenge-response authentication before minting per-project JWT).
+
+### `user_host_agents`
+
+Per ADR-0091. Tracks user-agent identities — the in-namespace agent deployed per (user, host) pair that handles X25519 token unwrapping and project pod lifecycle. Distinct from `agent_credentials` (which is per-project session-agents). One row per (host, user) pair.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PRIMARY KEY DEFAULT gen_random_uuid() | |
+| `host_slug` | TEXT | NOT NULL | Host where the user-agent runs |
+| `user_slug` | TEXT | NOT NULL | User the agent serves |
+| `nkey_public` | TEXT | | Ed25519 NKey public key. Registered by host controller via `mclaude.hosts.{hslug}.api.agents.user-agent.register` during Phase 1 (host grants user). Used by CP to validate challenge-response auth. |
+| `x25519_pub` | TEXT | | X25519 public key (base64, 32 bytes). Registered by user-agent during challenge-response (`POST /api/auth/verify` with `x25519_pub` field). Used by SPA/CLI to wrap (`crypto_box_seal`) tokens for delivery. |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | |
+
+Constraints:
+- `UNIQUE (host_slug, user_slug)` — one user-agent per (host, user) pair.
+
+Writers: control-plane (on `mclaude.hosts.{hslug}.api.agents.user-agent.register` from host controller; on `POST /api/auth/verify` from user-agent for `x25519_pub`).
+Readers: control-plane (validates user-agent challenge-response auth; serves X25519 pubkey to SPA/CLI via `GET /api/users/{uslug}/hosts/{hslug}/user-agent/pubkey`; computes fingerprint for grant accept).
+
+CP validates that a `host_grants` row exists for `(host_slug, user_slug)` before accepting a `user-agent.register` write. Trust chain: user → host → user-agent.
+
+### `host_grants`
+
+Per ADR-0091. Tracks the bilateral grant/accept handshake that authorizes a user-agent on a host to serve a user. The host initiates a grant; the user accepts. CP is a directory — it does not approve or deny; it stores both sides.
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | UUID | PRIMARY KEY DEFAULT gen_random_uuid() | |
+| `host_slug` | TEXT | NOT NULL | Host extending the grant |
+| `user_slug` | TEXT | NOT NULL | User receiving the grant |
+| `status` | TEXT | NOT NULL DEFAULT 'pending' | `pending`, `accepted`, `revoked` |
+| `created_at` | TIMESTAMPTZ | NOT NULL DEFAULT NOW() | When host published `mclaude.hosts.{hslug}.grants.create` |
+| `accepted_at` | TIMESTAMPTZ | | When user (or CP, for default platform) called `POST /api/users/{uslug}/hosts/{hslug}/grant/accept` |
+
+Constraints:
+- `UNIQUE (host_slug, user_slug)` — one grant per (host, user) pair.
+
+Writers: control-plane (on `mclaude.hosts.{hslug}.grants.create` from host controller; on `POST /api/users/{uslug}/hosts/{hslug}/grant/accept` from SPA/CLI; auto-grant + auto-accept for default platform on user creation).
+Readers: control-plane (gates `user_host_agents` writes; selects bootstrap vs full JWT for user-agent challenge-response; serves pending grants via `GET /api/users/{uslug}/grants`).
+
+The `revoked` status is reserved for the deferred revocation flow (separate ADR). v1 sets only `pending` and `accepted`.
 
 ### `oauth_connections`
 
@@ -319,6 +363,23 @@ The previous `mclaude-laptops` and `mclaude-heartbeats` buckets are removed. Liv
 
 **Job queue KV eliminated (ADR-0044):** The `mclaude-job-queue` KV bucket no longer exists. Quota-managed sessions use the session KV (`mclaude-sessions-{uslug}`) with extended fields (`softThreshold`, `hardHeadroomTokens`, `autoContinue`, `pausedVia`, etc.). Callers publish `sessions.create` directly with optional quota fields; the session-agent handles the lifecycle internally. See ADR-0044 for details.
 
+### `mclaude-user-info-{uslug}`
+
+Per-user, **client-only** KV bucket per ADR-0091. Created by control-plane on user creation alongside `mclaude-sessions-{uslug}` and `mclaude-projects-{uslug}`. Stores per-user secrets and preferences that originate from the user (browser/CLI). No infrastructure identity (host controller, user-agent, session-agent) has read or write access — credentials reach hosts via X25519 sealed-box delivery on NATS request/reply, not by reading this bucket.
+
+JetStream at-rest encryption (`store_key` in NATS server config) is required to protect the plaintext token on disk.
+
+| Key | Writer | Readers | Value |
+|-----|--------|---------|-------|
+| `tokens.anthropic` | SPA / CLI | SPA / CLI (any device) | Anthropic OAuth access token (plaintext string) |
+| `tokens.{provider}` | SPA / CLI | SPA / CLI (any device) | Provider OAuth/API token (plaintext) — multi-provider, future |
+| `git.{provider}` | SPA / CLI | SPA / CLI (any device) | Git credential (PAT/OAuth) — reserved for a follow-up ADR |
+| `preferences.*` | SPA / CLI | SPA / CLI (any device) | User preferences; SPA-only, never delivered to hosts |
+
+User JWT permissions: KV read/write on `mclaude-user-info-{uslug}` (full bucket). No other identity has access. See `docs/spec-nats-data-taxonomy.md` for the exact `$KV.` and `$JS.API.*` permission set.
+
+History: 1 (latest value only).
+
 ---
 
 ## NATS JetStream Streams
@@ -488,15 +549,46 @@ Contains all per-user resources below.
 
 | Key | Value | Description |
 |-----|-------|-------------|
-| `oauth-token` | OAuth bearer token (optional) | From DEV_OAUTH_TOKEN env |
 | `gh-hosts.yml` | `gh` CLI hosts config (YAML) | Reconciler-managed GitHub credential helper config |
 | `glab-config.yml` | `glab` CLI config (YAML) | Reconciler-managed GitLab credential helper config |
 | `conn-{id}-token` | OAuth access token or PAT | One per `oauth_connections` row |
 | `conn-{id}-refresh-token` | OAuth refresh token (GitLab only) | Rotated on each refresh cycle |
 | `conn-{id}-username` | Provider username (plain text) | Used by session-agent to resolve `GIT_IDENTITY_ID` → username |
 
+Per ADR-0091, the legacy `oauth-token` key (sourced from the global `DEV_OAUTH_TOKEN` env) is removed. Anthropic and other model-provider tokens live in `user-tokens-{uslug}` (below) instead.
+
 Writers: `mclaude-controller-k8s` (`reconcileSecrets`), control-plane OAuth callback + PAT handler + `reconcileUserCLIConfig`
 Readers: session-agent pod (mounted read-only at `/home/node/.user-secrets`)
+
+### Secret: `user-tokens-{uslug}` (in `mclaude-{userSlug}`)
+
+Per ADR-0091. Stores plaintext model-provider tokens after the user-agent has unsealed them from `crypto_box_seal` payloads delivered over NATS. One key per provider.
+
+| Key | Value | Description |
+|-----|-------|-------------|
+| `anthropic` | Anthropic OAuth access token (plaintext) | Written by user-agent on first `.agent.token-delivery` for provider=`anthropic`; updated on every re-auth |
+| `{provider}` | Provider token (plaintext) | Future providers (google, devin, etc.) |
+
+The Secret itself (with no data keys) is created by `mclaude-controller-k8s` at namespace-provisioning time so the user-agent pod's required volume mount resolves on startup. The user-agent populates per-provider keys on first `.agent.token-delivery`.
+
+Writers: `mclaude-controller-k8s` (creates the empty Secret), `mclaude-user-agent` (writes/updates per-provider keys after `crypto_box_seal_open` succeeds on a NATS-delivered payload).
+Readers: session-agent pod (mounted read-only at `/secrets/tokens/`; entrypoint exports `CLAUDE_CODE_OAUTH_TOKEN=$(cat /secrets/tokens/${TOKEN_PROVIDER})`).
+
+The host operator with cluster-admin can read this Secret directly. The CoCo/Kata upgrade path (ADR-0091, deferred) replaces the Secret mount with a TEE-attested in-memory endpoint.
+
+### Secret: `user-agent-key` (in `mclaude-{userSlug}`)
+
+Per ADR-0091. Holds the user-agent's identity material — both NATS NKey and X25519 keypair — so the agent survives pod restarts without operator intervention.
+
+| Key | Value | Description |
+|-----|-------|-------------|
+| `nkey-seed` | NATS Ed25519 NKey seed (`S...` encoded, ~58 chars) | Written by `mclaude-controller-k8s` at namespace creation (Phase 1, host grants user). Used for HTTP challenge-response auth with CP. |
+| `x25519-private` | base64(X25519 private key, 32 bytes) | Written by user-agent on first startup. Used for `crypto_box_seal_open` of token payloads. |
+
+Writers: `mclaude-controller-k8s` (`nkey-seed` only, at namespace creation), `mclaude-user-agent` (`x25519-private` only, on first startup if absent).
+Readers: `mclaude-user-agent` (only).
+
+CoCo/Kata upgrade path: `x25519-private` is replaced by a TEE-attested keypair; the Secret entry is eliminated.
 
 ### ConfigMap: `user-config` (in `mclaude-{userSlug}`)
 
@@ -545,17 +637,31 @@ Readers: reconciler — watches this ConfigMap (filtered by name + namespace) in
 
 - Replicas: 1
 - Strategy: `Recreate` — old pod must exit before new pod starts; prevents two pods consuming the same durable JetStream consumers simultaneously (ADR-0043)
-- `ownerReferences`: back to the `MCProject` CR via `controllerutil.SetControllerReference`. Deleting the `MCProject` CR cascades to this Deployment.
-- Volumes: project PVC (`project-data`), nix PVC, user-config ConfigMap, user-secrets Secret, `claude-home` emptyDir (mounted at `/home/node/.claude` — ephemeral per pod lifecycle, not persisted across restarts)
-- Container: session-agent image with env vars `USER_ID`, `PROJECT_ID` (UUIDs for FK joins), `USER_SLUG`, `PROJECT_SLUG`, `HOST_SLUG`, `NATS_URL` (= `HUB_NATS_URL`), `CONTROL_PLANE_URL` (injected from the controller's own `CONTROL_PLANE_URL` env — needed for session-agent self-bootstrap via challenge-response)
-- `CLAUDE_CODE_TMPDIR`: specified in the spec target but **not yet injected** by the reconciler's `buildPodTemplate()`. When implemented, should be set to `/data/claude-tmp` (PVC subPath on the `project-data` volume) so shell output files persist across pod restarts
+- Volumes: project PVC (`project-data`), nix PVC, user-config ConfigMap, user-secrets Secret, `user-tokens-{uslug}` Secret (mounted at `/secrets/tokens/`), `claude-home` emptyDir (mounted at `/home/node/.claude` — ephemeral per pod lifecycle, not persisted across restarts)
+- Container: session-agent image with env vars `USER_ID`, `PROJECT_ID` (UUIDs for FK joins), `USER_SLUG`, `PROJECT_SLUG`, `HOST_SLUG`, `GIT_URL`, `GIT_IDENTITY_ID`, `TOKEN_PROVIDER` (e.g. `anthropic`), `NATS_URL` (= `HUB_NATS_URL`), `CONTROL_PLANE_URL` (needed for session-agent self-bootstrap via challenge-response)
+- `CLAUDE_CODE_TMPDIR`: specified in the spec target but **not yet injected**. When implemented, should be set to `/data/claude-tmp` (PVC subPath on the `project-data` volume) so shell output files persist across pod restarts
 - Restart policy: Always (pod restarts trigger `--resume` recovery)
 
-`mclaude-controller-k8s` resolves `USER_SLUG`, `HOST_SLUG`, and `PROJECT_SLUG` directly from the host-scoped NATS subject of the provision request (`mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.create`) plus the request payload. The controller does not read Postgres — control-plane owns Postgres. Session slugs are per-session and flow through NATS messages / KV state; they are not pod env vars.
+Per ADR-0091, **`mclaude-user-agent` (not `mclaude-controller-k8s`) creates this Deployment**. The user-agent reacts to `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.provision` from CP (after CP creates the project DB row + KV entry) and to `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.delete` for teardown. The user-agent is event-driven (no reconciler, no `MCProject` CR); k8s itself is the source of truth for which project pods exist. On user-agent restart, existing Deployments are adopted without recreation. Project pods missed during user-agent downtime (e.g. delete events) are not retroactively reconciled — manual `kubectl delete deployment` is the operator escape hatch.
 
-Session-agent pods self-bootstrap NATS credentials: the agent generates its own NKey at pod startup, the controller registers the agent's public key with CP via `mclaude.hosts.{hslug}.api.agents.register`, then the agent runs HTTP challenge-response using `CONTROL_PLANE_URL` to obtain its per-project JWT. The `nats-creds` Secret key is not written by the controller (per ADR-0063).
+Session-agent pods self-bootstrap NATS credentials: the agent generates its own NKey at pod startup, the user-agent (acting as host controller for project lifecycle) does **not** register the session-agent's NKey on its behalf — the existing path via `mclaude.hosts.{hslug}.api.agents.register` is preserved. The session-agent runs HTTP challenge-response using `CONTROL_PLANE_URL` to obtain its per-project JWT. The `nats-creds` Secret key is not written.
 
-Writers: `mclaude-controller-k8s` (`reconcileDeployment`)
+Writers: `mclaude-user-agent` (creates and deletes the Deployment in response to NATS provision/delete events).
+
+### Deployment: `user-agent` (in `mclaude-{userSlug}`)
+
+Per ADR-0091. New Deployment, one per user namespace, deployed by `mclaude-controller-k8s` when the host grants the user access (Phase 1).
+
+- Replicas: 1
+- Strategy: `RollingUpdate` (single-tenant; restart is non-disruptive — k8s pods are unchanged on user-agent restart)
+- Volumes: `user-agent-key` Secret (mounted at `/secrets/agent/`), `user-tokens-{uslug}` Secret (mounted at `/secrets/tokens/` — write access via the k8s API, not the mount, since user-agent writes new keys after unsealing)
+- Container: user-agent image with env vars `USER_SLUG`, `HOST_SLUG`, `NAMESPACE`, `NATS_URL`, `CONTROL_PLANE_URL`
+- ServiceAccount: `mclaude-user-agent` — Role in user namespace permits `get/list/watch/create/update/patch/delete` on `Deployment` and `PersistentVolumeClaim`, and `get/list/create/update/patch` on `Secret` (`user-tokens-{uslug}` only) and `ConfigMap` (project-pod template snapshot — see below)
+- Restart policy: Always
+
+The controller copies the `{release}-session-agent-template` ConfigMap from `mclaude-system` into each user namespace as `session-agent-template` at namespace provisioning time. The user-agent reads its own namespace's copy — no cross-namespace RBAC required. When the source ConfigMap changes (Helm upgrade rolls out new image / resources), the controller re-copies into all user namespaces and re-rolls user-agent Deployments.
+
+Writers: `mclaude-controller-k8s` (creates Deployment + ServiceAccount + Role + RoleBinding when the host grants the user access).
 
 ### RBAC: ServiceAccount, Role, RoleBinding (in `mclaude-{userSlug}`)
 

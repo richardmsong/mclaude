@@ -53,9 +53,17 @@ mclaude
 │   └── hosts._.register                   ← register a new host ("_" sentinel — can't collide with slugs, which are [a-z0-9-]+)
 │
 ├── hosts.{hslug}                          ← host boundary (host controller scope)
-│   ├── users.{uslug}.projects.{pslug}.create   ← CP publishes after HTTP validation, host controller receives
-│   ├── users.{uslug}.projects.{pslug}.delete   ← CP publishes, host controller receives
-│   └── api.agents.register                ← core subject: host registers agent public key
+│   ├── users.{uslug}.projects.{pslug}.create   ← CP publishes after HTTP validation, host controller receives (LEGACY — replaced by user-agent path per ADR-0091)
+│   ├── users.{uslug}.projects.{pslug}.delete   ← CP publishes, host controller receives (LEGACY — replaced by user-agent path per ADR-0091)
+│   ├── api.agents.register                ← core subject: host registers session-agent public key
+│   ├── api.agents.user-agent.register     ← core subject: host registers user-agent NKey public key (ADR-0091)
+│   └── grants.create                      ← core subject: host grants user access (ADR-0091)
+│
+├── users.{uslug}.hosts.{hslug}.agent.>    ← per-(user,host) user-agent scope (ADR-0091)
+│   ├── activate                           ← CP signals grant accepted; user-agent re-runs challenge-response
+│   ├── token-delivery                     ← SPA/CLI delivers crypto_box_seal-wrapped token; request/reply
+│   ├── projects.provision                 ← CP requests project pod creation after DB write
+│   └── projects.delete                    ← CP requests project pod deletion after DB delete
 ```
 
 ---
@@ -70,10 +78,13 @@ Each per-user bucket uses the resource path as the key (no user prefix in the ke
 |--------|-------|------------|-------------|---------------------|
 | `KV_mclaude-sessions-{uslug}` | Per-user | `hosts.{hslug}.projects.{pslug}.sessions.{sslug}` | `hosts.laptop-a.projects.myapp.sessions.sess-001` | `$KV.mclaude-sessions-alice.hosts.laptop-a.projects.myapp.sessions.sess-001` |
 | `KV_mclaude-projects-{uslug}` | Per-user | `hosts.{hslug}.projects.{pslug}` | `hosts.laptop-a.projects.myapp` | `$KV.mclaude-projects-alice.hosts.laptop-a.projects.myapp` |
+| `KV_mclaude-user-info-{uslug}` | Per-user (client-only) | `tokens.{provider}` / `git.{provider}` / `preferences.*` | `tokens.anthropic` | `$KV.mclaude-user-info-alice.tokens.anthropic` |
 
 | `KV_mclaude-hosts` | Shared | `{hslug}` | `laptop-a` | `$KV.mclaude-hosts.laptop-a` |
 
 **Why hosts KV keys are flat:** The bucket name already scopes to hosts. Adding `hosts.` would be redundant (`KV_mclaude-hosts.hosts.laptop-a`). There is no deeper hierarchy — each key is one host.
+
+**`mclaude-user-info-{uslug}` is client-only (ADR-0091):** No infrastructure identity (host controller, user-agent, session-agent) has read or write access. Tokens reach hosts via X25519 sealed-box delivery on `mclaude.users.{uslug}.hosts.{hslug}.agent.token-delivery`, not by reading this bucket. JetStream at-rest encryption (`store_key`) is required.
 
 ### Streams
 
@@ -126,9 +137,15 @@ mclaude.users.{uslug}.hosts.{hslug}.manage.deregister
 mclaude.users.{uslug}.hosts.{hslug}.manage.revoke
 mclaude.users.{uslug}.quota
 mclaude.users.{uslug}.hosts._.register
-mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.create
-mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.delete
+mclaude.users.{uslug}.hosts.{hslug}.agent.activate
+mclaude.users.{uslug}.hosts.{hslug}.agent.token-delivery
+mclaude.users.{uslug}.hosts.{hslug}.agent.projects.provision
+mclaude.users.{uslug}.hosts.{hslug}.agent.projects.delete
+mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.create   # LEGACY (ADR-0091 removes)
+mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.delete   # LEGACY (ADR-0091 removes)
 mclaude.hosts.{hslug}.api.agents.register
+mclaude.hosts.{hslug}.api.agents.user-agent.register
+mclaude.hosts.{hslug}.grants.create
 ```
 
 Two subtrees:
@@ -142,6 +159,9 @@ State storage. Keys mirror the application subject hierarchy (minus the user pre
 ```
 $KV.mclaude-sessions-{uslug}.hosts.{hslug}.projects.{pslug}.sessions.{sslug}
 $KV.mclaude-projects-{uslug}.hosts.{hslug}.projects.{pslug}
+$KV.mclaude-user-info-{uslug}.tokens.{provider}
+$KV.mclaude-user-info-{uslug}.git.{provider}
+$KV.mclaude-user-info-{uslug}.preferences.{name}
 
 $KV.mclaude-hosts.{hslug}
 ```
@@ -174,17 +194,19 @@ $SYS.ACCOUNT.{account_id}.DISCONNECT
 
 Each identity type sees a specific slice of the taxonomy, enforced by JWT Pub/Sub.Allow lists.
 
-| Namespace | User (SPA/CLI) | Agent | Host controller | CP |
-|-----------|---------------|-------|----------------|-----|
-| `mclaude.users.{uslug}.*` | Own uslug, all hosts | Own uslug, one host, one project | None | Subscribe all (wildcard) |
-| `mclaude.hosts.{hslug}.*` | Publish to own hosts | None | Own hslug only | Publish to all hosts |
-| `$KV.mclaude-sessions-{uslug}.*` | Read all (own uslug) | Read/write one project | None | Write via agents |
-| `$KV.mclaude-projects-{uslug}.*` | Read all (own uslug) | Read/write one project | None | Write on provisioning |
+| Namespace | User (SPA/CLI) | Session-agent | User-agent | Host controller | CP |
+|-----------|---------------|---------------|------------|-----------------|-----|
+| `mclaude.users.{uslug}.*` | Own uslug, all hosts | Own uslug, one host, one project | Own uslug, one host (`agent.>` only) | None | Subscribe all (wildcard) |
+| `mclaude.users.{uslug}.hosts.{hslug}.agent.*` | Publish only (token-delivery, etc.) | None | Pub+Sub on own scope | None | Publish (`activate`, `projects.provision`, `projects.delete`) |
+| `mclaude.hosts.{hslug}.*` | Publish to own hosts | None | None | Own hslug only (incl. `grants.create`, `api.agents.user-agent.register`) | Publish to all hosts; subscribe to `grants.create` and `api.agents.*` |
+| `$KV.mclaude-sessions-{uslug}.*` | Read all (own uslug) | Read/write one project | None | None | Write via agents |
+| `$KV.mclaude-projects-{uslug}.*` | Read all (own uslug) | Read/write one project | None | None | Write on provisioning |
+| `$KV.mclaude-user-info-{uslug}.*` | Read/write all (own uslug) | None | None | None | None (full NATS access — accepted, see ADR-0091 security) |
 
-| `$KV.mclaude-hosts.*` | Per-host entries (JWT-scoped) | Own host only | None | Write ($SYS events) |
-| Binary data (S3) | Upload via pre-signed URL | Download via pre-signed URL | None | Signs URLs, validates ownership |
-| `$JS.API.*` | Own buckets/streams | Own buckets/streams, one project filter | None | All |
-| `$SYS.*` | None | None | None | Subscribe |
+| `$KV.mclaude-hosts.*` | Per-host entries (JWT-scoped) | Own host only | None | None | Write ($SYS events) |
+| Binary data (S3) | Upload via pre-signed URL | Download via pre-signed URL | None | None | Signs URLs, validates ownership |
+| `$JS.API.*` | Own buckets/streams (incl. user-info) | Own buckets/streams, one project filter | None (no JetStream/KV) | None | All |
+| `$SYS.*` | None | None | None | None | Subscribe |
 
 ---
 
@@ -217,5 +239,59 @@ For a session `sess-001` in project `myapp` on host `laptop-a` for user `alice`:
 | **Stream subject** (lifecycle) | `mclaude.users.alice.hosts.laptop-a.projects.myapp.sessions.sess-001.lifecycle.started` |
 | **KV key** (projects bucket) | `hosts.laptop-a.projects.myapp` |
 | **Host KV key** | `laptop-a` |
+| **User-info KV subject** (anthropic token) | `$KV.mclaude-user-info-alice.tokens.anthropic` |
 
 The pattern: strip the user prefix from the stream subject, drop the event suffix, and you have the KV key.
+
+---
+
+## User-Agent JWT Permissions (ADR-0091)
+
+The user-agent runs in `mclaude-{uslug}` on a host. CP issues two JWT scopes via the existing challenge-response flow; which one is returned depends on the `host_grants.status` row at verify time.
+
+### Bootstrap JWT — `IssueUserAgentBootstrapJWT(publicKey, uslug, hslug, accountKP)`
+
+Issued when grant is `pending`. Subscribe-only; user-agent waits for the activation signal and re-runs challenge-response on receipt. No JetStream / KV access.
+
+```
+Pub: _INBOX.>
+Sub: mclaude.users.{uslug}.hosts.{hslug}.agent.activate
+     _INBOX.>
+```
+
+5-minute TTL.
+
+### Full JWT — `IssueUserAgentJWT(publicKey, uslug, hslug, accountKP)`
+
+Issued when `host_grants.status = 'accepted'`. Allows the user-agent to receive token deliveries and project provision/delete events on its scope. No JetStream / KV access — user-agent never touches `mclaude-user-info-{uslug}` or any other KV bucket.
+
+```
+Pub: mclaude.users.{uslug}.hosts.{hslug}.agent.>
+     _INBOX.>
+Sub: mclaude.users.{uslug}.hosts.{hslug}.agent.>
+     _INBOX.>
+```
+
+5-minute TTL (same refresh pattern as session-agent's `agentJWTRefreshBuffer`).
+
+### User JWT additions — `mclaude-user-info-{uslug}` access
+
+User JWTs (SPA/CLI) gain full read/write on the new bucket. Permission entries:
+
+```
+Pub:
+  $KV.mclaude-user-info-{uslug}.*
+  $JS.API.DIRECT.GET.KV_mclaude-user-info-{uslug}.>
+  $JS.API.CONSUMER.CREATE.KV_mclaude-user-info-{uslug}.>
+  $JS.API.STREAM.INFO.KV_mclaude-user-info-{uslug}
+  $JS.API.CONSUMER.INFO.KV_mclaude-user-info-{uslug}.*
+  $JS.ACK.KV_mclaude-user-info-{uslug}.>
+  $JS.FC.KV_mclaude-user-info-{uslug}.>
+  mclaude.users.{uslug}.hosts.{hslug}.agent.token-delivery   # request/reply for delivery
+
+Sub:
+  $KV.mclaude-user-info-{uslug}.*                             # KV watch push delivery
+  $JS.FC.KV_mclaude-user-info-{uslug}.>
+```
+
+The user-agent does **not** receive any of these — `mclaude-user-info-{uslug}` is client-only.

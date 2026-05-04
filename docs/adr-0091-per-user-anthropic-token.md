@@ -1,8 +1,9 @@
 # ADR: Per-User Anthropic OAuth Token
 
-**Status**: draft
+**Status**: accepted
 **Status history**:
 - 2026-05-04: draft
+- 2026-05-04: accepted — paired with spec-state-schema.md, spec-nats-data-taxonomy.md, mclaude-control-plane/spec-control-plane.md, mclaude-controller-k8s/spec-k8s-architecture.md, mclaude-cli/spec-cli.md, mclaude-session-agent/spec-session-agent.md, charts-mclaude/spec-helm.md, mclaude-user-agent/spec-user-agent.md (new)
 
 ## Overview
 
@@ -30,6 +31,8 @@ The new design ensures:
 | User-agent X25519 keypair | Generated at first startup; private key persisted in k8s Secret `user-agent-key` | Survives pod restarts without requiring SPA to be online; CoCo/Kata upgrade: TEE protects private key |
 | User-agent X25519 pubkey | Registered with CP via JWT issuance endpoint; stored in DB | SPA reads pubkey from CP API; no KV bucket needed for pubkey exchange |
 | Project provisioning | User-agent creates project pods (migrated from host controller). Session lifecycle within the pod stays with session-agent. | User-agent = infrastructure layer (pods, secrets). Session-agent = application layer (git, CLI processes, session state). Boundary is the pod spec. |
+| Pod source-of-truth | k8s itself. User-agent is event-driven (provision/delete subjects), not a reconciler. | No external "expected pods" list. On user-agent restart, existing pods are adopted unchanged. Pods are Deployments so k8s self-heals. |
+| Revocation | Deferred to a follow-up ADR. | v1 has no /grant/revoke endpoint or .grants.revoke subject. Manual cleanup via `kubectl delete namespace mclaude-{uslug}` if an operator needs to evict a user. Full design (JWT revocation + token Secret cleanup + namespace teardown + recovery) handled separately. |
 | Host controller role | Decides which users to grant access to; publishes grant to CP; creates user namespace + deploys user-agent | Host initiates; constant-size JWT; session lifecycle fully delegated to user-agent |
 | CP role | Directory (stores grants, visible to SPA); credential issuer (NATS JWTs after mutual consent); identity provider; pubkey store | Not an authorization gate; not in session creation path; does not store, wrap, or unwrap the token |
 | Default platform flag | `is_default_platform BOOLEAN` on `hosts` table; set during cluster registration by admin | Exactly one cluster can be default; auto-grant + auto-accept for all users |
@@ -183,7 +186,7 @@ Precondition: client is logged in and session state is hydrated.
 
 ### Host trust (SPA delivers token to user-agent)
 
-When SPA decides to trust a host (trigger defined in ADR-0092):
+When the SPA decides to trust a host. The SPA-side trigger conditions (auto-deliver vs. require [Authorize] click, copy, error states) are the UX concern of ADR-0092 — separate ADR, sibling not dependency. ADR-0091 only specifies the mechanism below; any ordering or dispatch policy is ADR-0092's. CLI delivery is fully specified in `mclaude-cli/spec-cli.md` (`mclaude auth anthropic` iterates accepted grants and delivers).
 
 1. SPA uses token from session state (hydrated at login).
 2. SPA reads user-agent's X25519 pubkey from CP: `GET /api/users/{uslug}/hosts/{hslug}/user-agent/pubkey`.
@@ -231,13 +234,21 @@ Project creation is a two-step flow: CP creates the data (DB row, KV entry), use
 1. SPA (or CLI) creates project via CP: `mclaude.users.{uslug}.hosts.{hslug}.api.projects.create` (existing NATS subject, existing handler). CP creates `projects` DB row, writes to `mclaude-projects-{uslug}` KV, returns `{ "id": "<uuid>", "slug": "<pslug>" }`.
 2. CP publishes provisioning request to user-agent: `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.provision` with payload `{ "projectId": "<uuid>", "projectSlug": "<pslug>", "gitUrl": "...", "gitIdentityId": "...", "backend": "claude_code" }`.
 3. User-agent checks: do I have the token for the requested provider? If no → returns error ("host not trusted" or "token not configured").
-4. User-agent creates session pod in user namespace. Pod spec includes:
-   - `user-tokens-{uslug}` Secret mounted at `/secrets/tokens/`
-   - Env vars: `TOKEN_PROVIDER=anthropic`, `PROJECT_ID=<uuid>`, `PROJECT_SLUG=<pslug>`, `GIT_URL=<url>`, `HOST_SLUG=<hslug>`, `USER_SLUG=<uslug>`, `USER_ID=<uuid>`, `GIT_IDENTITY_ID=<id>`, `NATS_URL=<url>`, `CONTROL_PLANE_URL=<url>`
-   - NATS connection info (session-agent bootstraps its own JWT via existing challenge-response with CP)
+4. User-agent creates session pod in user namespace. Pod spec mirrors the existing project pod template (`{release}-session-agent-template` ConfigMap), with one addition for ADR-0091:
+   - **Volumes** (existing): `project-{projectId}` PVC at `/data`, `nix-{projectId}` PVC at `/nix`, `user-config` ConfigMap at `/home/node/.claude-seed`, `user-secrets` Secret at `/home/node/.user-secrets` (git credential helpers — `gh-hosts.yml`, `glab-config.yml`, `conn-{id}-*`), `claude-home` emptyDir at `/home/node/.claude`.
+   - **Volumes** (added by this ADR): `user-tokens-{uslug}` Secret at `/secrets/tokens/`.
+   - **Env vars**: `TOKEN_PROVIDER=anthropic`, `PROJECT_ID=<uuid>`, `PROJECT_SLUG=<pslug>`, `GIT_URL=<url>`, `HOST_SLUG=<hslug>`, `USER_SLUG=<uslug>`, `USER_ID=<uuid>`, `GIT_IDENTITY_ID=<id>`, `NATS_URL=<url>`, `CONTROL_PLANE_URL=<url>`.
+   - Session-agent self-bootstraps NATS credentials via challenge-response (existing flow, unchanged).
 5. Session-agent starts → reads token from mounted Secret → registers NKey with CP via existing `mclaude.hosts.{hslug}.api.agents.register` → gets scoped NATS JWT → clones repo → ready.
 
 Note: CP is in the project *creation* path (DB write, KV write) but not the *provisioning* path (pod creation). The transplant from CP to user-agent is on `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.provision` — within the user's subject space, not `mclaude.hosts.*`.
+
+### Project deletion
+
+1. SPA (or CLI) deletes project via CP: `mclaude.users.{uslug}.hosts.{hslug}.api.projects.delete` (existing handler). CP removes `projects` DB row and `mclaude-projects-{uslug}` KV entry.
+2. CP publishes deletion request to user-agent: `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.delete` with payload `{ "projectId": "<uuid>", "projectSlug": "<pslug>" }`.
+3. User-agent deletes the project pod (Deployment) in user namespace.
+4. If user-agent is offline when CP publishes: the delete event is missed. Pod persists. v1 accepts this; manual cleanup via `kubectl delete deployment` is the operator escape hatch. Reconcile-on-restart is out of scope (see Deferred).
 
 ### Session lifecycle (session-agent = application layer)
 
@@ -262,7 +273,9 @@ CP is not in the project provisioning path. Token gating is user-agent's respons
 
 - Publishes grants on `mclaude.hosts.{hslug}.grants.create` when the host operator (or automated policy) decides to grant access to a user.
 - Generates NKey pair for user-agent → writes seed to `user-agent-key` k8s Secret → registers pubkey with CP via `mclaude.hosts.{hslug}.api.agents.user-agent.register`.
-- Creates user namespace `mclaude-{uslug}` + deploys user-agent Deployment on grant.
+- Creates an **empty** `user-tokens-{uslug}` Secret in the user namespace (no data keys; populated later by user-agent on token delivery). This ensures the user-agent pod's required volume mount resolves on startup — without it, k8s refuses to schedule the pod (mount references nonexistent Secret).
+- Copies `{release}-session-agent-template` ConfigMap from `mclaude-system` into the user namespace as `session-agent-template` so the user-agent can read pod-template values from its own namespace (no cross-namespace RBAC). Re-copied on Helm upgrade and user-agent re-rolled.
+- Creates user namespace `mclaude-{uslug}` + RBAC (ServiceAccount, namespace-scoped Role granting verbs on `Deployment`, `PersistentVolumeClaim`, `Secret` (`user-tokens-{uslug}` only), `ConfigMap` (`session-agent-template` only) for `mclaude-user-agent`) + deploys user-agent Deployment on grant.
 - **Session pod creation removed** — delegated to user-agent.
 - Removes all `devOAuthToken` / `oauth-token` writes from user-secrets reconciler paths.
 - Removes session pod templates and lifecycle management.
@@ -277,8 +290,10 @@ CP is not in the project provisioning path. Token gating is user-agent's respons
 - Subscribes to `mclaude.users.{uslug}.hosts.{hslug}.agent.token-delivery` for token_wrapped delivery.
 - Unseals token_wrapped with X25519 private key; writes plaintext to `user-tokens-{uslug}` k8s Secret (keyed by provider).
 - Subscribes to `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.provision` for project provisioning requests from CP (after CP creates the DB row).
+- Subscribes to `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.delete` for project deletion requests from CP.
 - Creates session pods (one per project) in user namespace; mounts `user-tokens-{uslug}` Secret; sets `TOKEN_PROVIDER`, `PROJECT_SLUG`, `GIT_URL`, `HOST_SLUG`, `USER_SLUG`, `GIT_IDENTITY_ID` env vars.
-- Manages project pod lifecycle (creation, cleanup). Session lifecycle within the pod is session-agent's responsibility.
+- **Event-driven, not reconciling.** k8s is the source of truth for what pods exist. User-agent reacts to provision/delete events; on restart it adopts whatever pods are already in the namespace and does not query an external "expected pods" list. Pods missed during user-agent downtime (e.g. delete event published while user-agent was offline) are not retroactively reconciled — operator can clean up manually if needed. Pods are created as Deployments so k8s self-heals across node failures without user-agent involvement.
+- Session lifecycle within the pod is session-agent's responsibility.
 - CoCo/Kata upgrade: X25519 private key protected by TEE; token served via attested endpoint instead of Secret mount.
 
 ### mclaude-control-plane
@@ -286,6 +301,7 @@ CP is not in the project provisioning path. Token gating is user-agent's respons
 - Subscribes to `mclaude.hosts.*.grants.create` — stores grants in DB. Directory, not gate.
 - Subscribes to `mclaude.hosts.*.api.agents.user-agent.register` — stores user-agent NKey public key in `user_host_agents` table. Validates `host_grants` row exists. Same pattern as session-agent registration. Host controller vouches for the key.
 - On project creation (existing `mclaude.users.*.hosts.*.api.projects.create` handler): after creating DB row + KV entry, publishes provisioning request to user-agent on `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.provision`. Replaces the old transplant to `mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.create`.
+- On project deletion (existing `mclaude.users.*.hosts.*.api.projects.delete` handler): after removing DB row + KV entry, publishes deletion request to user-agent on `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.delete` with payload `{ "projectId": "<uuid>", "projectSlug": "<pslug>" }`. Best-effort; if user-agent is offline the event is missed and the pod persists until manual cleanup (no retroactive reconcile in v1).
 - Existing `POST /api/auth/challenge` + `POST /api/auth/verify` — extended to recognize user-agent NKeys (from `user_host_agents.nkey_public`). New optional field in `VerifyRequest`: `x25519_pub string` (base64-encoded, 32 bytes). Required when the caller is a user-agent (NKey matched in `user_host_agents`); ignored otherwise. On successful verify: stores `x25519_pub` in `user_host_agents.x25519_pub`; issues bootstrap JWT (if grant pending) or full JWT (if grant accepted). `issueJWTForNKey` extended with a user-agent lookup path alongside users, hosts, and session-agents.
 - New endpoint: `GET /api/users/{uslug}/grants` — returns pending host grants for the user, including user-agent X25519 pubkey fingerprint per grant. Auth: self (SPA/CLI).
 - New endpoint: `POST /api/users/{uslug}/hosts/{hslug}/grant/accept` — body: `{ "x25519_fingerprint": "..." }`. CP verifies fingerprint matches `user_host_agents.x25519_pub`. Match → marks grant accepted, publishes full JWT to `.agent.activate`. Mismatch → 409. Auth: self (SPA/CLI).
@@ -303,11 +319,34 @@ CP is not in the project provisioning path. Token gating is user-agent's respons
 
 ### mclaude-session-agent
 
-- `entrypoint.sh`: reads token from mounted Secret:
+`entrypoint.sh` changes:
+
+- **Remove** the legacy `oauth-token` read:
+  ```sh
+  # DELETE these lines (user-secrets no longer carries oauth-token per ADR-0091):
+  [ -f "/home/node/.user-secrets/oauth-token" ] && \
+      export CLAUDE_CODE_OAUTH_TOKEN=$(cat /home/node/.user-secrets/oauth-token)
+  ```
+- **Add** the per-user-tokens read:
   ```sh
   export CLAUDE_CODE_OAUTH_TOKEN=$(cat /secrets/tokens/${TOKEN_PROVIDER})
   ```
-- No HTTP call. No user-agent dependency at runtime. Token available immediately from mount.
+  Fails fast (`set -e`) if `/secrets/tokens/${TOKEN_PROVIDER}` is missing or empty — user-agent should never have created the pod without a token; this represents a control-plane bug.
+- **Remove** the `--nats-creds` flag from the `exec session-agent` call. The `nats-creds` file is no longer written into `user-secrets` (per ADR-0063, restated by this ADR). Session-agent self-bootstraps NATS credentials via HTTP challenge-response with CP using its own NKey.
+- **Add** `--auth-url "${CONTROL_PLANE_URL}"` to the `exec session-agent` call to activate the challenge-response path (`main.go` only takes the self-bootstrap path when `AUTH_URL != ""`).
+
+The final `exec` is:
+```sh
+exec session-agent \
+    --nats-url    "${NATS_URL}" \
+    --auth-url    "${CONTROL_PLANE_URL}" \
+    --user-id     "${USER_ID}" \
+    --project-id  "${PROJECT_ID}" \
+    --data-dir    /data \
+    --mode        k8s
+```
+
+No HTTP call for the token. No user-agent dependency at runtime — token is on disk before the agent starts.
 
 ### mclaude-web (SPA)
 
@@ -533,6 +572,8 @@ If X25519 private key is lost (`user-agent-key` Secret deleted):
 - Multi-provider: `tokens.{provider}` key pattern in KV and Secret; `TOKEN_PROVIDER` env var on session pod.
 
 **Deferred:**
+- **Revocation flow** (separate ADR): user-revoke and host-revoke endpoints/subjects, JWT revocation via `$SYS.REQ.CLAIMS.UPDATE`, token Secret + namespace cleanup, recovery semantics. v1 ships without a self-serve revoke; manual `kubectl delete namespace mclaude-{uslug}` is the operator escape hatch.
+- **Pod reconciliation**: no retroactive reconcile of pods missed during user-agent downtime. If a delete event is published while user-agent is offline, the pod persists until manual cleanup. v1 accepts this; reconcile-on-restart is a future addition if drift becomes a real failure mode.
 - Policy-driven grants for non-default hosts (host registers auto-grant policy with CP; CP evaluates on user creation).
 - User-configurable auto-accept for non-default hosts (opt-in per host or enterprise policy).
 - CP-delegated credential delivery (CP wraps and delivers when SPA is offline).
@@ -543,7 +584,7 @@ If X25519 private key is lost (`user-agent-key` Secret deleted):
 
 ## Open questions
 
-- **Revocation flow**: when trust is revoked (user revokes host, or host revokes user), what is the full cleanup? JWT revocation via `$SYS.REQ.CLAIMS.UPDATE` kills the NATS connection, but user-agent still has tokens in k8s Secret + memory + k8s RBAC. Likely requires namespace deletion. Needs design.
+_(none — all resolved; remaining work tracked under Deferred above)_
 
 ## Integration Test Cases
 
@@ -557,6 +598,8 @@ If X25519 private key is lost (`user-agent-key` Secret deleted):
 | User-agent pubkey registered | User-agent starts → pubkey stored in CP DB → SPA can read via API | user-agent, CP |
 | SPA delivers token_wrapped on host trust | SPA reads pubkey from CP → wraps token → NATS request/reply → user-agent writes Secret | SPA, user-agent, CP, NATS |
 | User-agent provisions project pod | SPA creates project via CP → CP publishes to `.agent.projects.provision` → user-agent creates pod with Secret mount + full env | SPA, CP, user-agent |
+| User-agent deletes project pod | SPA deletes project via CP → CP publishes to `.agent.projects.delete` → user-agent deletes Deployment | SPA, CP, user-agent |
+| User-agent restart adopts existing pods | Restart user-agent pod → existing project Deployments still running → no reconcile, no recreate, sessions continue | user-agent, k8s |
 | Session-agent JWT issuance unchanged | Session-agent in user-agent-created pod registers via `mclaude.hosts.{hslug}.api.agents.register` → CP issues JWT | session-agent, CP |
 | User-agent cannot read mclaude-user-info | User-agent JWT denied on `mclaude-user-info-{uslug}` subjects | NATS, user-agent |
 | Session without token fails | No token in Secret → user-agent returns error on session create | SPA, user-agent |

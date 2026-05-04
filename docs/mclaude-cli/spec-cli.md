@@ -134,6 +134,30 @@ Returns `{slug, leafJwt, leafSeed, accountJwt, operatorJwt, jsDomain, directNats
 
 Admin-only. Grants a user access to a cluster. Calls `POST /admin/clusters/{cluster-slug}/grants` with `{userSlug}`. Control-plane creates a new `hosts` row for that user with the cluster-shared fields copied from the existing cluster host row, and mints a per-user JWT.
 
+#### `mclaude auth anthropic`
+
+Per ADR-0091. Connects an Anthropic OAuth token (or pasted access token / API key) to the user's `mclaude-user-info-{uslug}` KV bucket and delivers it to all currently-trusted hosts via X25519 sealed-box. Required before any session can run on a host.
+
+```
+mclaude auth anthropic              # OAuth (PKCE loopback flow in default browser)
+mclaude auth anthropic --token <v>  # Manual paste — same downstream path
+mclaude auth anthropic --status     # Print connected/not-set + per-host trust status
+mclaude auth anthropic --revoke     # Delete tokens.anthropic from KV (client-side only)
+```
+
+Behavior:
+
+1. Obtain token: PKCE OAuth (default) opens the system browser to claude.ai, waits on a loopback HTTP listener, exchanges `code` for `access_token`. `--token <v>` skips OAuth and uses the supplied value directly.
+2. Authenticate to mclaude (uses existing user JWT from `~/.mclaude/auth.json`).
+3. Write the token to `mclaude-user-info-{uslug}` at key `tokens.anthropic` via NATS KV PUT.
+4. For each host in `GET /api/users/{uslug}/grants` with `status='accepted'`: read `GET /api/users/{uslug}/hosts/{hslug}/user-agent/pubkey` → `crypto_box_seal(token, x25519_pub)` (libsodium) → publish via NATS request/reply to `mclaude.users.{uslug}.hosts.{hslug}.agent.token-delivery` with `{provider: "anthropic", token_wrapped: "<base64>"}`. Reports per-host result (delivered / agent-offline / error).
+
+`--revoke` only deletes the KV key. Host-side cleanup (Secret deletion, JWT revocation, namespace teardown) is part of the deferred revocation flow (separate ADR per ADR-0091); the CLI does not attempt it in v1.
+
+`--status` prints `Connected` or `Not set` based on KV read; for each accepted host, prints whether the user-agent has registered an X25519 pubkey (i.e. is reachable for delivery).
+
+Exit codes: `0` success on all hosts, `1` token saved but at least one host could not receive it (transient — retry later), `2` no token configured / OAuth aborted, `3` KV write failed.
+
 #### `mclaude daemon --host <hslug>`
 
 Starts the BYOH local controller daemon. Reads `--host` from the flag or from `~/.mclaude/active-host` symlink if unset. Connects to hub NATS using the host's credentials from `~/.mclaude/hosts/{hslug}/nats.creds`, subscribes to `mclaude.users.{uslug}.hosts.{hslug}.api.projects.>`, and starts session-agent subprocesses for each provisioned project. Intended to run as a launchd / systemd service.

@@ -16,7 +16,27 @@ Per ADR-0054, every NATS subject the agent uses is host-scoped: `mclaude.users.{
 
 ### Standalone Mode (K8s)
 
-Runs as a single-container Deployment per project in the `mclaude-{userSlug}` namespace. The pod entrypoint (`entrypoint.sh`) seeds the Nix store from a bootstrap tarball, consumes secrets from the mounted `user-secrets` Secret, seeds Claude Code config from the `user-config` ConfigMap, symlinks JSONL history to the project PVC, disables onboarding and permission dialogs, and then execs the `session-agent` binary with `--mode k8s`.
+Runs as a single-container Deployment per project in the `mclaude-{userSlug}` namespace. Per ADR-0091, the project pod is created and owned by the per-user `mclaude-user-agent` (not `mclaude-controller-k8s`). The pod entrypoint (`entrypoint.sh`) seeds the Nix store from a bootstrap tarball, consumes secrets from the mounted `user-secrets` Secret (CLI configs only — no token field), reads the model-provider token from the mounted `user-tokens-{uslug}` Secret, seeds Claude Code config from the `user-config` ConfigMap, symlinks JSONL history to the project PVC, disables onboarding and permission dialogs, and then execs the `session-agent` binary with `--mode k8s`.
+
+The Anthropic OAuth token is sourced exclusively from `/secrets/tokens/${TOKEN_PROVIDER}` (mount of the `user-tokens-{uslug}` Secret). `entrypoint.sh` exports it as the env var Claude Code expects:
+
+```sh
+export CLAUDE_CODE_OAUTH_TOKEN=$(cat /secrets/tokens/${TOKEN_PROVIDER})
+```
+
+`TOKEN_PROVIDER` is supplied by the user-agent at pod-creation time (`anthropic` for v1; future providers use the same key pattern). No HTTP call, no NATS round-trip — the token is on disk before the agent starts. If `/secrets/tokens/${TOKEN_PROVIDER}` is missing or empty, `entrypoint.sh` exits with a clear error (the user-agent should not have created the pod without a token; this represents a control-plane bug). The legacy `oauth-token` field on `user-secrets` is removed (ADR-0091); session-agent must not read it.
+
+The `--nats-creds` flag is **not** passed to the `session-agent` binary — the per-project `nats-creds` Secret key was removed by ADR-0063, and the session-agent self-bootstraps NATS credentials via HTTP challenge-response with CP using its own NKey. `entrypoint.sh` passes `--auth-url "${CONTROL_PLANE_URL}"` to activate this path:
+
+```sh
+exec session-agent \
+    --nats-url    "${NATS_URL}" \
+    --auth-url    "${CONTROL_PLANE_URL}" \
+    --user-id     "${USER_ID}" \
+    --project-id  "${PROJECT_ID}" \
+    --data-dir    /data \
+    --mode        k8s
+```
 
 The container image is Alpine-based with Node.js 22, Claude Code (native binary), git, gh, glab, zsh, and Nix. A `pkg` shim translates `apt`/`brew` commands to `nix profile` operations. Two PVCs are mounted: the project PVC at `/data` (bare repo, worktrees, JSONL persistence, shared memory) and the Nix PVC at `/nix` (shared Nix store).
 
@@ -610,7 +630,8 @@ Terminal sessions spawn a PTY shell and bridge I/O through core NATS subjects. T
 | Anthropic OAuth API | Quota polling via `api.anthropic.com/api/oauth/usage` (designated agent only, ADR-0044) |
 | `~/.claude/.credentials.json` | OAuth token for quota API (designated agent only) |
 | `mclaude-controller-local` | Spawns per-project agents on BYOH hosts, registers agent NKeys with CP (ADR-0058) |
-| user-secrets K8s Secret | NATS creds, OAuth token, git CLI configs, connection tokens (K8s mode) |
+| user-secrets K8s Secret | git CLI configs, OAuth connection tokens (K8s mode) — `oauth-token` field removed per ADR-0091 |
+| user-tokens-{uslug} K8s Secret | Model-provider token (`anthropic` key for v1) — mounted at `/secrets/tokens/`, read by entrypoint into `CLAUDE_CODE_OAUTH_TOKEN` |
 | user-config K8s ConfigMap | Claude Code seed settings and hooks (K8s mode) |
 | Project PVC at `/data` | Bare repo, worktrees, JSONL persistence, config (K8s mode) |
 | Nix PVC at `/nix` | Shared Nix store (K8s mode) |

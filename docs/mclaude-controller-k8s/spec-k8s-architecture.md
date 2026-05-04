@@ -1,8 +1,21 @@
 # Spec: mclaude-controller-k8s
 
-The K8s controller is a kubebuilder operator that runs inside a worker Kubernetes cluster. It owns per-project runtime resources (Namespace, Deployment, PVCs, Secrets) for all users whose sessions are hosted on that cluster.
+The K8s controller is a kubebuilder operator that runs inside a worker Kubernetes cluster. Per ADR-0091, its scope is **per-user namespace setup** — Namespace, RBAC, the `user-agent-key` Secret with the user-agent's NKey seed, and the user-agent Deployment itself. It does **not** create per-project resources; the user-agent in each user namespace owns project-pod lifecycle, project PVCs, and the `user-tokens-{uslug}` Secret.
 
 The controller connects directly to hub NATS via JWT credential (host-scoped per ADR-0054). There is no local NATS StatefulSet; the worker chart no longer ships a leaf node.
+
+## Scope changes from ADR-0091
+
+| Removed (was here pre-ADR-0091) | Where it moved |
+|---------------------------------|----------------|
+| `MCProject` CRD reconciliation, per-project Deployments, per-project PVCs, `agent-nkey-{projectId}` Secret, session-agent pod creation | `mclaude-user-agent` (event-driven, no CRD) |
+| `DEV_OAUTH_TOKEN` env var, `oauth-token` field in `user-secrets` | Removed entirely (replaced by per-user `mclaude-user-info-{uslug}` KV + `user-tokens-{uslug}` Secret) |
+
+| Added | Behavior |
+|-------|----------|
+| Subscribe to `mclaude.hosts.{hslug}.grants.create` | When CP (default-platform auto-grant) or operator publishes a grant for `{uslug}`, controller spawns the user-agent: generate user-agent NKey, write `user-agent-key` Secret, register pubkey via `mclaude.hosts.{hslug}.api.agents.user-agent.register`, create namespace + user-agent Deployment + RBAC |
+| Publish `mclaude.hosts.{hslug}.grants.create` (operator path) | Operator-driven grant via a future CLI subcommand (out of scope for this spec) |
+| Per-user `user-agent` Deployment + ServiceAccount + Role + RoleBinding (with permissions on Deployments and `user-tokens-{uslug}` Secret in the user namespace) | Created once per user when the host grants access |
 
 ## Deployment
 
@@ -51,18 +64,17 @@ helm uninstall mclaude-worker -n mclaude-system
 
 **Option B (Helm pre-delete Job) — deferred:** A pre-delete hook Job that reads the NKey seed, performs challenge-response, and publishes the deregister subject is a planned future enhancement. Not implemented in V1 — use Option A.
 
-All MCProject CRs and their owned resources (Deployments, PVCs, Secrets) are cleaned up by `helm uninstall` via `ownerReferences` cascade or Helm-tracked resource deletion.
+User namespaces and their contents (user-agent Deployment, project Deployments owned by the user-agent, PVCs created by the user-agent, both Secrets) are cleaned up by `kubectl delete namespace mclaude-{uslug}` per ADR-0091. `helm uninstall` does not delete user namespaces — they are deliberately preserved across helm upgrades. Operators must explicitly delete a user namespace to revoke a grant (the formal revocation flow is deferred to a follow-up ADR).
 
 ## Configuration
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `HUB_NATS_URL` | Yes | Hub NATS WebSocket URL (e.g. `nats-wss://nats.mclaude.example:443`). |
-| `CONTROL_PLANE_URL` | Yes | Control-plane HTTP base URL for challenge-response auth and session-agent bootstrap. |
+| `CONTROL_PLANE_URL` | Yes | Control-plane HTTP base URL for challenge-response auth. |
 | `HOST_NKEY_SEED_PATH` | No | Path to the NKey seed file (default `/etc/mclaude/host-creds/nkey_seed`). |
-| `HELM_RELEASE_NAME` | No | Used to locate the session-agent-template ConfigMap (default `mclaude-worker`). |
-| `SESSION_AGENT_TEMPLATE_CM` | No | Explicit name of the session-agent-template ConfigMap. Overrides `HELM_RELEASE_NAME`-derived name. |
-| `DEV_OAUTH_TOKEN` | No | Claude API OAuth token for dev environments. Injected as `oauth-token` in per-user `user-secrets` Secret. |
+| `HELM_RELEASE_NAME` | No | Used to locate the user-agent template ConfigMap (default `mclaude-worker`). |
+| `USER_AGENT_TEMPLATE_CM` | No | Explicit name of the user-agent template ConfigMap (image, resources, etc.). Overrides `HELM_RELEASE_NAME`-derived name. |
 | `METRICS_ADDR` | No | Prometheus metrics listen address (default `:8082`). |
 | `HEALTH_PROBE_ADDR` | No | Health/readiness probe listen address (default `:8081`). |
 | `LEADER_ELECTION` | No | Enable leader election (default `false`). |
@@ -76,53 +88,50 @@ Dropped from prior spec (no longer used):
 
 ## NATS Subscriptions
 
-Subscribes via host JWT to the single wildcard `mclaude.hosts.{hslug}.>` (zero JetStream access). The JWT permission scope is `mclaude.hosts.{hslug}.>`. Messages are dispatched internally by subject suffix:
+Subscribes via host JWT to `mclaude.hosts.{hslug}.>` (zero JetStream access). Messages dispatched by subject suffix:
 
 | Subject suffix (within `mclaude.hosts.{hslug}.`) | Behavior |
 |---------------------------------------------------|----------|
-| `users.*.projects.*.create` | Request/reply. CP fan-out provisioning (ADR-0054). Resolves `userSlug`, `hostSlug`, `projectSlug` from subject + payload; creates the `MCProject` CR; returns success when reconcile reaches `Ready`. |
-| `users.*.projects.*.delete` | Request/reply. Deletes the `MCProject` CR; owner references cascade to project Deployment/PVC/Secret. |
-| `users.*.projects.*.update` | Request/reply. Re-reconciles `user-secrets` for the project (e.g. OAuth token rotation). Resolves `userSlug`, `hostSlug`, `projectSlug` from subject + payload; triggers `reconcileSecrets`. |
+| `grants.create` | ADR-0091. Payload `{uslug}`. Triggers per-user provisioning: ensures namespace `mclaude-{uslug}`, RBAC, generates user-agent NKey, writes `user-agent-key` Secret, registers user-agent pubkey via `mclaude.hosts.{hslug}.api.agents.user-agent.register {uslug, nkey_public}`, ensures user-agent Deployment. Idempotent — re-publishing the same grant is safe. |
+| `users.*.projects.*.create` | **REMOVED** by ADR-0091. CP now publishes to `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.provision` instead, and the user-agent (not this controller) handles it. |
+| `users.*.projects.*.delete` | **REMOVED** by ADR-0091. CP now publishes to `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.delete` instead. |
+| `users.*.projects.*.update` | Request/reply. Re-reconciles `user-secrets` for the project (e.g. OAuth token rotation). Resolves `userSlug`, `hostSlug`, `projectSlug` from subject + payload; triggers `reconcileSecrets` (gh-hosts.yml, glab-config.yml). Note: project pods themselves are owned by user-agent — this update only touches the per-user OAuth credential helpers in `user-secrets`. |
 
 ## Kubernetes Resources
 
-For full schemas see `docs/spec-state-schema.md` — Kubernetes Resources. Summary:
+For full schemas see `docs/spec-state-schema.md` — Kubernetes Resources. Summary (per ADR-0091):
 
-- CRD `MCProject` (`mcprojects.mclaude.io/v1alpha1`) in `mclaude-system`.
 - Per-user namespace `mclaude-{userSlug}` (ADR-0062) with ServiceAccount, Role, RoleBinding.
-- Per-user `user-secrets` Secret (OAuth tokens, CLI configs — **not** NATS credentials; see Session-Agent Auth).
+- Per-user `user-agent-key` Secret with `nkey-seed` (controller-written) — `x25519-private` is added later by the user-agent itself on first startup.
+- Per-user `user-secrets` Secret (OAuth credential helpers — `gh-hosts.yml`, `glab-config.yml`, `conn-{id}-*`). **No `oauth-token` field** (removed per ADR-0091).
 - Per-user `user-config` ConfigMap.
-- Per-project `project-{projectId}` and `nix-{projectId}` PVCs.
-- Per-project `project-{projectId}` Deployment with `ownerReferences` back to the MCProject CR.
-- Watched: `{release}-session-agent-template` ConfigMap in `mclaude-system` — changes re-enqueue all `MCProject` CRs.
+- Per-user `user-agent` Deployment + ServiceAccount `mclaude-user-agent` + Role permitting `Deployment` and `Secret` access within the user namespace + RoleBinding.
+- Watched: `{release}-user-agent-template` ConfigMap in `mclaude-system` — changes trigger re-rollout of all user-agent Deployments.
 
-All Deployments, PVCs, and Secrets materialized per project carry `ownerReferences` back to the `MCProject` CR via `controllerutil.SetControllerReference`. Deleting the `MCProject` CR cascades to all owned resources.
+The `MCProject` CRD, per-project `project-{projectId}` Deployments, per-project PVCs, and `agent-nkey-{projectId}` Secrets are no longer created by this controller — they are owned by the user-agent. (Existing CRDs from prior deployments are dropped during the migration; project pods recreate themselves under user-agent ownership when CP next publishes a `projects.provision`.)
 
-## Reconciler Loop
+## Reconciler Loop (per-user)
 
-On each reconcile cycle:
+On each `mclaude.hosts.{hslug}.grants.create` reception (and on resync):
 
-1. Loads the session-agent-template ConfigMap for image, resource, and PVC configuration. Default session-agent pod resources (from `charts/mclaude-worker/values.yaml`): requests `cpu: 200m, memory: 64Mi`; limits `cpu: 2000m, memory: 2Gi`. AKS production overrides via `values-aks.yaml`.
-2. Ensures the user namespace `mclaude-{userSlug}` exists with correct labels (ADR-0062: namespace derived from `userSlug`, not UUID).
-3. Ensures RBAC resources (ServiceAccount, Role, RoleBinding).
-4. Ensures the `user-config` ConfigMap and `user-secrets` Secret. The `user-secrets` Secret contains `oauth-token` (from `DEV_OAUTH_TOKEN` if set) and OAuth connection tokens. It does **not** contain NATS credentials.
-5. Copies imagePullSecrets from the controller's namespace.
-6. Ensures the project PVC and Nix PVC (with `ownerReferences` back to MCProject).
-6b. Ensures the per-project `agent-nkey-{projectId}` Secret: generates an NKey pair for the agent, writes the decorated seed to field `nkey_seed`, registers the public key with CP via NATS `agents.register`, sets `ownerReferences` back to MCProject. Idempotent — skips the NATS registration call if the Secret already exists with a matching key.
-7. Ensures the session-agent Deployment (with `ownerReferences` back to MCProject) using `Recreate` strategy. Pod env vars include `USER_ID`, `USER_SLUG`, `HOST_SLUG`, `PROJECT_ID`, `PROJECT_SLUG`, `NATS_URL` (= `HUB_NATS_URL`), `CONTROL_PLANE_URL` (injected from the controller's own `CONTROL_PLANE_URL` env, not from the session-agent-template ConfigMap). Pod mounts `agent-nkey-{projectId}` Secret at `/etc/mclaude/agent-nkey/`.
-8. Updates `MCProject` status: phase (`Pending → Provisioning → Ready` or `Failed`) and conditions.
+1. Load the user-agent template ConfigMap for image, resource limits, and ServiceAccount config.
+2. Ensure namespace `mclaude-{userSlug}` (ADR-0062: derived from userSlug, not UUID), labels `mclaude.io/user-id={userId}` (when CP supplies it; otherwise just `mclaude.io/managed=true`).
+3. Ensure ServiceAccount + Role + RoleBinding for both `mclaude-sa` (used by future project pods) and `mclaude-user-agent` (for the user-agent itself). The `mclaude-user-agent` Role grants verbs on `Deployment`, `PersistentVolumeClaim`, `Secret` (only `user-tokens-{uslug}`), and `ConfigMap` (only the local `session-agent-template`) within the user namespace. No ClusterRole or cross-namespace permissions.
+4. Ensure `user-secrets` Secret (CLI helper configs only — no token field).
+5. Ensure `user-config` ConfigMap (Claude Code workspace settings, hooks, seed configuration).
+5b. Copy `{release}-session-agent-template` from `mclaude-system` into the user namespace as `session-agent-template` (so the user-agent can read it without cross-namespace RBAC). On Helm upgrade where the source ConfigMap changes, controller re-copies into all user namespaces and re-rolls user-agent Deployments via `kubectl rollout restart`.
+6. Ensure `user-agent-key` Secret. If absent or missing `nkey-seed`: generate NKey via `nkeys.CreateUser()`, write decorated seed to `nkey-seed` field, then NATS request `mclaude.hosts.{hslug}.api.agents.user-agent.register {uslug, nkey_public}` to CP. Idempotent — skip registration if Secret already has the seed and CP already has the pubkey for `(host, user)`.
+6b. Ensure **empty** `user-tokens-{uslug}` Secret (no data keys yet) so the user-agent's required volume mount resolves at pod startup. The user-agent itself populates per-provider keys after the first successful `.agent.token-delivery` unseal — the controller never writes any token material here. Idempotent: if the Secret already exists (with or without populated keys), skip.
+7. Ensure `user-agent` Deployment (single replica, RollingUpdate). Pod mounts: `user-agent-key` Secret at `/secrets/agent/`, `user-tokens-{uslug}` Secret at `/secrets/tokens/`. Env: `USER_SLUG`, `HOST_SLUG`, `NAMESPACE`, `NATS_URL` (= `HUB_NATS_URL`), `CONTROL_PLANE_URL`. ImagePullSecrets copied from the controller's namespace.
+8. Copy imagePullSecrets from the controller's namespace into the user namespace.
 
-## Session-Agent Auth
+The user-agent itself, on startup, performs HTTP challenge-response with CP, supplies its X25519 public key, receives a bootstrap or full JWT depending on `host_grants.status`, and then handles `.agent.token-delivery`, `.agent.projects.provision`, and `.agent.projects.delete` events.
 
-The controller no longer mints session-agent JWTs. Session-agent pods self-bootstrap:
+## User-Agent Bootstrap
 
-1. During reconciliation, the controller generates an NKey pair for the agent (`nkeys.CreateUser()`), stores the decorated seed string in the per-project `agent-nkey-{projectId}` Secret (field: `nkey_seed`), and registers the public key with CP via NATS request `mclaude.hosts.{hslug}.api.agents.register {nkey_public, user_slug, project_slug}` — the host slug is implicit in the NATS subject and is not included in the payload. The controller does not retain the seed after writing to the Secret.
-2. The session-agent pod mounts the `agent-nkey-{projectId}` Secret, reads the NKey seed, and performs HTTP challenge-response (`POST /api/auth/challenge` + `POST /api/auth/verify`) against `CONTROL_PLANE_URL` to obtain its per-project JWT.
-3. Agent connects to hub NATS (`HUB_NATS_URL`) with the per-project JWT.
+The controller **does not retain** the user-agent NKey seed after writing it to the Secret. The user-agent reads the seed from the Secret at startup and performs its own HTTP challenge-response with CP. This mirrors the existing session-agent bootstrap pattern (controller mints NKey + registers pubkey + writes Secret; agent reads + auths itself).
 
-K8s-specific note: Unlike the BYOH variant (where the agent is a subprocess and can pass its public key to the controller via stdout), K8s controller and session-agent pods run in separate pods across different namespaces. The controller therefore generates the agent NKey pair during reconciliation and injects it via Secret mount. The seed is briefly held in-process by the controller before writing to the Secret.
-
-The `nats-creds` key is not written to `user-secrets`. The per-project `agent-nkey-{projectId}` Secret carries `ownerReferences` back to the MCProject CR and is deleted when the CR is deleted.
+X25519 keypair generation is performed by the user-agent on first startup, not by the controller — controller only handles the NATS NKey for authentication.
 
 ## Corporate CA Support
 
@@ -143,9 +152,8 @@ When the controller connects to hub NATS, hub publishes `$SYS.ACCOUNT.{accountKe
 | CP returns 404 on challenge-response (key not registered) | Log registration instruction with pubkey; retry every 5s (exponential backoff, cap 60s). Pod remains in boot loop until operator runs `mclaude host register`. K8s liveness probe deadline will crashloop the pod if operator never acts. |
 | Hub NATS unreachable at boot (after JWT acquired) | Retry with NATS client backoff. No provision requests processed during gap. |
 | Hub NATS drops at runtime | NATS client reconnects; existing JWT used until TTL; on TTL expiry, challenge-response refresh. If CP unreachable at refresh time, controller exits and K8s restarts. |
-| MCProject reconcile fails | MCProject CR enters `Failed` phase; CP surfaces error to user via NATS. |
-| Namespace creation fails (RBAC, quota) | MCProject CR enters `Failed` phase; logs detail. |
-| ownerReference cascade fails | Should not occur with `controllerutil.SetControllerReference` in place. If observed, file a bug — owner refs are the cleanup path. |
+| User-agent provisioning fails (RBAC, quota, image pull) | Logs error; controller retries on next resync. CP `host_grants` row remains; user-agent never registers; SPA shows host as needing authorization. |
+| `agents.user-agent.register` returns FORBIDDEN (grant row missing) | Should not occur — controller publishes the grant before registering. If observed, file a bug. |
 | Operator uses different `--name` at registration than `host.name` Helm value | CP keys off public key, not name. Controller decodes actual slug from JWT. `host.name` value is informational (NOTES.txt only). |
 
 ## Helm Chart Artifacts

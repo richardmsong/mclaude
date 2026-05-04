@@ -104,3 +104,65 @@
 | 3 | Project creation needs DB row | ADR said "CP not in path" but session-agent needs PROJECT_ID from Postgres | Split: CP creates project (DB row + KV, existing handler), then publishes provisioning request to user-agent on `.agent.projects.provision`. CP = data, user-agent = infrastructure. Full env var list with PROJECT_ID. | factual |
 | 4 | Missing env vars + nats-creds | Pod spec only listed 5 env vars; session-agent needs ~10 + nats-creds mount | Enumerated full env var list: TOKEN_PROVIDER, PROJECT_ID, PROJECT_SLUG, GIT_URL, HOST_SLUG, USER_SLUG, USER_ID, GIT_IDENTITY_ID, NATS_URL, CONTROL_PLANE_URL. Session-agent bootstraps its own NATS JWT via challenge-response (existing flow). | factual |
 | 5 | Subject `api.` prefix dropped | New subject diverged from existing hierarchy | Aligned to `mclaude.hosts.{hslug}.api.agents.user-agent.register`. Consistent with existing `api.agents.register`. | factual |
+
+## Run: 2026-05-04T (round 4, post-spec-edit)
+
+**Gaps found: 3**
+
+1. **`user-tokens-{uslug}` Secret mounted before any creator step** — Reconciler creates user-agent Deployment with required volume mount but no controller step creates the Secret. Pod fails to schedule.
+2. **`entrypoint.sh` changes underspecified** — Only the new `CLAUDE_CODE_OAUTH_TOKEN` export was specified. The legacy `oauth-token` read needs removal, the stale `--nats-creds` flag needs removal, and `--auth-url "${CONTROL_PLANE_URL}"` must be added to activate session-agent self-bootstrap.
+3. **ADR-0092 referenced but evaluator could not find it** — false positive: ADR-0092 exists at `docs/adr-0092-anthropic-token-ux.md` (draft).
+
+#### Fixes applied
+
+| # | Gap | Cause | Resolution | Type |
+|---|-----|-------|-----------|------|
+| 1 | Empty `user-tokens-{uslug}` Secret | Writer was specced as user-agent but pod can't start without the Secret already existing | Controller creates an **empty** `user-tokens-{uslug}` Secret in step 6b (between `user-agent-key` and user-agent Deployment). User-agent populates per-provider keys after first successful seal-open. ADR + spec-state-schema.md + spec-k8s-architecture.md + spec-user-agent.md updated. | factual |
+| 2 | entrypoint.sh changes underspecified | ADR specified only the additive change; current entrypoint has stale code paths to remove | Expanded ADR's `mclaude-session-agent` section to specify: remove legacy `oauth-token` read, remove `--nats-creds` flag, add `--auth-url "${CONTROL_PLANE_URL}"`. Final `exec session-agent` block reproduced. spec-session-agent.md mirrors. | factual |
+| 3 | ADR-0092 cross-reference | Evaluator missed the existing draft; underlying observation that the link looked dependency-shaped was valid | Reworded "trigger defined in ADR-0092" to "ADR-0092 is a sibling not dependency — UX flows belong there; ADR-0091 specifies only the mechanism." CLI delivery path is fully specified inside ADR-0091's CLI spec. | factual |
+
+## Run: 2026-05-04T (round 5)
+
+**Gaps found: 1**
+
+1. **Project pod volume spec omits `user-secrets`, `user-config`, and PVCs** — Step 4 of user-agent provisioning listed only the new `user-tokens-{uslug}` mount, dropping the existing volumes (`user-secrets` for git credentials, `user-config` for Claude Code seed, project + nix PVCs, claude-home emptyDir) that session-agent depends on.
+
+#### Fixes applied
+
+| # | Gap | Cause | Resolution | Type |
+|---|-----|-------|-----------|------|
+| 1 | Missing project pod volumes | ADR's user-agent step 4 listed only the new mount as a delta, but read like the full spec | Reworded ADR step 4 to enumerate "existing" + "added" volume sets. Updated spec-user-agent.md to enumerate all 6 volume mounts the project pod requires. spec-state-schema.md already listed them — no change needed there. | factual |
+
+## Run: 2026-05-04T (round 6)
+
+**Gaps found: 2**
+
+1. **User-agent ServiceAccount Role omits `PersistentVolumeClaim` — pod creation fails at PVC creation step** — spec-user-agent.md and spec-state-schema.md both define the user-agent's Role as granting `get/list/watch/create/update/patch/delete` on `Deployment` and `get/list/create/update` on `Secret` (only `user-tokens-{uslug}`) within the user namespace. However, spec-user-agent.md step 5 of "On `agent.projects.provision`" requires the user-agent to create `PersistentVolumeClaim` resources (`project-{projectId}` and `nix-{projectId}`). A ServiceAccount Role with no `PersistentVolumeClaim` verbs will cause every `kubectl create pvc` call in the user-agent to fail with a 403. No ClusterRole or other cross-resource permission is specified for PVCs anywhere in the design.
+   - **Doc**: "ServiceAccount: `mclaude-user-agent` with `get/list/watch/create/update/patch/delete` on `Deployment` and `get/list/create/update` on `Secret` (only `user-tokens-{uslug}`) within the user namespace." (spec-user-agent.md Deployment section); "Create per-project PVCs (`project-{projectId}` and `nix-{projectId}`) using sizes from the template." (spec-user-agent.md step 5); spec-state-schema.md line 659 has the same Role definition with no PVC verbs.
+   - **Code**: spec-state-schema.md Deployment `user-agent` section (line 659) and spec-user-agent.md (line 21) — both specify the Role without `PersistentVolumeClaim`; spec-k8s-architecture.md step 3 of Reconciler Loop specifies RBAC but also omits PVC.
+
+2. **User-agent cannot read `{release}-session-agent-template` ConfigMap from `mclaude-system` — no cross-namespace RBAC specified** — spec-user-agent.md step 2 of "On `agent.projects.provision`" says "Build the Deployment using the `{release}-session-agent-template` ConfigMap (read from `mclaude-system` via cross-namespace ConfigMap watch)." The user-agent's ServiceAccount has a namespace-scoped `Role` in `mclaude-{uslug}`. A namespace-scoped Role cannot grant access to resources in another namespace (`mclaude-system`). The design specifies no `ClusterRole` or `ClusterRoleBinding`, no separate ServiceAccount in `mclaude-system`, and no other mechanism for the user-agent to read this ConfigMap across namespace boundaries. Without it the user-agent will get a 403 on every `GET configmaps/{release}-session-agent-template` call to `mclaude-system`.
+   - **Doc**: "Build the Deployment using the `{release}-session-agent-template` ConfigMap (read from `mclaude-system` via cross-namespace ConfigMap watch — same template the old controller used)." (spec-user-agent.md line 57); "`{release}-session-agent-template` ConfigMap in `mclaude-system` (cross-namespace read for project pod template)." (spec-user-agent.md line 123); no ClusterRole or ClusterRoleBinding for user-agent appears in spec-state-schema.md, spec-user-agent.md, or spec-k8s-architecture.md.
+   - **Code**: The old controller (`mclaude-controller-k8s`) reads this ConfigMap because it runs as its own ServiceAccount in `mclaude-system` with its own Role. The user-agent runs in `mclaude-{uslug}` as `mclaude-user-agent` — a completely different identity with no `mclaude-system` access.
+
+#### Fixes applied
+
+| # | Gap | Cause | Resolution | Type |
+|---|-----|-------|-----------|------|
+| 1 | PVC RBAC missing | Role drafted before PVC creation step was added | Added `PersistentVolumeClaim` verbs to user-agent Role in ADR + spec-state-schema.md + spec-user-agent.md + spec-k8s-architecture.md. | factual |
+| 2 | Cross-namespace ConfigMap read | User-agent runs in user namespace; template lives in `mclaude-system` | Controller copies `{release}-session-agent-template` into the user namespace as `session-agent-template` at provisioning time. User-agent reads from its own namespace. ConfigMap re-copied + user-agent re-rolled on Helm upgrade. ADR + 3 specs updated. | factual |
+
+## Run: 2026-05-04T (round 7)
+
+CLEAN — no blocking gaps found.
+
+Cross-checks performed:
+
+- **ADR-0091 vs spec-state-schema.md**: All new tables (`user_host_agents`, `host_grants`), new column (`hosts.is_default_platform`), new KV bucket (`mclaude-user-info-{uslug}`), new Secrets (`user-tokens-{uslug}`, `user-agent-key`), and removed field (`user-secrets.oauth-token`) are present and consistent.
+- **ADR-0091 vs spec-nats-data-taxonomy.md**: All new subjects (`grants.create`, `api.agents.user-agent.register`, `agent.activate`, `agent.token-delivery`, `agent.projects.provision`, `agent.projects.delete`), `IssueUserAgentBootstrapJWT`/`IssueUserAgentJWT` permission sets, and user JWT additions for `mclaude-user-info-{uslug}` are fully specified and consistent.
+- **ADR-0091 vs spec-k8s-architecture.md**: Reconciler loop steps (including step 5b for ConfigMap copy and step 6b for empty `user-tokens-{uslug}` Secret) are present. PVC RBAC is in the Role spec. Session pod creation removal is documented.
+- **ADR-0091 vs spec-user-agent.md**: Boot sequence, NATS subjects, project pod lifecycle, token delivery flow, Role (including PVC verbs and ConfigMap-read-from-own-namespace), and error handling are complete and internally consistent.
+- **ADR-0091 vs spec-control-plane.md**: All new endpoints (`GET /api/users/{uslug}/grants`, `POST /api/users/{uslug}/hosts/{hslug}/grant/accept`, `GET /api/users/{uslug}/hosts/{hslug}/user-agent/pubkey`), new NATS subscriptions (`grants.create`, `api.agents.user-agent.register`), new publish subjects (`.agent.activate`, `agent.projects.provision`, `agent.projects.delete`), challenge-response extension (`x25519_pub` field), and `IssueUserAgentBootstrapJWT`/`IssueUserAgentJWT` issuance logic are present and consistent.
+- **ADR-0091 vs spec-session-agent.md**: Token read from `/secrets/tokens/${TOKEN_PROVIDER}`, removal of `oauth-token` legacy path, removal of `--nats-creds` flag, addition of `--auth-url` flag, and the final `exec session-agent` invocation are all consistent.
+- **User JWT example in spec-state-schema.md** does not include `mclaude-user-info` entries — but the document explicitly delegates to spec-nats-data-taxonomy.md for "the exact `$KV.` and `$JS.API.*` permission set." The taxonomy doc has the full authoritative additions. Not a blocking gap.
+- **Per-user-namespace `session-agent-template` ConfigMap** has no dedicated schema entry in spec-state-schema.md, but its creation is documented inline at line 662 under the user-agent Deployment section and in spec-k8s-architecture.md step 5b. Not a blocking gap.

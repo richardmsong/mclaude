@@ -117,8 +117,8 @@ S3-compatible object storage for import archives and chat attachments per ADR-00
 | `controlPlane.config.jwtExpirySeconds` | `28800` | Per-host user JWT lifetime (8h). |
 | `controlPlane.config.natsWsUrl` | `""` | External NATS WebSocket URL returned to browser clients on login. Injected as `NATS_WS_URL`. Empty means the SPA derives it from its own origin. |
 | `controlPlane.config.logLevel` | `""` | Injected as `LOG_LEVEL`. **Not read by Go code** — zerolog uses its default level. |
-| `controlPlane.devOAuthToken` | `""` | Claude API OAuth token for dev environments. Injected as `DEV_OAUTH_TOKEN`. Passed to per-user secrets for session-agent Claude API access. |
 | `controlPlane.service.httpPort` | `8080` | Main API listen port. Injected as `HTTP_PORT` env var. **Known mismatch:** Go code reads `PORT`, not `HTTP_PORT` — the chart env var name doesn't match. Currently works because both default to 8080. |
+| `nats.config.jetstream.encryption.storeKeySecret` | `""` | ADR-0091. Name of a Kubernetes Secret holding the JetStream at-rest encryption key under field `store-key`. When set, the NATS ConfigMap renders a `jetstream { store_dir: ..., key: $STORE_KEY }` stanza and the NATS StatefulSet mounts the Secret. Required to protect plaintext tokens in `mclaude-user-info-{uslug}` on disk. Generate with `openssl rand -base64 32` and inject via Bitwarden in CI (see `.github/workflows/deploy-main.yml`). |
 | `controlPlane.config.jwtRefreshThresholdSeconds` | `900` | Injected as `JWT_REFRESH_THRESHOLD_SECONDS`. **Not read by Go code** — phantom env var with no effect. |
 | `controlPlane.migrations.enabled` | `false` | Run dbmate schema migrations as an init container. |
 | `spa.enabled` | `true` | Deploy the SPA. |
@@ -203,15 +203,22 @@ A Helm pre-delete hook Job (Option B: automated deregistration without operator 
 | Deployment | `{release}-controller` | Single replica. Mounts `{release}-host-creds` at `/etc/mclaude/host-creds/`. Env: `HUB_NATS_URL`, `CONTROL_PLANE_URL`, `HOST_NKEY_SEED_PATH=/etc/mclaude/host-creds/nkey_seed`. |
 | Service | `{release}-controller-metrics` | Prometheus scrape target. |
 | ServiceAccount | `{release}-controller` | K8s SA used by the controller. |
-| ClusterRole | `{release}-controller` | Grants namespace, deployment, PVC, secret, configmap, serviceaccount, role, rolebinding, and `MCProject` CRD management. |
+| ClusterRole | `{release}-controller` | Per ADR-0091: namespace, deployment, secret, configmap, serviceaccount, role, rolebinding management. The `MCProject` CRD permission is **removed**. |
 | ClusterRoleBinding | `{release}-controller` | Binds ClusterRole to ServiceAccount. |
-| CustomResourceDefinition | `mcprojects.mclaude.io` | `MCProject` v1alpha1. Namespaced. |
+
+The `mcprojects.mclaude.io` CustomResourceDefinition is **removed** by ADR-0091 — project pod lifecycle moves to the user-agent (event-driven, no CRD).
 
 ### Session-Agent Template
 
 | Kind | Name | Notes |
 |---|---|---|
-| ConfigMap | `{release}-session-agent-template` | Static pod template values (image, imagePullPolicy, terminationGracePeriodSeconds, resourcesJson, projectPvcSize, projectPvcStorageClass, nixPvcSize, nixPvcStorageClass, corporateCAEnabled, corporateCAConfigMapName, corporateCAConfigMapKey). Read by `mclaude-controller-k8s` to build per-project Deployments. |
+| ConfigMap | `{release}-session-agent-template` | Static pod template values (image, imagePullPolicy, terminationGracePeriodSeconds, resourcesJson, projectPvcSize, projectPvcStorageClass, nixPvcSize, nixPvcStorageClass, corporateCAEnabled, corporateCAConfigMapName, corporateCAConfigMapKey). Per ADR-0091, read by **`mclaude-user-agent`** (not the controller) to build per-project Deployments. |
+
+### User-Agent Template (ADR-0091)
+
+| Kind | Name | Notes |
+|---|---|---|
+| ConfigMap | `{release}-user-agent-template` | Pod template values for the per-user-namespace `user-agent` Deployment (image, resources, ServiceAccount config). Read by `mclaude-controller-k8s` when reconciling a `grants.create` event. |
 
 ### Configuration Knobs
 
@@ -235,7 +242,10 @@ A Helm pre-delete hook Job (Option B: automated deregistration without operator 
 | `sessionAgent.corporateCA.bundleName` | `""` | trust-manager Bundle CR name. Consumed directly by the controller binary at runtime (not stored in the session-agent-template ConfigMap) — used for Bundle CR lookup when labeling user namespaces. |
 | `sessionAgent.corporateCA.configMapName` | `""` | ConfigMap name synced by trust-manager. Rendered as `corporateCAConfigMapName` in the session-agent-template ConfigMap. |
 | `sessionAgent.corporateCA.configMapKey` | `ca-certificates.crt` | PEM certs key in ConfigMap. Rendered as `corporateCAConfigMapKey` in the session-agent-template ConfigMap. |
-| `controller.config.devOAuthToken` | `""` | Claude API OAuth token for dev/CI. Injected as `oauth-token` in per-user `user-secrets` Secret via `DEV_OAUTH_TOKEN` env. |
+| `userAgent.image.repository` | `ghcr.io/richardmcsong/mclaude-user-agent` | ADR-0091. User-agent container image. |
+| `userAgent.image.tag` | `""` | Image tag (empty = chart appVersion). |
+| `userAgent.resources` | `{}` | User-agent pod resource requests/limits. |
+| `userAgent.templateConfigMap.name` | `""` | Override `{release}-user-agent-template` ConfigMap name (rendered into the chart by default). |
 
 ### Single-Cluster Degenerate Install
 
