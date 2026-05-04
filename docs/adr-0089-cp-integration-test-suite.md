@@ -260,7 +260,7 @@ No schema changes. `is_admin` column already exists in `users` table.
 ## Error Handling
 
 - `isAdminMiddleware`: 401 if no JWT, 403 if JWT valid but `is_admin = false`
-- `bootstrapAdminUser`: if `BOOTSTRAP_ADMIN_PASSWORD` is empty and user has no password, leaves password empty (no change); does not fail — existing OAuth-only admins continue to work
+- `bootstrapAdminUser`: if `BOOTSTRAP_ADMIN_EMAIL` is set but `BOOTSTRAP_ADMIN_PASSWORD` is empty, exits the init-keys Job with a non-zero error — a user cannot be created in a valid state without either a password or an OAuth connection. If the user already exists with a non-empty password hash, the empty `BOOTSTRAP_ADMIN_PASSWORD` is ignored (idempotent). If neither `BOOTSTRAP_ADMIN_EMAIL` nor `BOOTSTRAP_ADMIN_PASSWORD` is set, skip bootstrap admin creation entirely.
 - NATS subject tests use `nc.Request` with 3s timeout; `t.Fatal` on timeout
 
 ## Security
