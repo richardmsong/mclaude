@@ -92,7 +92,7 @@ CI gate: go test -tags cluster ./...
 
 ### Phase 1 End State
 
-After `helm upgrade --install mclaude-cp` completes and the Phase 1 CI gate passes, the `mclaude-system` namespace contains exactly **5 running pods** and **2 completed Jobs**. Other namespaces (`kube-system`, `kube-public`) contain the usual k3d infrastructure (CoreDNS, traefik, local-path-provisioner, svclb) — those are not part of the mclaude deployment and are not counted here.
+After `helm upgrade --install mclaude-cp` completes and the Phase 1 CI gate passes, the `mclaude-system` namespace contains exactly **5 running pods** and **2 completed Jobs**. The cluster also has `kube-system` (CoreDNS, traefik, local-path-provisioner, svclb, metrics-server), `cert-manager` (3 pods), and `external-dns` (1 pod) — these are cluster infrastructure and are not part of the mclaude deployment.
 
 | Resource | Kind | Count | Purpose |
 |----------|------|-------|---------|
