@@ -885,12 +885,20 @@ func TestIntegration_ADR0091_DefaultPlatform_AutoGrant(t *testing.T) {
 	suffix := uuid.NewString()[:8]
 	defaultHostSlug := "autogrant-default-" + suffix
 
+	// Create an owner user for the default platform host (hosts.user_id foreign key).
+	ownerID := "autogrant-owner-" + suffix
+	_, err := db.CreateUser(ctx, ownerID, ownerID+"@test.example.com", "AutoGrantOwner", "")
+	if err != nil {
+		t.Fatalf("CreateUser owner: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, ownerID) }) //nolint:errcheck
+
 	// Insert a default platform host row directly.
 	hostID := uuid.NewString()
-	_, err := db.pool.Exec(ctx, `
+	_, err = db.pool.Exec(ctx, `
 		INSERT INTO hosts (id, user_id, slug, name, type, role, is_default_platform)
 		VALUES ($1, $2, $3, $4, 'cluster', 'owner', TRUE)`,
-		hostID, uuid.NewString(), defaultHostSlug, defaultHostSlug)
+		hostID, ownerID, defaultHostSlug, defaultHostSlug)
 	if err != nil {
 		t.Fatalf("insert default platform host: %v", err)
 	}

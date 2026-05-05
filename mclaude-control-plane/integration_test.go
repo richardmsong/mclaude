@@ -11,6 +11,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -228,9 +229,11 @@ func mustConnectDB(t *testing.T, ctx context.Context) *DB {
 }
 
 // TestIntegration_StartProjectsSubscriberCreatesKVBuckets verifies that
-// StartProjectsSubscriber creates all required KV buckets on startup:
-// mclaude-projects, mclaude-job-queue, mclaude-hosts, mclaude-sessions.
-// Per spec startup step 7 and ADR-0046.
+// StartProjectsSubscriber creates the shared mclaude-hosts KV bucket at startup.
+// Per ADR-0054: only mclaude-hosts is created at startup; per-user KV buckets
+// (mclaude-sessions-{uslug}, mclaude-projects-{uslug}) are created lazily on
+// user registration/first login. The old shared mclaude-projects, mclaude-job-queue,
+// and mclaude-sessions buckets were removed per ADR-0054 and ADR-0044.
 func TestIntegration_StartProjectsSubscriberCreatesKVBuckets(t *testing.T) {
 	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
 	if err != nil {
@@ -248,30 +251,26 @@ func TestIntegration_StartProjectsSubscriberCreatesKVBuckets(t *testing.T) {
 		t.Fatalf("JetStream: %v", err)
 	}
 
-	// Expected history per bucket: mclaude-sessions uses 64, others use 1 (ADR-0046).
-	bucketHistory := map[string]int64{
-		"mclaude-projects":  1,
-		"mclaude-job-queue": 1,
-		"mclaude-hosts":     1,
-		"mclaude-sessions":  64,
+	// Only mclaude-hosts is created at startup (spec startup step 6, ADR-0054).
+	kv, err := js.KeyValue("mclaude-hosts")
+	if err != nil {
+		t.Fatalf("KeyValue(%q): %v — bucket should have been created by StartProjectsSubscriber", "mclaude-hosts", err)
 	}
-	for bucket, wantHistory := range bucketHistory {
-		kv, err := js.KeyValue(bucket)
-		if err != nil {
-			t.Errorf("KeyValue(%q): %v — bucket should have been created by StartProjectsSubscriber", bucket, err)
-			continue
-		}
-		if kv.Bucket() != bucket {
-			t.Errorf("bucket name = %q; want %q", kv.Bucket(), bucket)
-		}
+	if kv.Bucket() != "mclaude-hosts" {
+		t.Errorf("bucket name = %q; want %q", kv.Bucket(), "mclaude-hosts")
+	}
+	status, err := kv.Status()
+	if err != nil {
+		t.Fatalf("KeyValue(%q).Status(): %v", "mclaude-hosts", err)
+	}
+	if history := status.History(); history != 1 {
+		t.Errorf("mclaude-hosts History() = %d; want 1", history)
+	}
 
-		status, err := kv.Status()
-		if err != nil {
-			t.Errorf("KeyValue(%q).Status(): %v", bucket, err)
-			continue
-		}
-		if history := status.History(); history != wantHistory {
-			t.Errorf("bucket %q: History() = %d, want %d", bucket, history, wantHistory)
+	// Confirm old shared buckets are NOT created (removed per ADR-0054 / ADR-0044).
+	for _, obsolete := range []string{"mclaude-projects", "mclaude-job-queue", "mclaude-sessions"} {
+		if _, err := js.KeyValue(obsolete); err == nil {
+			t.Errorf("bucket %q exists; want absent (removed per ADR-0054)", obsolete)
 		}
 	}
 }
@@ -1549,15 +1548,20 @@ func TestIntegration_NKeyChallenge_AndVerify(t *testing.T) {
 	}
 
 	// Step 2: sign the challenge and verify.
-	// Challenge is base64-encoded raw nonce bytes.
-	import64 := challengeResp.Challenge
-	sig, err := userKP.Sign([]byte(import64))
+	// The challenge is base64-encoded raw nonce bytes. Decode to get the raw nonce,
+	// sign that (not the base64 string), then base64-encode the signature for the request.
+	rawNonce, err := base64.StdEncoding.DecodeString(challengeResp.Challenge)
+	if err != nil {
+		t.Fatalf("decode challenge nonce: %v", err)
+	}
+	sig, err := userKP.Sign(rawNonce)
 	if err != nil {
 		t.Fatalf("sign challenge: %v", err)
 	}
+	sigB64 := base64.StdEncoding.EncodeToString(sig)
 
 	verifyBody := fmt.Sprintf(`{"nkey_public":%q,"challenge":%q,"signature":%q}`,
-		userPub, challengeResp.Challenge, sig)
+		userPub, challengeResp.Challenge, sigB64)
 	rec2 := httptest.NewRecorder()
 	req2 := httptest.NewRequest(http.MethodPost, "/api/auth/verify", bytes.NewBufferString(verifyBody))
 	req2.Header.Set("Content-Type", "application/json")
@@ -2010,12 +2014,22 @@ func TestIntegration_CheckSlug_Taken(t *testing.T) {
 	}
 	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
 
-	// Create a project with a known slug.
+	// Create a machine host for the user so host_id can be set on the project.
+	hostID := uuid.NewString()
+	_, err = db.pool.Exec(ctx,
+		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'checkslug-host', 'Check Host', 'machine', 'owner', NOW())`,
+		hostID, user.ID)
+	if err != nil {
+		t.Fatalf("insert host: %v", err)
+	}
+	t.Cleanup(func() { db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) }) //nolint:errcheck
+
+	// Create a project with a known slug and a valid host_id (required by schema).
 	projID := uuid.NewString()
 	takenSlug := "taken-" + uuid.NewString()[:6]
 	_, err = db.pool.Exec(ctx,
-		`INSERT INTO projects (id, user_id, name, slug, git_url, status, created_at) VALUES ($1, $2, $3, $4, '', 'active', NOW())`,
-		projID, user.ID, "Taken Project", takenSlug)
+		`INSERT INTO projects (id, user_id, host_id, name, slug, git_url, status, created_at) VALUES ($1, $2, $3, $4, $5, '', 'active', NOW())`,
+		projID, user.ID, hostID, "Taken Project", takenSlug)
 	if err != nil {
 		t.Fatalf("insert project: %v", err)
 	}
