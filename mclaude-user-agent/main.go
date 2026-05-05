@@ -99,139 +99,161 @@ func run(ctx context.Context, cfg *AgentConfig) error {
 		Msg("X25519 keypair ready")
 
 	// Step 5: Authenticate with CP (Boot step 3) with exponential backoff.
-	jwt, err := authenticateWithBackoff(ctx, agentAuth)
+	_, err = authenticateWithBackoff(ctx, agentAuth)
 	if err != nil {
 		return fmt.Errorf("authenticate with CP: %w", err)
 	}
 	log.Info().Msg("authenticated with CP")
 
-	// Step 6: Connect to NATS.
-	nc, err := connectNATS(cfg.NATSURL, agentAuth)
-	if err != nil {
-		return fmt.Errorf("connect to NATS: %w", err)
-	}
-	defer nc.Close()
-	log.Info().Str("url", cfg.NATSURL).Msg("connected to NATS")
-
-	// Step 7: Create subsystem objects.
+	// Step 6: Create subsystem objects.
 	tokenMgr := NewTokenManager(k8sClient, cfg.Namespace, cfg.UserSlug, keypair, log.Logger)
 	provisioner := NewProvisioner(k8sClient, cfg.Namespace, cfg, log.Logger)
 
-	// Step 8: Start JWT refresh loop. On each refresh, attempt NATS reconnect if needed.
+	// Step 7: Start JWT refresh loop. The refresh loop re-authenticates before TTL expiry
+	// so the NATS JWTFunc always returns a valid JWT for reconnects.
 	agentAuth.StartRefreshLoop(ctx, func(newJWT string) {
 		log.Debug().Msg("JWT refreshed — NATS will use new JWT on next reconnect")
 		_ = newJWT
 	})
-	_ = jwt
 
-	// Step 9: Subscribe based on JWT scope.
-	// We don't parse the JWT to determine bootstrap vs full — instead we try the full
-	// subscription first. If the NATS server rejects the subscription (permissions error),
-	// we fall back to bootstrap mode.
-	//
-	// Simpler approach per spec: try to subscribe to full scope. If NATS rejects, subscribe
-	// bootstrap only. In practice, the JWT type is opaque to us — we rely on NATS RBAC.
-	// Per spec boot sequence steps 5-7: we subscribe optimistically.
+	// Step 8: NATS connect + subscribe loop.
+	// On activation: drain connection, reconnect with full JWT, re-subscribe.
+	return runNATSLoop(ctx, cfg, agentAuth, tokenMgr, provisioner, connectNATS)
+}
 
+// natsConnectFn is a function that creates a NATS connection. Injected for testing.
+type natsConnectFn func(natsURL string, auth *UserAgentAuth) (*nats.Conn, error)
+
+// runNATSLoop connects to NATS, subscribes to agent subjects, and loops on reconnect
+// signals (triggered by activate). Each iteration:
+//  1. Connect with current JWT (bootstrap or full).
+//  2. Subscribe based on JWT scope (bootstrap → activate-only; full → all subjects).
+//  3. Wait for ctx done or an activate-triggered reconnect signal.
+//  4. Drain and reconnect with the updated full JWT.
+//
+// The connectFn parameter is injected for testing; production code passes connectNATS.
+func runNATSLoop(
+	ctx context.Context,
+	cfg *AgentConfig,
+	agentAuth *UserAgentAuth,
+	tokenMgr *TokenManager,
+	provisioner *Provisioner,
+	connectFn natsConnectFn,
+) error {
 	uslug := cfg.UserSlug
 	hslug := cfg.HostSlug
 
 	activateSubj := fmt.Sprintf("mclaude.users.%s.hosts.%s.agent.activate", uslug, hslug)
-	fullSubjPrefix := fmt.Sprintf("mclaude.users.%s.hosts.%s.agent.>", uslug, hslug)
 	tokenDeliverySubj := fmt.Sprintf("mclaude.users.%s.hosts.%s.agent.token-delivery", uslug, hslug)
 	provisionSubj := fmt.Sprintf("mclaude.users.%s.hosts.%s.agent.projects.provision", uslug, hslug)
 	deleteSubj := fmt.Sprintf("mclaude.users.%s.hosts.%s.agent.projects.delete", uslug, hslug)
 
-	// Try full subscription. If denied, fall back to bootstrap mode.
-	if err := subscribeAgentSubjects(ctx, nc, uslug, hslug, fullSubjPrefix, activateSubj, tokenDeliverySubj, provisionSubj, deleteSubj, tokenMgr, provisioner, agentAuth, cfg); err != nil {
-		return fmt.Errorf("subscribe NATS subjects: %w", err)
-	}
-
-	<-ctx.Done()
-	log.Info().Msg("shutting down")
-	return nil
-}
-
-// subscribeAgentSubjects sets up the full NATS subscription tree.
-// On activation signal, re-runs challenge-response and reconnects with full JWT.
-func subscribeAgentSubjects(
-	ctx context.Context,
-	nc *nats.Conn,
-	uslug, hslug, fullSubjPrefix, activateSubj, tokenDeliverySubj, provisionSubj, deleteSubj string,
-	tokenMgr *TokenManager,
-	provisioner *Provisioner,
-	agentAuth *UserAgentAuth,
-	cfg *AgentConfig,
-) error {
-	// Always subscribe to activate — needed in both bootstrap and full mode.
-	_, err := nc.Subscribe(activateSubj, func(msg *nats.Msg) {
-		log.Info().Msg("received agent.activate signal — re-authenticating with CP")
-		// Re-run challenge-response to get full JWT.
-		if _, authErr := authenticateWithBackoff(ctx, agentAuth); authErr != nil {
-			log.Error().Err(authErr).Msg("re-auth after activate failed")
-			return
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
 		}
-		log.Info().Msg("re-auth after activate succeeded")
-		// Reconnect to NATS is handled by the NATS library's reconnect logic using the
-		// updated JWT from JWTFunc(). The library will use the new JWT on next reconnect.
-	})
-	if err != nil {
-		log.Warn().Err(err).Str("subject", activateSubj).Msg("subscribe activate failed (bootstrap JWT expected)")
-		// Still continue — we may get activated later.
-	}
 
-	// Subscribe to token-delivery (request/reply).
-	_, err = nc.Subscribe(tokenDeliverySubj, func(msg *nats.Msg) {
-		reply := tokenMgr.HandleDelivery(ctx, msg.Data)
-		if msg.Reply != "" {
-			if pubErr := nc.Publish(msg.Reply, reply); pubErr != nil {
-				log.Warn().Err(pubErr).Msg("token-delivery: publish reply failed")
+		// Connect with current JWT.
+		nc, connErr := connectFn(cfg.NATSURL, agentAuth)
+		if connErr != nil {
+			return fmt.Errorf("connect to NATS: %w", connErr)
+		}
+		log.Info().Str("url", cfg.NATSURL).Msg("connected to NATS")
+
+		// reconnectCh is signalled by the activate handler to trigger reconnect
+		// after re-auth with the full JWT.
+		reconnectCh := make(chan struct{}, 1)
+
+		// Subscribe to activate — needed in both bootstrap and full mode.
+		_, subErr := nc.Subscribe(activateSubj, func(msg *nats.Msg) {
+			log.Info().Msg("received agent.activate signal — re-authenticating with CP")
+			if _, authErr := authenticateWithBackoff(ctx, agentAuth); authErr != nil {
+				log.Error().Err(authErr).Msg("re-auth after activate failed")
+				return
 			}
+			log.Info().Msg("re-auth after activate succeeded — triggering NATS reconnect")
+			// Signal the loop to drain and reconnect with the new full JWT.
+			select {
+			case reconnectCh <- struct{}{}:
+			default:
+				// Already a reconnect pending; skip.
+			}
+		})
+		if subErr != nil {
+			nc.Close()
+			return fmt.Errorf("subscribe activate: %w", subErr)
 		}
-	})
-	if err != nil {
-		log.Warn().Err(err).Str("subject", tokenDeliverySubj).Msg("subscribe token-delivery failed (may need full JWT)")
-	}
 
-	// Subscribe to projects.provision (request/reply).
-	_, err = nc.Subscribe(provisionSubj, func(msg *nats.Msg) {
-		var req ProvisionRequest
-		if jsonErr := json.Unmarshal(msg.Data, &req); jsonErr != nil {
-			log.Warn().Err(jsonErr).Msg("provision: bad payload")
-			reply := ProvisionReply{Error: "bad_request"}
-			replyData, _ := json.Marshal(reply)
+		// Subscribe to token-delivery (request/reply).
+		// NATS RBAC will reject this subscription if we have a bootstrap JWT; the
+		// error is logged and the agent continues in activate-only mode until the
+		// reconnect loop upgrades to a full JWT.
+		if _, err := nc.Subscribe(tokenDeliverySubj, func(msg *nats.Msg) {
+			reply := tokenMgr.HandleDelivery(ctx, msg.Data)
 			if msg.Reply != "" {
-				_ = nc.Publish(msg.Reply, replyData)
+				if pubErr := nc.Publish(msg.Reply, reply); pubErr != nil {
+					log.Warn().Err(pubErr).Msg("token-delivery: publish reply failed")
+				}
 			}
-			return
+		}); err != nil {
+			log.Warn().Err(err).Str("subject", tokenDeliverySubj).Msg("subscribe token-delivery failed (bootstrap JWT — will re-subscribe after activate)")
 		}
-		reply := provisioner.Provision(ctx, req)
-		if msg.Reply != "" {
-			replyData, _ := json.Marshal(reply)
-			if pubErr := nc.Publish(msg.Reply, replyData); pubErr != nil {
-				log.Warn().Err(pubErr).Msg("provision: publish reply failed")
+
+		// Subscribe to projects.provision (request/reply).
+		if _, err := nc.Subscribe(provisionSubj, func(msg *nats.Msg) {
+			var req ProvisionRequest
+			if jsonErr := json.Unmarshal(msg.Data, &req); jsonErr != nil {
+				log.Warn().Err(jsonErr).Msg("provision: bad payload")
+				reply := ProvisionReply{Error: "bad_request"}
+				replyData, _ := json.Marshal(reply)
+				if msg.Reply != "" {
+					_ = nc.Publish(msg.Reply, replyData)
+				}
+				return
 			}
+			reply := provisioner.Provision(ctx, req)
+			if msg.Reply != "" {
+				replyData, _ := json.Marshal(reply)
+				if pubErr := nc.Publish(msg.Reply, replyData); pubErr != nil {
+					log.Warn().Err(pubErr).Msg("provision: publish reply failed")
+				}
+			}
+		}); err != nil {
+			log.Warn().Err(err).Str("subject", provisionSubj).Msg("subscribe projects.provision failed (bootstrap JWT — will re-subscribe after activate)")
 		}
-	})
-	if err != nil {
-		log.Warn().Err(err).Str("subject", provisionSubj).Msg("subscribe projects.provision failed (may need full JWT)")
-	}
 
-	// Subscribe to projects.delete (no reply expected).
-	_, err = nc.Subscribe(deleteSubj, func(msg *nats.Msg) {
-		var req DeleteRequest
-		if jsonErr := json.Unmarshal(msg.Data, &req); jsonErr != nil {
-			log.Warn().Err(jsonErr).Msg("delete: bad payload")
-			return
+		// Subscribe to projects.delete (no reply expected).
+		if _, err := nc.Subscribe(deleteSubj, func(msg *nats.Msg) {
+			var req DeleteRequest
+			if jsonErr := json.Unmarshal(msg.Data, &req); jsonErr != nil {
+				log.Warn().Err(jsonErr).Msg("delete: bad payload")
+				return
+			}
+			provisioner.Delete(ctx, req)
+		}); err != nil {
+			log.Warn().Err(err).Str("subject", deleteSubj).Msg("subscribe projects.delete failed (bootstrap JWT — will re-subscribe after activate)")
 		}
-		provisioner.Delete(ctx, req)
-	})
-	if err != nil {
-		log.Warn().Err(err).Str("subject", deleteSubj).Msg("subscribe projects.delete failed (may need full JWT)")
-	}
 
-	_ = fullSubjPrefix
-	return nil
+		// Wait: either context done (shutdown) or activate-triggered reconnect.
+		select {
+		case <-ctx.Done():
+			log.Info().Msg("shutting down")
+			_ = nc.Drain()
+			return nil
+		case <-reconnectCh:
+			// Drain current connection cleanly so in-flight messages complete,
+			// then reconnect with the new full JWT on the next loop iteration.
+			log.Info().Msg("draining NATS connection before reconnect with full JWT")
+			if drainErr := nc.Drain(); drainErr != nil {
+				log.Warn().Err(drainErr).Msg("drain failed; closing instead")
+				nc.Close()
+			}
+			log.Info().Msg("NATS connection drained — reconnecting with full JWT")
+			// Loop continues: next iteration calls connectFn with the updated JWT.
+		}
+	}
 }
 
 // authenticateWithBackoff runs challenge-response with CP using exponential backoff.
