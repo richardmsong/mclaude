@@ -2171,3 +2171,187 @@ func TestIntegration_CreateProject_SucceedsWithHost(t *testing.T) {
 			rec.Code, rec.Body.String())
 	}
 }
+
+// TestIntegration_Migration_DeletesLocalHosts verifies that running Migrate() removes
+// any pre-existing host rows with slug='local' (ADR-0095). ON DELETE CASCADE means
+// projects referencing the deleted host are also removed automatically.
+func TestIntegration_Migration_DeletesLocalHosts(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	// Create a user to own the local host.
+	userID := "mig-local-" + uuid.NewString()[:8]
+	user, err := db.CreateUser(ctx, userID, userID+"@t.example.com", "MigLocal", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Pre-seed a host row with slug='local' — the kind the old code auto-created.
+	localHostID := uuid.NewString()
+	if _, herr := db.pool.Exec(ctx,
+		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'local', 'Local Machine', 'machine', 'owner', NOW())`,
+		localHostID, user.ID); herr != nil {
+		t.Fatalf("insert local host: %v", herr)
+	}
+
+	// Run Migrate() — the ADR-0095 migration step executes DELETE FROM hosts WHERE slug = 'local'.
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	// Verify the local host row is gone.
+	var count int
+	if err := db.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM hosts WHERE id = $1`, localHostID).Scan(&count); err != nil {
+		t.Fatalf("count local host: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("local host row still exists after Migrate(); want 0 (ADR-0095 DELETE migration)")
+	}
+}
+
+// TestIntegration_NATS_ProjectCreate_ZeroHosts verifies that publishing to the legacy
+// mclaude.users.*.api.projects.create subject when the user has zero hosts replies
+// with {error: "no_hosts"} (ADR-0095).
+func TestIntegration_NATS_ProjectCreate_ZeroHosts(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	nc := mustNATSConn(t)
+	srv := newIntegrationServer(t, db, nc)
+
+	if err := srv.StartProjectsSubscriber(nc); err != nil {
+		t.Fatalf("StartProjectsSubscriber: %v", err)
+	}
+
+	// Create user with zero hosts.
+	userID := "nats-nohost-" + uuid.NewString()[:8]
+	user, err := db.CreateUser(ctx, userID, userID+"@t.example.com", "NATSNoHost", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	subject := fmt.Sprintf("mclaude.users.%s.api.projects.create", user.Slug)
+	payload, _ := json.Marshal(map[string]string{"name": "Blocked Project"})
+
+	reply, err := nc.Request(subject, payload, 3*time.Second)
+	if err != nil {
+		t.Fatalf("nc.Request %s: %v", subject, err)
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(reply.Data, &resp); err != nil {
+		t.Fatalf("unmarshal reply: %v", err)
+	}
+	if resp["error"] != "no_hosts" {
+		t.Errorf("error = %q; want %q; full reply: %s", resp["error"], "no_hosts", reply.Data)
+	}
+}
+
+// TestIntegration_HTTP_ProjectCreate_HostRequired verifies that
+// POST /api/users/{uslug}/projects returns 422 {error:"host_required"} when the user
+// has 2+ hosts and no hostSlug is included in the request body (ADR-0095).
+func TestIntegration_HTTP_ProjectCreate_HostRequired(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	userID := "multhost-http-" + uuid.NewString()[:8]
+	user, err := db.CreateUser(ctx, userID, userID+"@t.example.com", "MultHostHTTP", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Insert two host rows so the handler reaches the "multiple hosts, no hostSlug" branch.
+	for _, slug := range []string{"host-alpha", "host-beta"} {
+		hid := uuid.NewString()
+		if _, herr := db.pool.Exec(ctx,
+			`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, $3, $4, 'machine', 'owner', NOW())`,
+			hid, user.ID, slug, slug); herr != nil {
+			t.Fatalf("insert host %s: %v", slug, herr)
+		}
+		t.Cleanup(func() { db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hid) }) //nolint:errcheck
+	}
+
+	accountKP, _ := nkeys.CreateAccount()
+	srv := NewServer(db, accountKP, integDeps.NATSAddr, "", 8*time.Hour)
+	srv.SetExternalURL("http://localhost:8080")
+
+	jwt, _, err := IssueUserJWTLegacy(user.ID, user.Slug, accountKP, int64(8*time.Hour.Seconds()))
+	if err != nil {
+		t.Fatalf("IssueUserJWTLegacy: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	srv.RegisterRoutes(mux)
+
+	// Request body omits hostSlug — should trigger host_required.
+	body := `{"name":"Ambiguous Project"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/users/"+user.Slug+"/projects",
+		bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d; want 422; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["error"] != "host_required" {
+		t.Errorf("error = %q; want %q; full body: %s", resp["error"], "host_required", rec.Body.String())
+	}
+}
+
+// TestIntegration_NATS_ProjectCreate_HostRequired verifies that publishing to the legacy
+// mclaude.users.*.api.projects.create subject when the user has 2+ hosts and no hostSlug
+// in the payload replies with {error: "host_required"} (ADR-0095).
+func TestIntegration_NATS_ProjectCreate_HostRequired(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	nc := mustNATSConn(t)
+	srv := newIntegrationServer(t, db, nc)
+
+	if err := srv.StartProjectsSubscriber(nc); err != nil {
+		t.Fatalf("StartProjectsSubscriber: %v", err)
+	}
+
+	userID := "nats-multhost-" + uuid.NewString()[:8]
+	user, err := db.CreateUser(ctx, userID, userID+"@t.example.com", "NATSMultHost", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Insert two host rows.
+	for _, slug := range []string{"nats-host-one", "nats-host-two"} {
+		hid := uuid.NewString()
+		if _, herr := db.pool.Exec(ctx,
+			`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, $3, $4, 'machine', 'owner', NOW())`,
+			hid, user.ID, slug, slug); herr != nil {
+			t.Fatalf("insert host %s: %v", slug, herr)
+		}
+		t.Cleanup(func() { db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hid) }) //nolint:errcheck
+	}
+
+	subject := fmt.Sprintf("mclaude.users.%s.api.projects.create", user.Slug)
+	// Payload omits hostSlug — should trigger host_required.
+	payload, _ := json.Marshal(map[string]string{"name": "Ambiguous NATS Project"})
+
+	reply, err := nc.Request(subject, payload, 3*time.Second)
+	if err != nil {
+		t.Fatalf("nc.Request %s: %v", subject, err)
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(reply.Data, &resp); err != nil {
+		t.Fatalf("unmarshal reply: %v", err)
+	}
+	if resp["error"] != "host_required" {
+		t.Errorf("error = %q; want %q; full reply: %s", resp["error"], "host_required", reply.Data)
+	}
+}

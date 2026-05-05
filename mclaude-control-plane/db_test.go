@@ -137,9 +137,9 @@ func TestSchema_ProjectsUniqueIndex(t *testing.T) {
 	}
 }
 
-func TestSchema_BackfillLocalHost(t *testing.T) {
-	if !strings.Contains(schema, "'local'") {
-		t.Error("schema missing backfill for default 'local' machine host")
+func TestSchema_DeleteLocalHosts(t *testing.T) {
+	if !strings.Contains(schema, "DELETE FROM hosts WHERE slug = 'local'") {
+		t.Error("schema missing DELETE migration for auto-created local host stubs (ADR-0095)")
 	}
 }
 
