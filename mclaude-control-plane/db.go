@@ -1078,11 +1078,6 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS slug TEXT NOT NULL DEFAULT '';
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS host_id TEXT REFERENCES hosts(id) ON DELETE CASCADE;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS git_identity_id TEXT REFERENCES oauth_connections(id) ON DELETE SET NULL;
 
--- ADR-0095: Remove auto-created local host stubs.
--- projects.host_id has ON DELETE CASCADE, so projects referencing local hosts are
--- cascade-deleted automatically. No need to NULL host_id first.
-DELETE FROM hosts WHERE slug = 'local';
-
 -- Backfill slug from name for projects that have no slug set.
 UPDATE projects
 SET slug = lower(regexp_replace(name, '[^a-zA-Z0-9]+', '-', 'g'))

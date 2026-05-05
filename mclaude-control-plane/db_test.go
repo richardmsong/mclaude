@@ -137,9 +137,9 @@ func TestSchema_ProjectsUniqueIndex(t *testing.T) {
 	}
 }
 
-func TestSchema_DeleteLocalHosts(t *testing.T) {
-	if !strings.Contains(schema, "DELETE FROM hosts WHERE slug = 'local'") {
-		t.Error("schema missing DELETE migration for auto-created local host stubs (ADR-0095)")
+func TestSchema_NoLocalHostBackfill(t *testing.T) {
+	if strings.Contains(schema, "INSERT INTO hosts") && strings.Contains(schema, "'local'") {
+		t.Error("schema still contains backfill INSERT for auto-created local host stubs — removed by ADR-0095")
 	}
 }
 

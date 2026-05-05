@@ -24,7 +24,7 @@ Remove the automatic "local" stub host that is inserted whenever a user is creat
 |----------|--------|-----------|
 | Auto-local-host creation | Remove from `CreateUser` and schema migration backfill | Single code path — hosts only exist through attestation |
 | Project creation without hosts | Block with 422 `no_hosts` error | Forces users to register a real host before creating projects. Clean enforcement. |
-| Existing local host data | Delete all hosts with `slug='local'` via migration | Clean slate. No live prod deployments with real data on local hosts. Projects on local hosts get cascade-deleted or host_id nullified. |
+| Existing local host data | Stop creating new; leave existing in place. Operator manually wipes if desired. | No destructive migration — deleting user data is an operator decision, not automatic. |
 | SPA empty state | Show guidance to register a host when user has zero hosts | Users need a clear path forward when they first log in |
 | `CreateProjectWithIdentity` fallback | Remove local-host fallback; require explicit host_id | The NATS project creation path already includes host context from the subject pattern |
 
@@ -73,9 +73,7 @@ Remove the automatic "local" stub host that is inserted whenever a user is creat
 **`project_http.go` — `handleCreateProjectHTTP`:**
 - Same `HasHosts` pre-check and 422 response. Note: this HTTP endpoint exists but is currently unused by the SPA (SPA uses the NATS path above). The guard is added for API completeness.
 
-**New migration:**
-- `DELETE FROM hosts WHERE slug = 'local';`
-  The `projects.host_id` FK has `ON DELETE CASCADE`, so projects referencing deleted local hosts are automatically deleted. No need to NULL `host_id` first (which would violate the `NOT NULL` constraint added by the existing conditional migration).
+**No destructive migration.** Existing `slug='local'` host rows are left in place. Operators can manually delete them if desired (`DELETE FROM hosts WHERE slug = 'local'`). The code changes (removing auto-creation from `CreateUser` and the backfill DO block) prevent new local hosts from being created.
 
 ### `mclaude-web` (SPA)
 
@@ -87,10 +85,7 @@ Remove the automatic "local" stub host that is inserted whenever a user is creat
 
 ## Data Model
 
-No new tables. Changes:
-
-- `hosts`: rows with `slug='local'` are deleted by migration.
-- `projects`: rows referencing deleted local hosts are cascade-deleted (`ON DELETE CASCADE` FK on `host_id`).
+No new tables. No destructive changes. Existing `slug='local'` host rows remain — operator can manually delete if desired.
 
 ## Error Handling
 

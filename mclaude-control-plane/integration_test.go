@@ -2172,14 +2172,13 @@ func TestIntegration_CreateProject_SucceedsWithHost(t *testing.T) {
 	}
 }
 
-// TestIntegration_Migration_DeletesLocalHosts verifies that running Migrate() removes
-// any pre-existing host rows with slug='local' (ADR-0095). ON DELETE CASCADE means
-// projects referencing the deleted host are also removed automatically.
-func TestIntegration_Migration_DeletesLocalHosts(t *testing.T) {
+// TestIntegration_Migration_PreservesLocalHosts verifies that Migrate() does NOT
+// delete pre-existing host rows with slug='local' (ADR-0095 — no destructive migration;
+// operators manually delete if desired).
+func TestIntegration_Migration_PreservesLocalHosts(t *testing.T) {
 	ctx := context.Background()
 	db := mustConnectDB(t, ctx)
 
-	// Create a user to own the local host.
 	userID := "mig-local-" + uuid.NewString()[:8]
 	user, err := db.CreateUser(ctx, userID, userID+"@t.example.com", "MigLocal", "")
 	if err != nil {
@@ -2187,7 +2186,6 @@ func TestIntegration_Migration_DeletesLocalHosts(t *testing.T) {
 	}
 	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
 
-	// Pre-seed a host row with slug='local' — the kind the old code auto-created.
 	localHostID := uuid.NewString()
 	if _, herr := db.pool.Exec(ctx,
 		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'local', 'Local Machine', 'machine', 'owner', NOW())`,
@@ -2195,19 +2193,17 @@ func TestIntegration_Migration_DeletesLocalHosts(t *testing.T) {
 		t.Fatalf("insert local host: %v", herr)
 	}
 
-	// Run Migrate() — the ADR-0095 migration step executes DELETE FROM hosts WHERE slug = 'local'.
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
-	// Verify the local host row is gone.
 	var count int
 	if err := db.pool.QueryRow(ctx,
 		`SELECT COUNT(*) FROM hosts WHERE id = $1`, localHostID).Scan(&count); err != nil {
 		t.Fatalf("count local host: %v", err)
 	}
-	if count != 0 {
-		t.Errorf("local host row still exists after Migrate(); want 0 (ADR-0095 DELETE migration)")
+	if count != 1 {
+		t.Errorf("local host row was deleted by Migrate(); ADR-0095 says no destructive migration")
 	}
 }
 
