@@ -11,7 +11,7 @@ RUN apk add --no-cache ca-certificates curl \
 RUN addgroup -g 1000 app && adduser -u 1000 -G app -s /bin/sh -D app
 USER 1000
 
-COPY --chmod=0755 control-plane-${TARGETARCH} /usr/local/bin/control-plane
+COPY --chmod=0755 cmd/control-plane/control-plane-${TARGETARCH} /usr/local/bin/control-plane
 
 ENV LOG_LEVEL=info
 ENV PORT=8080

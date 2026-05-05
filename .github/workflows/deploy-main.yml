@@ -44,14 +44,14 @@ jobs:
       - name: Build binaries
         working-directory: mclaude-control-plane
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o control-plane-arm64 .
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o control-plane-amd64 .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o cmd/control-plane/control-plane-arm64 ./cmd/control-plane/
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o cmd/control-plane/control-plane-amd64 ./cmd/control-plane/
       - uses: actions/upload-artifact@v4
         with:
           name: control-plane-binaries
           path: |
-            mclaude-control-plane/control-plane-arm64
-            mclaude-control-plane/control-plane-amd64
+            mclaude-control-plane/cmd/control-plane/control-plane-arm64
+            mclaude-control-plane/cmd/control-plane/control-plane-amd64
 
   build-control-plane-image:
     name: Docker control-plane (${{ matrix.arch }})
