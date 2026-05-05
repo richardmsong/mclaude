@@ -549,13 +549,20 @@ func (s *Server) handleNATSImportConfirm(msg *nats.Msg) {
 		return
 	}
 
+	// Resolve host UUID from hslug (ADR-0095: CreateProjectWithIdentity requires explicit hostID).
+	host, err := s.db.GetHostBySlug(ctx, hslug)
+	if err != nil || host == nil {
+		replyNATSError(msg, "host not found")
+		return
+	}
+
 	// Create project with source='import' and import_ref set.
 	projectName := req.Name
 	if projectName == "" {
 		projectName = pslug
 	}
 	projID := uuid.NewString()
-	proj, err := s.db.CreateProjectWithIdentity(ctx, projID, user.ID, projectName, "", nil)
+	proj, err := s.db.CreateProjectWithIdentity(ctx, projID, user.ID, projectName, "", host.ID, nil)
 	if err != nil {
 		replyNATSError(msg, "failed to create project")
 		return

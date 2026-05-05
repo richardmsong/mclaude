@@ -216,7 +216,8 @@ func (db *DB) SetUserNKeyPublic(ctx context.Context, userID, nkeyPublic string) 
 }
 
 // CreateUser inserts a new user row. id must be a pre-generated UUID.
-// KNOWN-16: Also creates a default host row with type='machine', role='owner'.
+// Per ADR-0095, no host row is created. Hosts are created only through the
+// BYOH attestation flow (mclaude.users.*.hosts._.register).
 func (db *DB) CreateUser(ctx context.Context, id, email, name, passwordHash string) (*User, error) {
 	userSlug := computeUserSlug(email)
 	now := time.Now().UTC()
@@ -225,19 +226,6 @@ func (db *DB) CreateUser(ctx context.Context, id, email, name, passwordHash stri
 		id, email, name, passwordHash, userSlug, now)
 	if err != nil {
 		return nil, fmt.Errorf("create user: %w", err)
-	}
-
-	// KNOWN-16: Create default host row (type='machine', role='owner').
-	hostID := uuid.NewString()
-	_, err = db.pool.Exec(ctx,
-		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at)
-		 VALUES ($1, $2, 'local', 'Local Machine', 'machine', 'owner', $3)
-		 ON CONFLICT (user_id, slug) DO NOTHING`,
-		hostID, id, now)
-	if err != nil {
-		// Non-fatal: user was created, host creation failure is logged.
-		// The schema migration backfill will catch this on next restart.
-		_ = err
 	}
 
 	return &User{ID: id, Email: email, Name: name, PasswordHash: passwordHash, Slug: userSlug, CreatedAt: now}, nil
@@ -279,16 +267,19 @@ type Project struct {
 }
 
 // CreateProject inserts a new project row. id must be a pre-generated UUID.
-func (db *DB) CreateProject(ctx context.Context, id, userID, name, gitURL string) (*Project, error) {
-	return db.CreateProjectWithIdentity(ctx, id, userID, name, gitURL, nil)
+// hostID must be the UUID of an existing host row — callers must resolve the host
+// before calling (ADR-0095: no fallback host resolution inside this function).
+func (db *DB) CreateProject(ctx context.Context, id, userID, name, gitURL, hostID string) (*Project, error) {
+	return db.CreateProjectWithIdentity(ctx, id, userID, name, gitURL, hostID, nil)
 }
 
 // CreateProjectWithIdentity inserts a new project row with optional git_identity_id.
-// KNOWN-13: Computes and sets the slug column (slugified project name) and sets host_id.
-func (db *DB) CreateProjectWithIdentity(ctx context.Context, id, userID, name, gitURL string, gitIdentityID *string) (*Project, error) {
+// hostID must be the UUID of an existing host row. Per ADR-0095, there is no fallback
+// host resolution — the caller is responsible for resolving the host before calling.
+func (db *DB) CreateProjectWithIdentity(ctx context.Context, id, userID, name, gitURL, hostID string, gitIdentityID *string) (*Project, error) {
 	now := time.Now().UTC()
 
-	// KNOWN-13: Compute slug from project name.
+	// Compute slug from project name.
 	projectSlug := slug.Slugify(name)
 	if projectSlug == "" {
 		projectSlug = "project"
@@ -299,27 +290,15 @@ func (db *DB) CreateProjectWithIdentity(ctx context.Context, id, userID, name, g
 		projectSlug = slug.ValidateOrFallback(projectSlug, slug.KindProject, uid)
 	}
 
-	// KNOWN-13: Look up user's default host if host_id not provided.
-	var hostID *string
-	err := db.pool.QueryRow(ctx,
-		`SELECT id FROM hosts WHERE user_id = $1 AND slug = 'local' LIMIT 1`, userID).Scan(&hostID)
-	if err != nil {
-		// If no local host, try any host for this user.
-		err = db.pool.QueryRow(ctx,
-			`SELECT id FROM hosts WHERE user_id = $1 ORDER BY created_at LIMIT 1`, userID).Scan(&hostID)
-		if err != nil {
-			hostID = nil // no host available
-		}
-	}
-
-	_, err = db.pool.Exec(ctx,
+	hostIDPtr := &hostID
+	_, err := db.pool.Exec(ctx,
 		`INSERT INTO projects (id, user_id, name, slug, git_url, status, host_id, created_at, git_identity_id)
 		 VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8)`,
-		id, userID, name, projectSlug, gitURL, hostID, now, gitIdentityID)
+		id, userID, name, projectSlug, gitURL, hostIDPtr, now, gitIdentityID)
 	if err != nil {
 		return nil, fmt.Errorf("create project: %w", err)
 	}
-	return &Project{ID: id, UserID: userID, Name: name, Slug: projectSlug, GitURL: gitURL, Status: "active", HostID: hostID, GitIdentityID: gitIdentityID, CreatedAt: now}, nil
+	return &Project{ID: id, UserID: userID, Name: name, Slug: projectSlug, GitURL: gitURL, Status: "active", HostID: hostIDPtr, GitIdentityID: gitIdentityID, CreatedAt: now}, nil
 }
 
 // GetProjectsByUser returns all projects owned by a user, with host slug joined.
@@ -434,6 +413,18 @@ func (db *DB) GetHostsByUser(ctx context.Context, userID string) ([]*Host, error
 		hosts = append(hosts, h)
 	}
 	return hosts, rows.Err()
+}
+
+// HasHosts returns true if the user owns at least one host (ADR-0095).
+// Used to gate project creation — users must register a host before creating projects.
+func (db *DB) HasHosts(ctx context.Context, userID string) (bool, error) {
+	var count int
+	err := db.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM hosts WHERE user_id = $1 LIMIT 1`, userID).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("has hosts: %w", err)
+	}
+	return count > 0, nil
 }
 
 // GetHostBySlug looks up a host by slug. Returns the first match across all users.
@@ -1005,7 +996,8 @@ func scanOAuthConnection(row interface {
 // schema is the DDL applied on startup via Migrate().
 // Table creation order matters for foreign keys: users → hosts → projects → oauth_connections.
 // ALTER TABLE statements handle backward-compatible migration of existing installations.
-// The DO block backfills a default 'local' machine host per user and sets host_id on projects.
+// Per ADR-0095: the migration includes DELETE FROM hosts WHERE slug = 'local' to remove
+// auto-created local host stubs. ON DELETE CASCADE removes referencing project rows.
 const schema = `
 -- Base tables (for fresh installations, includes all ADR-0035 columns).
 CREATE TABLE IF NOT EXISTS users (
@@ -1086,27 +1078,10 @@ ALTER TABLE projects ADD COLUMN IF NOT EXISTS slug TEXT NOT NULL DEFAULT '';
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS host_id TEXT REFERENCES hosts(id) ON DELETE CASCADE;
 ALTER TABLE projects ADD COLUMN IF NOT EXISTS git_identity_id TEXT REFERENCES oauth_connections(id) ON DELETE SET NULL;
 
--- Backfill: create a default 'local' machine host for every user that lacks one,
--- then set host_id on orphaned projects.
-DO $$
-DECLARE
-    u RECORD;
-    hid TEXT;
-BEGIN
-    FOR u IN SELECT usr.id FROM users usr WHERE NOT EXISTS (
-        SELECT 1 FROM hosts WHERE hosts.user_id = usr.id AND hosts.slug = 'local'
-    ) LOOP
-        hid := gen_random_uuid()::text;
-        INSERT INTO hosts (id, user_id, slug, name, type, role)
-        VALUES (hid, u.id, 'local', 'Local Machine', 'machine', 'owner');
-    END LOOP;
-END
-$$;
-
-UPDATE projects p
-SET host_id = h.id
-FROM hosts h
-WHERE p.user_id = h.user_id AND h.slug = 'local' AND p.host_id IS NULL;
+-- ADR-0095: Remove auto-created local host stubs.
+-- projects.host_id has ON DELETE CASCADE, so projects referencing local hosts are
+-- cascade-deleted automatically. No need to NULL host_id first.
+DELETE FROM hosts WHERE slug = 'local';
 
 -- Backfill slug from name for projects that have no slug set.
 UPDATE projects

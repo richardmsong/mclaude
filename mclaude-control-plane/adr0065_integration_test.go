@@ -37,7 +37,16 @@ func TestIntegration_HandleGetProjectHTTP_ImportRefNull(t *testing.T) {
 	}
 	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
 
-	proj, err := db.CreateProject(ctx, "adr0065-proj-p1", userID, "Test Project Null Import", "")
+	// ADR-0095: insert a test host row before creating a project.
+	hostID := "adr0065-proj-h1"
+	if _, herr := db.pool.Exec(ctx,
+		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'test-host-p1', 'Test Host P1', 'machine', 'owner', NOW())
+		 ON CONFLICT (user_id, slug) DO NOTHING`,
+		hostID, userID); herr != nil {
+		t.Fatalf("insert test host: %v", herr)
+	}
+
+	proj, err := db.CreateProject(ctx, "adr0065-proj-p1", userID, "Test Project Null Import", "", hostID)
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
@@ -95,7 +104,16 @@ func TestIntegration_HandleGetProjectHTTP_ImportRefNonNull(t *testing.T) {
 	}
 	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
 
-	proj, err := db.CreateProject(ctx, "adr0065-proj-p2", userID, "Test Project With Import", "")
+	// ADR-0095: insert a test host row before creating a project.
+	hostID := "adr0065-proj-h2"
+	if _, herr := db.pool.Exec(ctx,
+		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'test-host-p2', 'Test Host P2', 'machine', 'owner', NOW())
+		 ON CONFLICT (user_id, slug) DO NOTHING`,
+		hostID, userID); herr != nil {
+		t.Fatalf("insert test host: %v", herr)
+	}
+
+	proj, err := db.CreateProject(ctx, "adr0065-proj-p2", userID, "Test Project With Import", "", hostID)
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}

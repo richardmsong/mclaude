@@ -139,8 +139,10 @@ func (s *Server) handleProjectCreate(nc *nats.Conn, msg *nats.Msg, userSlug, sub
 		return
 	}
 
+	ctx := context.Background()
+
 	// Resolve user by slug to get UUID (needed for DB writes and ProvisionRequest.UserID).
-	user, err := s.db.GetUserBySlug(context.Background(), userSlug)
+	user, err := s.db.GetUserBySlug(ctx, userSlug)
 	if err != nil {
 		replyError(msg, "internal error")
 		return
@@ -169,9 +171,72 @@ func (s *Server) handleProjectCreate(nc *nats.Conn, msg *nats.Msg, userSlug, sub
 		hostSlug = req.HostSlug
 	}
 
+	// ADR-0095: For the legacy user-scoped subject (no host in subject), enforce
+	// host presence and resolve hostSlug before calling CreateProjectWithIdentity.
+	var resolvedHostID string
+	if subjectHostSlug != "" {
+		// Host-scoped subject: host slug is authoritative from the NATS subject.
+		// Look up the host to get its UUID.
+		host, herr := s.db.GetHostBySlug(ctx, hostSlug)
+		if herr != nil || host == nil {
+			replyError(msg, "host not found")
+			return
+		}
+		resolvedHostID = host.ID
+	} else {
+		// Legacy user-scoped subject: must resolve host from payload or auto-select.
+		hasHosts, herr := s.db.HasHosts(ctx, userID)
+		if herr != nil {
+			replyError(msg, "internal error")
+			return
+		}
+		if !hasHosts {
+			b, _ := json.Marshal(map[string]string{
+				"error":   "no_hosts",
+				"message": "Register a host before creating a project",
+			})
+			if msg.Reply != "" {
+				_ = msg.Respond(b)
+			}
+			return
+		}
+		userHosts, herr := s.db.GetHostsByUser(ctx, userID)
+		if herr != nil {
+			replyError(msg, "internal error")
+			return
+		}
+		if hostSlug != "" {
+			// Payload specified a hostSlug — find it.
+			for _, h := range userHosts {
+				if h.Slug == hostSlug {
+					resolvedHostID = h.ID
+					break
+				}
+			}
+			if resolvedHostID == "" {
+				replyError(msg, "host not found")
+				return
+			}
+		} else if len(userHosts) == 1 {
+			// Exactly one host — auto-select.
+			resolvedHostID = userHosts[0].ID
+			hostSlug = userHosts[0].Slug
+		} else {
+			// Multiple hosts and no hostSlug.
+			b, _ := json.Marshal(map[string]string{
+				"error":   "host_required",
+				"message": "Specify hostSlug — user has multiple hosts",
+			})
+			if msg.Reply != "" {
+				_ = msg.Respond(b)
+			}
+			return
+		}
+	}
+
 	// Validate gitIdentityId if provided.
 	if req.GitIdentityID != nil && *req.GitIdentityID != "" {
-		conn, err := s.db.GetOAuthConnectionByID(context.Background(), *req.GitIdentityID)
+		conn, err := s.db.GetOAuthConnectionByID(ctx, *req.GitIdentityID)
 		if err != nil || conn == nil || conn.UserID != userID {
 			replyError(msg, "invalid gitIdentityId")
 			return
@@ -188,7 +253,7 @@ func (s *Server) handleProjectCreate(nc *nats.Conn, msg *nats.Msg, userSlug, sub
 	}
 
 	id := uuid.NewString()
-	proj, err := s.db.CreateProjectWithIdentity(context.Background(), id, userID, req.Name, req.GitURL, req.GitIdentityID)
+	proj, err := s.db.CreateProjectWithIdentity(ctx, id, userID, req.Name, req.GitURL, resolvedHostID, req.GitIdentityID)
 	if err != nil {
 		replyError(msg, "failed to create project")
 		return
@@ -218,7 +283,7 @@ func (s *Server) handleProjectCreate(nc *nats.Conn, msg *nats.Msg, userSlug, sub
 		// Determine whether this is a cluster host (routes via user-agent) or machine
 		// host (routes via host controller directly). Look up the owner row for this host.
 		var provSubject string
-		if host, herr := s.db.GetHostBySlug(context.Background(), hostSlug); herr == nil && host != nil && host.Type == "cluster" {
+		if host, herr := s.db.GetHostBySlug(ctx, hostSlug); herr == nil && host != nil && host.Type == "cluster" {
 			// ADR-0091: cluster host — publish to user-agent provisioning subject.
 			provSubject = "mclaude.users." + userSlug + ".hosts." + hostSlug + ".agent.projects.provision"
 		} else {

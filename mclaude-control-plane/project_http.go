@@ -112,8 +112,61 @@ func (s *Server) handleCreateProjectHTTP(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// ADR-0095: Require at least one registered host before creating a project.
+	hasHosts, err := s.db.HasHosts(r.Context(), userID)
+	if err != nil {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !hasHosts {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+			"error":   "no_hosts",
+			"message": "Register a host before creating a project",
+		})
+		return
+	}
+
+	// Resolve the host to use. The caller may specify hostSlug explicitly;
+	// if omitted, auto-select when exactly one host exists.
+	userHosts, err := s.db.GetHostsByUser(r.Context(), userID)
+	if err != nil {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	var resolvedHostID, hostSlug string
+	if req.HostSlug != "" {
+		// Caller specified a host — find it in the user's host list.
+		for _, h := range userHosts {
+			if h.Slug == req.HostSlug {
+				resolvedHostID = h.ID
+				hostSlug = h.Slug
+				break
+			}
+		}
+		if resolvedHostID == "" {
+			http.Error(w, "host not found", http.StatusBadRequest)
+			return
+		}
+	} else if len(userHosts) == 1 {
+		// Exactly one host — auto-select.
+		resolvedHostID = userHosts[0].ID
+		hostSlug = userHosts[0].Slug
+	} else {
+		// Multiple hosts and no hostSlug provided.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+			"error":   "host_required",
+			"message": "Specify hostSlug — user has multiple hosts",
+		})
+		return
+	}
+
 	id := uuid.NewString()
-	proj, err := s.db.CreateProjectWithIdentity(r.Context(), id, userID, req.Name, req.GitURL, req.GitIdentityID)
+	proj, err := s.db.CreateProjectWithIdentity(r.Context(), id, userID, req.Name, req.GitURL, resolvedHostID, req.GitIdentityID)
 	if err != nil {
 		if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
 			http.Error(w, "project slug already exists", http.StatusConflict)
@@ -129,11 +182,6 @@ func (s *Server) handleCreateProjectHTTP(w http.ResponseWriter, r *http.Request,
 	var userSlug string
 	if user, uerr := s.db.GetUserByID(r.Context(), userID); uerr == nil && user != nil {
 		userSlug = user.Slug
-	}
-
-	hostSlug := req.HostSlug
-	if hostSlug == "" {
-		hostSlug = proj.HostSlug // from DB join
 	}
 
 	// Write to KV so session-store watchers pick it up immediately.

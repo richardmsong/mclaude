@@ -1929,12 +1929,21 @@ func TestIntegration_ProjectCreate_NATS(t *testing.T) {
 	}
 	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
 
+	// ADR-0095: insert a host row so the project creation is not blocked by the no_hosts guard.
+	hostID := uuid.NewString()
+	if _, herr := db.pool.Exec(ctx,
+		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'proj-nats-host', 'ProjNats Host', 'machine', 'owner', NOW())`,
+		hostID, user.ID); herr != nil {
+		t.Fatalf("insert test host: %v", herr)
+	}
+	t.Cleanup(func() { db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) }) //nolint:errcheck
+
 	// Ensure per-user JetStream resources exist (needed for KV write).
 	if err := ensureUserResources(nc, user.Slug); err != nil {
 		t.Logf("ensureUserResources (non-fatal): %v", err)
 	}
 
-	// Publish project create.
+	// Publish project create (legacy user-scoped subject — handler auto-selects the single host).
 	subject := fmt.Sprintf("mclaude.users.%s.api.projects.create", user.Slug)
 	payload, _ := json.Marshal(map[string]string{
 		"name": "Test Project NATS",
@@ -2049,5 +2058,116 @@ func TestIntegration_CheckSlug_Taken(t *testing.T) {
 	}
 	if available, _ := resp["available"].(bool); available {
 		t.Errorf("available = true; want false for taken slug; reply: %s", reply.Data)
+	}
+}
+
+// ---- ADR-0095: no_hosts guard on project creation ----
+
+// TestIntegration_CreateProject_BlockedWithoutHosts verifies that
+// POST /api/users/{uslug}/projects returns 422 no_hosts when the user has zero
+// registered hosts (ADR-0095).
+func TestIntegration_CreateProject_BlockedWithoutHosts(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	userID := "no-host-" + uuid.NewString()[:8]
+	user, err := db.CreateUser(ctx, userID, userID+"@t.example.com", "NoHost", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	accountKP, _ := nkeys.CreateAccount()
+	srv := NewServer(db, accountKP, integDeps.NATSAddr, "", 8*time.Hour)
+	srv.SetExternalURL("http://localhost:8080")
+
+	// Issue a JWT for the user (no password needed — use legacy JWT issuance).
+	jwt, _, err := IssueUserJWTLegacy(user.ID, user.Slug, accountKP, int64(8*time.Hour.Seconds()))
+	if err != nil {
+		t.Fatalf("IssueUserJWTLegacy: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	srv.RegisterRoutes(mux)
+
+	body := `{"name":"My Project"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/users/"+user.Slug+"/projects",
+		bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d; want 422; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["error"] != "no_hosts" {
+		t.Errorf("error = %q; want %q", resp["error"], "no_hosts")
+	}
+}
+
+// TestIntegration_CreateProject_SucceedsWithHost verifies that
+// POST /api/users/{uslug}/projects succeeds when the user has at least one
+// registered host (ADR-0095).
+func TestIntegration_CreateProject_SucceedsWithHost(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	userID := "with-host-" + uuid.NewString()[:8]
+	user, err := db.CreateUser(ctx, userID, userID+"@t.example.com", "WithHost", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Insert a test host row (ADR-0095: same pattern as TestIntegration_CheckSlug_Taken).
+	hostID := uuid.NewString()
+	if _, herr := db.pool.Exec(ctx,
+		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'test-host', 'Test Host', 'machine', 'owner', NOW())`,
+		hostID, user.ID); herr != nil {
+		t.Fatalf("insert test host: %v", herr)
+	}
+	t.Cleanup(func() { db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) }) //nolint:errcheck
+
+	accountKP, _ := nkeys.CreateAccount()
+	srv := NewServer(db, accountKP, integDeps.NATSAddr, "", 8*time.Hour)
+	srv.SetExternalURL("http://localhost:8080")
+
+	jwt, _, err := IssueUserJWTLegacy(user.ID, user.Slug, accountKP, int64(8*time.Hour.Seconds()))
+	if err != nil {
+		t.Fatalf("IssueUserJWTLegacy: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	srv.RegisterRoutes(mux)
+
+	body := `{"name":"My Project","hostSlug":"test-host"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/users/"+user.Slug+"/projects",
+		bytes.NewBufferString(body))
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	// 201 Created or provisioning failure (503) — either means the DB row was created.
+	// The provisioning request will time out since no host controller is running in the test.
+	// We verify the project row exists in DB regardless.
+	var projCount int
+	if err := db.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM projects WHERE user_id = $1`, user.ID).Scan(&projCount); err != nil {
+		t.Fatalf("count projects: %v", err)
+	}
+	// Even if provisioning fails, the DB row should have been created (status='failed').
+	// The key invariant: it did NOT return 422 no_hosts.
+	if rec.Code == http.StatusUnprocessableEntity {
+		t.Fatalf("got 422; host was registered but got no_hosts: %s", rec.Body.String())
+	}
+	if projCount == 0 {
+		t.Errorf("no project row in DB after successful host registration; status=%d body=%s",
+			rec.Code, rec.Body.String())
 	}
 }
