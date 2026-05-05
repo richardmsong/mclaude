@@ -26,10 +26,6 @@ export class MockAuthClient implements IAuthClient {
     return this.loginResponse
   }
 
-  async loginSSO(_provider: string): Promise<string> {
-    return 'https://sso.example.com/callback'
-  }
-
   async refresh(): Promise<{ jwt: string }> {
     this.refreshCalls.push(Date.now())
     if (this.shouldFailRefresh) throw new Error('Refresh failed')

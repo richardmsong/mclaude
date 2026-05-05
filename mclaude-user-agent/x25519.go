@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 
-	"golang.org/x/crypto/curve25519"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -22,24 +22,16 @@ type X25519Keypair struct {
 }
 
 // GenerateX25519Keypair generates a new X25519 keypair suitable for NaCl box operations.
+// Uses crypto/ecdh.X25519() which handles RFC 7748 clamping internally — ADR-0096.
 func GenerateX25519Keypair() (*X25519Keypair, error) {
-	var priv [32]byte
-	if _, err := rand.Read(priv[:]); err != nil {
-		return nil, fmt.Errorf("generate X25519 private key: %w", err)
-	}
-	// Clamp the private key per RFC 7748.
-	priv[0] &= 248
-	priv[31] &= 127
-	priv[31] |= 64
-
-	pub, err := curve25519.X25519(priv[:], curve25519.Basepoint)
+	key, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("derive X25519 public key: %w", err)
+		return nil, fmt.Errorf("generate X25519 keypair: %w", err)
 	}
 
 	kp := &X25519Keypair{}
-	copy(kp.Private[:], priv[:])
-	copy(kp.Public[:], pub)
+	copy(kp.Private[:], key.Bytes())
+	copy(kp.Public[:], key.PublicKey().Bytes())
 	return kp, nil
 }
 
@@ -67,13 +59,13 @@ func LoadOrGenerateX25519Keypair(ctx context.Context, k8s kubernetes.Interface, 
 		if len(decoded) != 32 {
 			return nil, fmt.Errorf("x25519-private has wrong length %d (expected 32)", len(decoded))
 		}
-		kp := &X25519Keypair{}
-		copy(kp.Private[:], decoded)
-		pub, derivErr := curve25519.X25519(kp.Private[:], curve25519.Basepoint)
+		ecdhKey, derivErr := ecdh.X25519().NewPrivateKey(decoded)
 		if derivErr != nil {
 			return nil, fmt.Errorf("derive public key from stored private: %w", derivErr)
 		}
-		copy(kp.Public[:], pub)
+		kp := &X25519Keypair{}
+		copy(kp.Private[:], ecdhKey.Bytes())
+		copy(kp.Public[:], ecdhKey.PublicKey().Bytes())
 		return kp, nil
 	}
 

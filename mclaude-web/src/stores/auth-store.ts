@@ -76,10 +76,6 @@ export class AuthStore {
     this._setState({ userId: tokens.userId, userSlug, jwt: tokens.jwt, status: 'authenticated' })
   }
 
-  async loginSSO(provider: string): Promise<string> {
-    return this.authClient.loginSSO(provider)
-  }
-
   async logout(): Promise<void> {
     this._stopRefreshLoop()
     await this.authClient.logout()

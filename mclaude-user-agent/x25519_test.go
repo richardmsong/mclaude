@@ -11,30 +11,21 @@ import (
 )
 
 // TestGenerateX25519Keypair verifies that a keypair is generated with correct properties.
+// Uses crypto/ecdh per ADR-0096; clamping is handled internally by the stdlib and is
+// not reflected in the raw bytes returned by key.Bytes().
 func TestGenerateX25519Keypair(t *testing.T) {
 	kp, err := GenerateX25519Keypair()
 	if err != nil {
 		t.Fatalf("GenerateX25519Keypair: %v", err)
 	}
 
-	// Private key should be non-zero.
+	// Private and public keys should be non-zero.
 	var zero [32]byte
 	if kp.Private == zero {
 		t.Error("private key is all zeros")
 	}
 	if kp.Public == zero {
 		t.Error("public key is all zeros")
-	}
-
-	// RFC 7748 clamp bits.
-	if kp.Private[0]&7 != 0 {
-		t.Error("private key low 3 bits not cleared")
-	}
-	if kp.Private[31]&128 != 0 {
-		t.Error("private key bit 255 not cleared")
-	}
-	if kp.Private[31]&64 == 0 {
-		t.Error("private key bit 254 not set")
 	}
 
 	// Two generated keypairs should be different.

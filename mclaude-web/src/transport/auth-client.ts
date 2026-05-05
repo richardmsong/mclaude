@@ -22,13 +22,6 @@ export class AuthClient implements IAuthClient {
     return tokens
   }
 
-  async loginSSO(provider: string): Promise<string> {
-    const res = await fetch(`${this.baseUrl}/auth/sso/${provider}`)
-    if (!res.ok) throw new Error(`SSO failed: ${res.status}`)
-    const { redirectUrl } = await res.json()
-    return redirectUrl as string
-  }
-
   async refresh(): Promise<{ jwt: string }> {
     const res = await fetch(`${this.baseUrl}/auth/refresh`, {
       method: 'POST',
@@ -41,12 +34,6 @@ export class AuthClient implements IAuthClient {
   }
 
   async logout(): Promise<void> {
-    if (this._tokens) {
-      await fetch(`${this.baseUrl}/auth/logout`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${this._tokens.jwt}` },
-      }).catch(() => {})
-    }
     this._tokens = null
     this._clearPersisted()
   }

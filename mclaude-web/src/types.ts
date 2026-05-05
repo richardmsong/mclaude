@@ -85,7 +85,6 @@ export interface LoginProject {
 
 export interface IAuthClient {
   login(email: string, password: string): Promise<AuthTokens>
-  loginSSO(provider: string): Promise<string> // redirect URL
   refresh(): Promise<{ jwt: string }>
   logout(): Promise<void>
   getStoredTokens(): AuthTokens | null

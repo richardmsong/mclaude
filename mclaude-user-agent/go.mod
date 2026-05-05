@@ -12,7 +12,10 @@ require (
 	k8s.io/client-go v0.35.2
 )
 
-require github.com/cenkalti/backoff/v5 v5.0.3
+require (
+	github.com/cenkalti/backoff/v5 v5.0.3
+	github.com/nats-io/nats-server/v2 v2.12.6
+)
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.6.0-default-no-op // indirect
@@ -37,7 +40,6 @@ require (
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nats-io/jwt/v2 v2.8.1 // indirect
-	github.com/nats-io/nats-server/v2 v2.12.6 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
