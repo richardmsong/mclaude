@@ -1,8 +1,9 @@
 # ADR: Dockerfile chmod for control-plane binary
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-05: accepted
+- 2026-05-05: implemented — CI run 25359655898 deploy-main green; control-plane pod Running on new image (`main-83a367d`).
 
 ## Overview
 
