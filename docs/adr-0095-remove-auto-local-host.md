@@ -1,9 +1,10 @@
 # ADR: Remove automatic local host creation from CreateUser
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-05: draft
 - 2026-05-05: accepted — paired with spec-control-plane.md, spec-state-schema.md, spec-host-picker.md, spec-web.md
+- 2026-05-05: implemented — all scope CLEAN
 
 ## Overview
 
