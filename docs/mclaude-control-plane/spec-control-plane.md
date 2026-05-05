@@ -108,7 +108,7 @@ HTTP handlers for project CRUD are wired and functional. `POST` (create) inserts
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/users/{uslug}/projects` | Creates a project on a specified host. **Known gap (CP-6):** creates Postgres row but skips KV write, provisioning request, and `publishProjectsUpdated` broadcast — HTTP-created projects are invisible to the SPA and have no session-agent pod. |
+| `POST` | `/api/users/{uslug}/projects` | Creates a project on a specified host. Requires `hostSlug` in request body. Returns 422 `{error: "no_hosts"}` if the user has zero registered hosts. Returns 422 `{error: "host_required"}` if the user has multiple hosts and `hostSlug` is omitted. If the user has exactly one host and `hostSlug` is omitted, auto-selects it (ADR-0095). |
 | `GET` | `/api/users/{uslug}/projects` | Lists all projects for the user. |
 | `GET` | `/api/users/{uslug}/projects/{pslug}` | Gets a single project by slug. |
 | `DELETE` | `/api/users/{uslug}/projects/{pslug}` | Deletes a project. |
@@ -177,7 +177,7 @@ Per ADR-0035 the control-plane communicates with controllers over host-scoped NA
 | `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.attachments.confirm` | Attachment upload confirmation (ADR-0053). Agent sends `{id}`, CP records metadata in `attachments` table (sets `confirmed=true`). |
 | `mclaude.users.{uslug}.hosts.{hslug}.projects.check-slug` | Project slug availability check (ADR-0053). CLI sends `{slug}`. CP checks uniqueness of the slug per-user-per-host against Postgres. Returns `{available: true}` if the slug is free, or `{available: false, suggestion: "slug-2"}` with a suggested alternative if taken. |
 
-Note: The control-plane also subscribes to `mclaude.users.*.api.projects.create` (a user-scoped NATS subject without the host segment) for backward-compatible NATS-based project creation from the SPA. This subject is published by the SPA's `subjProjectsCreate` helper. The handler creates the Postgres row, writes to `mclaude-projects` KV, and publishes a provisioning request to the host-scoped controller subject. This NATS path coexists with the HTTP `POST /api/users/{uslug}/projects` endpoint; both are functional. **Known bug:** `CreateProjectWithIdentity` does not compute or set the `slug` column on INSERT — new projects get `slug=''` until the next startup migration backfill runs. This also means `ProvisionRequest.ProjectSlug` is empty. **Known bug:** `host_id` column is nullable in the DDL despite the spec requiring NOT NULL — `CreateProjectWithIdentity` does not set `host_id`, so NATS-created projects have `host_id = NULL` until the backfill.
+Note: The control-plane also subscribes to `mclaude.users.*.api.projects.create` (a user-scoped NATS subject without the host segment) for backward-compatible NATS-based project creation from the SPA. The handler requires a registered host: returns `{error: "no_hosts"}` if the user has zero hosts, resolves `hostSlug` from the payload (auto-selects if user has exactly one host, returns `{error: "host_required"}` if multiple hosts and no `hostSlug`). `host_id` is always set on INSERT (ADR-0095). **Known bug:** `CreateProjectWithIdentity` does not compute or set the `slug` column on INSERT — new projects get `slug=''` until the next startup migration backfill runs.
 
 ### NATS KV Buckets and JetStream Streams
 
@@ -270,6 +270,8 @@ Per ADR-0054, all identity types (user, host, agent) generate their own NKey pai
 
 Single auth code path: the user-agent always re-runs challenge-response when its JWT nears expiry or when it receives the activation signal. Whatever JWT matches the current grant status is what gets issued. There is no separate "activation" credential — `.agent.activate` carries only an empty/status signal, never a JWT.
 
+**User creation does not insert any host row** (ADR-0095). Hosts are only created through the BYOH attestation flow (`mclaude.users.*.hosts._.register` or device-code registration). Users start with zero hosts and must register one before creating projects.
+
 **Per-user resource provisioning:** On user registration (first login), CP creates per-user KV buckets (`mclaude-sessions-{uslug}`, `mclaude-projects-{uslug}`, `mclaude-user-info-{uslug}` — ADR-0091) and the per-user sessions stream (`MCLAUDE_SESSIONS_{uslug}`). These resources are created once per user and persist. **Default-platform auto-grant is invoked idempotently on every user JWT issuance** (not only on first user creation): `issueJWTForNKey` queries `SELECT slug FROM hosts WHERE is_default_platform = true LIMIT 1`; if a default platform exists, it `UpsertHostGrant`s a row `(host_slug=<default>, user_slug, status='accepted', accepted_at=NOW())` and publishes to `mclaude.hosts.{<default>}.grants.create` on behalf of the host. `UpsertHostGrant` uses `ON CONFLICT DO NOTHING` so re-fires are no-ops. The host controller spins up the user-agent + namespace on first delivery; subsequent fires are idempotent. Once the user-agent registers and authenticates, CP issues a full JWT immediately.
 
 The auth middleware on protected routes decodes and validates the JWT against the account public key, extracts the user UUID into the request context, and enforces access boundaries: returns 403 Forbidden when the JWT subject (user slug) does not match the URL `{uslug}` parameter. Admin users bypass the slug-match check. Admin routes additionally require `isAdminMiddleware`: after JWT validation, the user's `is_admin` flag is fetched from Postgres; 403 Forbidden is returned if false. Admin = a normal user with `is_admin=true` — no separate token or port.
@@ -338,6 +340,8 @@ On project deletion (ADR-0053), in addition to the standard Postgres + KV + prov
 - **Device-code expired (>10 min)**: `POST /api/hosts/register` returns 410 Gone with `{error: "code expired, restart registration"}`.
 - **Device-code already redeemed**: returns 409 Conflict.
 - **Admin endpoint called by non-admin**: returns 403 Forbidden.
+- **Project creation with no registered hosts**: returns 422 with `{error: "no_hosts", message: "Register a host before creating a project"}` (ADR-0095). Applies to both HTTP and NATS project creation paths.
+- **Project creation with multiple hosts and no `hostSlug`**: returns 422 with `{error: "host_required", message: "Specify hostSlug — user has multiple hosts"}` (ADR-0095).
 
 ## Integration Tests
 
@@ -352,6 +356,8 @@ The `go test -tags integration` suite is the Phase 1 CI gate. All tests use `htt
 | `TestIntegration_BootstrapAdminUser_FreshWithPassword` | `bootstrapAdminUser` with non-empty password on empty DB: user row created with non-empty `password_hash`, `is_admin=true`; login succeeds |
 | `TestIntegration_BootstrapAdminUser_ExistingUserGetsPassword` | `bootstrapAdminUser` called on existing user with empty `password_hash`: hash is written, login succeeds after call |
 | `TestIntegration_BootstrapAdminUser_EmailWithoutPassword_Errors` | `bootstrapAdminUser` with email set and empty password when user does not yet exist: returns a non-nil error; no user row is created |
+| `TestIntegration_CreateProject_BlockedWithoutHosts` | `POST /api/users/{uslug}/projects` returns 422 `no_hosts` when user has zero registered hosts (ADR-0095) |
+| `TestIntegration_CreateProject_SucceedsWithHost` | `POST /api/users/{uslug}/projects` succeeds when user has at least one registered host (ADR-0095) |
 
 **Admin routes (main port, `isAdminMiddleware`):**
 

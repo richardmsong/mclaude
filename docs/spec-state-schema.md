@@ -79,11 +79,7 @@ Readers: control-plane (`GetHostsByUser`, `GetHostBySlug`, login handler, auth m
 
 Slug charset: per ADR-0024. The reserved-word blocklist is `{users, hosts, projects, sessions, clusters, api, events, lifecycle, quota, terminal, create, delete, input, config, control}` — extended by ADR-0054 with session subject type-tokens. `clusters` stays in the blocklist defensively even though no `mclaude.clusters.*` subjects exist anymore.
 
-#### Default machine host
-
-On user creation, control-plane writes one row to `hosts` with `slug='local'`, `type='machine'`, `user_id=<new user id>`. The user's first project is associated with this host unless explicitly registered against a different one. **Known bug:** `POST /admin/users` and `seedDev` `CreateUser` do not create the default host row — only the startup migration backfill does. Admin-created users cannot create projects until the binary restarts.
-
-See `docs/adr-0035-unified-host-architecture.md` for the unified host model and `docs/adr-0054-nats-jetstream-permission-tightening.md` for the host access and credential model.
+See `docs/adr-0035-unified-host-architecture.md` for the unified host model and `docs/adr-0054-nats-jetstream-permission-tightening.md` for the host access and credential model. Hosts are only created through the BYOH attestation flow (ADR-0095) — no automatic host rows are inserted on user creation.
 
 ### `host_access`
 

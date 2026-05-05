@@ -25,7 +25,7 @@ When the user opens the New Project sheet (from the dashboard overflow menu), th
 └─────────────────────────────────┘
 ```
 
-- Default selection: the user's `local` machine host (the `slug=local`, `type=machine` row created at user signup).
+- Default selection: the user's first registered host (stored in localStorage `mclaude.defaultHostSlug`). If no hosts are registered, the host picker is disabled and the UI shows an empty state prompting the user to register a host (ADR-0095).
 - Dropdown lists every host in the login response's `hosts[]` array, ordered: machine hosts owned by the user first (alphabetical), then cluster hosts (alphabetical).
 - Each row in the dropdown shows: host display name + slug + a one-character type badge (🖥️ machine / ☁️ cluster) + role indicator (you / shared).
 - **Disabled** rows (not selectable) for hosts where `online === false`. Tapping shows a tooltip "{name} is offline — wait for it to reconnect or pick another host."
@@ -121,7 +121,8 @@ This runtime fallback is distinct from the **initial** direct-vs-hub selection p
 
 | State | Display |
 |-------|---------|
-| User has only the default `local` host | Settings → Hosts shows just `🖥️ local` and the `+ Register a new host` button. New Project's Host field is non-disclosed (auto-selected, hidden) until a second host exists. |
+| User has zero hosts | Settings → Hosts shows an empty state: "No hosts registered. Run `mclaude host register` on your machine to get started." and the `+ Register a new host` button. New Project button is disabled. (ADR-0095) |
+| User has exactly one host | New Project's Host field is non-disclosed (auto-selected, hidden) until a second host exists. |
 | All hosts offline at New Project time | All dropdown rows disabled. Banner at top: "No hosts online. Start `mclaude daemon` on a registered machine, or contact an admin to register a cluster." |
 | Device-code expired before registration completes | Modal collapses to "Code expired — Try again." |
 | Device-code already redeemed (409) | Modal shows "This code was already used. Generate a new one." |
@@ -132,7 +133,7 @@ This runtime fallback is distinct from the **initial** direct-vs-hub selection p
 ## Dependencies
 
 - Login response shape per `docs/spec-state-schema.md` — Login Response Shape.
-- AuthStore extension: `getHosts(): Host[]` and `getDefaultHostSlug(): string` (reads localStorage, falls back to the `local` machine host).
+- AuthStore extension: `getHosts(): Host[]` and `getDefaultHostSlug(): string | null` (reads localStorage; returns `null` if no hosts registered — callers must handle the no-host case).
 - SessionStore extension: per-host JetStream KV watches with conditional `jsDomain` qualification.
 - EventStore extension: dual-NATS strategy (hub always, direct-to-worker on demand for cluster hosts).
 - Control-plane endpoints `POST /api/users/{uslug}/hosts/code`, `POST /api/hosts/register`, `GET /api/users/{uslug}/hosts`, `DELETE /api/users/{uslug}/hosts/{hslug}` (see `docs/mclaude-control-plane/spec-control-plane.md`).
