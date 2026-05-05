@@ -18,7 +18,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -402,11 +401,6 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 			redirectWithError(w, r, externalURL, returnURL, "storage")
 			return
 		}
-		// Reconcile CLI config.
-		if err := s.reconcileUserCLIConfig(r.Context(), st.UserID); err != nil {
-			log.Warn().Err(err).Str("userId", st.UserID).Msg("OAuth: CLI config reconcile failed (non-fatal)")
-		}
-
 		// GAP-CP-11: Set users.oauth_id if currently NULL.
 		if profile.ProviderUserID != "" {
 			_, _ = s.db.pool.Exec(r.Context(),
@@ -502,9 +496,6 @@ func (s *Server) handleAddPAT(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to save connection", http.StatusInternalServerError)
 			return
 		}
-		if err := s.reconcileUserCLIConfig(r.Context(), userID); err != nil {
-			log.Warn().Err(err).Str("userId", userID).Msg("PAT: CLI config reconcile failed (non-fatal)")
-		}
 	}
 
 	// GAP-CP-03: Notify controllers so they refresh user-secrets with new PAT.
@@ -596,11 +587,6 @@ func (s *Server) handleDeleteConnection(w http.ResponseWriter, r *http.Request) 
 				}
 			}
 		}
-	}
-
-	// Rebuild CLI config.
-	if err := s.reconcileUserCLIConfig(r.Context(), userID); err != nil {
-		log.Warn().Err(err).Str("userId", userID).Msg("disconnect: CLI config reconcile failed (non-fatal)")
 	}
 
 	// GAP-CP-03: Notify controllers so they refresh user-secrets after disconnect.
@@ -1169,120 +1155,6 @@ func (s *Server) readSecretKey(ctx context.Context, userID, key string) (string,
 	return "", nil
 }
 
-// ---------------------------------------------------------------------------
-// CLI config reconciliation (no-op per ADR-0035)
-// ---------------------------------------------------------------------------
-
-// reconcileUserCLIConfig is a no-op — K8s Secret management moved to controller-k8s per ADR-0035.
-func (s *Server) reconcileUserCLIConfig(ctx context.Context, userID string) error {
-	return nil
-}
-
-// buildGHHostsYAML builds the gh-hosts.yml content from GitHub-type connections.
-// Format: per-host users map, most-recently-connected user is the active default.
-func buildGHHostsYAML(conns []*OAuthConnection, tokenMap map[string]string) string {
-	// Group GitHub connections by host.
-	type hostEntry struct {
-		users       map[string]string // username -> token
-		defaultUser string
-		latestTime  time.Time
-	}
-	hosts := make(map[string]*hostEntry)
-
-	for _, c := range conns {
-		if c.ProviderType != "github" {
-			continue
-		}
-		token := tokenMap[c.ID]
-		if token == "" {
-			continue
-		}
-		host := extractHost(c.BaseURL)
-		if host == "" {
-			continue
-		}
-		if _, ok := hosts[host]; !ok {
-			hosts[host] = &hostEntry{users: make(map[string]string)}
-		}
-		hosts[host].users[c.Username] = token
-		if c.ConnectedAt.After(hosts[host].latestTime) {
-			hosts[host].latestTime = c.ConnectedAt
-			hosts[host].defaultUser = c.Username
-		}
-	}
-
-	if len(hosts) == 0 {
-		return ""
-	}
-
-	// Sort hosts for deterministic output.
-	hostNames := make([]string, 0, len(hosts))
-	for h := range hosts {
-		hostNames = append(hostNames, h)
-	}
-	sort.Strings(hostNames)
-
-	var sb strings.Builder
-	for _, host := range hostNames {
-		entry := hosts[host]
-		sb.WriteString(host + ":\n")
-		sb.WriteString("    users:\n")
-
-		// Sort users for determinism.
-		userNames := make([]string, 0, len(entry.users))
-		for u := range entry.users {
-			userNames = append(userNames, u)
-		}
-		sort.Strings(userNames)
-		for _, u := range userNames {
-			sb.WriteString("        " + u + ":\n")
-			sb.WriteString("            oauth_token: " + entry.users[u] + "\n")
-		}
-		sb.WriteString("    user: " + entry.defaultUser + "\n")
-	}
-	return sb.String()
-}
-
-// buildGlabConfigYAML builds the glab-config.yml content from GitLab-type connections.
-func buildGlabConfigYAML(conns []*OAuthConnection, tokenMap map[string]string) string {
-	type hostEntry struct {
-		token    string
-		host     string
-		username string
-	}
-	var hosts []hostEntry
-
-	for _, c := range conns {
-		if c.ProviderType != "gitlab" {
-			continue
-		}
-		token := tokenMap[c.ID]
-		if token == "" {
-			continue
-		}
-		host := extractHost(c.BaseURL)
-		if host == "" {
-			continue
-		}
-		hosts = append(hosts, hostEntry{token: token, host: host, username: c.Username})
-	}
-
-	if len(hosts) == 0 {
-		return ""
-	}
-
-	sort.Slice(hosts, func(i, j int) bool { return hosts[i].host < hosts[j].host })
-
-	var sb strings.Builder
-	sb.WriteString("hosts:\n")
-	for _, h := range hosts {
-		sb.WriteString("  " + h.host + ":\n")
-		sb.WriteString("    token: " + h.token + "\n")
-		sb.WriteString("    api_host: " + h.host + "\n")
-		sb.WriteString("    user: " + h.username + "\n")
-	}
-	return sb.String()
-}
 
 // extractHost parses a URL and returns just the hostname (no scheme, no port if standard).
 func extractHost(rawURL string) string {
@@ -1557,7 +1429,6 @@ func (s *Server) refreshGitLabToken(ctx context.Context, conn *OAuthConnection) 
 			if _, dbErr := s.db.DeleteOAuthConnection(ctx, conn.ID); dbErr != nil {
 				log.Warn().Err(dbErr).Str("connectionId", conn.ID).Msg("delete expired GitLab connection")
 			}
-			_ = s.reconcileUserCLIConfig(ctx, conn.UserID)
 			return fmt.Errorf("refresh token expired")
 		}
 	}
@@ -1579,11 +1450,6 @@ func (s *Server) refreshGitLabToken(ctx context.Context, conn *OAuthConnection) 
 		if err := s.db.UpdateTokenExpiry(ctx, conn.ID, newExpiry); err != nil {
 			log.Warn().Err(err).Str("connectionId", conn.ID).Msg("update token_expires_at")
 		}
-	}
-
-	// Rebuild CLI config.
-	if err := s.reconcileUserCLIConfig(ctx, conn.UserID); err != nil {
-		log.Warn().Err(err).Str("connectionId", conn.ID).Msg("CLI config reconcile after refresh")
 	}
 
 	// GAP-CP-03: Notify controllers so they refresh user-secrets with new GitLab token.
@@ -1625,67 +1491,3 @@ func exchangeRefreshToken(p *ProviderConfig, refreshToken string) (*tokenRespons
 	return &tr, nil
 }
 
-// ---------------------------------------------------------------------------
-// Startup reconcile
-// ---------------------------------------------------------------------------
-
-// ReconcileAllUserCLIConfigs runs reconcileUserCLIConfig for all users on startup.
-// Best-effort: each user gets a 10-second timeout; failures are logged and skipped.
-// Also cleans up orphaned connections (oauth type whose provider_id no longer exists in config).
-func (s *Server) ReconcileAllUserCLIConfigs(ctx context.Context) {
-	if s.db == nil {
-		return
-	}
-
-	rows, err := s.db.pool.Query(ctx, `SELECT id FROM users`)
-	if err != nil {
-		log.Warn().Err(err).Msg("startup reconcile: list users failed")
-		return
-	}
-	defer rows.Close()
-
-	var userIDs []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err == nil {
-			userIDs = append(userIDs, id)
-		}
-	}
-
-	// Collect current provider IDs.
-	adminProviderIDs := make(map[string]bool)
-	if s.providers != nil {
-		for _, p := range s.providers.providers {
-			adminProviderIDs[p.ID] = true
-		}
-	}
-
-	for _, userID := range userIDs {
-		userCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		func() {
-			defer cancel()
-			// Cleanup orphaned OAuth connections.
-			conns, err := s.db.GetOAuthConnectionsByUser(userCtx, userID)
-			if err == nil {
-				for _, c := range conns {
-					if c.AuthType == "oauth" && !adminProviderIDs[c.ProviderID] {
-						log.Info().Str("connectionId", c.ID).Str("userId", userID).
-							Str("providerId", c.ProviderID).
-							Msg("startup: removing orphaned OAuth connection (provider removed from Helm)")
-						_ = s.removeSecretKeys(userCtx, userID, []string{
-							"conn-" + c.ID + "-token",
-							"conn-" + c.ID + "-refresh-token",
-							"conn-" + c.ID + "-username",
-						})
-						if _, err := s.db.DeleteOAuthConnection(userCtx, c.ID); err != nil {
-							log.Warn().Err(err).Str("connectionId", c.ID).Msg("startup: delete orphaned connection")
-						}
-					}
-				}
-			}
-			if err := s.reconcileUserCLIConfig(userCtx, userID); err != nil {
-				log.Warn().Err(err).Str("userId", userID).Msg("startup: CLI config reconcile failed (non-fatal)")
-			}
-		}()
-	}
-}
