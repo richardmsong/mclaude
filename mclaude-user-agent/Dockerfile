@@ -1,10 +1,7 @@
-FROM alpine:3.21 AS chmod-stage
-COPY user-agent /usr/local/bin/user-agent
-RUN chmod +x /usr/local/bin/user-agent
-
+# syntax=docker/dockerfile:1.4
 FROM gcr.io/distroless/static:nonroot
 
-COPY --from=chmod-stage /usr/local/bin/user-agent /usr/local/bin/user-agent
+COPY --chmod=0755 user-agent /usr/local/bin/user-agent
 
 ENV LOG_LEVEL=info
 

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.4
 # Runtime: node base for claude CLI, Go binary copied from build context.
 # claude-code installed via native installer (pre-built binary download, not npm compile).
 FROM node:22-alpine
@@ -51,10 +52,8 @@ RUN chmod +x /usr/local/bin/pkg && \
     ln -sf /usr/local/bin/pkg /usr/local/bin/apt && \
     ln -sf /usr/local/bin/pkg /usr/local/bin/brew
 
-COPY session-agent-${TARGETARCH} /usr/local/bin/session-agent
-RUN chmod +x /usr/local/bin/session-agent
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY --chmod=0755 session-agent-${TARGETARCH} /usr/local/bin/session-agent
+COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 ENV LOG_LEVEL=info
 ENV NATS_URL=nats://nats:4222
