@@ -91,7 +91,7 @@ kubectl cluster-info   # verify: should show 127.0.0.1, not 0.0.0.0
 
 ```bash
 NS="mclaude-system"
-RELEASE="mclaude"
+RELEASE="mclaude-cp"
 
 kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
 
@@ -102,7 +102,7 @@ kubectl create secret generic mclaude-postgres \
   --dry-run=client -o yaml | kubectl apply -f -
 
 # Control-plane credentials
-PG_HOST="${RELEASE}-postgres.${NS}.svc.cluster.local"
+PG_HOST="mclaude-postgres.${NS}.svc.cluster.local"
 kubectl create secret generic mclaude-control-plane \
   --namespace "$NS" \
   --from-literal=database-url="postgres://mclaude:devpassword@${PG_HOST}:5432/mclaude?sslmode=disable" \
@@ -280,14 +280,25 @@ if [ -z "$OAUTH_TOKEN" ]; then
 fi
 ```
 
-Build the helm install command. TLS ingress settings and hostnames are in `values-k3d-ghcr.yaml`. The Tailscale IP is passed via `--set` since it is not known at file-edit time. If local images were built, override the image tags:
+Install `mclaude-postgres` first (ADR-0094: Postgres is a separate release; `mclaude-cp`'s `init-keys` pre-install hook requires Postgres to be reachable before it runs):
+
+```bash
+SDD_DEBUG=1 helm upgrade --install mclaude-postgres ./charts/mclaude-postgres \
+  -n mclaude-system \
+  --set existingSecret=mclaude-postgres \
+  --wait --timeout 5m
+```
+
+Build the helm install command for `mclaude-cp`. TLS ingress settings and hostnames are in `values-k3d-ghcr.yaml`. The Tailscale IP is passed via `--set` since it is not known at file-edit time. If local images were built, override the image tags:
 
 ```bash
 HELM_ARGS=(
   -n mclaude-system
-  -f charts/mclaude/values-k3d-ghcr.yaml
+  -f charts/mclaude-cp/values-k3d-ghcr.yaml
   --set "controlPlane.devOAuthToken=${OAUTH_TOKEN}"
   --set "ingress.externalDnsTarget=${TS_IP}"
+  --set "database.host=mclaude-postgres.mclaude-system.svc"
+  --set "database.passwordSecretRef=mclaude-postgres"
   --wait --timeout 5m
   --force-conflicts
 )
@@ -310,7 +321,7 @@ if [ "$USE_LOCAL_IMAGES" = true ]; then
   )
 fi
 
-SDD_DEBUG=1 helm upgrade --install mclaude ./charts/mclaude "${HELM_ARGS[@]}"
+SDD_DEBUG=1 helm upgrade --install mclaude-cp ./charts/mclaude-cp "${HELM_ARGS[@]}"
 ```
 
 `SDD_DEBUG=1` is required — the spec-driven-dev hook blocks `helm upgrade/install` unless this is set (CI-only guard).
@@ -369,11 +380,11 @@ k3d cluster delete mclaude-dev
 | `projects` table missing (login succeeds but projects 500s) | pgx `pool.Exec` only runs first statement in multi-statement SQL | Manually create: `kubectl exec -it deploy/mclaude-postgres -n mclaude-system -- psql -U mclaude -c "CREATE TABLE IF NOT EXISTS projects (...)"` |
 | devSeed user not created (old binary) | Old ghcr.io `latest` predates devSeed feature | Manually seed: see "Manual DB Seeding" below |
 | `helm upgrade/install` blocked by hook | spec-driven-dev hook guards against local deploys | Set `SDD_DEBUG=1` env var (Step 8) |
-| `StatefulSet.apps "mclaude-nats" / "mclaude-postgres" is invalid: spec: Forbidden: updates to statefulset spec for fields other than...` | An older install set `persistence.enabled: false`; chart defaults are now `true` and K8s forbids adding `volumeClaimTemplates` in place. | `helm uninstall mclaude -n mclaude-system` (wipes local NATS KV + postgres state — local dev only), then re-run `/deploy-local-preview`. |
+| `StatefulSet.apps "mclaude-nats" / "mclaude-postgres" is invalid: spec: Forbidden: updates to statefulset spec for fields other than...` | An older install set `persistence.enabled: false`; chart defaults are now `true` and K8s forbids adding `volumeClaimTemplates` in place. | `helm uninstall mclaude-cp -n mclaude-system && helm uninstall mclaude-postgres -n mclaude-system` (wipes local NATS KV + postgres state — local dev only), then re-run `/deploy-local-preview`. |
 | Session-agent: `SSL certificate verification failed` | Corporate proxy intercepts TLS; container lacks CA bundle | Mount corporate CA bundle into container and set `NODE_EXTRA_CA_CERTS` |
 | Session-agent: `Not logged in · Please run /login` | `CLAUDE_CODE_OAUTH_TOKEN` not set in pod | Check `user-secrets` Secret has `oauth-token` key; if pod started before token was added, `kubectl rollout restart` |
-| MinIO pod not ready / `CrashLoopBackOff` | Misconfiguration or PVC issue | `kubectl logs deploy/mclaude-minio -n mclaude-system` (replace `mclaude` with your release name if different) |
-| Bucket missing after install | Bucket-creation Job failed or was skipped | Re-run: `kubectl delete job mclaude-minio-bucket -n mclaude-system && helm upgrade mclaude ./charts/mclaude-cp -n mclaude-system -f charts/mclaude-cp/values-k3d-ghcr.yaml ...` |
+| MinIO pod not ready / `CrashLoopBackOff` | Misconfiguration or PVC issue | `kubectl logs deploy/mclaude-cp-minio -n mclaude-system` |
+| Bucket missing after install | Bucket-creation Job failed or was skipped | Re-run: `kubectl delete job mclaude-cp-minio-bucket -n mclaude-system && helm upgrade mclaude-cp ./charts/mclaude-cp -n mclaude-system -f charts/mclaude-cp/values-k3d-ghcr.yaml ...` |
 | Presigned URL unreachable from CLI/SPA | `S3_ENDPOINT` does not match the external Ingress hostname | Verify `ingress.minioHost` in your values matches the DNS name resolving to the cluster; check `kubectl get ingress mclaude-minio -n mclaude-system` |
 
 ---
