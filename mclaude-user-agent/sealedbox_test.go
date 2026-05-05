@@ -2,8 +2,43 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"fmt"
 	"testing"
+
+	"golang.org/x/crypto/curve25519"
+	"golang.org/x/crypto/nacl/box"
 )
+
+// SealedBoxSeal encrypts plaintext for the recipient's X25519 public key (sealed box).
+// Returns the sealed box: ephemeralPK (32 bytes) || NaCl box ciphertext.
+// Test-only helper — production user-agent only needs SealedBoxOpen.
+func SealedBoxSeal(plaintext []byte, recipientPub *[32]byte) ([]byte, error) {
+	// Generate ephemeral keypair.
+	var ephemeralPriv [32]byte
+	if _, err := rand.Read(ephemeralPriv[:]); err != nil {
+		return nil, fmt.Errorf("generate ephemeral private key: %w", err)
+	}
+	ephemeralPriv[0] &= 248
+	ephemeralPriv[31] &= 127
+	ephemeralPriv[31] |= 64
+
+	ephemeralPubSlice, err := curve25519.X25519(ephemeralPriv[:], curve25519.Basepoint)
+	if err != nil {
+		return nil, fmt.Errorf("derive ephemeral public key: %w", err)
+	}
+	var ephemeralPub [32]byte
+	copy(ephemeralPub[:], ephemeralPubSlice)
+
+	nonce := sealedBoxNonce(&ephemeralPub, recipientPub)
+
+	ciphertext := box.Seal(nil, plaintext, nonce, recipientPub, &ephemeralPriv)
+
+	result := make([]byte, 32+len(ciphertext))
+	copy(result[:32], ephemeralPub[:])
+	copy(result[32:], ciphertext)
+	return result, nil
+}
 
 // TestSealedBoxRoundtrip verifies that SealedBoxSeal followed by SealedBoxOpen
 // recovers the original plaintext.

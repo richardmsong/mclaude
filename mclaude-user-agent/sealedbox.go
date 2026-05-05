@@ -11,11 +11,9 @@
 package main
 
 import (
-	"crypto/rand"
 	"fmt"
 
 	"golang.org/x/crypto/blake2b"
-	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/nacl/box"
 )
 
@@ -41,36 +39,6 @@ func SealedBoxOpen(sealed []byte, recipientPub, recipientPriv *[32]byte) ([]byte
 		return nil, fmt.Errorf("box.Open failed: authentication failed or wrong key")
 	}
 	return plaintext, nil
-}
-
-// SealedBoxSeal encrypts plaintext for the recipient's X25519 public key (sealed box).
-// Returns the sealed box: ephemeralPK (32 bytes) || NaCl box ciphertext.
-// Used in tests to produce valid sealed boxes for unit-testing the Open path.
-func SealedBoxSeal(plaintext []byte, recipientPub *[32]byte) ([]byte, error) {
-	// Generate ephemeral keypair.
-	var ephemeralPriv [32]byte
-	if _, err := rand.Read(ephemeralPriv[:]); err != nil {
-		return nil, fmt.Errorf("generate ephemeral private key: %w", err)
-	}
-	ephemeralPriv[0] &= 248
-	ephemeralPriv[31] &= 127
-	ephemeralPriv[31] |= 64
-
-	ephemeralPubSlice, err := curve25519.X25519(ephemeralPriv[:], curve25519.Basepoint)
-	if err != nil {
-		return nil, fmt.Errorf("derive ephemeral public key: %w", err)
-	}
-	var ephemeralPub [32]byte
-	copy(ephemeralPub[:], ephemeralPubSlice)
-
-	nonce := sealedBoxNonce(&ephemeralPub, recipientPub)
-
-	ciphertext := box.Seal(nil, plaintext, nonce, recipientPub, &ephemeralPriv)
-
-	result := make([]byte, 32+len(ciphertext))
-	copy(result[:32], ephemeralPub[:])
-	copy(result[32:], ciphertext)
-	return result, nil
 }
 
 // sealedBoxNonce computes the 24-byte nonce for a sealed box per libsodium's

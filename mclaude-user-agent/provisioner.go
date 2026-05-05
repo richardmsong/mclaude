@@ -120,7 +120,6 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 
 	// Build and apply the Deployment.
 	deploy := p.buildDeployment(req, tpl, provider)
-	existing := &appsv1.Deployment{}
 	_, getErr := p.k8s.AppsV1().Deployments(p.namespace).Get(ctx, deploy.Name, metav1.GetOptions{})
 	if getErr == nil {
 		// Already exists — idempotent update.
@@ -139,7 +138,6 @@ func (p *Provisioner) Provision(ctx context.Context, req ProvisionRequest) Provi
 		p.log.Error().Err(getErr).Str("deploy", deploy.Name).Msg("provision: get deployment failed")
 		return ProvisionReply{Error: fmt.Sprintf("deploy_get_failed: %v", getErr)}
 	}
-	_ = existing
 
 	p.log.Info().
 		Str("projectId", req.ProjectID).
