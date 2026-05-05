@@ -1,0 +1,23 @@
+{{- if .Values.tls.certManager.enabled -}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "mclaude-cp.fullname" . }}-wildcard
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "mclaude-cp.labels" . | nindent 4 }}
+spec:
+  secretName: {{ (index .Values.ingress.tls 0).secretName }}
+  issuerRef:
+    kind: {{ .Values.tls.certManager.issuerRef.kind | default "ClusterIssuer" }}
+    name: {{ required "tls.certManager.issuerRef.name is required when tls.certManager.enabled" .Values.tls.certManager.issuerRef.name }}
+  commonName: {{ required "tls.certManager.commonName is required when tls.certManager.enabled" .Values.tls.certManager.commonName | quote }}
+  dnsNames:
+    {{- range (required "tls.certManager.dnsNames is required when tls.certManager.enabled" .Values.tls.certManager.dnsNames) }}
+    - {{ . | quote }}
+    {{- end }}
+  duration: {{ .Values.tls.certManager.duration | default "2160h" }}
+  renewBefore: {{ .Values.tls.certManager.renewBefore | default "720h" }}
+{{- end }}

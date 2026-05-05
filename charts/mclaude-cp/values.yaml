@@ -242,6 +242,24 @@ tests:
     pullPolicy: IfNotPresent
 
 ## ---------------------------------------------------------------------------
+## TLS Certificate (ADR-0097)
+## When enabled, the chart renders a cert-manager Certificate CR for the
+## wildcard hostname. Carries helm.sh/resource-policy: keep so helm uninstall
+## does NOT delete the Certificate or its derived TLS Secret (LE rate-limit safe).
+## Default false — each environment overlay opts in explicitly.
+## ---------------------------------------------------------------------------
+tls:
+  certManager:
+    enabled: false        # default-disabled: every overlay opts in explicitly
+    issuerRef:
+      kind: ClusterIssuer
+      name: ""            # required when enabled
+    commonName: ""        # required when enabled
+    dnsNames: []          # required when enabled
+    duration: 2160h       # 90d (LE default)
+    renewBefore: 720h     # 30d before expiry
+
+## ---------------------------------------------------------------------------
 ## ServiceAccount for control-plane (no K8s permissions per ADR-0035)
 ## ---------------------------------------------------------------------------
 serviceAccount:

@@ -181,7 +181,9 @@ helm upgrade --install external-dns external-dns/external-dns \
   --wait
 ```
 
-Apply the ClusterIssuer and wildcard Certificate CR:
+Apply the ClusterIssuer:
+
+> **ADR-0097**: The Certificate CR is now owned by the `mclaude-cp` Helm chart (rendered when `tls.certManager.enabled=true` in `values-k3d-ghcr.yaml`). The manual `kubectl apply` of the Certificate that existed here per ADR-0033 has been removed. The wait step moves to after `helm install mclaude-cp` (Step 6).
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -202,33 +204,6 @@ spec:
               name: digitalocean-api-token
               key: access-token
 EOF
-
-kubectl apply -f - <<'EOF'
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: mclaude-richardmcsong-wildcard
-  namespace: mclaude-system
-spec:
-  secretName: mclaude-richardmcsong-tls
-  issuerRef:
-    kind: ClusterIssuer
-    name: mclaude-letsencrypt-prod
-  commonName: "*.mclaude.richardmcsong.com"
-  dnsNames:
-    - "*.mclaude.richardmcsong.com"
-    - "mclaude.richardmcsong.com"
-  duration: 2160h
-  renewBefore: 720h
-EOF
-```
-
-Wait for cert issuance (DNS-01 challenge + LE validation takes ~60–180s):
-
-```bash
-kubectl wait --for=condition=Ready \
-  certificate/mclaude-richardmcsong-wildcard \
-  -n mclaude-system --timeout=5m
 ```
 
 > **No keychain step**: the Let's Encrypt cert is trusted by every device out of the box. No `sudo security add-trusted-cert` needed.
@@ -342,6 +317,14 @@ SDD_DEBUG=1 helm upgrade --install mclaude ./charts/mclaude "${HELM_ARGS[@]}"
 
 > **Why this matters**: without `devOAuthToken`, the session-agent pod has no Claude credentials. It receives messages and silently does nothing. The token flows: Helm → `DEV_OAUTH_TOKEN` env on control-plane → reconciler writes `oauth-token` key into `user-secrets` Secret → session-agent mounts it at `/home/node/.user-secrets/oauth-token`.
 
+Wait for the Certificate to become Ready (per ADR-0097, the Certificate CR is now rendered by the `mclaude-cp` chart; `helm install --wait` only covers Pod/Service readiness — cert-manager is a separate controller, so the wait must be explicit). On subsequent installs the Certificate is already Ready (`helm.sh/resource-policy: keep` preserves it across `helm uninstall`), so this is a no-op after the first issuance (~60–180s for DNS-01 + LE validation):
+
+```bash
+kubectl wait --for=condition=Ready \
+  certificate/mclaude-cp-wildcard \
+  -n mclaude-system --timeout=5m
+```
+
 ### Step 7 — Wait for pods
 
 ```bash
@@ -380,7 +363,7 @@ k3d cluster delete mclaude-dev
 | `ErrImagePull` / 403 from ghcr.io | GHCR token expired in registry config | Re-run Step 1 (delete cluster first if needed): `k3d cluster delete mclaude-dev` |
 | `ErrImagePull` / TLS handshake failure | Corporate proxy intercepts TLS | Ensure `insecure_skip_verify: true` is in `/tmp/k3d-registries.yaml` and cluster was created with `--registry-config` |
 | DNS doesn't resolve (`ping dev.mclaude.richardmcsong.com` hangs) | ExternalDNS hasn't written A records yet (takes ~1 min after Ingress is created) | `kubectl logs -n external-dns deploy/external-dns`; verify DO API token is valid; retry after 60s |
-| Certificate stuck in `Issuing` | DO API token invalid or DNS propagation slow | `kubectl describe certificate mclaude-richardmcsong-wildcard -n mclaude-system`; check cert-manager logs; verify token with `curl -X GET -H "Authorization: Bearer ${DO_TOKEN}" "https://api.digitalocean.com/v2/domains"` |
+| Certificate stuck in `Issuing` | DO API token invalid or DNS propagation slow | `kubectl describe certificate mclaude-cp-wildcard -n mclaude-system`; check cert-manager logs; verify token with `curl -X GET -H "Authorization: Bearer ${DO_TOKEN}" "https://api.digitalocean.com/v2/domains"` |
 | Login 405 | Ingress not routing to control-plane | Check `kubectl get ingress -n mclaude-system`; host must be `dev.mclaude.richardmcsong.com` |
 | NATS WebSocket fails | `natsUrl` in login response is internal cluster URL | Old binary — SPA falls back to `wss://<origin>/nats` which routes through Traefik correctly |
 | `projects` table missing (login succeeds but projects 500s) | pgx `pool.Exec` only runs first statement in multi-statement SQL | Manually create: `kubectl exec -it deploy/mclaude-postgres -n mclaude-system -- psql -U mclaude -c "CREATE TABLE IF NOT EXISTS projects (...)"` |

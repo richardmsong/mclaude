@@ -57,6 +57,20 @@ minio:
     requests:
       memory: 32Mi
 
+## ADR-0097: Certificate CR is now helm-managed. ingress.tls[0].secretName
+## (mclaude-richardmcsong-tls above) is the single source of truth for the
+## Secret name — do NOT duplicate it here.
+tls:
+  certManager:
+    enabled: true
+    issuerRef:
+      kind: ClusterIssuer
+      name: mclaude-letsencrypt-prod
+    commonName: "*.mclaude.richardmcsong.com"
+    dnsNames:
+      - "*.mclaude.richardmcsong.com"
+      - "mclaude.richardmcsong.com"
+
 global:
   imagePullSecrets:
     - name: ghcr-pull-secret
