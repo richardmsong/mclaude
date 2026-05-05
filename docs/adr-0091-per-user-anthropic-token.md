@@ -1,9 +1,10 @@
 # ADR: Per-User Anthropic OAuth Token
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-04: draft
 - 2026-05-04: accepted — paired with spec-state-schema.md, spec-nats-data-taxonomy.md, mclaude-control-plane/spec-control-plane.md, mclaude-controller-k8s/spec-k8s-architecture.md, mclaude-cli/spec-cli.md, mclaude-session-agent/spec-session-agent.md, charts-mclaude/spec-helm.md, mclaude-user-agent/spec-user-agent.md (new)
+- 2026-05-04: implemented — all scope CLEAN (mclaude-user-agent, mclaude-control-plane, mclaude-controller-k8s, mclaude-cli, mclaude-session-agent, charts-mclaude)
 
 ## Overview
 
