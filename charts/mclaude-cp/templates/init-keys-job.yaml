@@ -42,6 +42,7 @@ spec:
                 secretKeyRef:
                   name: {{ required "database.passwordSecretRef is required" .Values.database.passwordSecretRef }}
                   key: postgres-password
+                  optional: true
             - name: DATABASE_URL
               value: "postgres://{{ .Values.database.user }}:$(POSTGRES_PASSWORD)@{{ required "database.host is required" .Values.database.host }}:{{ .Values.database.port }}/{{ .Values.database.name }}?sslmode={{ .Values.database.sslmode }}"
             - name: OPERATOR_KEYS_SECRET

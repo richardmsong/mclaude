@@ -38,7 +38,7 @@ The Job is the only place the operator/account seeds are generated; subsequent d
 | StatefulSet | `{release}-nats` | Single replica (configurable). VolumeClaimTemplate `data` when persistence enabled. |
 | Service | `{release}-nats` | ClusterIP. Ports: client (4222), websocket (8080), monitor (8222), **leafnodes (7422)**. |
 | Service | `{release}-nats-headless` | Headless service for StatefulSet DNS. |
-| ConfigMap | `{release}-nats-config` | `nats.conf` with the 3-tier trust chain (`operator`, `resolver: nats`, `resolver_preload`) referencing `mclaude-system/operator-keys`. JetStream domain `hub`. `resolver: nats` enables JWT revocation via `$SYS.REQ.CLAIMS.UPDATE` (ADR-0054). |
+| ConfigMap | `{release}-nats-config` | `nats.conf` with the 3-tier trust chain (`operator`, `resolver: MEMORY`, `resolver_preload`) referencing `mclaude-system/operator-keys`. JetStream domain `hub`. `resolver: MEMORY` is the current implementation; upgrade to `resolver: nats` (full account resolver with JWT revocation) is tracked in ADR-0054 (draft). |
 
 For the full NATS server config see `docs/spec-state-schema.md` — NATS Server Configuration.
 
