@@ -3,6 +3,9 @@ name: Deploy main
 on:
   workflow_dispatch:
 
+env:
+  GHCR: ghcr.io/richardmsong
+
 jobs:
   tag:
     name: Compute image tag
@@ -17,161 +20,296 @@ jobs:
           echo "value=main-${short_sha}" >> "$GITHUB_OUTPUT"
           echo "Image tag: main-${short_sha}"
 
-  build-control-plane:
-    name: Build control-plane
+  # ---------------------------------------------------------------------------
+  # Control-plane
+  # ---------------------------------------------------------------------------
+  build-control-plane-binaries:
+    name: Build control-plane binaries
     needs: tag
     runs-on: self-hosted
     permissions:
       contents: read
-      packages: write
-    outputs:
-      tag: ${{ needs.tag.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
-      - name: Authenticate to GHCR
-        run: |
-          mkdir -p "$RUNNER_TEMP/docker"
-          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
-            "$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64)" \
-            > "$RUNNER_TEMP/docker/config.json"
-          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
-
       - uses: actions/setup-go@v5
         with:
           go-version-file: mclaude-control-plane/go.mod
           cache: false
-
       - name: Build binaries
         working-directory: mclaude-control-plane
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o control-plane-arm64 .
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o control-plane-amd64 .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: control-plane-binaries
+          path: |
+            mclaude-control-plane/control-plane-arm64
+            mclaude-control-plane/control-plane-amd64
 
-      - uses: docker/setup-qemu-action@v3
+  build-control-plane-image:
+    name: Docker control-plane (${{ matrix.arch }})
+    needs: [tag, build-control-plane-binaries]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: self-hosted
+          - arch: amd64
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: control-plane-binaries
+          path: mclaude-control-plane
+      - name: Authenticate to GHCR
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
           context: ./mclaude-control-plane
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/${{ matrix.arch }}
           push: true
-          tags: |
-            ghcr.io/richardmsong/mclaude-control-plane:${{ needs.tag.outputs.image_tag }}
-            ghcr.io/richardmsong/mclaude-control-plane:main
+          tags: ${{ env.GHCR }}/mclaude-control-plane:${{ needs.tag.outputs.image_tag }}-${{ matrix.arch }}
 
-  build-spa:
-    name: Build spa
-    needs: tag
+  merge-control-plane:
+    name: Merge control-plane manifest
+    needs: [tag, build-control-plane-image]
     runs-on: self-hosted
+    permissions:
+      packages: write
+    steps:
+      - name: Authenticate to GHCR
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+      - name: Create multi-arch manifest
+        env:
+          TAG: ${{ needs.tag.outputs.image_tag }}
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.GHCR }}/mclaude-control-plane:${TAG} \
+            -t ${{ env.GHCR }}/mclaude-control-plane:main \
+            ${{ env.GHCR }}/mclaude-control-plane:${TAG}-amd64 \
+            ${{ env.GHCR }}/mclaude-control-plane:${TAG}-arm64
+
+  # ---------------------------------------------------------------------------
+  # SPA
+  # ---------------------------------------------------------------------------
+  build-spa-image:
+    name: Docker spa (${{ matrix.arch }})
+    needs: tag
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
-    outputs:
-      tag: ${{ needs.tag.outputs.image_tag }}
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: self-hosted
+          - arch: amd64
+            runner: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Authenticate to GHCR
         run: |
-          mkdir -p "$RUNNER_TEMP/docker"
-          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
-            "$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64)" \
-            > "$RUNNER_TEMP/docker/config.json"
-          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
-      - uses: docker/setup-qemu-action@v3
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
           context: ./mclaude-web
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/${{ matrix.arch }}
           push: true
-          tags: |
-            ghcr.io/richardmsong/mclaude-spa:${{ needs.tag.outputs.image_tag }}
-            ghcr.io/richardmsong/mclaude-spa:main
+          tags: ${{ env.GHCR }}/mclaude-spa:${{ needs.tag.outputs.image_tag }}-${{ matrix.arch }}
 
-  build-session-agent:
-    name: Build session-agent
+  merge-spa:
+    name: Merge spa manifest
+    needs: [tag, build-spa-image]
+    runs-on: self-hosted
+    permissions:
+      packages: write
+    steps:
+      - name: Authenticate to GHCR
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+      - name: Create multi-arch manifest
+        env:
+          TAG: ${{ needs.tag.outputs.image_tag }}
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.GHCR }}/mclaude-spa:${TAG} \
+            -t ${{ env.GHCR }}/mclaude-spa:main \
+            ${{ env.GHCR }}/mclaude-spa:${TAG}-amd64 \
+            ${{ env.GHCR }}/mclaude-spa:${TAG}-arm64
+
+  # ---------------------------------------------------------------------------
+  # Session-agent
+  # ---------------------------------------------------------------------------
+  build-session-agent-binaries:
+    name: Build session-agent binaries
     needs: tag
     runs-on: self-hosted
     permissions:
       contents: read
-      packages: write
-    outputs:
-      tag: ${{ needs.tag.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
-      - name: Authenticate to GHCR
-        run: |
-          mkdir -p "$RUNNER_TEMP/docker"
-          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
-            "$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64)" \
-            > "$RUNNER_TEMP/docker/config.json"
-          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
-
       - uses: actions/setup-go@v5
         with:
           go-version-file: mclaude-session-agent/go.mod
           cache: false
-
       - name: Build binaries
         working-directory: mclaude-session-agent
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o session-agent-arm64 .
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o session-agent-amd64 .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: session-agent-binaries
+          path: |
+            mclaude-session-agent/session-agent-arm64
+            mclaude-session-agent/session-agent-amd64
 
-      - uses: docker/setup-qemu-action@v3
+  build-session-agent-image:
+    name: Docker session-agent (${{ matrix.arch }})
+    needs: [tag, build-session-agent-binaries]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: self-hosted
+          - arch: amd64
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: session-agent-binaries
+          path: mclaude-session-agent
+      - name: Authenticate to GHCR
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
           context: ./mclaude-session-agent
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/${{ matrix.arch }}
           push: true
-          tags: |
-            ghcr.io/richardmsong/mclaude-session-agent:${{ needs.tag.outputs.image_tag }}
-            ghcr.io/richardmsong/mclaude-session-agent:main
+          tags: ${{ env.GHCR }}/mclaude-session-agent:${{ needs.tag.outputs.image_tag }}-${{ matrix.arch }}
 
-  build-controller-k8s:
-    name: Build controller-k8s
+  merge-session-agent:
+    name: Merge session-agent manifest
+    needs: [tag, build-session-agent-image]
+    runs-on: self-hosted
+    permissions:
+      packages: write
+    steps:
+      - name: Authenticate to GHCR
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+      - name: Create multi-arch manifest
+        env:
+          TAG: ${{ needs.tag.outputs.image_tag }}
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.GHCR }}/mclaude-session-agent:${TAG} \
+            -t ${{ env.GHCR }}/mclaude-session-agent:main \
+            ${{ env.GHCR }}/mclaude-session-agent:${TAG}-amd64 \
+            ${{ env.GHCR }}/mclaude-session-agent:${TAG}-arm64
+
+  # ---------------------------------------------------------------------------
+  # Controller-k8s
+  # ---------------------------------------------------------------------------
+  build-controller-k8s-binaries:
+    name: Build controller-k8s binaries
     needs: tag
     runs-on: self-hosted
     permissions:
       contents: read
-      packages: write
-    outputs:
-      tag: ${{ needs.tag.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
-      - name: Authenticate to GHCR
-        run: |
-          mkdir -p "$RUNNER_TEMP/docker"
-          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
-            "$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64)" \
-            > "$RUNNER_TEMP/docker/config.json"
-          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
-
       - uses: actions/setup-go@v5
         with:
           go-version-file: mclaude-controller-k8s/go.mod
           cache: false
-
       - name: Build binaries
         working-directory: mclaude-controller-k8s
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o controller-k8s-arm64 .
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o controller-k8s-amd64 .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: controller-k8s-binaries
+          path: |
+            mclaude-controller-k8s/controller-k8s-arm64
+            mclaude-controller-k8s/controller-k8s-amd64
 
-      - uses: docker/setup-qemu-action@v3
+  build-controller-k8s-image:
+    name: Docker controller-k8s (${{ matrix.arch }})
+    needs: [tag, build-controller-k8s-binaries]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: self-hosted
+          - arch: amd64
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: controller-k8s-binaries
+          path: mclaude-controller-k8s
+      - name: Authenticate to GHCR
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
           context: ./mclaude-controller-k8s
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/${{ matrix.arch }}
           push: true
-          tags: |
-            ghcr.io/richardmsong/mclaude-controller-k8s:${{ needs.tag.outputs.image_tag }}
-            ghcr.io/richardmsong/mclaude-controller-k8s:main
+          tags: ${{ env.GHCR }}/mclaude-controller-k8s:${{ needs.tag.outputs.image_tag }}-${{ matrix.arch }}
 
+  merge-controller-k8s:
+    name: Merge controller-k8s manifest
+    needs: [tag, build-controller-k8s-image]
+    runs-on: self-hosted
+    permissions:
+      packages: write
+    steps:
+      - name: Authenticate to GHCR
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+      - name: Create multi-arch manifest
+        env:
+          TAG: ${{ needs.tag.outputs.image_tag }}
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.GHCR }}/mclaude-controller-k8s:${TAG} \
+            -t ${{ env.GHCR }}/mclaude-controller-k8s:main \
+            ${{ env.GHCR }}/mclaude-controller-k8s:${TAG}-amd64 \
+            ${{ env.GHCR }}/mclaude-controller-k8s:${TAG}-arm64
+
+  # ---------------------------------------------------------------------------
+  # Deploy
+  # ---------------------------------------------------------------------------
   deploy-cp:
     name: Deploy control-plane
-    needs: [tag, build-control-plane, build-spa]
+    needs: [tag, merge-control-plane, merge-spa]
     if: always() && !failure() && !cancelled()
     runs-on: [self-hosted, tailscale]
     environment: deploy
@@ -235,7 +373,7 @@ jobs:
 
   deploy-worker:
     name: Deploy worker
-    needs: [tag, deploy-cp, build-session-agent, build-controller-k8s]
+    needs: [tag, deploy-cp, merge-session-agent, merge-controller-k8s]
     if: false
     runs-on: [self-hosted, tailscale]
     environment: deploy
