@@ -2,7 +2,7 @@
 # claude-code installed via native installer (pre-built binary download, not npm compile).
 FROM node:22-alpine
 
-ARG TARGETARCH=arm64
+ARG TARGETARCH
 
 # Install system tools including zsh.
 # glab — not in Alpine repos; download binary from GitLab releases.
@@ -51,7 +51,7 @@ RUN chmod +x /usr/local/bin/pkg && \
     ln -sf /usr/local/bin/pkg /usr/local/bin/apt && \
     ln -sf /usr/local/bin/pkg /usr/local/bin/brew
 
-COPY session-agent /usr/local/bin/session-agent
+COPY session-agent-${TARGETARCH} /usr/local/bin/session-agent
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

@@ -41,18 +41,18 @@ jobs:
           go-version-file: mclaude-control-plane/go.mod
           cache: false
 
-      - name: Build binary
+      - name: Build binaries
         working-directory: mclaude-control-plane
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o control-plane .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o control-plane-arm64 .
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o control-plane-amd64 .
 
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-        with:
-          driver: docker
       - uses: docker/build-push-action@v6
         with:
           context: ./mclaude-control-plane
-          platforms: linux/arm64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ghcr.io/richardmsong/mclaude-control-plane:${{ needs.tag.outputs.image_tag }}
@@ -76,13 +76,12 @@ jobs:
             "$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64)" \
             > "$RUNNER_TEMP/docker/config.json"
           echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-        with:
-          driver: docker
       - uses: docker/build-push-action@v6
         with:
           context: ./mclaude-web
-          platforms: linux/arm64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ghcr.io/richardmsong/mclaude-spa:${{ needs.tag.outputs.image_tag }}
@@ -112,18 +111,18 @@ jobs:
           go-version-file: mclaude-session-agent/go.mod
           cache: false
 
-      - name: Build binary
+      - name: Build binaries
         working-directory: mclaude-session-agent
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o session-agent .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o session-agent-arm64 .
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o session-agent-amd64 .
 
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-        with:
-          driver: docker
       - uses: docker/build-push-action@v6
         with:
           context: ./mclaude-session-agent
-          platforms: linux/arm64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ghcr.io/richardmsong/mclaude-session-agent:${{ needs.tag.outputs.image_tag }}
@@ -153,18 +152,18 @@ jobs:
           go-version-file: mclaude-controller-k8s/go.mod
           cache: false
 
-      - name: Build binary
+      - name: Build binaries
         working-directory: mclaude-controller-k8s
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o controller-k8s .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o controller-k8s-arm64 .
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o controller-k8s-amd64 .
 
+      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-        with:
-          driver: docker
       - uses: docker/build-push-action@v6
         with:
           context: ./mclaude-controller-k8s
-          platforms: linux/arm64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ghcr.io/richardmsong/mclaude-controller-k8s:${{ needs.tag.outputs.image_tag }}
