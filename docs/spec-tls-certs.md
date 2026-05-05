@@ -81,29 +81,39 @@ No staging issuer is created. LE production is the only path.
 
 ### Certificate CR
 
-One wildcard cert, in `mclaude-system`:
+One wildcard cert per cluster, owned by the `mclaude-cp` Helm chart per ADR-0097. Rendered when `tls.certManager.enabled` is `true` (overlays like `values-k3d-ghcr.yaml` flip it on; AKS/airgap leave it at the default `false`). Carries `helm.sh/resource-policy: keep` so a `helm uninstall` does **not** delete the Certificate or its derived TLS Secret — the cert survives wipe/reinstall cycles, and Let's Encrypt is not asked to re-issue on each install (LE rate-limit safe).
 
 ```yaml
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: mclaude-richardmcsong-wildcard
-  namespace: mclaude-system
+  name: {{ include "mclaude-cp.fullname" . }}-wildcard   # → mclaude-cp-wildcard
+  namespace: {{ .Release.Namespace }}                    # → mclaude-system
+  annotations:
+    helm.sh/resource-policy: keep
 spec:
-  secretName: mclaude-richardmcsong-tls
+  secretName: {{ (index .Values.ingress.tls 0).secretName }}   # single source of truth
   issuerRef:
-    kind: ClusterIssuer
-    name: mclaude-letsencrypt-prod
-  commonName: "*.mclaude.richardmcsong.com"
+    kind: {{ .Values.tls.certManager.issuerRef.kind | default "ClusterIssuer" }}
+    name: {{ required "tls.certManager.issuerRef.name is required when tls.certManager.enabled" .Values.tls.certManager.issuerRef.name }}
+  commonName: {{ required "tls.certManager.commonName is required when tls.certManager.enabled" .Values.tls.certManager.commonName | quote }}
   dnsNames:
-    - "*.mclaude.richardmcsong.com"
-    - "mclaude.richardmcsong.com"
-  duration: 2160h   # 90 days (LE default)
-  renewBefore: 720h # 30 days before expiry
+    {{- range (required "tls.certManager.dnsNames is required when tls.certManager.enabled" .Values.tls.certManager.dnsNames) }}
+    - {{ . | quote }}
+    {{- end }}
+  duration: {{ .Values.tls.certManager.duration | default "2160h" }}    # 90 days (LE default)
+  renewBefore: {{ .Values.tls.certManager.renewBefore | default "720h" }} # 30 days before expiry
 ```
 
-The resulting Secret `mclaude-richardmcsong-tls` is consumed by every Ingress
-in `mclaude-system` (main + NATS, across all Helm releases in that namespace).
+The `required` directives fail `helm template` / `helm install` fast with a clear error if `tls.certManager.enabled=true` but configuration is incomplete (e.g., empty `commonName`).
+
+**Resource name**: per ADR-0097, the chart-managed Certificate is `{release}-wildcard` (`mclaude-cp-wildcard` for the default release). The pre-ADR-0097 hardcoded name `mclaude-richardmcsong-wildcard` (applied manually by `/deploy-local-preview`) is no longer in use. Clusters that have the legacy CR must follow the migration runbook in ADR-0097: delete the legacy Certificate first (cert-manager won't share Secret ownership), then `helm install mclaude-cp` to render the new one.
+
+The resulting Secret (e.g. `mclaude-richardmcsong-tls` for the dev overlay) is consumed by every Ingress in `mclaude-system` (main + NATS, across all Helm releases in that namespace) by reference name. The Secret is created/updated by cert-manager based on the Certificate; no Helm release tracks the Secret directly, so it persists naturally regardless of helm uninstall behaviour.
+
+**Adoption semantics**: on `helm install`/`helm upgrade`, helm checks whether `mclaude-cp-wildcard` exists. If it does (e.g., from a prior install that was helm-uninstalled), helm adopts it as a no-op — cert-manager does not re-issue, no Let's Encrypt rate-limit slot is consumed. If it doesn't exist, helm creates it and cert-manager issues fresh.
+
+**Externally-managed TLS path**: when `tls.certManager.enabled=false` (default), the chart skips the Certificate template entirely. The operator pre-creates a TLS Secret out-of-band (Azure Application Gateway export, corporate CA, etc.) and references it via `ingress.tls[0].secretName`. The chart's Ingress resources reference whatever name is supplied; cert-manager is not involved.
 
 ### ExternalDNS
 
@@ -175,15 +185,18 @@ when running `helm upgrade --install`.
 - cert-manager install: ~30s (CRD registration + deployments ready).
 - ExternalDNS install: ~15s.
 - First cert issuance: ~60–180s (DO TXT propagation + LE validation).
-- `/deploy-local-preview` should `kubectl wait --for=condition=Ready
-  certificate/mclaude-richardmcsong-wildcard -n mclaude-system --timeout=5m`
-  before proceeding to the main `helm install mclaude`.
+- `helm install mclaude-cp --wait` returns when Pods/Services are Ready, but does **not** wait for cert-manager to fulfill the Certificate (cert-manager is a separate controller; helm has no insight into its reconcile loop). The Certificate-Ready wait must be explicit:
+  ```bash
+  kubectl wait --for=condition=Ready certificate/mclaude-cp-wildcard \
+    -n mclaude-system --timeout=5m
+  ```
+  Per ADR-0097 the Certificate is helm-managed (rendered into the chart); `/deploy-local-preview` no longer pre-applies it but keeps the post-install wait above. On subsequent installs the Certificate is already Ready (`helm.sh/resource-policy: keep` preserves it across uninstalls), so the wait is a no-op.
 
 ## Component Responsibilities
 
 | Component | Responsibility |
 |-----------|---------------|
-| `/deploy-local-preview` skill | Bootstraps cert-manager, ExternalDNS, DO-token Secret, ClusterIssuer, and Certificate CR. Waits for the Certificate to become Ready. Then installs the mclaude chart with `ingress.externalDnsTarget=$TS_IP`. |
+| `/deploy-local-preview` skill | Bootstraps cert-manager, ExternalDNS, DO-token Secret, and ClusterIssuer (one-time per cluster, infrastructure layer). Per ADR-0097, the Certificate CR is **not** owned by this skill — the `mclaude-cp` Helm chart owns it via a `helm.sh/resource-policy: keep` template gated by `tls.certManager.enabled`. After cluster bootstrap, the skill runs `helm install mclaude-cp` with the values overlay that opts in (`values-k3d-ghcr.yaml`). |
 | `.github/workflows/deploy-preview.yml` | Assumes cert-manager + ExternalDNS already exist in the cluster (bootstrapped once by `/deploy-local-preview`). Runs `helm upgrade --install mclaude-preview-${BRANCH_SLUG} charts/mclaude` with the preview hostnames, the Tailscale IP as the ExternalDNS target, and the shared Secret `mclaude-richardmcsong-tls` in the `tls[0]` stanza. |
 | `charts/mclaude/templates/ingress.yaml` | Main Ingress. Emits `external-dns.alpha.kubernetes.io/hostname` + `target` annotations when `ingress.externalDnsTarget` is set. Consumes `ingress.tls` from values (caller supplies `mclaude-richardmcsong-tls` for k3d/CI). |
 | `charts/mclaude/templates/nats-ws-ingress.yaml` | NATS WebSocket Ingress. Same annotations, `hostname` is `ingress.natsHost`. Shares the `ingress.tls` stanza. |
@@ -192,6 +205,7 @@ when running `helm upgrade --install`.
 
 ## Failure modes
 
+- **`Certificate` stuck in `Issuing`** (any cause) — `kubectl describe certificate mclaude-cp-wildcard -n mclaude-system` surfaces cert-manager's detailed status (Order, Challenge, current message). Common root causes: wrong `issuerRef.name`, hostname not in the DO zone, ClusterIssuer not Ready, DNS-01 challenge stuck waiting on TXT propagation, or an Order in error state. Walk the linked CRs (`kubectl get order -n mclaude-system`, `kubectl get challenge -n mclaude-system`) for the specific failure.
 - **DO API token invalid/revoked** — `Certificate` stuck Issuing; ExternalDNS
   logs 401. Rotate the token in Bitwarden, re-run the skill, both controllers
   pick up the new Secret.
@@ -211,3 +225,17 @@ when running `helm upgrade --install`.
 - **Corporate HTTPS-intercepting proxy MITMs the domain** — browser sees the
   corp CA cert instead of LE. Out of scope; user's Mac must bypass the proxy
   for this domain via PAC.
+- **`tls.certManager.enabled=true` with missing required fields** (per ADR-0097) —
+  `helm install`/`helm template` fails fast with the exact missing values key
+  named in the error (e.g. `Error: execution error at (mclaude-cp/templates/certificate.yaml:14:21): tls.certManager.commonName is required when tls.certManager.enabled`).
+  No partial install; operator fixes the overlay and retries.
+- **`helm upgrade` with Certificate spec changes** (per ADR-0097, e.g. adding a
+  new entry to `tls.certManager.dnsNames`) — helm updates the kept resource;
+  cert-manager re-issues on material spec changes. The `keep` annotation only
+  prevents *delete*, not *update*. A re-issuance burns one Let's Encrypt rate-
+  limit slot (50/week/registered domain). Avoid editing dnsNames frequently.
+- **`helm uninstall mclaude-cp` then `helm install` again** (per ADR-0097) — Certificate
+  survives uninstall via `helm.sh/resource-policy: keep`; the derived TLS Secret
+  also persists (cert-manager-managed, not helm-tracked). Reinstall adopts the
+  existing Certificate as a no-op — no LE re-issuance, no rate-limit cost.
+  This is the default outcome on dev wipe/reinstall cycles.

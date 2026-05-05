@@ -6,6 +6,8 @@
 - 2026-04-22: accepted — paired with docs/spec-tls-certs.md (new), docs/charts-mclaude/spec-helm.md, docs/mclaude-control-plane/spec-control-plane.md, docs/feature-list.md, docs/_sidebar.md, docs/spec-doc-layout.md; docs/spec-tailscale-dns.md deleted
 - 2026-04-26: implemented — all scope CLEAN
 
+> **Superseded in part by adr-0097-tls-cert-in-helm-chart.md** — the Certificate-CR-ownership decision (skill-applied via `/deploy-local-preview`) is replaced by a helm-managed Certificate template in `mclaude-cp` with `helm.sh/resource-policy: keep`. The cert-manager + ClusterIssuer + DNS-01 + ExternalDNS architecture in this ADR is unaffected.
+
 ## Overview
 
 Replace the self-signed wildcard cert for `*.mclaude.local` (local dev) and the

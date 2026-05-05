@@ -48,6 +48,12 @@ Per ADR-0094, Postgres is **not** part of `mclaude-cp` — it is its own chart (
 
 For Postgres table schemas see `docs/spec-state-schema.md` — Postgres.
 
+### TLS Certificate (per ADR-0097)
+
+| Kind | Name | Notes |
+|---|---|---|
+| Certificate (cert-manager.io/v1) | `{release}-wildcard` (e.g. `mclaude-cp-wildcard`) | Rendered only when `tls.certManager.enabled=true`. Carries `helm.sh/resource-policy: keep` so `helm uninstall` does NOT delete it (preserves Let's Encrypt rate-limit budget across wipe/reinstall cycles). The derived Secret (cert-manager-managed, named per `ingress.tls[0].secretName`) persists naturally — no helm release tracks it for deletion. References ClusterIssuer `tls.certManager.issuerRef.name` (typically `mclaude-letsencrypt-prod` from ADR-0033 cluster bootstrap). When `tls.certManager.enabled=false` (default) the chart skips the Certificate entirely and operators pre-create the TLS Secret out-of-band (AKS Application Gateway, air-gapped corporate CA). |
+
 ### Control-Plane
 
 | Kind | Name | Notes |
@@ -120,6 +126,13 @@ S3-compatible object storage for import archives and chat attachments per ADR-00
 | `controlPlane.config.logLevel` | `""` | Injected as `LOG_LEVEL`. **Not read by Go code** — zerolog uses its default level. |
 | `controlPlane.service.httpPort` | `8080` | Main API listen port. Injected as `HTTP_PORT` env var. **Known mismatch:** Go code reads `PORT`, not `HTTP_PORT` — the chart env var name doesn't match. Currently works because both default to 8080. |
 | `nats.config.jetstream.encryption.storeKeySecret` | `""` | ADR-0091. Name of a Kubernetes Secret holding the JetStream at-rest encryption key under field `store-key`. When set, the NATS ConfigMap renders a `jetstream { store_dir: ..., key: $STORE_KEY }` stanza and the NATS StatefulSet mounts the Secret. Required to protect plaintext tokens in `mclaude-user-info-{uslug}` on disk. Generate with `openssl rand -base64 32` and inject via Bitwarden in CI (see `.github/workflows/deploy-main.yml`). |
+| `tls.certManager.enabled` | `false` | ADR-0097. When `true`, the chart renders a cert-manager `Certificate` CR for the wildcard hostname declared by `commonName`/`dnsNames`. The CR carries `helm.sh/resource-policy: keep` so `helm uninstall` does not delete it. Default `false` so each environment overlay opts in explicitly; `values-k3d-ghcr.yaml` flips to `true`. AKS/airgap leave it `false` and supply a pre-created TLS Secret via `ingress.tls[0].secretName`. |
+| `tls.certManager.issuerRef.kind` | `ClusterIssuer` | Issuer kind for the Certificate. Required when `enabled=true`. |
+| `tls.certManager.issuerRef.name` | `""` | Issuer name. Required when `enabled=true`. Cluster bootstrap (per ADR-0033) creates `mclaude-letsencrypt-prod`. |
+| `tls.certManager.commonName` | `""` | Wildcard `commonName` (e.g. `*.mclaude.richardmcsong.com`). Required when `enabled=true`. |
+| `tls.certManager.dnsNames` | `[]` | List of DNS SANs (typically the wildcard plus the apex domain). Required when `enabled=true`. |
+| `tls.certManager.duration` | `2160h` | Certificate lifetime (90 days, LE default). |
+| `tls.certManager.renewBefore` | `720h` | Renew window (30 days before expiry). |
 | `controlPlane.config.jwtRefreshThresholdSeconds` | `900` | Injected as `JWT_REFRESH_THRESHOLD_SECONDS`. **Not read by Go code** — phantom env var with no effect. |
 | `controlPlane.migrations.enabled` | `false` | Run dbmate schema migrations as an init container. The init container inherits the same `database.*` env contract as the main control-plane container (per ADR-0094): `POSTGRES_PASSWORD` from `database.passwordSecretRef` Secret + `DATABASE_URL` interpolation against `database.host`/`database.port`/`database.user`/`database.name`/`database.sslmode`. No hardcoded Postgres Secret name or hostname. |
 | `spa.enabled` | `true` | Deploy the SPA. |
@@ -345,9 +358,9 @@ Brief downtime for K8s-hosted projects during cutover. No in-place upgrade path.
 | `values.yaml` (cp) | Defaults for all hub knobs. Production-oriented images, persistence enabled, nginx ingress. MinIO enabled by default (`minio.enabled: true`, `minio.persistence.enabled: true`). `ingress.minioHost` is empty — set it in a cluster-specific overlay. `database.host`, `database.passwordSecretRef` are empty — operator MUST set on every install. |
 | `values-dev.yaml` (cp) | Local k3d development. Images built locally (`pullPolicy: Never`), persistence disabled, no ingress. `minio.enabled: false` — no valid `S3_ENDPOINT` without an Ingress hostname, and presigned URLs would not be reachable. |
 | `values-e2e.yaml` (cp) | CI end-to-end tests. Python HTTP stub control-plane and SPA, real NATS, persistence disabled. `minio.enabled: false` — stub control-plane does not read env vars or call S3. Postgres is provided by the separate `mclaude-postgres` release (its own `values-e2e.yaml`). |
-| `values-k3d-ghcr.yaml` (cp) | Local k3d preview with ghcr.io images. Traefik ingress with TLS on `*.mclaude.richardmcsong.com`. Sets `ingress.minioHost: minio.mclaude.richardmcsong.com` (direct subdomain of the wildcard cert, covered by `*.mclaude.richardmcsong.com`). Overrides `minio.resources.requests.memory: 32Mi` (down from default 128Mi) so MinIO can schedule on the shared k3d node whose memory request budget is consumed by session-agent pods (ADR-0068). |
-| `values-airgap.yaml` (cp) | Air-gapped deployments. All images pulled via `global.imageRegistry`. Overrides `minio.image.registry` and `minio.mcImage.registry` to `registry.internal.example.com` so both MinIO server and `minio/mc` bucket-Job images are pulled from the internal mirror. |
-| `values-aks.yaml` (cp) | Azure Kubernetes Service production. `managed-csi-premium`, larger PVCs, scaled replicas. Sets `minio.persistence.storageClass: managed-csi-premium` (consistent with NATS storage class override). |
+| `values-k3d-ghcr.yaml` (cp) | Local k3d preview with ghcr.io images. Traefik ingress with TLS on `*.mclaude.richardmcsong.com`. Per ADR-0097, sets `tls.certManager.enabled: true` with `issuerRef.name: mclaude-letsencrypt-prod`, `commonName: "*.mclaude.richardmcsong.com"`, and `dnsNames` covering the wildcard + apex. Sets `ingress.minioHost: minio.mclaude.richardmcsong.com` (direct subdomain of the wildcard cert, covered by `*.mclaude.richardmcsong.com`). Overrides `minio.resources.requests.memory: 32Mi` (down from default 128Mi) so MinIO can schedule on the shared k3d node whose memory request budget is consumed by session-agent pods (ADR-0068). |
+| `values-airgap.yaml` (cp) | Air-gapped deployments. All images pulled via `global.imageRegistry`. Overrides `minio.image.registry` and `minio.mcImage.registry` to `registry.internal.example.com` so both MinIO server and `minio/mc` bucket-Job images are pulled from the internal mirror. Per ADR-0097, leaves `tls.certManager.enabled` at the default `false` — air-gapped sites use a corporate CA-issued TLS Secret pre-created by the operator (referenced via `ingress.tls[0].secretName`). cert-manager + DNS-01 are not used (no public DNS path for ACME). |
+| `values-aks.yaml` (cp) | Azure Kubernetes Service production. `managed-csi-premium`, larger PVCs, scaled replicas. Sets `minio.persistence.storageClass: managed-csi-premium` (consistent with NATS storage class override). Per ADR-0097, leaves `tls.certManager.enabled` at the default `false` — Azure Application Gateway terminates TLS upstream of the Ingress, and the operator pre-creates a TLS Secret out-of-band (referenced via `ingress.tls[0].secretName`). cert-manager is not used. |
 | `values.yaml` (worker) | Defaults. Production image refs, persistence enabled. |
 | `values-dev.yaml` (worker) | Local k3d. Tailored for single-cluster degenerate install. |
 | `values-airgap.yaml` (worker) | Air-gapped variant. |
