@@ -194,8 +194,9 @@ func (s *Server) handleProjectCreate(nc *nats.Conn, msg *nats.Msg, userSlug, sub
 		return
 	}
 
-	// ADR-0035 + ADR-0050: publish provisioning request to the host-scoped subject
-	// so the appropriate controller (K8s or local) can provision resources.
+	// ADR-0035 + ADR-0050 + ADR-0091: publish provisioning request to the host.
+	// ADR-0091: cluster hosts route through user-agent (`mclaude.users.{uslug}.hosts.{hslug}.agent.projects.provision`).
+	// Machine hosts continue to use `mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.create` (unchanged).
 	// ProvisionRequest includes both UUIDs (K8s naming) and slugs (NATS subjects/env vars).
 	provisionFailed := false
 	if hostSlug != "" {
@@ -213,8 +214,18 @@ func (s *Server) handleProjectCreate(nc *nats.Conn, msg *nats.Msg, userSlug, sub
 			GitIdentityID: gitIdentityIDStr,
 		}
 		provData, _ := json.Marshal(provReq)
-		// ADR-0054: publish to host-scoped fan-out subject.
-		provSubject := subj.HostUserProjectsCreate(slug.HostSlug(hostSlug), slug.UserSlug(userSlug), slug.ProjectSlug(proj.Slug))
+
+		// Determine whether this is a cluster host (routes via user-agent) or machine
+		// host (routes via host controller directly). Look up the owner row for this host.
+		var provSubject string
+		if host, herr := s.db.GetHostBySlug(context.Background(), hostSlug); herr == nil && host != nil && host.Type == "cluster" {
+			// ADR-0091: cluster host — publish to user-agent provisioning subject.
+			provSubject = "mclaude.users." + userSlug + ".hosts." + hostSlug + ".agent.projects.provision"
+		} else {
+			// Machine host (or unknown) — publish to host controller directly (existing path).
+			provSubject = subj.HostUserProjectsCreate(slug.HostSlug(hostSlug), slug.UserSlug(userSlug), slug.ProjectSlug(proj.Slug))
+		}
+
 		provReply, err := nc.Request(provSubject, provData, provisionTimeoutSeconds())
 		if err != nil {
 			log.Error().Err(err).
@@ -362,9 +373,25 @@ func ensurePerUserSessionsStream(js nats.JetStreamContext, uslug string) error {
 	return err
 }
 
+// ensurePerUserInfoKV creates the per-user mclaude-user-info-{uslug} KV bucket (ADR-0091).
+// Client-only bucket: user JWT has read/write; no infrastructure identity has access.
+// History=1 (latest value per key; multiple devices share one token — no history needed).
+func ensurePerUserInfoKV(js nats.JetStreamContext, uslug string) (nats.KeyValue, error) {
+	bucket := userInfoBucket(uslug)
+	kv, err := js.KeyValue(bucket)
+	if err == nil {
+		return kv, nil
+	}
+	return js.CreateKeyValue(&nats.KeyValueConfig{
+		Bucket:  bucket,
+		History: 1,
+	})
+}
+
 // ensureUserResources creates all per-user JetStream resources on user registration.
 // Per ADR-0054: creates mclaude-sessions-{uslug}, mclaude-projects-{uslug},
 // and MCLAUDE_SESSIONS_{uslug} stream.
+// Per ADR-0091: also creates mclaude-user-info-{uslug} KV bucket.
 func ensureUserResources(nc *nats.Conn, uslug string) error {
 	js, err := nc.JetStream()
 	if err != nil {
@@ -374,6 +401,10 @@ func ensureUserResources(nc *nats.Conn, uslug string) error {
 		return err
 	}
 	if _, err := ensurePerUserProjectsKV(js, uslug); err != nil {
+		return err
+	}
+	// ADR-0091: create the client-only user-info KV bucket for tokens/preferences.
+	if _, err := ensurePerUserInfoKV(js, uslug); err != nil {
 		return err
 	}
 	if err := ensurePerUserSessionsStream(js, uslug); err != nil {
@@ -420,15 +451,25 @@ func publishProjectsUpdateToHost(nc *nats.Conn, userSlug, hostSlug string) {
 	}
 }
 
-// publishProjectsDeleteToHost publishes a NATS message to
-// mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.delete (ADR-0054 fan-out)
-// so the controller tears down per-project resources (GAP-CP-04).
-func publishProjectsDeleteToHost(nc *nats.Conn, userSlug, hostSlug, projectSlug, projectID string) {
+// publishProjectsDeleteToHost publishes a NATS message to the appropriate subject
+// so the controller or user-agent tears down per-project resources (GAP-CP-04, ADR-0091).
+// ADR-0091: cluster hosts route through user-agent (mclaude.users.{uslug}.hosts.{hslug}.agent.projects.delete).
+// Machine hosts use the existing host-scoped fan-out subject (mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.delete).
+//
+// hostType is optional: pass "cluster" for cluster hosts, "" or "machine" for machine hosts.
+// When hostType is "", the function falls back to the existing machine-host subject (backward compat).
+func publishProjectsDeleteToHost(nc *nats.Conn, userSlug, hostSlug, projectSlug, projectID string, hostType ...string) {
 	if nc == nil || userSlug == "" || hostSlug == "" {
 		return
 	}
+
+	// ADR-0091: route cluster hosts through user-agent.
+	isCluster := len(hostType) > 0 && hostType[0] == "cluster"
 	var subject string
-	if projectSlug != "" {
+	if isCluster {
+		// Best-effort publish — no reply expected. User-agent deletes the pod.
+		subject = "mclaude.users." + userSlug + ".hosts." + hostSlug + ".agent.projects.delete"
+	} else if projectSlug != "" {
 		subject = subj.HostUserProjectsDelete(slug.HostSlug(hostSlug), slug.UserSlug(userSlug), slug.ProjectSlug(projectSlug))
 	} else {
 		// Fallback for callers without project slug: use legacy user-scoped subject.

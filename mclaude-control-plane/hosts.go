@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -109,15 +111,28 @@ func generateDeviceCode() (string, error) {
 // handleUserAPIRoutes dispatches /api/users/{uslug}/* requests to the correct sub-handler.
 func (s *Server) handleUserAPIRoutes(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/users/")
-	parts := strings.SplitN(path, "/", 4)
+	// Split into at most 5 parts to handle deep paths like {uslug}/hosts/{hslug}/grant/accept
+	parts := strings.SplitN(path, "/", 6)
 	if len(parts) < 2 {
 		http.NotFound(w, r)
 		return
 	}
-	switch parts[1] {
-	case "hosts":
+	uslug := parts[0]
+	switch {
+	case parts[1] == "hosts" && len(parts) >= 4 && parts[3] == "grant" && len(parts) >= 5 && parts[4] == "accept":
+		// POST /api/users/{uslug}/hosts/{hslug}/grant/accept
+		hslug := parts[2]
+		s.handleGrantAccept(w, r, uslug, hslug)
+	case parts[1] == "hosts" && len(parts) >= 5 && parts[3] == "user-agent" && parts[4] == "pubkey":
+		// GET /api/users/{uslug}/hosts/{hslug}/user-agent/pubkey
+		hslug := parts[2]
+		s.handleUserAgentPubkey(w, r, uslug, hslug)
+	case parts[1] == "grants":
+		// GET /api/users/{uslug}/grants
+		s.handleListGrants(w, r, uslug)
+	case parts[1] == "hosts":
 		s.handleHostRoutes(w, r)
-	case "projects":
+	case parts[1] == "projects":
 		s.handleProjectHTTPRoutes(w, r)
 	default:
 		http.NotFound(w, r)
@@ -323,14 +338,20 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request, userID
 	// publish delete notifications for each project on this host so controllers
 	// can tear down per-project resources (namespaces, Deployments, PVCs, RBAC).
 	// ADR-0053: Also delete S3 prefixes for each project (best-effort).
+	// ADR-0091: route cluster hosts through user-agent.
 	if s.nc != nil || s.s3 != nil {
 		user, userErr := s.db.GetUserByID(r.Context(), userID)
 		if userErr == nil && user != nil {
+			// Look up host type so we can route delete through user-agent for cluster hosts.
+			var hostTypeForDelete string
+			if h, herr := s.db.GetHostBySlug(r.Context(), hslug); herr == nil && h != nil {
+				hostTypeForDelete = h.Type
+			}
 			projects, projErr := s.db.GetProjectsByHostSlug(r.Context(), userID, hslug)
 			if projErr == nil {
 				for _, p := range projects {
 					if s.nc != nil {
-						publishProjectsDeleteToHost(s.nc, user.Slug, hslug, p.Slug, p.ID)
+						publishProjectsDeleteToHost(s.nc, user.Slug, hslug, p.Slug, p.ID, hostTypeForDelete)
 					}
 					// ADR-0053: Delete S3 prefix for this project (best-effort).
 					if s.s3 != nil && p.Slug != "" {
@@ -536,6 +557,211 @@ func (s *Server) handleHostRegister(w http.ResponseWriter, r *http.Request) {
 		JWT:    hostJWT,
 		HubURL: s.natsWsURL,
 	})
+}
+
+// ----- ADR-0091: Grant endpoints -----
+
+// GrantEntry is a single entry in the GET /api/users/{uslug}/grants response.
+type GrantEntry struct {
+	HostSlug           string  `json:"hostSlug"`
+	Status             string  `json:"status"`
+	CreatedAt          string  `json:"createdAt"`
+	AcceptedAt         *string `json:"acceptedAt,omitempty"`
+	X25519Fingerprint  *string `json:"x25519Fingerprint,omitempty"` // sha256(x25519_pub) hex; present after user-agent registers
+}
+
+// handleListGrants handles GET /api/users/{uslug}/grants (ADR-0091).
+// Returns pending and accepted host grants for the user, including x25519 fingerprint.
+// Auth: self (uslug must match JWT subject; admin bypass).
+func (s *Server) handleListGrants(w http.ResponseWriter, r *http.Request, uslug string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.db == nil {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Auth: self-only (or admin bypass).
+	if err := s.requireSelfOrAdmin(r, uslug); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	ctx := r.Context()
+	grants, err := s.db.GetHostGrantsByUserSlug(ctx, uslug)
+	if err != nil {
+		http.Error(w, "query error", http.StatusInternalServerError)
+		return
+	}
+
+	entries := make([]GrantEntry, 0, len(grants))
+	for _, g := range grants {
+		e := GrantEntry{
+			HostSlug:  g.HostSlug,
+			Status:    g.Status,
+			CreatedAt: g.CreatedAt.UTC().Format(time.RFC3339),
+		}
+		if g.AcceptedAt != nil {
+			s := g.AcceptedAt.UTC().Format(time.RFC3339)
+			e.AcceptedAt = &s
+		}
+		// Compute x25519 fingerprint if pubkey is registered.
+		ua, _ := s.db.GetUserHostAgentBySlug(ctx, g.HostSlug, uslug)
+		if ua != nil && ua.X25519Pub != nil && *ua.X25519Pub != "" {
+			fp := computeX25519Fingerprint(*ua.X25519Pub)
+			e.X25519Fingerprint = &fp
+		}
+		entries = append(entries, e)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(entries) //nolint:errcheck
+}
+
+// GrantAcceptRequest is the body for POST /api/users/{uslug}/hosts/{hslug}/grant/accept.
+type GrantAcceptRequest struct {
+	X25519Fingerprint string `json:"x25519_fingerprint"` // sha256(x25519_pub) hex
+}
+
+// handleGrantAccept handles POST /api/users/{uslug}/hosts/{hslug}/grant/accept (ADR-0091).
+// Body: {x25519_fingerprint}. CP verifies fingerprint matches user_host_agents.x25519_pub.
+// Match → sets host_grants.status='accepted', publishes activation signal. Mismatch → 409.
+func (s *Server) handleGrantAccept(w http.ResponseWriter, r *http.Request, uslug, hslug string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.db == nil {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Auth: self-only (or admin bypass).
+	if err := s.requireSelfOrAdmin(r, uslug); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	var req GrantAcceptRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.X25519Fingerprint == "" {
+		http.Error(w, "x25519_fingerprint is required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+
+	// Look up user_host_agents.x25519_pub for (hslug, uslug).
+	ua, err := s.db.GetUserHostAgentBySlug(ctx, hslug, uslug)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if ua == nil || ua.X25519Pub == nil || *ua.X25519Pub == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "agent_not_registered"}) //nolint:errcheck
+		return
+	}
+
+	// Verify fingerprint matches.
+	expectedFP := computeX25519Fingerprint(*ua.X25519Pub)
+	if req.X25519Fingerprint != expectedFP {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "fingerprint_mismatch"}) //nolint:errcheck
+		return
+	}
+
+	// Accept the grant.
+	if err := s.db.AcceptHostGrant(ctx, hslug, uslug); err != nil {
+		http.Error(w, "failed to accept grant", http.StatusInternalServerError)
+		return
+	}
+
+	// Publish activation signal to user-agent.
+	if s.nc != nil {
+		subject := "mclaude.users." + uslug + ".hosts." + hslug + ".agent.activate"
+		payload, _ := json.Marshal(map[string]string{"status": "accepted"})
+		if pubErr := s.nc.Publish(subject, payload); pubErr != nil {
+			log.Warn().Err(pubErr).Str("subject", subject).Msg("grant accept: failed to publish activate signal (non-fatal)")
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// UserAgentPubkeyResponse is returned by GET /api/users/{uslug}/hosts/{hslug}/user-agent/pubkey.
+type UserAgentPubkeyResponse struct {
+	X25519Pub string `json:"x25519_pub"` // base64-encoded X25519 public key (32 bytes)
+}
+
+// handleUserAgentPubkey handles GET /api/users/{uslug}/hosts/{hslug}/user-agent/pubkey (ADR-0091).
+// Returns the user-agent's X25519 public key from user_host_agents.
+// SPA reads this to perform crypto_box_seal(token, x25519_pub) before publishing to .agent.token-delivery.
+// 404 if x25519_pub is NULL (agent not yet registered).
+func (s *Server) handleUserAgentPubkey(w http.ResponseWriter, r *http.Request, uslug, hslug string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.db == nil {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Auth: self-only (or admin bypass).
+	if err := s.requireSelfOrAdmin(r, uslug); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	ctx := r.Context()
+	ua, err := s.db.GetUserHostAgentBySlug(ctx, hslug, uslug)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if ua == nil || ua.X25519Pub == nil || *ua.X25519Pub == "" {
+		http.Error(w, "user-agent pubkey not yet registered", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(UserAgentPubkeyResponse{X25519Pub: *ua.X25519Pub}) //nolint:errcheck
+}
+
+// computeX25519Fingerprint computes sha256(x25519_pub) and returns the result as a hex string.
+// The x25519Pub value is the base64-encoded public key string (as stored in user_host_agents.x25519_pub).
+// Per ADR-0091: fingerprint = sha256(x25519_pub_bytes) hex, where x25519_pub_bytes is the
+// UTF-8 encoding of the base64 string. SPA computes the same fingerprint before calling grant/accept.
+func computeX25519Fingerprint(x25519Pub string) string {
+	h := sha256.Sum256([]byte(x25519Pub))
+	return hex.EncodeToString(h[:])
+}
+
+// requireSelfOrAdmin checks that the authenticated user matches uslug (or is admin).
+// Returns nil on success, error on failure.
+func (s *Server) requireSelfOrAdmin(r *http.Request, uslug string) error {
+	userID, ok := r.Context().Value(contextKeyUserID).(string)
+	if !ok || userID == "" {
+		return fmt.Errorf("not authenticated")
+	}
+	if s.db == nil {
+		return fmt.Errorf("db not available")
+	}
+	user, err := s.db.GetUserByID(r.Context(), userID)
+	if err != nil || user == nil {
+		return fmt.Errorf("user not found")
+	}
+	if user.IsAdmin {
+		return nil // admin bypass
+	}
+	if user.Slug == uslug {
+		return nil // self
+	}
+	return fmt.Errorf("forbidden")
 }
 
 // slugify converts a display name to a URL-safe slug.

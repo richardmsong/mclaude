@@ -36,15 +36,23 @@ func kvStreamName(bucket string) string {
 	return "KV_" + bucket
 }
 
+// userInfoBucket returns the per-user user-info KV bucket name (ADR-0091).
+func userInfoBucket(uslug string) string {
+	return "mclaude-user-info-" + uslug
+}
+
 // UserSubjectPermissions returns the NATS pub/sub permissions for a user (SPA/CLI).
 // Per ADR-0054: explicit, per-user-resource scoped allow-lists replacing broad wildcards.
+// Per ADR-0091: adds mclaude-user-info-{uslug} bucket access.
 // hostSlugs is the list of host slugs the user has access to (owned + granted).
 func UserSubjectPermissions(uslug string, hostSlugs []string) NATSPermissions {
 	sessBucket := userSessionsBucket(uslug)
 	projBucket := userProjectsBucket(uslug)
+	infoBucket := userInfoBucket(uslug)
 	sessStream := userSessionsStream(uslug)
 	sessStreamName := kvStreamName(sessBucket)
 	projStreamName := kvStreamName(projBucket)
+	infoStreamName := kvStreamName(infoBucket)
 
 	pub := []string{
 		// Core user subjects
@@ -53,6 +61,14 @@ func UserSubjectPermissions(uslug string, hostSlugs []string) NATSPermissions {
 		// KV direct-get (any key in own buckets)
 		"$JS.API.DIRECT.GET." + sessStreamName + ".>",
 		"$JS.API.DIRECT.GET." + projStreamName + ".>",
+		// ADR-0091: user-info KV direct-get and operations
+		"$JS.API.DIRECT.GET." + infoStreamName + ".>",
+		"$JS.API.CONSUMER.CREATE." + infoStreamName + ".>",
+		"$JS.API.STREAM.INFO." + infoStreamName,
+		"$JS.API.CONSUMER.INFO." + infoStreamName + ".*",
+		"$JS.ACK." + infoStreamName + ".>",
+		"$JS.FC." + infoStreamName + ".>",
+		"$KV." + infoBucket + ".*", // KV put on user-info bucket
 		// KV watch (consumer create) on own buckets
 		"$JS.API.CONSUMER.CREATE." + sessStreamName + ".>",
 		"$JS.API.CONSUMER.CREATE." + projStreamName + ".>",
@@ -86,6 +102,9 @@ func UserSubjectPermissions(uslug string, hostSlugs []string) NATSPermissions {
 		// KV watch push delivery
 		"$KV." + sessBucket + ".hosts.>",
 		"$KV." + projBucket + ".hosts.>",
+		// ADR-0091: user-info KV watch push delivery
+		"$KV." + infoBucket + ".*",
+		"$JS.FC." + infoStreamName + ".>",
 		// Flow control
 		"$JS.FC." + sessStreamName + ".>",
 		"$JS.FC." + projStreamName + ".>",
@@ -312,6 +331,42 @@ func IssueSessionAgentJWT(publicKey string, uslug, hslug, pslug string, accountK
 	perms := SessionAgentSubjectPermissions(uslug, hslug, pslug)
 	const agentTTLSecs = 5 * 60 // 5-minute TTL (ADR-0054)
 	return issueJWT(publicKey, "agent-"+uslug+"-"+hslug+"-"+pslug, accountKP, agentTTLSecs, perms)
+}
+
+// IssueUserAgentBootstrapJWT issues a NATS user JWT for a user-agent when the host
+// grant is still pending (ADR-0091). Subscribe-only scope limited to the
+// activation signal subject so the user-agent can wait for grant acceptance.
+//
+// publicKey: the user-agent's NKey public key.
+// uslug: the owning user's slug.
+// hslug: the host slug where the user-agent runs.
+func IssueUserAgentBootstrapJWT(publicKey string, uslug, hslug string, accountKP nkeys.KeyPair) (string, error) {
+	perms := NATSPermissions{
+		PubAllow: []string{"_INBOX.>"},
+		SubAllow: []string{
+			"mclaude.users." + uslug + ".hosts." + hslug + ".agent.activate",
+			"_INBOX.>",
+		},
+	}
+	const agentTTLSecs = 5 * 60 // 5-minute TTL (ADR-0091)
+	return issueJWT(publicKey, "user-agent-bootstrap-"+uslug+"-"+hslug, accountKP, agentTTLSecs, perms)
+}
+
+// IssueUserAgentJWT issues a NATS user JWT for a user-agent when the host grant
+// is accepted (ADR-0091). Allows pub+sub on the full user-agent scope so the
+// agent can receive token deliveries and project provision/delete events.
+//
+// publicKey: the user-agent's NKey public key.
+// uslug: the owning user's slug.
+// hslug: the host slug where the user-agent runs.
+func IssueUserAgentJWT(publicKey string, uslug, hslug string, accountKP nkeys.KeyPair) (string, error) {
+	agentPrefix := "mclaude.users." + uslug + ".hosts." + hslug + ".agent.>"
+	perms := NATSPermissions{
+		PubAllow: []string{agentPrefix, "_INBOX.>"},
+		SubAllow: []string{agentPrefix, "_INBOX.>"},
+	}
+	const agentTTLSecs = 5 * 60 // 5-minute TTL (ADR-0091)
+	return issueJWT(publicKey, "user-agent-"+uslug+"-"+hslug, accountKP, agentTTLSecs, perms)
 }
 
 // IssueUserJWTLegacy is a backward-compatible wrapper that generates an NKey pair

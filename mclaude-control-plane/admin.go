@@ -54,11 +54,14 @@ type AdminSessionStopRequest struct {
 
 // AdminClusterRegisterRequest is the body for POST /admin/clusters (ADR-0035).
 // ADR-0063: jsDomain and leafUrl fields removed (leaf topology dropped per ADR-0054).
+// ADR-0091: DefaultPlatform field added. If true, sets hosts.is_default_platform=true
+// (partial unique index ensures at most one default platform — collision returns 409).
 type AdminClusterRegisterRequest struct {
-	Slug         string `json:"slug"`
-	Name         string `json:"name,omitempty"`
-	DirectNATSURL string `json:"directNatsUrl,omitempty"`
-	UserSlug     string `json:"userSlug,omitempty"` // owner user slug; if empty, first admin user is used
+	Slug            string `json:"slug"`
+	Name            string `json:"name,omitempty"`
+	DirectNATSURL   string `json:"directNatsUrl,omitempty"`
+	UserSlug        string `json:"userSlug,omitempty"` // owner user slug; if empty, first admin user is used
+	DefaultPlatform bool   `json:"defaultPlatform,omitempty"` // ADR-0091: set hosts.is_default_platform=true
 }
 
 // AdminClusterRegisterResponse is returned on successful cluster registration.
@@ -215,7 +218,8 @@ func (s *Server) adminDeleteUser(w http.ResponseWriter, r *http.Request, userID 
 					projects, projErr := s.db.GetProjectsByHostSlug(r.Context(), userID, h.Slug)
 					if projErr == nil {
 						for _, p := range projects {
-							publishProjectsDeleteToHost(s.nc, user.Slug, h.Slug, p.Slug, p.ID)
+							// ADR-0091: route cluster hosts through user-agent.
+							publishProjectsDeleteToHost(s.nc, user.Slug, h.Slug, p.Slug, p.ID, h.Type)
 						}
 					}
 				}
@@ -400,11 +404,18 @@ func (s *Server) adminRegisterCluster(w http.ResponseWriter, r *http.Request) {
 
 	hostID := uuid.NewString()
 	_, err = s.db.pool.Exec(r.Context(), `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, direct_nats_url, public_key, user_jwt)
-		VALUES ($1, $2, $3, $4, 'cluster', 'owner', $5, $6, $7)`,
-		hostID, ownerUserID, req.Slug, req.Name, req.DirectNATSURL, clusterNKey.PublicKey, clusterJWT)
+		INSERT INTO hosts (id, user_id, slug, name, type, role, direct_nats_url, public_key, user_jwt, is_default_platform)
+		VALUES ($1, $2, $3, $4, 'cluster', 'owner', $5, $6, $7, $8)`,
+		hostID, ownerUserID, req.Slug, req.Name, req.DirectNATSURL, clusterNKey.PublicKey, clusterJWT, req.DefaultPlatform)
 	if err != nil {
 		if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
+			// Distinguish between cluster slug conflict and default_platform conflict.
+			if strings.Contains(err.Error(), "idx_hosts_default_platform") {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				json.NewEncoder(w).Encode(map[string]string{"error": "default_platform_exists"}) //nolint:errcheck
+				return
+			}
 			http.Error(w, "cluster slug already exists", http.StatusConflict)
 			return
 		}

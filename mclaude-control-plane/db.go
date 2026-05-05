@@ -74,6 +74,29 @@ type AgentCredential struct {
 	CreatedAt   time.Time
 }
 
+// UserHostAgent is a row from the user_host_agents table (ADR-0091).
+// One row per (host, user) pair. Stores the NKey public key (registered by
+// host controller) and X25519 public key (registered by user-agent on startup).
+type UserHostAgent struct {
+	ID          string
+	HostSlug    string
+	UserSlug    string
+	NKeyPublic  *string // Ed25519 NKey public key; nil until host controller registers it
+	X25519Pub   *string // X25519 public key (base64, 32 bytes); nil until user-agent authenticates
+	CreatedAt   time.Time
+}
+
+// HostGrant is a row from the host_grants table (ADR-0091).
+// Tracks the bilateral grant/accept handshake that authorises a user-agent on a host.
+type HostGrant struct {
+	ID         string
+	HostSlug   string
+	UserSlug   string
+	Status     string     // "pending", "accepted", "revoked"
+	CreatedAt  time.Time
+	AcceptedAt *time.Time // nil when status='pending'
+}
+
 // Attachment is a row from the attachments table (ADR-0053).
 type Attachment struct {
 	ID        string
@@ -556,6 +579,160 @@ func (db *DB) DeleteAgentCredentialsByProject(ctx context.Context, userID, hostS
 		userID, hostSlug, projectSlug)
 	return err
 }
+
+// --- ADR-0091: user_host_agents and host_grants DB methods ---
+
+// UpsertUserHostAgentNKey upserts a user_host_agents row and sets nkey_public.
+// Called when the host controller registers the user-agent NKey (Phase 1 step 3).
+// Returns FORBIDDEN if no host_grants row exists for (hostSlug, userSlug).
+func (db *DB) UpsertUserHostAgentNKey(ctx context.Context, hostSlug, userSlug, nkeyPublic string) error {
+	// Validate that a host_grants row exists for (hostSlug, userSlug).
+	var count int
+	err := db.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM host_grants WHERE host_slug = $1 AND user_slug = $2`,
+		hostSlug, userSlug).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("check host_grants: %w", err)
+	}
+	if count == 0 {
+		return fmt.Errorf("FORBIDDEN: no host_grants row for (%s, %s)", hostSlug, userSlug)
+	}
+
+	_, err = db.pool.Exec(ctx, `
+		INSERT INTO user_host_agents (host_slug, user_slug, nkey_public, created_at)
+		VALUES ($1, $2, $3, NOW())
+		ON CONFLICT (host_slug, user_slug) DO UPDATE SET nkey_public = EXCLUDED.nkey_public`,
+		hostSlug, userSlug, nkeyPublic)
+	return err
+}
+
+// UpdateUserHostAgentX25519Pub sets the x25519_pub for a user_host_agents row.
+// Called during POST /api/auth/verify when the NKey resolves to user_host_agents.
+func (db *DB) UpdateUserHostAgentX25519Pub(ctx context.Context, hostSlug, userSlug, x25519Pub string) error {
+	_, err := db.pool.Exec(ctx,
+		`UPDATE user_host_agents SET x25519_pub = $1 WHERE host_slug = $2 AND user_slug = $3`,
+		x25519Pub, hostSlug, userSlug)
+	return err
+}
+
+// GetUserHostAgentByNKeyPublic looks up a user_host_agents row by NKey public key.
+// Used in issueJWTForNKey lookup (ADR-0091 lookup path).
+func (db *DB) GetUserHostAgentByNKeyPublic(ctx context.Context, nkeyPublic string) (*UserHostAgent, error) {
+	row := db.pool.QueryRow(ctx,
+		`SELECT id, host_slug, user_slug, nkey_public, x25519_pub, created_at
+		 FROM user_host_agents WHERE nkey_public = $1`,
+		nkeyPublic)
+	ua := &UserHostAgent{}
+	err := row.Scan(&ua.ID, &ua.HostSlug, &ua.UserSlug, &ua.NKeyPublic, &ua.X25519Pub, &ua.CreatedAt)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get user host agent by nkey: %w", err)
+	}
+	return ua, nil
+}
+
+// GetUserHostAgentBySlug returns the user_host_agents row for a (host, user) pair.
+func (db *DB) GetUserHostAgentBySlug(ctx context.Context, hostSlug, userSlug string) (*UserHostAgent, error) {
+	row := db.pool.QueryRow(ctx,
+		`SELECT id, host_slug, user_slug, nkey_public, x25519_pub, created_at
+		 FROM user_host_agents WHERE host_slug = $1 AND user_slug = $2`,
+		hostSlug, userSlug)
+	ua := &UserHostAgent{}
+	err := row.Scan(&ua.ID, &ua.HostSlug, &ua.UserSlug, &ua.NKeyPublic, &ua.X25519Pub, &ua.CreatedAt)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get user host agent by slug: %w", err)
+	}
+	return ua, nil
+}
+
+// UpsertHostGrant upserts a host_grants row. Status is forced to 'pending' on
+// insert; accepted status is only set via AcceptHostGrant. On conflict (existing
+// row), the status is not changed — idempotent for host controller re-publishes.
+func (db *DB) UpsertHostGrant(ctx context.Context, hostSlug, userSlug, status string) error {
+	now := time.Now().UTC()
+	var acceptedAt *time.Time
+	if status == "accepted" {
+		acceptedAt = &now
+	}
+	_, err := db.pool.Exec(ctx, `
+		INSERT INTO host_grants (host_slug, user_slug, status, created_at, accepted_at)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (host_slug, user_slug) DO NOTHING`,
+		hostSlug, userSlug, status, now, acceptedAt)
+	return err
+}
+
+// AcceptHostGrant sets status='accepted' and accepted_at=NOW() for a host_grants row.
+// Called by POST /api/users/{uslug}/hosts/{hslug}/grant/accept (ADR-0091).
+func (db *DB) AcceptHostGrant(ctx context.Context, hostSlug, userSlug string) error {
+	_, err := db.pool.Exec(ctx,
+		`UPDATE host_grants SET status = 'accepted', accepted_at = NOW()
+		 WHERE host_slug = $1 AND user_slug = $2`,
+		hostSlug, userSlug)
+	return err
+}
+
+// GetHostGrant returns the host_grants row for (hostSlug, userSlug), or nil if not found.
+func (db *DB) GetHostGrant(ctx context.Context, hostSlug, userSlug string) (*HostGrant, error) {
+	row := db.pool.QueryRow(ctx,
+		`SELECT id, host_slug, user_slug, status, created_at, accepted_at
+		 FROM host_grants WHERE host_slug = $1 AND user_slug = $2`,
+		hostSlug, userSlug)
+	g := &HostGrant{}
+	err := row.Scan(&g.ID, &g.HostSlug, &g.UserSlug, &g.Status, &g.CreatedAt, &g.AcceptedAt)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get host grant: %w", err)
+	}
+	return g, nil
+}
+
+// GetHostGrantsByUserSlug returns all host_grants for a user (pending + accepted).
+// Used by GET /api/users/{uslug}/grants (ADR-0091).
+func (db *DB) GetHostGrantsByUserSlug(ctx context.Context, userSlug string) ([]*HostGrant, error) {
+	rows, err := db.pool.Query(ctx,
+		`SELECT id, host_slug, user_slug, status, created_at, accepted_at
+		 FROM host_grants WHERE user_slug = $1 AND status IN ('pending', 'accepted')
+		 ORDER BY created_at`,
+		userSlug)
+	if err != nil {
+		return nil, fmt.Errorf("get host grants by user: %w", err)
+	}
+	defer rows.Close()
+	var grants []*HostGrant
+	for rows.Next() {
+		g := &HostGrant{}
+		if err := rows.Scan(&g.ID, &g.HostSlug, &g.UserSlug, &g.Status, &g.CreatedAt, &g.AcceptedAt); err != nil {
+			return nil, err
+		}
+		grants = append(grants, g)
+	}
+	return grants, rows.Err()
+}
+
+// GetDefaultPlatformHostSlug returns the slug of the default platform host, or "" if none.
+// Called on user creation to auto-grant access (ADR-0091).
+func (db *DB) GetDefaultPlatformHostSlug(ctx context.Context) (string, error) {
+	var hostSlug string
+	err := db.pool.QueryRow(ctx,
+		`SELECT slug FROM hosts WHERE is_default_platform = true LIMIT 1`).Scan(&hostSlug)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			return "", nil
+		}
+		return "", fmt.Errorf("get default platform host: %w", err)
+	}
+	return hostSlug, nil
+}
+
+// --- end ADR-0091 ---
 
 // GetAgentCredentialsByHostUser returns all agent credentials for a host/user combination.
 // Used for revocation during manage.revoke-access (ADR-0054).
@@ -1040,4 +1217,33 @@ BEGIN
     END IF;
 END
 $$;
+
+-- ADR-0091: is_default_platform column on hosts.
+-- At most one host can be the default platform (partial unique index enforces this).
+ALTER TABLE hosts ADD COLUMN IF NOT EXISTS is_default_platform BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hosts_default_platform ON hosts (is_default_platform) WHERE is_default_platform = TRUE;
+
+-- ADR-0091: user_host_agents table — one row per (user, host) pair.
+-- Tracks the in-namespace user-agent that handles token delivery and project pod lifecycle.
+CREATE TABLE IF NOT EXISTS user_host_agents (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    host_slug   TEXT NOT NULL,
+    user_slug   TEXT NOT NULL,
+    nkey_public TEXT,
+    x25519_pub  TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (host_slug, user_slug)
+);
+
+-- ADR-0091: host_grants table — bilateral grant/accept handshake.
+-- The host initiates; the user (or CP on default platform) accepts.
+CREATE TABLE IF NOT EXISTS host_grants (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    host_slug   TEXT NOT NULL,
+    user_slug   TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    accepted_at TIMESTAMPTZ,
+    UNIQUE (host_slug, user_slug)
+);
 `

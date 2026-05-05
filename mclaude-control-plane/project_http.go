@@ -230,14 +230,14 @@ func (s *Server) handleDeleteProjectHTTP(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// CP-04: Before deleting, look up the project to get its ID and host slug
+	// CP-04: Before deleting, look up the project to get its ID, host slug, and host type
 	// for NATS notifications (same pattern as handleDeleteHost in hosts.go).
-	var projectID, hostSlug string
+	var projectID, hostSlug, hostType string
 	err := s.db.pool.QueryRow(r.Context(), `
-		SELECT p.id, COALESCE(h.slug, '')
+		SELECT p.id, COALESCE(h.slug, ''), COALESCE(h.type, '')
 		FROM projects p
 		LEFT JOIN hosts h ON h.id = p.host_id
-		WHERE p.user_id = $1 AND p.slug = $2`, userID, pslug).Scan(&projectID, &hostSlug)
+		WHERE p.user_id = $1 AND p.slug = $2`, userID, pslug).Scan(&projectID, &hostSlug, &hostType)
 	if err != nil {
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
@@ -251,10 +251,10 @@ func (s *Server) handleDeleteProjectHTTP(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	// CP-04: Publish delete notification to controller so it tears down
-	// per-project K8s resources (namespace, Deployment, PVCs, RBAC).
+	// CP-04 + ADR-0091: Publish delete notification to the appropriate subject.
+	// Cluster hosts route through user-agent; machine hosts use the existing host-scoped subject.
 	if s.nc != nil && userSlug != "" && hostSlug != "" {
-		publishProjectsDeleteToHost(s.nc, userSlug, hostSlug, pslug, projectID)
+		publishProjectsDeleteToHost(s.nc, userSlug, hostSlug, pslug, projectID, hostType)
 	}
 
 	tag, err := s.db.pool.Exec(r.Context(),

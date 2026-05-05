@@ -42,10 +42,13 @@ type ChallengeResponse struct {
 }
 
 // VerifyRequest is the body for POST /api/auth/verify.
+// ADR-0091: x25519_pub is optional; required when the caller is a user-agent
+// (NKey resolves to user_host_agents). Ignored for other identity types.
 type VerifyRequest struct {
 	NKeyPublic string `json:"nkey_public"`
-	Challenge  string `json:"challenge"`  // base64-encoded nonce from challenge response
-	Signature  string `json:"signature"`  // base64-encoded Ed25519 signature of the nonce
+	Challenge  string `json:"challenge"`    // base64-encoded nonce from challenge response
+	Signature  string `json:"signature"`    // base64-encoded Ed25519 signature of the nonce
+	X25519Pub  string `json:"x25519_pub"`   // ADR-0091: X25519 pubkey (base64, 32 bytes); required for user-agents
 }
 
 // VerifyResponse is returned for POST /api/auth/verify.
@@ -194,9 +197,14 @@ func (s *Server) handleAuthVerify(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve identity type and issue JWT.
 	ctx := r.Context()
-	jwtStr, issueErr := s.issueJWTForNKey(ctx, req.NKeyPublic)
+	jwtStr, issueErr := s.issueJWTForNKey(ctx, req.NKeyPublic, req.X25519Pub)
 	if issueErr != nil {
-		writeVerifyError(w, issueErr.Error(), issueErr.Code(), http.StatusForbidden)
+		code := issueErr.Code()
+		status := http.StatusForbidden
+		if code == "INVALID_REQUEST" {
+			status = http.StatusBadRequest
+		}
+		writeVerifyError(w, issueErr.Error(), code, status)
 		return
 	}
 
@@ -218,8 +226,12 @@ func (e *authError) Code() string  { return e.code }
 
 // issueJWTForNKey resolves the identity type from the NKey public key and issues
 // a scoped JWT. Returns an authError if the identity is unknown or forbidden.
-// Lookup order per ADR-0054: users.nkey_public → hosts.public_key → agent_credentials.nkey_public.
-func (s *Server) issueJWTForNKey(ctx context.Context, nkeyPublic string) (string, *authError) {
+// Lookup order per ADR-0054 + ADR-0091:
+//   users.nkey_public → hosts.public_key → agent_credentials.nkey_public → user_host_agents.nkey_public
+//
+// x25519Pub is optional for most callers; required when the NKey resolves to
+// user_host_agents (user-agent identity). Ignored for all other identity types.
+func (s *Server) issueJWTForNKey(ctx context.Context, nkeyPublic string, x25519Pub string) (string, *authError) {
 	expirySecs := int64(s.jwtExpiry.Seconds())
 
 	// 1. Check if it's a user.
@@ -232,8 +244,22 @@ func (s *Server) issueJWTForNKey(ctx context.Context, nkeyPublic string) (string
 			return "", &authError{"failed to issue user jwt", "INTERNAL_ERROR"}
 		}
 		// ADR-0054: ensure per-user JetStream resources exist on first auth.
+		// ADR-0091: also creates mclaude-user-info-{uslug} KV bucket.
 		if s.nc != nil {
 			_ = ensureUserResources(s.nc, user.Slug)
+			// ADR-0091: auto-grant + auto-accept for default platform on user creation.
+			// On first login (or any login), check if a default platform exists.
+			// If so, ensure host_grants row is accepted and publish grants.create so the
+			// host controller spins up the user-agent and namespace.
+			if defaultHostSlug, defErr := s.db.GetDefaultPlatformHostSlug(ctx); defErr == nil && defaultHostSlug != "" {
+				// Upsert the grant as accepted — idempotent (ON CONFLICT DO NOTHING skips if already set).
+				if upsertErr := s.db.UpsertHostGrant(ctx, defaultHostSlug, user.Slug, "accepted"); upsertErr == nil {
+					// Publish grants.create so the host controller creates the user namespace + user-agent.
+					// Fire-and-forget — no reply expected.
+					grantPayload, _ := json.Marshal(map[string]string{"uslug": user.Slug})
+					_ = s.nc.Publish("mclaude.hosts."+defaultHostSlug+".grants.create", grantPayload)
+				}
+			}
 		}
 		return jwt, nil
 	}
@@ -270,6 +296,42 @@ func (s *Server) issueJWTForNKey(ctx context.Context, nkeyPublic string) (string
 		return jwt, nil
 	}
 
+	// 4. ADR-0091: Check if it's a user-agent (user_host_agents table).
+	userAgent, err := s.db.GetUserHostAgentByNKeyPublic(ctx, nkeyPublic)
+	if err == nil && userAgent != nil {
+		// x25519_pub is required when caller is a user-agent.
+		if x25519Pub == "" {
+			return "", &authError{"x25519_pub is required for user-agent authentication", "INVALID_REQUEST"}
+		}
+		// Store the X25519 pubkey in user_host_agents.
+		if storeErr := s.db.UpdateUserHostAgentX25519Pub(ctx, userAgent.HostSlug, userAgent.UserSlug, x25519Pub); storeErr != nil {
+			return "", &authError{"failed to store x25519 pubkey", "INTERNAL_ERROR"}
+		}
+		// Select bootstrap vs full JWT based on host_grants.status.
+		grant, grantErr := s.db.GetHostGrant(ctx, userAgent.HostSlug, userAgent.UserSlug)
+		if grantErr != nil || grant == nil {
+			// No grant found — issue bootstrap JWT (gate pending host controller publish).
+			jwt, jwtErr := IssueUserAgentBootstrapJWT(nkeyPublic, userAgent.UserSlug, userAgent.HostSlug, s.accountKP)
+			if jwtErr != nil {
+				return "", &authError{"failed to issue user-agent bootstrap jwt", "INTERNAL_ERROR"}
+			}
+			return jwt, nil
+		}
+		if grant.Status == "accepted" {
+			jwt, jwtErr := IssueUserAgentJWT(nkeyPublic, userAgent.UserSlug, userAgent.HostSlug, s.accountKP)
+			if jwtErr != nil {
+				return "", &authError{"failed to issue user-agent jwt", "INTERNAL_ERROR"}
+			}
+			return jwt, nil
+		}
+		// Grant is pending (or revoked) — issue bootstrap JWT.
+		jwt, jwtErr := IssueUserAgentBootstrapJWT(nkeyPublic, userAgent.UserSlug, userAgent.HostSlug, s.accountKP)
+		if jwtErr != nil {
+			return "", &authError{"failed to issue user-agent bootstrap jwt", "INTERNAL_ERROR"}
+		}
+		return jwt, nil
+	}
+
 	return "", &authError{"unknown public key", "NOT_FOUND"}
 }
 
@@ -294,7 +356,7 @@ func (s *Server) isHostRevoked(ctx context.Context, hostID string) bool {
 }
 
 // isNKeyRegistered checks whether the given NKey public key is registered
-// in any of the three identity tables.
+// in any of the four identity tables (users, hosts, agent_credentials, user_host_agents).
 func (s *Server) isNKeyRegistered(ctx context.Context, nkeyPublic string) bool {
 	if s.db == nil {
 		return false
@@ -309,6 +371,10 @@ func (s *Server) isNKeyRegistered(ctx context.Context, nkeyPublic string) bool {
 	}
 	// Check agent credentials
 	if a, err := s.db.GetAgentCredentialByNKeyPublic(ctx, nkeyPublic); err == nil && a != nil {
+		return true
+	}
+	// ADR-0091: Check user_host_agents
+	if ua, err := s.db.GetUserHostAgentByNKeyPublic(ctx, nkeyPublic); err == nil && ua != nil {
 		return true
 	}
 	return false

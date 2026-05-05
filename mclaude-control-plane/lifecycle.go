@@ -78,6 +78,22 @@ func (s *Server) StartLifecycleSubscribers(nc *nats.Conn) error {
 		return err
 	}
 
+	// ADR-0091: Host grants user access.
+	// mclaude.hosts.{hslug}.grants.create — payload {uslug}
+	if _, err := nc.Subscribe("mclaude.hosts.*.grants.create", func(msg *nats.Msg) {
+		s.handleHostGrantCreate(msg)
+	}); err != nil {
+		return err
+	}
+
+	// ADR-0091: Host controller registers user-agent NKey public key.
+	// mclaude.hosts.{hslug}.api.agents.user-agent.register — payload {uslug, nkey_public}
+	if _, err := nc.Subscribe("mclaude.hosts.*.api.agents.user-agent.register", func(msg *nats.Msg) {
+		s.handleUserAgentRegister(msg)
+	}); err != nil {
+		return err
+	}
+
 	// check-slug: mclaude.users.{uslug}.hosts.{hslug}.projects.check-slug
 	// (ADR-0053, ADR-0077 — slug availability check before project creation)
 	if _, err := nc.Subscribe("mclaude.users.*.hosts.*.projects.check-slug", func(msg *nats.Msg) {
@@ -512,7 +528,8 @@ func (s *Server) handleManageDeregister(msg *nats.Msg) {
 			nc := s.nc
 			for _, p := range projects {
 				if nc != nil {
-					publishProjectsDeleteToHost(nc, owner.Slug, hslug, p.Slug, p.ID)
+					// ADR-0091: route cluster hosts through user-agent.
+					publishProjectsDeleteToHost(nc, owner.Slug, hslug, p.Slug, p.ID, host.Type)
 				}
 				// ADR-0053: Delete S3 prefix for this project (best-effort).
 				if s.s3 != nil && p.Slug != "" {
@@ -758,6 +775,119 @@ func (s *Server) handleManageUpdate(msg *nats.Msg) {
 			}
 		}
 	}
+
+	replyNATSOK(msg)
+}
+
+// ----- ADR-0091: Host Grant Create -----
+
+// HostGrantCreateRequest is the payload for mclaude.hosts.{hslug}.grants.create.
+type HostGrantCreateRequest struct {
+	USlug string `json:"uslug"`
+}
+
+// handleHostGrantCreate processes mclaude.hosts.*.grants.create (ADR-0091).
+// The host (or CP on behalf of the default platform) publishes {uslug} to grant
+// a user access. CP upserts host_grants with status='pending' (or 'accepted' if
+// this is the default platform's auto-grant where is_default_platform=true).
+// CP is a directory — it does not approve or deny; it records the host's intent.
+func (s *Server) handleHostGrantCreate(msg *nats.Msg) {
+	if s.db == nil {
+		replyNATSOK(msg) // best-effort; no reply expected in most callers
+		return
+	}
+
+	// Extract host slug from subject: mclaude.hosts.{hslug}.grants.create
+	parts := strings.Split(msg.Subject, ".")
+	if len(parts) < 4 {
+		replyNATSError(msg, "malformed subject")
+		return
+	}
+	hslug := parts[2]
+
+	var req HostGrantCreateRequest
+	if err := json.Unmarshal(msg.Data, &req); err != nil || req.USlug == "" {
+		replyNATSError(msg, "uslug is required")
+		return
+	}
+
+	ctx := context.Background()
+
+	// Determine status: 'accepted' if host is the default platform, 'pending' otherwise.
+	status := "pending"
+	defaultSlug, err := s.db.GetDefaultPlatformHostSlug(ctx)
+	if err == nil && defaultSlug == hslug {
+		status = "accepted"
+	}
+
+	if err := s.db.UpsertHostGrant(ctx, hslug, req.USlug, status); err != nil {
+		log.Error().Err(err).Str("hostSlug", hslug).Str("userSlug", req.USlug).Msg("host grant create: upsert failed")
+		replyNATSError(msg, "failed to store grant")
+		return
+	}
+
+	log.Info().
+		Str("hostSlug", hslug).
+		Str("userSlug", req.USlug).
+		Str("status", status).
+		Msg("host grant recorded")
+
+	replyNATSOK(msg)
+}
+
+// ----- ADR-0091: User-Agent Register -----
+
+// UserAgentRegisterRequest is the payload for mclaude.hosts.{hslug}.api.agents.user-agent.register.
+type UserAgentRegisterRequest struct {
+	USlug      string `json:"uslug"`
+	NKeyPublic string `json:"nkey_public"`
+}
+
+// handleUserAgentRegister processes mclaude.hosts.*.api.agents.user-agent.register (ADR-0091).
+// Host controller registers the user-agent NKey public key for (uslug, hslug).
+// CP validates that a host_grants row exists for (hslug, uslug) — rejects with
+// FORBIDDEN if not (prevents a host from registering agents for arbitrary users).
+// Upserts user_host_agents.nkey_public for (host_slug, user_slug).
+func (s *Server) handleUserAgentRegister(msg *nats.Msg) {
+	if s.db == nil {
+		replyNATSError(msg, "service unavailable")
+		return
+	}
+
+	// Extract host slug from subject: mclaude.hosts.{hslug}.api.agents.user-agent.register
+	parts := strings.Split(msg.Subject, ".")
+	if len(parts) < 6 {
+		replyNATSError(msg, "malformed subject")
+		return
+	}
+	hslug := parts[2]
+
+	var req UserAgentRegisterRequest
+	if err := json.Unmarshal(msg.Data, &req); err != nil {
+		replyNATSError(msg, "invalid request body")
+		return
+	}
+	if req.USlug == "" || req.NKeyPublic == "" {
+		replyNATSError(msg, "uslug and nkey_public are required")
+		return
+	}
+
+	ctx := context.Background()
+
+	// UpsertUserHostAgentNKey validates host_grants row exists before upserting.
+	if err := s.db.UpsertUserHostAgentNKey(ctx, hslug, req.USlug, req.NKeyPublic); err != nil {
+		if strings.Contains(err.Error(), "FORBIDDEN") {
+			replyNATSForbidden(msg, "no host_grants row for this (host, user) — host must grant access first")
+			return
+		}
+		replyNATSError(msg, "failed to store user-agent key")
+		return
+	}
+
+	log.Info().
+		Str("hostSlug", hslug).
+		Str("userSlug", req.USlug).
+		Msg("user-agent NKey registered")
 
 	replyNATSOK(msg)
 }
