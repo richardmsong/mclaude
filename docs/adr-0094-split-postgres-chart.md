@@ -1,9 +1,10 @@
 # ADR: Split Postgres into a standalone chart
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-05: draft
 - 2026-05-05: accepted — paired with charts-mclaude/spec-helm.md, mclaude-control-plane/spec-control-plane.md
+- 2026-05-05: implemented — all scope CLEAN
 
 ## Overview
 
