@@ -384,14 +384,23 @@ jobs:
             --namespace mclaude-system \
             --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Cleanup failed control-plane release
+      - name: Cleanup failed releases
         run: |
-          if helm status mclaude-cp -n mclaude-system 2>/dev/null | grep -q "STATUS: failed"; then
-            echo "Release mclaude-cp is in failed state — uninstalling to clear SSA ownership"
-            helm uninstall mclaude-cp -n mclaude-system
-          fi
+          for release in mclaude-postgres mclaude-cp; do
+            if helm status "$release" -n mclaude-system 2>/dev/null | grep -q "STATUS: failed"; then
+              echo "Release $release is in failed state — uninstalling to clear SSA ownership"
+              helm uninstall "$release" -n mclaude-system
+            fi
+          done
 
-      - name: Helm deploy control-plane
+      - name: Helm deploy mclaude-postgres
+        run: |
+          helm upgrade --install mclaude-postgres ./charts/mclaude-postgres \
+            --set existingSecret=mclaude-postgres \
+            --namespace mclaude-system \
+            --wait --timeout 5m
+
+      - name: Helm deploy mclaude-cp
         env:
           IMAGE_TAG: ${{ needs.tag.outputs.image_tag }}
         run: |
@@ -401,6 +410,8 @@ jobs:
             -f ./charts/mclaude-cp/values-k3d-ghcr.yaml \
             --set controlPlane.image.tag="${IMAGE_TAG}" \
             --set spa.image.tag="${IMAGE_TAG}" \
+            --set database.host=mclaude-postgres.mclaude-system.svc \
+            --set database.passwordSecretRef=mclaude-postgres \
             --set "controlPlane.bootstrapAdminEmail=${BOOTSTRAP_ADMIN_EMAIL}" \
             --set "controlPlane.bootstrapAdminPassword=${BOOTSTRAP_ADMIN_PASSWORD}" \
             --set "ingress.externalDnsTarget=${TS_IP}" \

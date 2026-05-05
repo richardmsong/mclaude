@@ -18,11 +18,17 @@ import (
 )
 
 // runInitKeys implements the "init-keys" subcommand: generates operator + account
-// NKey pairs and JWTs, writes them to a K8s Secret, and optionally creates a
-// bootstrap admin user in Postgres.
+// NKey pairs and JWTs, writes them to a K8s Secret, and UPSERTs the bootstrap
+// admin user in Postgres.
 //
 // Called by the Helm pre-install Job (charts/mclaude-cp/templates/init-keys-job.yaml).
-// Idempotent: exits 0 if the Secret already exists.
+//
+// Control flow per ADR-0094:
+//  1. Key generation: writes the operator-keys Secret. Skipped (idempotent) if the
+//     Secret already exists — the early-return is scoped to this step only.
+//  2. Bootstrap admin UPSERT: runs unconditionally on every helm upgrade when
+//     BOOTSTRAP_ADMIN_EMAIL is set, regardless of whether keys were just generated
+//     or already existed.
 func runInitKeys() {
 	logger := zerolog.New(os.Stdout).With().
 		Str("component", "control-plane").
@@ -49,82 +55,90 @@ func runInitKeys() {
 		logger.Fatal().Err(err).Msg("create kubernetes client")
 	}
 
-	// 1. Check if Secret already exists — idempotent.
+	// Step 1: Key generation — idempotent, scoped early-return.
 	_, err = clientset.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
 	if err == nil {
 		logger.Info().
 			Str("namespace", namespace).
 			Str("secret", secretName).
-			Msg("operator-keys Secret already exists — nothing to do")
-		return
-	}
-	if !kerrors.IsNotFound(err) {
+			Msg("operator-keys Secret already exists — skipping key generation")
+		// Do NOT return here — fall through to admin bootstrap below.
+	} else if !kerrors.IsNotFound(err) {
 		logger.Fatal().Err(err).Msg("check existing Secret")
-	}
-
-	// 2–4. Generate operator + account NKey pairs and JWTs.
-	oa, err := mclaudenats.GenerateOperatorAccount("mclaude-operator", "mclaude-account")
-	if err != nil {
-		logger.Fatal().Err(err).Msg("generate operator/account keys")
-	}
-	logger.Info().
-		Str("operatorPub", oa.OperatorPublicKey).
-		Str("accountPub", oa.AccountPublicKey).
-		Msg("generated NKey pairs and JWTs")
-
-	// 5. Create K8s Secret.
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by": "mclaude-init-keys",
-			},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			"operatorJwt":      []byte(oa.OperatorJWT),
-			"accountJwt":       []byte(oa.AccountJWT),
-			"accountSeed":      oa.AccountSeed,
-			"operatorSeed":     oa.OperatorSeed,
-			"accountPublicKey": []byte(oa.AccountPublicKey),
-			"resolverPreload": []byte(
-				`"` + oa.SysAccountPublicKey + `": ` + oa.SysAccountJWT + "\n" +
-					`"` + oa.AccountPublicKey + `": ` + oa.AccountJWT,
-			),
-		},
-	}
-	_, err = clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
-	if err != nil {
-		if kerrors.IsAlreadyExists(err) {
-			// Race condition: another init-keys pod created it between our Get and Create.
-			logger.Info().Msg("Secret was created by another init-keys instance — idempotent exit")
-			return
+	} else {
+		// Secret does not exist: generate and create it.
+		oa, err := mclaudenats.GenerateOperatorAccount("mclaude-operator", "mclaude-account")
+		if err != nil {
+			logger.Fatal().Err(err).Msg("generate operator/account keys")
 		}
-		logger.Fatal().Err(err).Msg("create operator-keys Secret")
-	}
-	logger.Info().
-		Str("namespace", namespace).
-		Str("secret", secretName).
-		Msg("created operator-keys Secret")
+		logger.Info().
+			Str("operatorPub", oa.OperatorPublicKey).
+			Str("accountPub", oa.AccountPublicKey).
+			Msg("generated NKey pairs and JWTs")
 
-	// 6. Optionally bootstrap admin user in Postgres.
-	if bootstrapEmail != "" && databaseURL != "" {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      secretName,
+				Namespace: namespace,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by": "mclaude-init-keys",
+				},
+			},
+			Type: corev1.SecretTypeOpaque,
+			Data: map[string][]byte{
+				"operatorJwt":      []byte(oa.OperatorJWT),
+				"accountJwt":       []byte(oa.AccountJWT),
+				"accountSeed":      oa.AccountSeed,
+				"operatorSeed":     oa.OperatorSeed,
+				"sysAccountSeed":   oa.SysAccountSeed,
+				"accountPublicKey": []byte(oa.AccountPublicKey),
+				"resolverPreload": []byte(
+					`"` + oa.SysAccountPublicKey + `": ` + oa.SysAccountJWT + "\n" +
+						`"` + oa.AccountPublicKey + `": ` + oa.AccountJWT,
+				),
+			},
+		}
+		_, err = clientset.CoreV1().Secrets(namespace).Create(ctx, secret, metav1.CreateOptions{})
+		if err != nil {
+			if kerrors.IsAlreadyExists(err) {
+				// Race condition: another init-keys pod created it between our Get and Create.
+				logger.Info().Msg("Secret was created by another init-keys instance — idempotent exit")
+				// Fall through to admin bootstrap.
+			} else {
+				logger.Fatal().Err(err).Msg("create operator-keys Secret")
+			}
+		} else {
+			logger.Info().
+				Str("namespace", namespace).
+				Str("secret", secretName).
+				Msg("created operator-keys Secret")
+		}
+	}
+
+	// Step 2: Bootstrap admin UPSERT — runs unconditionally on every helm upgrade
+	// when BOOTSTRAP_ADMIN_EMAIL is set (ADR-0094).
+	if bootstrapEmail != "" {
+		if databaseURL == "" {
+			logger.Fatal().Msg("BOOTSTRAP_ADMIN_EMAIL set but DATABASE_URL is empty — cannot bootstrap admin")
+		}
 		if err := bootstrapAdminUser(ctx, logger, databaseURL, bootstrapEmail, bootstrapPassword); err != nil {
 			logger.Fatal().Err(err).Msg("bootstrap admin user")
 		}
-	} else if bootstrapEmail != "" {
-		logger.Warn().Msg("BOOTSTRAP_ADMIN_EMAIL set but DATABASE_URL is empty — skipping admin bootstrap")
 	}
 
 	logger.Info().Msg("init-keys completed successfully")
 }
 
-// bootstrapAdminUser connects to Postgres and inserts a bootstrap admin user
-// if one doesn't already exist with the given email. Idempotent.
-// If password is non-empty, it is hashed and stored. If the user already exists
-// and has no password hash, the password is set. Empty password is handled
-// gracefully — existing OAuth-only admins continue to work.
+// bootstrapAdminUser UPSERTs a bootstrap admin user in Postgres (ADR-0094).
+//
+// Semantics:
+//   - Fresh user + non-empty password: inserts with is_admin=true and bcrypt hash.
+//   - Fresh user + empty password: returns an error (unusable account — login impossible).
+//   - Existing user + non-empty password: promotes to admin and rotates password_hash.
+//   - Existing user + empty password: promotes to admin, preserves existing password_hash.
+//
+// The underlying SQL is a single INSERT ... ON CONFLICT (email) DO UPDATE, making
+// this safe to re-run on every helm upgrade.
 func bootstrapAdminUser(ctx context.Context, logger zerolog.Logger, databaseURL, email, password string) error {
 	db, err := ConnectDB(ctx, databaseURL)
 	if err != nil {
@@ -136,55 +150,46 @@ func bootstrapAdminUser(ctx context.Context, logger zerolog.Logger, databaseURL,
 		return fmt.Errorf("migrate schema: %w", err)
 	}
 
-	// Check if user already exists — idempotent.
-	existing, err := db.GetUserByEmail(ctx, email)
-	if err != nil {
-		return fmt.Errorf("check existing user: %w", err)
-	}
-	if existing != nil {
-		logger.Info().Str("email", email).Bool("isAdmin", existing.IsAdmin).Msg("bootstrap admin user already exists")
-		// Ensure is_admin is set even if the user was previously created without it.
-		if !existing.IsAdmin {
-			if err := db.SetUserAdmin(ctx, existing.ID, true); err != nil {
-				return fmt.Errorf("promote existing user to admin: %w", err)
-			}
-			logger.Info().Str("email", email).Msg("promoted existing user to admin")
-		}
-		// If password is provided and user has no password hash, set it now.
-		if password != "" && existing.PasswordHash == "" {
-			hash, hashErr := HashPassword(password)
-			if hashErr != nil {
-				return fmt.Errorf("hash bootstrap admin password: %w", hashErr)
-			}
-			if err := db.UpdateUserPassword(ctx, existing.ID, hash); err != nil {
-				return fmt.Errorf("update bootstrap admin password: %w", err)
-			}
-			logger.Info().Str("email", email).Msg("set password for existing bootstrap admin")
-		}
-		return nil
-	}
-
-	// Password is required when creating a new user — an account with no password
-	// hash cannot log in, which is an invalid state.
+	// Validate: empty password is only allowed when the user already exists
+	// (we preserve the existing hash in that case). Check existence first.
 	if password == "" {
-		return fmt.Errorf("BOOTSTRAP_ADMIN_PASSWORD is required when BOOTSTRAP_ADMIN_EMAIL is set and no user with that email exists yet")
+		existing, err := db.GetUserByEmail(ctx, email)
+		if err != nil {
+			return fmt.Errorf("check existing user: %w", err)
+		}
+		if existing == nil {
+			return fmt.Errorf("BOOTSTRAP_ADMIN_PASSWORD is required when BOOTSTRAP_ADMIN_EMAIL is set and no user with that email exists yet")
+		}
+		// User exists with empty password — just ensure is_admin. No hash change.
 	}
 
-	// Hash password.
-	passwordHash, hashErr := HashPassword(password)
-	if hashErr != nil {
-		return fmt.Errorf("hash bootstrap admin password: %w", hashErr)
+	// Compute bcrypt hash when password is provided (empty string → sentinel for "preserve").
+	var passwordHash string
+	if password != "" {
+		h, hashErr := HashPassword(password)
+		if hashErr != nil {
+			return fmt.Errorf("hash bootstrap admin password: %w", hashErr)
+		}
+		passwordHash = h
 	}
 
-	// Create the bootstrap admin user.
-	user, err := db.CreateUser(ctx, uuid.NewString(), email, "Admin", passwordHash)
+	userID := uuid.NewString()
+	userSlug := computeUserSlug(email)
+	now := time.Now().UTC()
+
+	// UPSERT: insert if not exists; on conflict promote to admin and conditionally
+	// rotate password_hash (only when the new password is non-empty).
+	_, err = db.pool.Exec(ctx, `
+		INSERT INTO users (id, email, name, is_admin, password_hash, slug, created_at)
+		VALUES ($1, $2, 'Admin', true, $3, $4, $5)
+		ON CONFLICT (email) DO UPDATE
+		  SET is_admin     = true,
+		      password_hash = CASE WHEN $3 = '' THEN users.password_hash ELSE EXCLUDED.password_hash END`,
+		userID, email, passwordHash, userSlug, now)
 	if err != nil {
-		return fmt.Errorf("create admin user: %w", err)
-	}
-	if err := db.SetUserAdmin(ctx, user.ID, true); err != nil {
-		return fmt.Errorf("set admin flag: %w", err)
+		return fmt.Errorf("upsert bootstrap admin user: %w", err)
 	}
 
-	logger.Info().Str("email", email).Str("userId", user.ID).Msg("created bootstrap admin user")
+	logger.Info().Str("email", email).Msg("bootstrap admin user upserted")
 	return nil
 }

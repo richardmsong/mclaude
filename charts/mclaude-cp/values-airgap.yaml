@@ -1,5 +1,7 @@
 ## Air-gapped values for control-plane chart.
 ## All images from internal registry mirror.
+## Postgres is its own chart (charts/mclaude-postgres). ADR-0094.
+## Mirror the postgres image in charts/mclaude-postgres/values-airgap.yaml.
 
 global:
   imageRegistry: "registry.internal.example.com"
@@ -11,12 +13,6 @@ nats:
     registry: registry.internal.example.com
     repository: mirror/nats
     tag: "2.10.24-alpine"
-
-postgres:
-  image:
-    registry: registry.internal.example.com
-    repository: mirror/postgres
-    tag: "16.6-alpine"
 
 controlPlane:
   image:

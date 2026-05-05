@@ -1,6 +1,7 @@
 ## mclaude-cp Helm Chart Values
-## Control-plane chart: hub NATS, Postgres, control-plane, SPA.
-## Ref: ADR-0035, docs/charts-mclaude/spec-helm.md
+## Control-plane chart: hub NATS, control-plane, SPA.
+## Postgres is its own chart (mclaude-postgres). See ADR-0094.
+## Ref: ADR-0035, ADR-0094, docs/charts-mclaude/spec-helm.md
 
 global:
   ## Override image registry for all images (air-gapped mirror)
@@ -65,32 +66,30 @@ nats:
     listenPort: 7422
 
 ## ---------------------------------------------------------------------------
-## PostgreSQL
+## Database connection (ADR-0094)
+## Postgres is NOT part of this chart — install charts/mclaude-postgres first
+## (or point at a managed DB). Set database.host and database.passwordSecretRef
+## on every install.
 ## ---------------------------------------------------------------------------
-postgres:
-  enabled: true
-  image:
-    registry: docker.io
-    repository: postgres
-    tag: "16.6-alpine"
-    pullPolicy: IfNotPresent
-  resources:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: 500m
-      memory: 1Gi
-  persistence:
-    enabled: true
-    storageClass: ""
-    size: 20Gi
-  auth:
-    database: mclaude
-    username: mclaude
-    ## Name of existing Secret with key "postgres-password"
-    existingSecret: "mclaude-postgres"
-    secretPasswordKey: "postgres-password"
+database:
+  ## DNS-resolvable hostname for Postgres. Required — chart fails if unset.
+  ## In-cluster default: mclaude-postgres.mclaude-system.svc
+  ## Managed-DB example: foo.us-east-1.rds.amazonaws.com
+  host: ""
+  ## Postgres port
+  port: 5432
+  ## Postgres user
+  user: mclaude
+  ## Postgres database name
+  name: mclaude
+  ## Name of an existing Secret in the cp namespace with key "postgres-password".
+  ## Required — chart fails if unset.
+  ## CI creates the Secret via Bitwarden; local dev: kubectl create secret generic
+  ## mclaude-postgres --from-literal=postgres-password=$(openssl rand -base64 24)
+  passwordSecretRef: ""
+  ## Postgres SSL mode in the DSN. Set to "require" (or "verify-full") for
+  ## managed-DB environments.
+  sslmode: disable
 
 ## ---------------------------------------------------------------------------
 ## Control Plane

@@ -1,0 +1,5 @@
+## CI end-to-end test values for mclaude-postgres chart.
+## Disables persistence so tests run without a storage class.
+
+persistence:
+  enabled: false

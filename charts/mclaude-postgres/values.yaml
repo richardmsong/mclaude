@@ -1,0 +1,69 @@
+## mclaude-postgres Helm Chart Values
+## In-cluster PostgreSQL StatefulSet for self-hosted mclaude installs.
+## Ref: ADR-0094, docs/charts-mclaude/spec-helm.md
+
+## ---------------------------------------------------------------------------
+## Image
+## ---------------------------------------------------------------------------
+image:
+  repository: postgres
+  tag: "16-alpine"
+  pullPolicy: IfNotPresent
+
+## ---------------------------------------------------------------------------
+## Replicas
+## ---------------------------------------------------------------------------
+## Single replica. v1 does not support HA replication; managed-DB is the prod
+## HA path.
+replicas: 1
+
+## ---------------------------------------------------------------------------
+## Persistence
+## ---------------------------------------------------------------------------
+persistence:
+  ## When false, data is stored in emptyDir (dev/CI only — data is lost on pod restart).
+  enabled: true
+  ## PVC size.
+  size: 20Gi
+  ## Storage class. Empty = cluster default. AKS overrides via values-aks.yaml.
+  storageClass: ""
+
+## ---------------------------------------------------------------------------
+## Secret reference (REQUIRED)
+## ---------------------------------------------------------------------------
+## Name of an existing Secret with key "postgres-password".
+## Chart helm install fails fast if empty — there is no chart-generated password
+## fallback (avoids the helm-uninstall-deletes-password-but-PVC-survives footgun).
+##
+## Create with:
+##   kubectl create secret generic mclaude-postgres \
+##     --from-literal=postgres-password=$(openssl rand -base64 24) \
+##     -n mclaude-system
+##
+## In CI: Bitwarden fetch step in .github/workflows/deploy-main.yml creates this.
+existingSecret: ""
+
+## ---------------------------------------------------------------------------
+## Database identity
+## ---------------------------------------------------------------------------
+## Initial superuser and database created by the postgres image on first start.
+database:
+  user: mclaude
+  name: mclaude
+
+## ---------------------------------------------------------------------------
+## Resources
+## ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 1Gi
+
+## ---------------------------------------------------------------------------
+## Namespace
+## ---------------------------------------------------------------------------
+namespace:
+  name: mclaude-system

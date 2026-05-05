@@ -1,23 +1,23 @@
-{{- if .Values.postgres.enabled }}
+{{- $existingSecret := required "existingSecret is required — create a Secret with key postgres-password before installing this chart" .Values.existingSecret -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ include "mclaude-cp.fullname" . }}-postgres
-  namespace: {{ include "mclaude-cp.namespace" . }}
+  name: {{ include "mclaude-postgres.fullname" . }}
+  namespace: {{ include "mclaude-postgres.namespace" . }}
   labels:
-    {{- include "mclaude-cp.labels" . | nindent 4 }}
+    {{- include "mclaude-postgres.labels" . | nindent 4 }}
     app.kubernetes.io/component: postgres
 spec:
-  replicas: 1
-  serviceName: {{ include "mclaude-cp.fullname" . }}-postgres-headless
+  replicas: {{ .Values.replicas }}
+  serviceName: {{ include "mclaude-postgres.fullname" . }}-headless
   selector:
     matchLabels:
-      {{- include "mclaude-cp.selectorLabels" . | nindent 6 }}
+      {{- include "mclaude-postgres.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: postgres
   template:
     metadata:
       labels:
-        {{- include "mclaude-cp.selectorLabels" . | nindent 8 }}
+        {{- include "mclaude-postgres.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: postgres
     spec:
       securityContext:
@@ -25,11 +25,10 @@ spec:
         runAsUser: 999
         runAsGroup: 999
         fsGroup: 999
-      {{- include "mclaude-cp.imagePullSecrets" . | nindent 6 }}
       containers:
         - name: postgres
-          image: {{ include "mclaude-cp.image" (dict "imageValues" .Values.postgres.image "global" .Values.global) }}
-          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             runAsNonRoot: true
             runAsUser: 999
@@ -45,14 +44,14 @@ spec:
               protocol: TCP
           env:
             - name: POSTGRES_DB
-              value: {{ .Values.postgres.auth.database | quote }}
+              value: {{ .Values.database.name | quote }}
             - name: POSTGRES_USER
-              value: {{ .Values.postgres.auth.username | quote }}
+              value: {{ .Values.database.user | quote }}
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.postgres.auth.existingSecret }}
-                  key: {{ .Values.postgres.auth.secretPasswordKey }}
+                  name: {{ $existingSecret }}
+                  key: postgres-password
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
           volumeMounts:
@@ -63,9 +62,9 @@ spec:
               command:
                 - pg_isready
                 - -U
-                - {{ .Values.postgres.auth.username | quote }}
+                - {{ .Values.database.user | quote }}
                 - -d
-                - {{ .Values.postgres.auth.database | quote }}
+                - {{ .Values.database.name | quote }}
             initialDelaySeconds: 30
             periodSeconds: 30
             timeoutSeconds: 5
@@ -74,30 +73,29 @@ spec:
               command:
                 - pg_isready
                 - -U
-                - {{ .Values.postgres.auth.username | quote }}
+                - {{ .Values.database.user | quote }}
                 - -d
-                - {{ .Values.postgres.auth.database | quote }}
+                - {{ .Values.database.name | quote }}
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
           resources:
-            {{- toYaml .Values.postgres.resources | nindent 12 }}
-      {{- if not .Values.postgres.persistence.enabled }}
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- if not .Values.persistence.enabled }}
       volumes:
         - name: data
           emptyDir: {}
       {{- end }}
-  {{- if .Values.postgres.persistence.enabled }}
+  {{- if .Values.persistence.enabled }}
   volumeClaimTemplates:
     - metadata:
         name: data
       spec:
         accessModes: ["ReadWriteOnce"]
-        {{- if .Values.postgres.persistence.storageClass }}
-        storageClassName: {{ .Values.postgres.persistence.storageClass | quote }}
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
         {{- end }}
         resources:
           requests:
-            storage: {{ .Values.postgres.persistence.size }}
+            storage: {{ .Values.persistence.size }}
   {{- end }}
-{{- end }}

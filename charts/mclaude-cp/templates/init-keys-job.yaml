@@ -18,8 +18,8 @@ metadata:
     "helm.sh/hook-weight": "-20"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
-  backoffLimit: 0
-  activeDeadlineSeconds: 120
+  backoffLimit: 4
+  activeDeadlineSeconds: 300
   template:
     metadata:
       labels:
@@ -40,11 +40,10 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.postgres.auth.existingSecret | default "mclaude-postgres" }}
+                  name: {{ required "database.passwordSecretRef is required" .Values.database.passwordSecretRef }}
                   key: postgres-password
-                  optional: true
             - name: DATABASE_URL
-              value: "postgres://mclaude:$(POSTGRES_PASSWORD)@{{ include "mclaude-cp.fullname" . }}-postgres.{{ include "mclaude-cp.namespace" . }}.svc:5432/mclaude?sslmode=disable"
+              value: "postgres://{{ .Values.database.user }}:$(POSTGRES_PASSWORD)@{{ required "database.host is required" .Values.database.host }}:{{ .Values.database.port }}/{{ .Values.database.name }}?sslmode={{ .Values.database.sslmode }}"
             - name: OPERATOR_KEYS_SECRET
               value: "operator-keys"
             - name: NAMESPACE

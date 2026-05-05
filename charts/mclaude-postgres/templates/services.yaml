@@ -1,0 +1,40 @@
+## ClusterIP Service — used by mclaude-cp as database.host
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mclaude-postgres.fullname" . }}
+  namespace: {{ include "mclaude-postgres.namespace" . }}
+  labels:
+    {{- include "mclaude-postgres.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "mclaude-postgres.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+---
+## Headless Service — for StatefulSet DNS
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "mclaude-postgres.fullname" . }}-headless
+  namespace: {{ include "mclaude-postgres.namespace" . }}
+  labels:
+    {{- include "mclaude-postgres.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    {{- include "mclaude-postgres.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP

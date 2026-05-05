@@ -1,5 +1,6 @@
 ## AKS Production values for control-plane chart.
 ## managed-csi-premium storage, scaled replicas.
+## Postgres is now in charts/mclaude-postgres — set database.* here. ADR-0094.
 
 nats:
   config:
@@ -15,17 +16,13 @@ nats:
       cpu: 1000m
       memory: 2Gi
 
-postgres:
-  persistence:
-    storageClass: managed-csi-premium
-    size: 100Gi
-  resources:
-    requests:
-      cpu: 250m
-      memory: 512Mi
-    limits:
-      cpu: 1000m
-      memory: 4Gi
+## database.host and database.passwordSecretRef must be set on every install.
+## For AKS with in-cluster mclaude-postgres:
+##   --set database.host=mclaude-postgres.mclaude-system.svc
+##   --set database.passwordSecretRef=mclaude-postgres
+## For AKS managed Postgres: override database.host and database.sslmode=require.
+database:
+  sslmode: require
 
 controlPlane:
   replicas: 2

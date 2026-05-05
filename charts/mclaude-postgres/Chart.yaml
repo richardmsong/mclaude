@@ -1,0 +1,16 @@
+apiVersion: v2
+name: mclaude-postgres
+description: >-
+  PostgreSQL StatefulSet for self-hosted mclaude installs. Skip entirely when
+  using a managed database (RDS, Cloud SQL, AKS-managed Postgres).
+type: application
+version: 0.1.0
+appVersion: "16"
+keywords:
+  - mclaude
+  - postgres
+  - postgresql
+  - database
+maintainers:
+  - name: mclaude
+home: https://github.com/richardmsong/mclaude

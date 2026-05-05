@@ -1,0 +1,14 @@
+## AKS Production values for mclaude-postgres chart.
+## Uses managed-csi-premium storage class and larger PVC.
+
+persistence:
+  storageClass: managed-csi-premium
+  size: 100Gi
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 4Gi

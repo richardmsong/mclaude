@@ -1,11 +1,9 @@
 ## Dev values for local k3d cluster (control-plane chart).
 ## Images built locally (pullPolicy: Never). No persistence.
+## Postgres is its own chart (charts/mclaude-postgres). ADR-0094.
+## Set database.host and database.passwordSecretRef on install.
 
 nats:
-  persistence:
-    enabled: false
-
-postgres:
   persistence:
     enabled: false
 

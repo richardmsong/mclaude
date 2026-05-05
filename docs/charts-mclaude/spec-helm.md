@@ -171,9 +171,9 @@ Per ADR-0094. Deploys an in-cluster PostgreSQL StatefulSet for self-hosted insta
 
 | Kind | Name | Notes |
 |---|---|---|
-| StatefulSet | `{release}-postgres` | Single replica. Image `postgres:16-alpine`. Runs as UID 999. VolumeClaimTemplate `data` (RWO) when `persistence.enabled`. Env: `POSTGRES_DB={{ database.name | default "mclaude" }}`, `POSTGRES_USER={{ database.user | default "mclaude" }}`, `POSTGRES_PASSWORD` from `existingSecret` key `postgres-password`. |
-| Service | `{release}-postgres` | ClusterIP. Port: 5432. The DNS name `{{ release }}-postgres.{{ namespace }}.svc` is what `mclaude-cp` sets `database.host` to in self-hosted installs. |
-| Service | `{release}-postgres-headless` | Headless service for StatefulSet DNS. |
+| StatefulSet | `{fullname}` | Single replica. Image `postgres:16-alpine`. Runs as UID 999. VolumeClaimTemplate `data` (RWO) when `persistence.enabled`. Env: `POSTGRES_DB={{ database.name | default "mclaude" }}`, `POSTGRES_USER={{ database.user | default "mclaude" }}`, `POSTGRES_PASSWORD` from `existingSecret` key `postgres-password`. |
+| Service | `{fullname}` | ClusterIP. Port: 5432. The DNS name `{fullname}.{namespace}.svc` is what `mclaude-cp` sets `database.host` to in self-hosted installs (e.g. `mclaude-postgres.mclaude-system.svc` when released as `mclaude-postgres`). |
+| Service | `{fullname}-headless` | Headless service for StatefulSet DNS. |
 
 ### Configuration knobs
 

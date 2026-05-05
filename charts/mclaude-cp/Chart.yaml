@@ -1,8 +1,8 @@
 apiVersion: v2
 name: mclaude-cp
 description: >-
-  mclaude control-plane chart — hub NATS, Postgres, control-plane,
-  SPA, and operator/account NKey bootstrap.
+  mclaude control-plane chart — hub NATS, control-plane, SPA,
+  and operator/account NKey bootstrap. Postgres is in charts/mclaude-postgres.
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

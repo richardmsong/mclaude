@@ -1031,6 +1031,138 @@ func TestIntegration_BootstrapAdminUser_ExistingUserGetsPassword(t *testing.T) {
 	}
 }
 
+// TestIntegration_BootstrapAdminUser_PasswordRotation verifies that
+// bootstrapAdminUser called on an existing user who already has a password_hash
+// rotates the hash and the new password authenticates successfully (ADR-0094
+// UPSERT semantics — password rotation is always applied when password is non-empty).
+func TestIntegration_BootstrapAdminUser_PasswordRotation(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	// Create user with an initial password.
+	userID := "bootstrap-rotate-" + uuid.NewString()[:8]
+	email := userID + "@test.example.com"
+	initialPassword := "initial-pw-" + uuid.NewString()[:8]
+	initialHash, err := HashPassword(initialPassword)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	user, err := db.CreateUser(ctx, userID, email, "RotateBootstrap", initialHash)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if err := db.SetUserAdmin(ctx, user.ID, true); err != nil {
+		t.Fatalf("SetUserAdmin: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Call bootstrap with a new password — should rotate the hash.
+	newPassword := "rotated-pw-" + uuid.NewString()[:8]
+	logger := zerolog.Nop()
+	if err := bootstrapAdminUser(ctx, logger, integDeps.PostgresDSN, email, newPassword); err != nil {
+		t.Fatalf("bootstrapAdminUser: %v", err)
+	}
+
+	// Verify hash changed.
+	updated, err := db.GetUserByEmail(ctx, email)
+	if err != nil {
+		t.Fatalf("GetUserByEmail: %v", err)
+	}
+	if updated == nil {
+		t.Fatal("user not found after bootstrapAdminUser")
+	}
+	if updated.PasswordHash == initialHash {
+		t.Error("password_hash unchanged; want rotated hash after bootstrapAdminUser with new password")
+	}
+	if !updated.IsAdmin {
+		t.Error("is_admin = false; want true after bootstrapAdminUser")
+	}
+
+	// Verify new password authenticates.
+	accountKP, _ := nkeys.CreateAccount()
+	srv := NewServer(db, accountKP, integDeps.NATSAddr, "", 8*time.Hour)
+	srv.SetExternalURL("http://localhost:8080")
+
+	loginBody := fmt.Sprintf(`{"email":%q,"password":%q}`, email, newPassword)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(loginBody))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("login with new password: status = %d; want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify old password no longer authenticates.
+	oldLoginBody := fmt.Sprintf(`{"email":%q,"password":%q}`, email, initialPassword)
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(oldLoginBody))
+	req2.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(rec2, req2)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Errorf("login with old password: status = %d; want 401", rec2.Code)
+	}
+}
+
+// TestIntegration_BootstrapAdminUser_EmptyPasswordPreservesHash verifies that
+// bootstrapAdminUser called on an existing user with empty password preserves
+// the existing password_hash (ADR-0094 UPSERT semantics — CASE WHEN $2 = '').
+func TestIntegration_BootstrapAdminUser_EmptyPasswordPreservesHash(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	// Create user with a password.
+	userID := "bootstrap-preserve-" + uuid.NewString()[:8]
+	email := userID + "@test.example.com"
+	password := "preserve-pw-" + uuid.NewString()[:8]
+	passwordHash, err := HashPassword(password)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	user, err := db.CreateUser(ctx, userID, email, "PreserveBootstrap", passwordHash)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if err := db.SetUserAdmin(ctx, user.ID, true); err != nil {
+		t.Fatalf("SetUserAdmin: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Call bootstrap with empty password — must preserve existing hash.
+	logger := zerolog.Nop()
+	if err := bootstrapAdminUser(ctx, logger, integDeps.PostgresDSN, email, "" /* empty */); err != nil {
+		t.Fatalf("bootstrapAdminUser with empty password on existing user: %v", err)
+	}
+
+	// Verify hash is unchanged.
+	updated, err := db.GetUserByEmail(ctx, email)
+	if err != nil {
+		t.Fatalf("GetUserByEmail: %v", err)
+	}
+	if updated == nil {
+		t.Fatal("user not found after bootstrapAdminUser")
+	}
+	if updated.PasswordHash != passwordHash {
+		t.Error("password_hash was changed; want preserved when bootstrapAdminUser called with empty password")
+	}
+	if !updated.IsAdmin {
+		t.Error("is_admin = false; want true")
+	}
+
+	// Verify original password still authenticates.
+	accountKP, _ := nkeys.CreateAccount()
+	srv := NewServer(db, accountKP, integDeps.NATSAddr, "", 8*time.Hour)
+	srv.SetExternalURL("http://localhost:8080")
+
+	loginBody := fmt.Sprintf(`{"email":%q,"password":%q}`, email, password)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(loginBody))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("login status = %d; want 200; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // ---- ADR-0089 Admin routes (main port, isAdminMiddleware) ----
 
 // TestIntegration_AdminCreateUser verifies POST /admin/users creates a user

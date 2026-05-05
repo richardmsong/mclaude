@@ -23,7 +23,8 @@ spec:
       {{- include "mclaude-cp.imagePullSecrets" . | nindent 6 }}
       serviceAccountName: {{ include "mclaude-cp.serviceAccountName" . }}
       {{- if .Values.controlPlane.migrations.enabled }}
-      ## dbmate runs schema migrations before the control-plane starts
+      ## dbmate runs schema migrations before the control-plane starts.
+      ## Uses the same database.* env contract as the main container (ADR-0094).
       initContainers:
         - name: migrate
           image: {{ include "mclaude-cp.image" (dict "imageValues" .Values.controlPlane.image "global" .Values.global) }}
@@ -34,10 +35,10 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: mclaude-postgres
+                  name: {{ required "database.passwordSecretRef is required" .Values.database.passwordSecretRef }}
                   key: postgres-password
             - name: DATABASE_URL
-              value: "postgres://mclaude:$(POSTGRES_PASSWORD)@{{ include "mclaude-cp.fullname" . }}-postgres.{{ include "mclaude-cp.namespace" . }}.svc:5432/mclaude?sslmode=disable"
+              value: "postgres://{{ .Values.database.user }}:$(POSTGRES_PASSWORD)@{{ required "database.host is required" .Values.database.host }}:{{ .Values.database.port }}/{{ .Values.database.name }}?sslmode={{ .Values.database.sslmode }}"
           resources:
             requests:
               cpu: 50m
@@ -85,10 +86,10 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: mclaude-postgres
+                  name: {{ required "database.passwordSecretRef is required" .Values.database.passwordSecretRef }}
                   key: postgres-password
             - name: DATABASE_URL
-              value: "postgres://mclaude:$(POSTGRES_PASSWORD)@{{ include "mclaude-cp.fullname" . }}-postgres.{{ include "mclaude-cp.namespace" . }}.svc:5432/mclaude?sslmode=disable"
+              value: "postgres://{{ .Values.database.user }}:$(POSTGRES_PASSWORD)@{{ required "database.host is required" .Values.database.host }}:{{ .Values.database.port }}/{{ .Values.database.name }}?sslmode={{ .Values.database.sslmode }}"
             ## Operator keys mounted from the init-keys Job Secret
             - name: OPERATOR_KEYS_PATH
               value: /etc/mclaude/operator-keys

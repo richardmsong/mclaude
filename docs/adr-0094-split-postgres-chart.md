@@ -89,9 +89,9 @@ ON CONFLICT (email) DO UPDATE
 ### `charts/mclaude-postgres` (NEW)
 
 Top-level chart. Installs:
-- `StatefulSet` `{release}-postgres` (single replica, runs as UID 999, `postgres:16-alpine`)
-- `Service` `{release}-postgres` (ClusterIP, port 5432)
-- `Service` `{release}-postgres-headless` (headless, for StatefulSet DNS)
+- `StatefulSet` `{fullname}` (single replica, runs as UID 999, `postgres:16-alpine`)
+- `Service` `{fullname}` (ClusterIP, port 5432)
+- `Service` `{fullname}-headless` (headless, for StatefulSet DNS)
 - VolumeClaimTemplate `data` (RWO, configurable size + storageClass)
 
 Values:

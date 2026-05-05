@@ -1,11 +1,9 @@
 ## E2E test values for control-plane chart.
-## Python stubs for control-plane and SPA; real NATS + Postgres.
+## Python stubs for control-plane and SPA; real NATS.
+## Postgres is provided by the separate mclaude-postgres release
+## (charts/mclaude-postgres/values-e2e.yaml). ADR-0094.
 
 nats:
-  persistence:
-    enabled: false
-
-postgres:
   persistence:
     enabled: false
 

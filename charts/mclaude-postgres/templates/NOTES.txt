@@ -1,0 +1,12 @@
+mclaude-postgres has been deployed.
+
+PostgreSQL is running at:
+  {{ include "mclaude-postgres.fullname" . }}.{{ include "mclaude-postgres.namespace" . }}.svc:5432
+
+To connect mclaude-cp to this instance, set these values when installing mclaude-cp:
+
+  helm install mclaude-cp charts/mclaude-cp -n {{ include "mclaude-postgres.namespace" . }} \
+    --set database.host={{ include "mclaude-postgres.fullname" . }}.{{ include "mclaude-postgres.namespace" . }}.svc \
+    --set database.passwordSecretRef={{ .Values.existingSecret }}
+
+The Secret {{ .Values.existingSecret }} must have key "postgres-password".
