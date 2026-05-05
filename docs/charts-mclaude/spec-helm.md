@@ -1,13 +1,14 @@
-# Spec: Helm Charts (mclaude-cp + mclaude-worker)
+# Spec: Helm Charts (mclaude-postgres + mclaude-cp + mclaude-worker)
 
-Per ADR-0035 the previous single `mclaude` chart is split into two independently-installed charts. Both share image references, persistence knobs, and ingress conventions, but each owns a distinct slice of the architecture.
+Per ADR-0035 the previous single `mclaude` chart was split into `mclaude-cp` and `mclaude-worker`. Per ADR-0094, Postgres was further split out of `mclaude-cp` into its own `mclaude-postgres` chart so managed-DB swaps (RDS, Cloud SQL) work by simply not installing the `mclaude-postgres` release. The three charts share image references, persistence knobs, and ingress conventions, but each owns a distinct slice of the architecture.
 
 | Chart | Purpose | Installed in |
 |-------|---------|--------------|
-| `mclaude-cp` | Central control-plane: hub NATS, Postgres, MinIO object storage, control-plane Deployment, SPA, operator/account NKey bootstrap. | The single `mclaude-cp` Kubernetes cluster. |
+| `mclaude-postgres` | PostgreSQL StatefulSet + Services. Single replica. Self-hosted in-cluster DB. Skipped entirely on managed-DB deployments. | The single `mclaude-cp` Kubernetes cluster (only when self-hosting). |
+| `mclaude-cp` | Central control-plane: hub NATS, MinIO object storage, control-plane Deployment, SPA, operator/account NKey bootstrap. Connects to a Postgres instance addressed by `database.host` + `database.passwordSecretRef`. | The single `mclaude-cp` Kubernetes cluster. |
 | `mclaude-worker` | Worker cluster: `mclaude-controller-k8s` operator (hub-direct, independently installable), session-agent template. | Each worker Kubernetes cluster (one per cluster host). |
 
-A single-cluster degenerate deployment installs **both** charts into the same K8s cluster; `mclaude-worker` connects directly to the hub NATS service.
+A single-cluster degenerate deployment installs **all three** charts into the same K8s cluster, in order: `mclaude-postgres` → `mclaude-cp` → `mclaude-worker`. `mclaude-worker` connects directly to the hub NATS service. Each `helm install` waits for its release to be Ready before the next.
 
 BYOH machines do **not** use Helm — they install the `mclaude-cli` binary, run `mclaude host register`, and start the host controller daemon (`mclaude daemon`).
 
@@ -43,11 +44,7 @@ For the full NATS server config see `docs/spec-state-schema.md` — NATS Server 
 
 ### PostgreSQL
 
-| Kind | Name | Notes |
-|---|---|---|
-| StatefulSet | `{release}-postgres` | Single replica. Runs as UID 999. VolumeClaimTemplate `data` when persistence enabled. |
-| Service | `{release}-postgres` | ClusterIP. Port: 5432. |
-| Service | `{release}-postgres-headless` | Headless service for StatefulSet DNS. |
+Per ADR-0094, Postgres is **not** part of `mclaude-cp` — it is its own chart (`mclaude-postgres`, see the `## Chart: mclaude-postgres` section below). `mclaude-cp` accepts a connection contract via `database.host` + `database.passwordSecretRef` and is agnostic to whether the Postgres on the other end is in-cluster, AKS-managed, RDS, or Cloud SQL.
 
 For Postgres table schemas see `docs/spec-state-schema.md` — Postgres.
 
@@ -55,7 +52,7 @@ For Postgres table schemas see `docs/spec-state-schema.md` — Postgres.
 
 | Kind | Name | Notes |
 |---|---|---|
-| Deployment | `{release}-control-plane` | Configurable replicas. Optional `dbmate` init container when `migrations.enabled`. Mounts `mclaude-system/operator-keys` at `OPERATOR_KEYS_PATH`. Mounts `provider-config` ConfigMap when OAuth providers are configured. When `minio.enabled=true` and `ingress.minioHost` is non-empty: env vars `S3_ENDPOINT=https://{ingress.minioHost}`, `S3_BUCKET={minio.bucket}`, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` from Secret `{release}-minio` (or `minio.existingSecret`). `S3_REGION` is intentionally omitted — `loadS3Config()` defaults to `us-east-1` which is correct for MinIO path-style signing. |
+| Deployment | `{release}-control-plane` | Configurable replicas. Optional `dbmate` init container when `migrations.enabled` — uses the same `database.*` env contract as the main container (no hardcoded Postgres Secret name or DSN). Mounts `mclaude-system/operator-keys` at `OPERATOR_KEYS_PATH`. Mounts `provider-config` ConfigMap when OAuth providers are configured. **Postgres env contract** (per ADR-0094): `POSTGRES_PASSWORD` is loaded via `valueFrom.secretKeyRef` against the Secret named in `database.passwordSecretRef` (key `postgres-password`); `DATABASE_URL` is composed at pod runtime via env-var interpolation `postgres://{database.user}:$(POSTGRES_PASSWORD)@{database.host}:{database.port}/{database.name}?sslmode={database.sslmode}`. The `dbmate` init container (when enabled) and the `init-keys` Job use the identical contract. If the Secret named by `database.passwordSecretRef` does not exist, the pod stays in `CreateContainerConfigError` (env-from reference to a missing Secret); helm install with `--wait` fails fast. When `minio.enabled=true` and `ingress.minioHost` is non-empty: env vars `S3_ENDPOINT=https://{ingress.minioHost}`, `S3_BUCKET={minio.bucket}`, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` from Secret `{release}-minio` (or `minio.existingSecret`). `S3_REGION` is intentionally omitted — `loadS3Config()` defaults to `us-east-1` which is correct for MinIO path-style signing. |
 | Service | `{release}-control-plane` | ClusterIP. Port: http (8080). `/metrics` is served on the same port, unauthenticated. |
 | ConfigMap | `{release}-provider-config` | `providers.json` — OAuth provider instances. Created only when `controlPlane.providers` is non-empty. |
 | ServiceAccount | `{release}-mclaude` | Used by the control-plane Deployment. **No K8s permissions** — the control-plane has no controller-runtime client per ADR-0035. |
@@ -108,11 +105,15 @@ S3-compatible object storage for import archives and chat attachments per ADR-00
 | `nats.persistence.size` | `10Gi` | Hub JetStream PVC size. |
 | `nats.leafNodes.listenPort` | `7422` | Leaf-node listen port on hub NATS. |
 | `nats.config.maxControlLine` | `"16384"` | Max NATS protocol control-line length in bytes (ADR-0087). Default NATS value is 4096, which is too small for user JWTs with multiple host grants (~240 bytes per additional host). 16384 supports ~62 concurrent host grants per user. |
-| `postgres.enabled` | `true` | Deploy Postgres. |
-| `postgres.persistence.size` | `20Gi` | Postgres PVC size. |
+| `database.host` | `""` | **Required.** DNS-resolvable hostname for Postgres (e.g. `mclaude-postgres.mclaude-system.svc` for in-cluster, or `foo.us-east-1.rds.amazonaws.com` for managed). Chart fails if unset. |
+| `database.port` | `5432` | Postgres port. |
+| `database.user` | `mclaude` | Postgres user. |
+| `database.name` | `mclaude` | Postgres database name. |
+| `database.passwordSecretRef` | `""` | **Required.** Name of an existing Secret in the cp namespace with key `postgres-password`. Operator creates this Secret (CI does it via Bitwarden). The Secret name is `mclaude-postgres` for the in-cluster default; managed-DB users create their own Secret with the same `postgres-password` key. |
+| `database.sslmode` | `disable` | Postgres SSL mode in the DSN. Override to `require` (or `verify-full` with mounted CA) for managed-DB. |
 | `controlPlane.externalUrl` | `""` | **Required.** External URL (e.g. `https://dev.mclaude.richardmcsong.com`). Chart fails if unset. |
-| `controlPlane.bootstrapAdminEmail` | `""` | First admin's email. The `init-keys` Job creates a normal `users` row with `is_admin=true` and a bcrypt password hash from `bootstrapAdminPassword`. |
-| `controlPlane.bootstrapAdminPassword` | `""` | Password for the bootstrap admin. Hashed by `init-keys` and stored in `users.password_hash`. Required for CI to authenticate without OAuth. If empty, the admin can only log in via OAuth. |
+| `controlPlane.bootstrapAdminEmail` | `""` | First admin's email. The `init-keys` Job creates a `users` row with `is_admin=true` and a bcrypt password hash from `bootstrapAdminPassword`. UPSERTs on `email`: re-running helm upgrade is idempotent (existing user → update `is_admin=true` and refresh password if `bootstrapAdminPassword` is non-empty; otherwise preserve existing hash). |
+| `controlPlane.bootstrapAdminPassword` | `""` | Password for the bootstrap admin. Hashed by `init-keys` and stored in `users.password_hash`. Required for CI to authenticate without OAuth. Empty on subsequent helm upgrades preserves the existing hash. |
 | `controlPlane.providers` | `[]` | OAuth provider instances. |
 | `controlPlane.config.jwtExpirySeconds` | `28800` | Per-host user JWT lifetime (8h). |
 | `controlPlane.config.natsWsUrl` | `""` | External NATS WebSocket URL returned to browser clients on login. Injected as `NATS_WS_URL`. Empty means the SPA derives it from its own origin. |
@@ -120,7 +121,7 @@ S3-compatible object storage for import archives and chat attachments per ADR-00
 | `controlPlane.service.httpPort` | `8080` | Main API listen port. Injected as `HTTP_PORT` env var. **Known mismatch:** Go code reads `PORT`, not `HTTP_PORT` — the chart env var name doesn't match. Currently works because both default to 8080. |
 | `nats.config.jetstream.encryption.storeKeySecret` | `""` | ADR-0091. Name of a Kubernetes Secret holding the JetStream at-rest encryption key under field `store-key`. When set, the NATS ConfigMap renders a `jetstream { store_dir: ..., key: $STORE_KEY }` stanza and the NATS StatefulSet mounts the Secret. Required to protect plaintext tokens in `mclaude-user-info-{uslug}` on disk. Generate with `openssl rand -base64 32` and inject via Bitwarden in CI (see `.github/workflows/deploy-main.yml`). |
 | `controlPlane.config.jwtRefreshThresholdSeconds` | `900` | Injected as `JWT_REFRESH_THRESHOLD_SECONDS`. **Not read by Go code** — phantom env var with no effect. |
-| `controlPlane.migrations.enabled` | `false` | Run dbmate schema migrations as an init container. |
+| `controlPlane.migrations.enabled` | `false` | Run dbmate schema migrations as an init container. The init container inherits the same `database.*` env contract as the main control-plane container (per ADR-0094): `POSTGRES_PASSWORD` from `database.passwordSecretRef` Secret + `DATABASE_URL` interpolation against `database.host`/`database.port`/`database.user`/`database.name`/`database.sslmode`. No hardcoded Postgres Secret name or hostname. |
 | `spa.enabled` | `true` | Deploy the SPA. |
 | `ingress.enabled` | `true` | Create Ingress resources. |
 | `ingress.host` | `""` | Platform hostname. |
@@ -152,9 +153,70 @@ The `slug-backfill` Job is removed — per ADR-0035 there is no migration of exi
 
 ### Pre-requisite Secrets (created outside the chart)
 
-- `mclaude-postgres` — key `postgres-password`.
+`mclaude-cp` consumes a Postgres connection password via `database.passwordSecretRef` (default Secret name `mclaude-postgres`, key `postgres-password`). The Secret itself is created either by the `mclaude-postgres` chart's pre-requisite step (operator runbook) or by CI's Bitwarden fetch — see the `## Chart: mclaude-postgres` section below for the full contract. `mclaude-cp` only reads the Secret; it does not create it.
 
 `mclaude-control-plane` (or the value of `controlPlane.existingSecret`) — no longer requires an `admin-token` key. The operator keys it previously carried are generated by the `init-keys` Job and stored in `mclaude-system/operator-keys`.
+
+---
+
+## Chart: `mclaude-postgres`
+
+Per ADR-0094. Deploys an in-cluster PostgreSQL StatefulSet for self-hosted installs. **Skipped entirely on managed-DB deployments** — operators install only `mclaude-cp` (and `mclaude-worker` for cluster hosts) and point `database.host` at their managed endpoint.
+
+### Deployment
+
+`helm install mclaude-postgres charts/mclaude-postgres -n mclaude-system --set existingSecret=mclaude-postgres`. The Secret named by `existingSecret` must already exist with a `postgres-password` key (operator/CI pre-creates it; CI uses Bitwarden). Idempotent — safe to re-run for upgrades.
+
+### Resources
+
+| Kind | Name | Notes |
+|---|---|---|
+| StatefulSet | `{release}-postgres` | Single replica. Image `postgres:16-alpine`. Runs as UID 999. VolumeClaimTemplate `data` (RWO) when `persistence.enabled`. Env: `POSTGRES_DB={{ database.name | default "mclaude" }}`, `POSTGRES_USER={{ database.user | default "mclaude" }}`, `POSTGRES_PASSWORD` from `existingSecret` key `postgres-password`. |
+| Service | `{release}-postgres` | ClusterIP. Port: 5432. The DNS name `{{ release }}-postgres.{{ namespace }}.svc` is what `mclaude-cp` sets `database.host` to in self-hosted installs. |
+| Service | `{release}-postgres-headless` | Headless service for StatefulSet DNS. |
+
+### Configuration knobs
+
+| Key | Default | Description |
+|---|---|---|
+| `image.repository` | `postgres` | Postgres image. |
+| `image.tag` | `16-alpine` | Pinned tag. |
+| `replicas` | `1` | Single replica. v1 does not support HA replication; managed-DB is the prod HA path. |
+| `persistence.enabled` | `true` | When false, uses `emptyDir` (dev/CI only). |
+| `persistence.size` | `20Gi` | PVC size. |
+| `persistence.storageClass` | `""` | Empty = cluster default. AKS overrides via `values-aks.yaml` (`managed-csi-premium`). |
+| `existingSecret` | `""` | **Required.** Name of an existing Secret with key `postgres-password`. Chart `helm install` fails fast if empty — there is no chart-generated password fallback (avoids the helm-uninstall-deletes-password-but-PVC-survives footgun). |
+| `database.user` | `mclaude` | Initial superuser created by the postgres image on first start. |
+| `database.name` | `mclaude` | Initial database created by the postgres image on first start. |
+
+### Pre-requisite Secret (created outside the chart)
+
+| Secret | Required keys | Created by |
+|--------|--------------|-----------|
+| `mclaude-postgres` (default name; configurable via `existingSecret`) | `postgres-password` | Operator runbook (`kubectl create secret generic mclaude-postgres --from-literal=postgres-password=$(openssl rand -base64 24) -n mclaude-system`) for local dev; CI's Bitwarden fetch step in `.github/workflows/deploy-main.yml` for prod. |
+
+The chart **does not generate** the password. Single source of truth.
+
+### Cutover from the legacy in-chart Postgres
+
+Per ADR-0094 the Postgres StatefulSet/Service templates have been **removed** from `mclaude-cp`. Existing deployments that ran the prior chart will have a `data-mclaude-cp-postgres-0` PVC bound to the old StatefulSet. Operator runbook for migration:
+
+```bash
+helm uninstall mclaude-cp -n mclaude-system
+kubectl delete pvc data-mclaude-cp-postgres-0 -n mclaude-system   # explicit; survives helm uninstall
+helm install mclaude-postgres charts/mclaude-postgres -n mclaude-system [...]
+helm install mclaude-cp        charts/mclaude-cp        -n mclaude-system [...]
+```
+
+DB state is **not preserved** across the cutover. The project has no live prod deployments today; clean-slate migration is the trade-off for a chart that doesn't auto-rename PVCs.
+
+### Values files
+
+| File | Use |
+|------|-----|
+| `values.yaml` | Defaults. Local k3d uses these as-is plus `--set existingSecret=mclaude-postgres`. |
+| `values-aks.yaml` | AKS production: `persistence.storageClass: managed-csi-premium`. |
+| `values-e2e.yaml` | CI end-to-end tests: `persistence.enabled: false` (emptyDir). |
 
 ---
 
@@ -277,12 +339,15 @@ Brief downtime for K8s-hosted projects during cutover. No in-place upgrade path.
 
 | Values file | Purpose |
 |---|---|
-| `values.yaml` (cp) | Defaults for all hub knobs. Production-oriented images, persistence enabled, nginx ingress. MinIO enabled by default (`minio.enabled: true`, `minio.persistence.enabled: true`). `ingress.minioHost` is empty — set it in a cluster-specific overlay. |
+| `values.yaml` (postgres) | Defaults for the `mclaude-postgres` chart: `postgres:16-alpine`, RWO 20Gi PVC, no storageClass override, single replica. `existingSecret` is empty by default — operators MUST set it on every install. |
+| `values-aks.yaml` (postgres) | AKS production: `persistence.storageClass: managed-csi-premium`. |
+| `values-e2e.yaml` (postgres) | CI end-to-end tests: `persistence.enabled: false` (emptyDir). |
+| `values.yaml` (cp) | Defaults for all hub knobs. Production-oriented images, persistence enabled, nginx ingress. MinIO enabled by default (`minio.enabled: true`, `minio.persistence.enabled: true`). `ingress.minioHost` is empty — set it in a cluster-specific overlay. `database.host`, `database.passwordSecretRef` are empty — operator MUST set on every install. |
 | `values-dev.yaml` (cp) | Local k3d development. Images built locally (`pullPolicy: Never`), persistence disabled, no ingress. `minio.enabled: false` — no valid `S3_ENDPOINT` without an Ingress hostname, and presigned URLs would not be reachable. |
-| `values-e2e.yaml` (cp) | CI end-to-end tests. Python HTTP stub control-plane and SPA, real NATS/Postgres, persistence disabled. `minio.enabled: false` — stub control-plane does not read env vars or call S3. |
+| `values-e2e.yaml` (cp) | CI end-to-end tests. Python HTTP stub control-plane and SPA, real NATS, persistence disabled. `minio.enabled: false` — stub control-plane does not read env vars or call S3. Postgres is provided by the separate `mclaude-postgres` release (its own `values-e2e.yaml`). |
 | `values-k3d-ghcr.yaml` (cp) | Local k3d preview with ghcr.io images. Traefik ingress with TLS on `*.mclaude.richardmcsong.com`. Sets `ingress.minioHost: minio.mclaude.richardmcsong.com` (direct subdomain of the wildcard cert, covered by `*.mclaude.richardmcsong.com`). Overrides `minio.resources.requests.memory: 32Mi` (down from default 128Mi) so MinIO can schedule on the shared k3d node whose memory request budget is consumed by session-agent pods (ADR-0068). |
 | `values-airgap.yaml` (cp) | Air-gapped deployments. All images pulled via `global.imageRegistry`. Overrides `minio.image.registry` and `minio.mcImage.registry` to `registry.internal.example.com` so both MinIO server and `minio/mc` bucket-Job images are pulled from the internal mirror. |
-| `values-aks.yaml` (cp) | Azure Kubernetes Service production. `managed-csi-premium`, larger PVCs, scaled replicas. Sets `minio.persistence.storageClass: managed-csi-premium` (consistent with NATS and Postgres storage class overrides). |
+| `values-aks.yaml` (cp) | Azure Kubernetes Service production. `managed-csi-premium`, larger PVCs, scaled replicas. Sets `minio.persistence.storageClass: managed-csi-premium` (consistent with NATS storage class override). |
 | `values.yaml` (worker) | Defaults. Production image refs, persistence enabled. |
 | `values-dev.yaml` (worker) | Local k3d. Tailored for single-cluster degenerate install. |
 | `values-airgap.yaml` (worker) | Air-gapped variant. |
