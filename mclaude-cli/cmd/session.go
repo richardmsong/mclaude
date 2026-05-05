@@ -14,8 +14,8 @@ import (
 	"io"
 
 	clicontext "mclaude-cli/context"
-	"mclaude.io/common/pkg/slug"
-	"mclaude.io/common/pkg/subj"
+	"mclaude-control-plane/slug"
+	subj "mclaude-control-plane/subjects"
 )
 
 // SessionListFlags holds parsed flags for "mclaude session list".

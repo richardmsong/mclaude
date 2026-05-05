@@ -17,7 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"mclaude.io/common/pkg/slug"
+	"mclaude-control-plane/slug"
 )
 
 // DefaultPath returns the default path for the context file.

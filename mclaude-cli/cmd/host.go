@@ -9,8 +9,8 @@ import (
 	"time"
 
 	clicontext "mclaude-cli/context"
-	mcnats "mclaude.io/common/pkg/nats"
-	"mclaude.io/common/pkg/slug"
+	mcnats "mclaude-control-plane/nkeys"
+	"mclaude-control-plane/slug"
 
 	"github.com/nats-io/nkeys"
 )

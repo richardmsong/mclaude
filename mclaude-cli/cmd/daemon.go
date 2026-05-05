@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 
 	clicontext "mclaude-cli/context"
-	"mclaude.io/common/pkg/slug"
+	"mclaude-control-plane/slug"
 )
 
 // --------------------------------------------------------------------------
