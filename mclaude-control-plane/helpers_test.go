@@ -9,6 +9,28 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// permContains checks if a permission list contains a given subject.
+// Test helper — not part of production code.
+func permContains(perms []string, subject string) bool {
+	for _, p := range perms {
+		if p == subject {
+			return true
+		}
+	}
+	return false
+}
+
+// permHasPrefix checks if any permission in the list starts with the given prefix.
+// Test helper — not part of production code.
+func permHasPrefix(perms []string, prefix string) bool {
+	for _, p := range perms {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // fakeResponseWriter captures status + body for simple handler tests that
 // don't need the full httptest.ResponseRecorder machinery.
 type fakeResponseWriter struct {

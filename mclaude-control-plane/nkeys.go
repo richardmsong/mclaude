@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	natsjwt "github.com/nats-io/jwt/v2"
@@ -520,22 +519,3 @@ func UserSubjectPermissionsLegacy(userID string, userSlug string) NATSPermission
 	}
 }
 
-// permContains checks if a permission list contains a given subject.
-func permContains(perms []string, subject string) bool {
-	for _, p := range perms {
-		if p == subject {
-			return true
-		}
-	}
-	return false
-}
-
-// permHasPrefix checks if any permission in the list starts with the given prefix.
-func permHasPrefix(perms []string, prefix string) bool {
-	for _, p := range perms {
-		if strings.HasPrefix(p, prefix) {
-			return true
-		}
-	}
-	return false
-}
