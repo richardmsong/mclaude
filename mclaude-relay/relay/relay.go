@@ -1,4 +1,4 @@
-package main
+package relay
 
 import (
 	"encoding/base64"
@@ -104,7 +104,8 @@ type ptySession struct {
 	hostname   string
 }
 
-func NewRelay(tunnelToken, webToken string, users *UserStore) *Relay {
+// New creates a new Relay instance.
+func New(tunnelToken, webToken string, users *UserStore) *Relay {
 	return &Relay{
 		tunnelToken:    tunnelToken,
 		legacyWebToken: webToken,
@@ -510,8 +511,36 @@ func prefixWSMessage(msg *TunnelMsg, hostname string) *TunnelMsg {
 	}
 }
 
+// ── Laptops endpoint ──────────────────────────────────────────────────────
+
+// HandleLaptops returns the list of connected laptops, filtered by the authenticated user's ACL.
+func (r *Relay) HandleLaptops(w http.ResponseWriter, req *http.Request) {
+	laptops := r.ConnectedLaptops()
+	// If user is authenticated, filter by their ACL
+	if user := r.authenticateRequest(req); user != nil {
+		var filtered []string
+		for _, h := range laptops {
+			if r.userCanAccessLaptop(user, h) {
+				filtered = append(filtered, h)
+			}
+		}
+		laptops = filtered
+	}
+	w.Header().Set("Content-Type", "application/json")
+	type laptopInfo struct {
+		ID        string `json:"id"`
+		Connected bool   `json:"connected"`
+	}
+	result := make([]laptopInfo, len(laptops))
+	for i, l := range laptops {
+		result[i] = laptopInfo{ID: l, Connected: true}
+	}
+	json.NewEncoder(w).Encode(result) //nolint:errcheck
+}
+
 // ── Tunneled static files (no auth required for page load) ────────────────
 
+// HandleTunnelStatic proxies a request to a connector's static file serving.
 func (r *Relay) HandleTunnelStatic(w http.ResponseWriter, req *http.Request, staticHost string) {
 	tunnel := r.getTunnel(staticHost)
 	if tunnel == nil {
@@ -531,6 +560,7 @@ func (r *Relay) HandleTunnelStatic(w http.ResponseWriter, req *http.Request, sta
 
 // ── HTTP API proxy ─────────────────────────────────────────────────────────
 
+// HandleAPI proxies authenticated API requests to the appropriate tunnel(s).
 func (r *Relay) HandleAPI(w http.ResponseWriter, req *http.Request) {
 	// Auth
 	user := r.authenticateRequest(req)

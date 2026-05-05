@@ -1,0 +1,3583 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="theme-color" content="#111111" />
+<title>MClaude</title>
+<style>
+:root {
+  --bg:       #111111;
+  --surf:     #1c1c1e;
+  --surf2:    #2c2c2e;
+  --surf3:    #3a3a3c;
+  --border:   #38383a;
+  --text:     #ffffff;
+  --text2:    #8e8e93;
+  --text3:    #48484a;
+  --blue:     #0a84ff;
+  --green:    #30d158;
+  --orange:   #ff9f0a;
+  --red:      #ff453a;
+  --purple:   #bf5af2;
+  --safe-t:   env(safe-area-inset-top,    0px);
+  --safe-b:   env(safe-area-inset-bottom, 0px);
+  --safe-l:   env(safe-area-inset-left,   0px);
+  --safe-r:   env(safe-area-inset-right,  0px);
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html{touch-action:manipulation}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',system-ui,sans-serif;
+  font-size:16px;line-height:1.4;-webkit-text-size-adjust:100%}
+#app{height:100%;display:flex;flex-direction:column;padding-top:var(--safe-t)}
+
+/* ── Navbar ── */
+.nav{display:flex;align-items:center;gap:8px;padding:12px 16px;min-height:52px;
+  background:var(--surf);border-bottom:1px solid var(--border);flex-shrink:0}
+.nav-title{flex:1;font-size:17px;font-weight:600;display:flex;align-items:center;gap:8px}
+.nav-back{background:none;border:none;color:var(--blue);font-size:17px;
+  cursor:pointer;padding:4px 0;display:flex;align-items:center;gap:2px;white-space:nowrap}
+
+/* ── Scrollable content ── */
+.content{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+
+/* ── Auth ── */
+.auth{height:100%;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;padding:32px;gap:20px}
+.auth-icon{font-size:72px;line-height:1}
+.auth-title{font-size:30px;font-weight:700}
+.auth-sub{font-size:14px;color:var(--text2);text-align:center;max-width:260px}
+.auth-form{width:100%;max-width:320px;display:flex;flex-direction:column;gap:10px}
+
+/* ── Inputs ── */
+input,textarea{width:100%;background:var(--surf2);border:1px solid var(--border);
+  border-radius:10px;padding:12px 14px;color:var(--text);font-size:16px;
+  outline:none;font-family:inherit}
+input:focus,textarea:focus{border-color:var(--blue)}
+textarea{resize:none;line-height:1.4}
+
+/* ── Buttons ── */
+.btn{width:100%;background:var(--blue);color:#fff;border:none;border-radius:10px;
+  padding:14px;font-size:16px;font-weight:600;cursor:pointer;transition:opacity .15s}
+.btn:active{opacity:.75}
+.btn-surf{background:var(--surf2);color:var(--text)}
+.btn-green{background:var(--green)}
+.btn-red{background:var(--red)}
+.btn-sm{width:auto;padding:8px 16px;font-size:14px;border-radius:8px}
+
+/* ── Badge ── */
+.badge{background:var(--red);color:#fff;font-size:11px;font-weight:700;
+  min-width:18px;height:18px;border-radius:9px;display:inline-flex;
+  align-items:center;justify-content:center;padding:0 5px}
+
+/* ── Connection dot ── */
+.cdot{width:8px;height:8px;border-radius:50%;background:var(--text3);flex-shrink:0}
+.cdot.ok{background:var(--green)}
+.cdot.err{background:var(--red)}
+
+/* ── Status dot ── */
+.sdot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.sdot.working{background:var(--orange);animation:pulse 1.2s ease-in-out infinite}
+.sdot.needs_permission{background:var(--red)}
+.sdot.plan_mode{background:var(--purple)}
+.sdot.idle{background:var(--green)}
+.sdot.unknown,.sdot.waiting_for_input{background:var(--text3)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ── Session list ── */
+.slist{list-style:none}
+.srow{display:flex;align-items:center;gap:12px;padding:14px 16px;
+  border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
+.srow:active{background:var(--surf)}
+.sinfo{flex:1;min-width:0}
+.sname{font-size:16px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.smeta{font-size:12px;color:var(--text2);margin-top:2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.schev{color:var(--text3);font-size:18px;line-height:1}
+
+/* ── Tmux session filter ── */
+.tmux-filter{display:flex;gap:6px;padding:8px 16px;overflow-x:auto;flex-shrink:0;
+  border-bottom:1px solid var(--border);background:var(--surf);-webkit-overflow-scrolling:touch}
+.tmux-chip{padding:5px 12px;border-radius:14px;font-size:13px;font-weight:500;
+  background:var(--surf2);color:var(--text2);border:1px solid var(--border);
+  cursor:pointer;white-space:nowrap;transition:all .15s;flex-shrink:0}
+.tmux-chip:active{opacity:.7}
+.tmux-chip.on{background:var(--blue);color:#fff;border-color:var(--blue)}
+
+/* ── Empty state ── */
+.empty{text-align:center;padding:64px 32px;color:var(--text2)}
+.empty h3{color:var(--text);margin-bottom:8px;font-size:18px}
+
+/* ── FAB ── */
+.fab{position:fixed;bottom:calc(24px + var(--safe-b));right:calc(20px + var(--safe-r));
+  width:56px;height:56px;border-radius:28px;background:var(--blue);color:#fff;
+  font-size:30px;border:none;cursor:pointer;display:flex;align-items:center;
+  justify-content:center;box-shadow:0 4px 20px rgba(10,132,255,.45);z-index:50;
+  transition:transform .1s}
+.fab:active{transform:scale(.9)}
+
+/* ── Sheet modal ── */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100;
+  display:flex;align-items:flex-end;animation:fadeIn .2s}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+.sheet{background:var(--surf);border-radius:16px 16px 0 0;width:100%;
+  max-height:80vh;display:flex;flex-direction:column;
+  padding-bottom:var(--safe-b);animation:slideUp .25s ease-out}
+@keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
+.sheet-hdr{display:flex;align-items:center;padding:16px 20px;
+  border-bottom:1px solid var(--border);flex-shrink:0}
+.sheet-title{flex:1;font-size:17px;font-weight:600}
+.sheet-close{background:none;border:none;color:var(--text2);font-size:22px;
+  cursor:pointer;line-height:1;padding:0 4px}
+.plist{list-style:none;overflow-y:auto;flex:1}
+.prow{display:flex;align-items:center;gap:12px;padding:14px 20px;
+  border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
+.prow:active{background:var(--surf2)}
+.picon{font-size:22px;width:28px;text-align:center}
+.pname{font-size:15px;font-weight:500}
+.ppath{font-size:11px;color:var(--text2);margin-top:1px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px}
+
+/* ── Session detail ── */
+.detail{height:100%;display:flex;flex-direction:column;position:relative}
+.det-meta{padding:8px 16px;background:var(--surf);border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text2);flex-shrink:0}
+.det-meta .win{margin-left:auto;font-size:11px;color:var(--text3);font-variant-numeric:tabular-nums}
+.plan-card{background:var(--surf2);border-bottom:1px solid var(--border);flex-shrink:0}
+.plan-hdr{display:flex;align-items:center;gap:6px;padding:8px 16px;cursor:pointer}
+.plan-hdr:active{background:var(--surf3)}
+.plan-body{padding:0 16px 10px;font-size:13px;color:var(--text2);line-height:1.5;
+  max-height:200px;overflow-y:auto}
+.plan-body p{margin:4px 0}
+.act-bar{display:flex;gap:8px;padding:8px 16px;background:var(--surf2);
+  border-bottom:1px solid var(--border);flex-shrink:0}
+.prompt-bar{padding:10px 16px;background:var(--surf2);
+  border-bottom:1px solid var(--border);flex-shrink:0}
+.prompt-q{font-size:14px;color:var(--text);margin-bottom:8px;line-height:1.4}
+.prompt-opts{display:flex;flex-wrap:wrap;gap:6px}
+.popt{background:var(--surf);border:1px solid var(--border);border-radius:16px;
+  padding:6px 12px;font-size:13px;cursor:pointer;color:var(--blue)}
+.popt:active{background:var(--surf3)}
+
+/* ── Three-dot menu ── */
+.dot-menu-btn{background:none;border:none;color:var(--text2);font-size:20px;
+  cursor:pointer;padding:4px 8px;line-height:1;letter-spacing:2px}
+.dot-menu-btn:active{color:var(--text)}
+.dot-menu{position:absolute;right:12px;top:48px;background:var(--surf2);
+  border:1px solid var(--border);border-radius:12px;min-width:200px;
+  box-shadow:0 8px 24px rgba(0,0,0,.4);z-index:100;overflow:hidden}
+.dot-menu-item{display:flex;align-items:center;gap:10px;padding:12px 16px;
+  font-size:14px;color:var(--text);cursor:pointer;border-bottom:1px solid var(--border)}
+.dot-menu-item:last-child{border-bottom:none}
+.dot-menu-item:active{background:var(--surf3)}
+.dot-menu-item .dm-icon{font-size:16px;width:20px;text-align:center}
+.dot-menu-item .dm-sub{font-size:11px;color:var(--text2);margin-top:1px}
+.model-list{max-height:220px;overflow-y:auto}
+.model-opt{display:flex;align-items:center;gap:10px;padding:10px 16px;
+  font-size:14px;color:var(--text);cursor:pointer;border-bottom:1px solid var(--border)}
+.model-opt:active{background:var(--surf3)}
+.model-opt.active{color:var(--blue)}
+.model-opt.active::after{content:'✓';margin-left:auto;color:var(--blue)}
+.raw-overlay{position:fixed;inset:0;z-index:200;display:flex;flex-direction:column;background:#000}
+.raw-header{display:flex;align-items:center;padding:12px 16px;gap:8px;
+  background:var(--surf);border-bottom:1px solid var(--border);flex-shrink:0}
+.raw-header .raw-title{flex:1;font-size:15px;font-weight:600}
+
+/* ── Tabs ── */
+.tabs{display:flex;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--surf)}
+.tab{flex:1;padding:10px;text-align:center;font-size:14px;font-weight:500;
+  color:var(--text2);cursor:pointer;border-bottom:2px solid transparent;transition:color .15s}
+.tab.on{color:var(--blue);border-bottom-color:var(--blue)}
+
+/* ── Events (chat) ── */
+.evlist{padding:12px 14px;display:flex;flex-direction:column;gap:10px;min-height:100%}
+
+.ev-user{align-self:flex-end;max-width:85%;background:var(--blue);color:#fff;
+  border-radius:18px 18px 4px 18px;padding:10px 14px;font-size:15px;
+  white-space:pre-wrap;word-break:break-word;line-height:1.4}
+
+.ev-text{align-self:flex-start;max-width:95%;font-size:15px;line-height:1.55;
+  word-break:break-word}
+.ev-text ul,.ev-text ol{white-space:normal}
+.ev-text pre{white-space:pre-wrap;word-break:break-all}
+
+.ev-think{align-self:flex-start;max-width:95%;background:var(--surf);
+  border-radius:10px;padding:10px 14px;font-size:13px;cursor:pointer;
+  border:1px solid var(--border)}
+.think-hdr{display:flex;align-items:center;gap:6px;color:var(--text2);font-style:italic}
+.think-body{margin-top:8px;white-space:pre-wrap;word-break:break-word;
+  font-style:normal;color:var(--text);line-height:1.5;font-size:13px}
+
+.ev-tool{align-self:flex-start;max-width:95%;border:1px solid var(--border);
+  border-radius:10px;overflow:hidden;font-size:13px;width:100%;max-width:100%}
+.tool-hdr{background:var(--surf);padding:8px 12px;display:flex;align-items:center;
+  gap:6px;color:var(--text2);font-family:'SF Mono',Menlo,monospace;font-size:12px;
+  border-bottom:1px solid var(--border)}
+.tool-name{font-weight:600;color:var(--text)}
+.tool-body{padding:8px 12px;background:var(--surf2);font-family:'SF Mono',Menlo,monospace;
+  color:var(--text);white-space:pre-wrap;word-break:break-all;
+  max-height:180px;overflow-y:auto;font-size:12px;line-height:1.5}
+
+.ev-result{align-self:flex-start;max-width:95%;border-radius:10px;overflow:hidden;
+  font-size:13px;border:1px solid var(--border);width:100%;max-width:100%}
+.ev-result.err{border-color:rgba(255,69,58,.5)}
+.result-body{padding:8px 12px;background:var(--surf2);font-family:'SF Mono',Menlo,monospace;
+  white-space:pre-wrap;word-break:break-all;max-height:90px;overflow-y:hidden;
+  font-size:12px;line-height:1.5;color:var(--text)}
+.ev-result.err .result-body{color:var(--red)}
+
+/* ── Inline result within tool tile ── */
+.tool-result-inline{border-top:1px solid var(--border)}
+.tool-result-inline .result-body{max-height:90px;overflow-y:hidden}
+.tool-result-inline.err .result-body{color:var(--red)}
+
+.ev-sys{align-self:center;font-size:11px;color:var(--text3);padding:2px 0;text-align:center}
+
+/* ── Agent group (subagent nesting) ── */
+.ev-agent-group{align-self:flex-start;width:100%;max-width:95%}
+.agent-group-hdr{display:flex;align-items:center;gap:6px;padding:8px 10px;
+  background:rgba(255,159,10,.08);border-radius:8px;cursor:pointer;
+  font-size:13px;transition:background .15s}
+.agent-group-hdr:active{background:rgba(255,159,10,.15)}
+.agent-group-type{font-weight:600;color:var(--orange)}
+.agent-group-desc{font-size:12px;color:var(--text2);flex:1;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.agent-group-badge{font-size:11px;color:var(--text3);flex-shrink:0}
+.agent-group-chev{font-size:10px;color:var(--text3);flex-shrink:0;transition:transform .2s}
+.agent-group-chev.open{transform:rotate(180deg)}
+.agent-group-body{margin-left:8px;padding-left:10px;
+  border-left:2px solid rgba(255,159,10,.3);margin-top:4px}
+.agent-group-body .ev-tool,.agent-group-body .ev-result,.agent-group-body .ev-text,
+.agent-group-body .ev-think,.agent-group-body .ev-sys{font-size:12px}
+
+/* ── Legacy flat subagent (fallback) ── */
+.ev-subagent{align-self:flex-start;width:100%;max-width:95%;background:var(--surf);
+  border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.subagent-hdr{padding:8px 12px;display:flex;align-items:center;gap:6px;
+  font-size:13px;color:var(--text2);border-bottom:1px solid var(--border)}
+.subagent-type{font-weight:600;color:var(--purple)}
+.subagent-desc{font-size:12px;padding:6px 12px;color:var(--text2);font-style:italic}
+
+/* ── Event detail modal ── */
+.ev-detail-sheet{background:var(--surf);border-radius:16px 16px 0 0;width:100%;
+  max-height:80vh;display:flex;flex-direction:column;padding-bottom:var(--safe-b);
+  animation:slideUp .25s ease-out}
+.ev-detail-hdr{display:flex;align-items:center;padding:16px 20px;
+  border-bottom:1px solid var(--border);flex-shrink:0}
+.ev-detail-title{flex:1;display:flex;align-items:center;gap:8px;font-size:15px;font-weight:600}
+.ev-detail-time{font-size:11px;color:var(--text3)}
+.ev-detail-body{padding:16px 20px;overflow-y:auto;flex:1;font-size:14px;line-height:1.5}
+.ev-detail-body pre{background:var(--surf2);padding:10px 12px;border-radius:8px;
+  font-family:'SF Mono',Menlo,monospace;font-size:12px;line-height:1.5;
+  white-space:pre-wrap;word-break:break-all;overflow-x:auto;color:var(--text)}
+.ev-detail-model{display:inline-block;font-size:11px;color:var(--text2);
+  background:var(--surf2);padding:2px 8px;border-radius:10px;margin-top:4px}
+.ev-detail-field{margin-top:12px}
+.ev-detail-field-label{font-size:11px;font-weight:600;color:var(--text2);
+  text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.ev-clickable{cursor:pointer;transition:opacity .15s}
+.ev-clickable:active{opacity:.7}
+
+/* ── Diff view (Edit tool) ── */
+.diff-view{border-radius:6px;overflow:hidden;border:1px solid var(--border);
+  font-family:'SF Mono',Menlo,monospace;font-size:11px;line-height:1.6}
+.diff-file{padding:4px 10px;font-size:11px;color:var(--text2);
+  border-bottom:1px solid var(--border);background:var(--surf)}
+.diff-line{display:flex;min-height:20px}
+.diff-gutter{width:18px;text-align:center;flex-shrink:0;font-size:10px;
+  padding:0 2px;user-select:none;-webkit-user-select:none}
+.diff-content{flex:1;padding:0 8px;white-space:pre-wrap;word-break:break-all}
+.diff-line.ctx .diff-gutter{color:var(--text3)}
+.diff-line.ctx .diff-content{color:var(--text2)}
+.diff-line.rem{background:rgba(255,69,58,.08)}
+.diff-line.rem .diff-gutter{color:var(--red);background:rgba(255,69,58,.15)}
+.diff-line.rem .diff-content{color:var(--red)}
+.diff-line.add{background:rgba(48,209,88,.08)}
+.diff-line.add .diff-gutter{color:var(--green);background:rgba(48,209,88,.15)}
+.diff-line.add .diff-content{color:var(--green)}
+.diff-hl{border-radius:2px}
+.diff-line.rem .diff-hl{background:rgba(255,69,58,.25)}
+.diff-line.add .diff-hl{background:rgba(48,209,88,.25)}
+
+/* ── AskUserQuestion inline block ── */
+.ev-ask{align-self:flex-start;width:100%;max-width:95%;background:var(--surf);
+  border:1px solid rgba(10,132,255,.3);border-radius:10px;overflow:hidden}
+.ask-hdr{padding:8px 12px;display:flex;align-items:center;gap:6px;
+  font-size:13px;color:var(--blue);border-bottom:1px solid var(--border)}
+.ask-q-group{padding:10px 12px;border-bottom:1px solid var(--border)}
+.ask-q-group:last-child{border-bottom:none}
+.ask-q-header{font-size:12px;font-weight:600;color:var(--text);margin-bottom:4px}
+.ask-q-text{font-size:13px;color:var(--text2);margin-bottom:8px;line-height:1.4}
+.ask-opt{display:flex;align-items:flex-start;gap:8px;padding:8px 10px;
+  border:1px solid var(--border);border-radius:10px;margin-bottom:6px;
+  cursor:pointer;transition:border-color .15s,background .15s}
+.ask-opt:active,.ask-opt.selected{border-color:var(--blue);background:rgba(10,132,255,.08)}
+.ask-opt-radio{width:18px;height:18px;border-radius:9px;border:2px solid var(--text3);
+  flex-shrink:0;display:flex;align-items:center;justify-content:center;margin-top:1px;
+  transition:border-color .15s}
+.ask-opt.selected .ask-opt-radio{border-color:var(--blue)}
+.ask-opt.selected .ask-opt-radio::after{content:'';width:10px;height:10px;
+  border-radius:5px;background:var(--blue)}
+.ask-opt-label{font-size:14px;font-weight:500;color:var(--text)}
+.ask-opt-desc{font-size:12px;color:var(--text2);margin-top:1px}
+.ask-submit{margin:8px 12px 12px;padding:10px;border-radius:8px;background:var(--blue);
+  color:#fff;border:none;font-size:14px;font-weight:600;cursor:pointer;width:calc(100% - 24px);
+  transition:opacity .15s}
+.ask-submit:disabled{background:var(--surf3);color:var(--text3);cursor:default}
+.ask-submit.done{background:var(--green)}
+.ask-submit:active:not(:disabled){opacity:.75}
+
+/* ── Terminal ── */
+.terminal{padding:10px 12px;font-family:'SF Mono',Menlo,'Courier New',monospace;
+  font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-all;
+  background:#000;color:#e5e5e5;flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+
+/* ── Input bar ── */
+.ibar{display:flex;align-items:flex-end;gap:8px;padding:8px 12px;
+  padding-bottom:calc(8px + var(--safe-b));
+  background:var(--surf);border-top:1px solid var(--border);flex-shrink:0}
+.ifield{flex:1;background:var(--surf2);border:1px solid var(--border);
+  border-radius:20px;padding:9px 14px;color:var(--text);font-size:15px;
+  max-height:120px;overflow-y:auto;line-height:1.4}
+.ifield:focus{border-color:var(--blue)}
+.isend{width:34px;height:34px;border-radius:17px;background:var(--blue);
+  border:none;color:#fff;font-size:18px;cursor:pointer;display:flex;
+  align-items:center;justify-content:center;flex-shrink:0;transition:transform .1s}
+.isend:disabled{background:var(--surf3);color:var(--text3)}
+.isend:active:not(:disabled){transform:scale(.88)}
+.iattach{width:34px;height:34px;border-radius:17px;background:var(--surf2);
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;
+  cursor:pointer;font-size:18px;border:1px solid var(--border);transition:opacity .15s;
+  position:relative}
+.iattach:active{opacity:.7}
+.iattach.uploading{opacity:.5;pointer-events:none}
+.iattach.uploading::after{content:'';position:absolute;inset:3px;border-radius:50%;
+  border:2px solid var(--blue);border-top-color:transparent;
+  animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.istop{width:34px;height:34px;border-radius:17px;background:var(--red);
+  border:none;color:#fff;font-size:16px;font-weight:700;cursor:pointer;display:flex;
+  align-items:center;justify-content:center;flex-shrink:0;transition:transform .1s}
+.istop:active{transform:scale(.88)}
+.istop:disabled{background:var(--surf3);color:var(--text3)}
+
+/* ── Skills picker ── */
+.skill-picker{background:var(--surf);border-top:1px solid var(--border);
+  max-height:200px;overflow-y:auto;flex-shrink:0}
+.skill-row{display:flex;align-items:center;gap:10px;padding:10px 16px;
+  border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
+.skill-row:active{background:var(--surf2)}
+.skill-name{font-size:14px;font-weight:600;color:var(--blue);font-family:'SF Mono',Menlo,monospace}
+.skill-desc{font-size:12px;color:var(--text2);flex:1;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.skill-src{font-size:11px;color:var(--text3);flex-shrink:0}
+
+/* ── Push-to-talk ── */
+.ptt{width:48px;height:48px;border-radius:24px;background:var(--surf2);
+  border:1px solid var(--border);color:var(--text2);font-size:22px;
+  cursor:pointer;display:flex;align-items:center;justify-content:center;
+  flex-shrink:0;transition:background .15s,color .15s;user-select:none;
+  -webkit-user-select:none;touch-action:none}
+.ptt:active,.ptt.rec{background:var(--red);color:#fff;border-color:var(--red)}
+.ptt.rec{animation:pttrec 1s ease-in-out infinite}
+@keyframes pttrec{0%,100%{box-shadow:0 0 0 0 rgba(255,69,58,.5)}
+  50%{box-shadow:0 0 0 10px rgba(255,69,58,0)}}
+
+/* ── Settings ── */
+.settings{padding:16px}
+.settings-section{margin-bottom:24px}
+.settings-label{font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;
+  letter-spacing:.5px;margin-bottom:8px;padding:0 4px}
+.settings-card{background:var(--surf);border-radius:10px;overflow:hidden;
+  border:1px solid var(--border)}
+.settings-row{display:flex;align-items:center;padding:12px 16px;
+  border-bottom:1px solid var(--border);gap:10px}
+.settings-row:last-child{border-bottom:none}
+.settings-row-label{flex:1;font-size:15px}
+.settings-row-value{font-size:14px;color:var(--text2)}
+.settings-select{background:var(--surf2);border:1px solid var(--border);border-radius:8px;
+  padding:8px 12px;color:var(--text);font-size:14px;-webkit-appearance:none;appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238e8e93' fill='none' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 10px center;padding-right:28px}
+.settings-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.nav-icon{background:none;border:none;color:var(--text2);font-size:18px;cursor:pointer;
+  padding:4px;display:flex;align-items:center}
+.nav-icon:active{opacity:.6}
+
+/* ── Pending screenshot preview ── */
+.ipreview{display:flex;align-items:center;gap:8px;padding:6px 12px;
+  background:var(--surf);border-top:1px solid var(--border);flex-shrink:0}
+.ipreview img{height:48px;border-radius:6px;object-fit:cover}
+.ipreview-remove{background:rgba(255,69,58,.2);border:none;color:var(--red);
+  width:24px;height:24px;border-radius:12px;font-size:14px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.ipreview-remove:active{background:rgba(255,69,58,.4)}
+
+/* ── Misc ── */
+.loading{text-align:center;padding:32px;color:var(--text2);font-size:15px}
+::-webkit-scrollbar{width:3px;height:3px}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+::-webkit-scrollbar-track{background:transparent}
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.min.css" />
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10/lib/addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11/lib/addon-web-links.min.js"></script>
+</head>
+<body>
+<div id="app"></div>
+<script>
+'use strict';
+
+// ── State ──────────────────────────────────────────────────────────────────
+const S = {
+  token: localStorage.getItem('mc_tok') || '',
+  user: null,         // {id, name, email, role, laptops} from /auth/me
+  sessions: [],
+  projects: [],
+  skills: [],
+  skillsLoaded: false,
+  screenshotCache: new Map(), // path → data URL, for inline rendering
+  events: {},         // displayId → EventObject[]
+  sessionIds: {},     // displayId → sessionId (to detect /clear)
+  outputs: {},        // displayId → raw terminal string
+  expanded: new Set(),// expanded thinking UUIDs
+  activeId: null,
+  activeTab: 'events',
+  ws: null,
+  wsState: 'off',     // off | connecting | ok | err
+  modal: null,        // null | 'newSession'
+  loadingProjects: false,
+  tmuxFilter: null,   // null = default session, 'all' = all, or specific session name
+  laptop: localStorage.getItem('mc_laptop') || null, // null = auto (first/only), or hostname
+  laptops: [],        // list from /laptops endpoint or discovered from sessions
+  pendingImage: null,  // {file: File, dataURL: string} — staged screenshot waiting to be sent
+  fetched: new Set(), // session IDs that have completed initial data fetch
+  ptyWs: null,        // WebSocket for PTY shell
+  ptyTerm: null,      // xterm.js Terminal instance
+  ptyFit: null,       // FitAddon instance
+  ptyResizeObs: null, // ResizeObserver for terminal container
+  ptyTextBuf: '',      // plain-text mirror of terminal output for text-select mode
+  ptyTextMode: false,  // true = show selectable <pre> instead of xterm canvas
+  ptyRawAll: [],       // full raw data history for replay when xterm is recreated
+  ptyCtrlPending: false, // true = next keystroke is sent as Ctrl+key
+  adminUsers: [],     // admin user list cache
+};
+
+// ── DOM root ───────────────────────────────────────────────────────────────
+const $app = document.getElementById('app');
+
+// Eagerly fetch laptops so Settings shows hosts immediately
+fetch('/laptops', S.token ? {headers: {'Authorization': 'Bearer ' + S.token}} : {}).then(r => r.ok ? r.json() : []).then(list => {
+  if (Array.isArray(list)) S.laptops = list.map(l => l.id || l);
+  if (route().page === 'settings') renderSettings();
+  else patchDashboard();
+}).catch(() => {});
+
+// ── Routing ────────────────────────────────────────────────────────────────
+function route() {
+  const h = location.hash.slice(1);
+  if (h === 'settings') return { page: 'settings' };
+  if (h === 'users') return { page: 'users' };
+  if (h === 'usage') return { page: 'usage' };
+  if (h.startsWith('s/')) return { page: 'session', id: decodeURIComponent(h.slice(2)) };
+  return { page: 'dashboard' };
+}
+
+window.addEventListener('hashchange', () => {
+  cleanupPty();
+  const r = route();
+  if (r.page === 'session') {
+    S.activeId = r.id;
+    S.activeTab = 'events';
+    ensureSessionData(r.id);
+  } else {
+    S.activeId = null;
+  }
+  render();
+});
+
+// Fetch user info after login
+async function fetchUserInfo() {
+  try {
+    const resp = await fetch('/auth/me', {
+      headers: { 'Authorization': `Bearer ${S.token}` }
+    });
+    if (resp.ok) {
+      S.user = await resp.json();
+    }
+  } catch(e) {
+    console.warn('fetchUserInfo:', e);
+  }
+}
+
+// ── PTY (web shell) ───────────────────────────────────────────────────────
+
+// keepWs=true: detach xterm but keep the shell alive (tab switch)
+// keepWs=false: full teardown (navigate away from session)
+function cleanupPty(keepWs = false) {
+  if (S.ptyResizeObs) { S.ptyResizeObs.disconnect(); S.ptyResizeObs = null; }
+  if (S.ptyTerm) { S.ptyTerm.dispose(); S.ptyTerm = null; S.ptyFit = null; }
+  if (!keepWs && S.ptyWs) { S.ptyWs.close(); S.ptyWs = null; S.ptyRawAll = []; S.ptyTextBuf = ''; }
+}
+
+function connectPty(hostname) {
+  // Detach any existing xterm but keep WebSocket if already running
+  cleanupPty(true);
+
+  const container = document.getElementById('xterm-container');
+  if (!container) return;
+
+  const term = new Terminal({
+    cursorBlink: true,
+    fontSize: 13,
+    fontFamily: "'SF Mono', Menlo, 'Courier New', monospace",
+    theme: { background: '#000000', foreground: '#ffffff' },
+    scrollback: 5000,
+    minimumContrastRatio: 1,
+  });
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  if (typeof WebLinksAddon !== 'undefined') {
+    term.loadAddon(new WebLinksAddon.WebLinksAddon());
+  }
+
+  term.open(container);
+  fitAddon.fit();
+  // Re-fit after layout settles (container may have had 0 height on first paint)
+  setTimeout(() => { try { fitAddon.fit(); } catch(_) {} }, 100);
+
+  S.ptyTerm = term;
+  S.ptyFit = fitAddon;
+
+  const attachWs = (ws) => {
+    // Replay full history into the fresh xterm instance
+    for (const chunk of S.ptyRawAll) {
+      if (chunk instanceof ArrayBuffer) term.write(new Uint8Array(chunk));
+      else term.write(chunk);
+    }
+
+    ws.onmessage = (e) => {
+      const chunk = e.data instanceof ArrayBuffer ? e.data.slice(0) : e.data;
+      S.ptyRawAll.push(chunk);
+      const raw = e.data instanceof ArrayBuffer ? new TextDecoder().decode(e.data) : e.data;
+      const plain = raw.replace(/\x1b\[[\x20-\x3f]*[\x40-\x7e]/g, '')   // CSI sequences (covers ?2004h etc)
+                       .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC sequences
+                       .replace(/\x1b[^[\]]/g, '');                        // other ESC sequences
+      S.ptyTextBuf += plain;
+      if (S.ptyTextMode) {
+        const pre = document.getElementById('pty-text-view');
+        if (pre) { pre.textContent = S.ptyTextBuf; pre.scrollTop = pre.scrollHeight; }
+      }
+      if (S.ptyTerm) {
+        if (e.data instanceof ArrayBuffer) S.ptyTerm.write(new Uint8Array(e.data));
+        else S.ptyTerm.write(e.data);
+      }
+    };
+
+    ws.onclose = () => {
+      if (S.ptyTerm) S.ptyTerm.write('\r\n\x1b[31m[Disconnected — reconnecting…]\x1b[0m\r\n');
+      S.ptyWs = null; S.ptyRawAll = []; S.ptyTextBuf = '';
+      // Auto-reconnect if still on terminal tab
+      if (S.activeTab === 'terminal' && !S.ptyTextMode) {
+        setTimeout(() => {
+          if (S.activeTab === 'terminal' && !S.ptyWs) {
+            const sess = S.sessions.find(s => s.id === S.activeId);
+            const hostname = sess?.laptop || S.laptop || (S.laptops[0]?.id || S.laptops[0]) || '';
+            connectPty(hostname);
+          }
+        }, 2000);
+      }
+    };
+
+    term.onData(data => {
+      if (ws.readyState !== 1) return;
+      if (S.ptyCtrlPending && data.length === 1) {
+        S.ptyCtrlPending = false;
+        const ctrlBtn = document.getElementById('pty-ctrl-btn');
+        if (ctrlBtn) { ctrlBtn.style.background = 'rgba(40,40,40,.92)'; ctrlBtn.style.color = '#ddd'; }
+        const code = data.toUpperCase().charCodeAt(0) - 64;
+        if (code > 0 && code < 32) { ws.send(String.fromCharCode(code)); return; }
+      }
+      ws.send(data);
+    });
+    term.onResize(({rows, cols}) => {
+      if (ws.readyState === 1) ws.send(JSON.stringify({type:'resize', rows, cols}));
+    });
+    term.focus();
+  };
+
+  if (S.ptyWs && S.ptyWs.readyState === WebSocket.OPEN) {
+    // Reuse existing shell session
+    attachWs(S.ptyWs);
+  } else {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const rows = term.rows, cols = term.cols;
+    let url = `${proto}//${location.host}/ws/pty?token=${encodeURIComponent(S.token)}&rows=${rows}&cols=${cols}`;
+    if (hostname) url += `&laptop=${encodeURIComponent(hostname)}`;
+    const ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+    S.ptyWs = ws;
+    ws.onopen = () => attachWs(ws);
+  }
+
+  // Container resize → fit → resize event
+  const resizeObs = new ResizeObserver(() => { try { fitAddon.fit(); } catch(_) {} });
+  resizeObs.observe(container);
+  S.ptyResizeObs = resizeObs;
+}
+
+function sendPty(data) {
+  if (S.ptyWs && S.ptyWs.readyState === WebSocket.OPEN) S.ptyWs.send(data);
+  if (S.ptyTerm) S.ptyTerm.focus();
+}
+
+function bindPtyModeBtn(id) {
+  const toolbar = document.getElementById('pty-toolbar');
+  if (toolbar) {
+    toolbar.addEventListener('click', e => {
+      const key = e.target.dataset.key;
+      if (!key) return;
+      if (key === 'ctrl') {
+        S.ptyCtrlPending = !S.ptyCtrlPending;
+        e.target.style.background = S.ptyCtrlPending ? 'rgba(80,120,200,.9)' : 'rgba(40,40,40,.92)';
+        e.target.style.color = S.ptyCtrlPending ? '#fff' : '#ddd';
+      } else if (key === 'esc')   { sendPty('\x1b'); }
+      else if (key === 'tab')     { sendPty('\t'); }
+      else if (key === 'up')      { sendPty('\x1b[A'); }
+      else if (key === 'down')    { sendPty('\x1b[B'); }
+      else if (key === 'right')   { sendPty('\x1b[C'); }
+      else if (key === 'left')    { sendPty('\x1b[D'); }
+      if (S.ptyTerm) S.ptyTerm.focus();
+    });
+  }
+
+  const pasteBtn = document.getElementById('pty-paste-btn');
+  if (pasteBtn) {
+    pasteBtn.onclick = async () => {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) sendPty(text);
+      } catch(e) {
+        const text = window.prompt('Paste text to send:');
+        if (text) sendPty(text);
+      }
+    };
+  }
+  const btn = document.getElementById('pty-mode-btn');
+  if (!btn) return;
+  btn.onclick = () => {
+    S.ptyTextMode = !S.ptyTextMode;
+    const tc = document.getElementById('tab-content');
+    if (!tc) return;
+    tc.innerHTML = tabContentHTML(id);
+    if (S.ptyTextMode) {
+      const pre = document.getElementById('pty-text-view');
+      if (pre) pre.scrollTop = pre.scrollHeight;
+    } else {
+      const sess = S.sessions.find(s => s.id === id);
+      const hostname = sess?.laptop || S.laptop || (S.laptops[0]?.id || S.laptops[0]) || '';
+      setTimeout(() => connectPty(hostname), 50);
+    }
+    bindPtyModeBtn(id);
+  };
+}
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+let wsTimer = null;
+let pingTimer = null;
+
+function connectWS() {
+  if (!S.token) return;
+  if (S.ws && S.ws.readyState <= 1) return;
+
+  S.wsState = 'connecting';
+  patchConnDot();
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  let wsUrl = `${proto}//${location.host}/ws?token=${encodeURIComponent(S.token)}`;
+  if (S.laptop) wsUrl += `&laptop=${encodeURIComponent(S.laptop)}`;
+  S.ws = new WebSocket(wsUrl);
+
+  S.ws.onopen = () => {
+    S.wsState = 'ok';
+    clearTimeout(wsTimer);
+    pingTimer = setInterval(() => S.ws?.readyState === 1 && S.ws.send(JSON.stringify({type:'ping'})), 14000);
+    patchConnDot();
+    // Fetch connected laptops so hosts with no sessions still appear
+    api('GET', '/laptops').then(list => {
+      if (Array.isArray(list)) S.laptops = list.map(l => l.id || l);
+      patchDashboard();
+    }).catch(() => {});
+  };
+
+  S.ws.onmessage = e => {
+    try { onWS(JSON.parse(e.data)); } catch(err) { console.error('WS parse/handle error:', err, e.data?.slice?.(0,200)); }
+  };
+
+  S.ws.onerror = () => { S.wsState = 'err'; patchConnDot(); };
+
+  S.ws.onclose = () => {
+    S.wsState = 'off';
+    clearInterval(pingTimer);
+    patchConnDot();
+    wsTimer = setTimeout(connectWS, 3500);
+  };
+}
+
+function onWS(msg) {
+  const data = typeof msg.data === 'string' ? safeParse(msg.data, msg.data) : msg.data;
+
+  if (msg.type === 'sessions') {
+    const incoming = Array.isArray(data) ? data : [];
+    // Detect /clear: if sessionId changed for a known session, wipe its event cache
+    for (const s of incoming) {
+      if (S.sessionIds[s.id] && S.sessionIds[s.id] !== s.sessionId) {
+        delete S.events[s.id];
+        if (S.activeId === s.id && S.activeTab === 'events') patchEventsList();
+      }
+      S.sessionIds[s.id] = s.sessionId;
+    }
+    S.sessions = incoming;
+    patchDashboard();
+    patchSessionHeader();
+
+  } else if (msg.type === 'output' || msg.type === 'more_output') {
+    if (data?.id) {
+      S.outputs[data.id] = data.output || '';
+      if (S.activeId === data.id && S.activeTab === 'terminal') patchTerminal();
+    }
+
+  } else if (msg.type === 'event') {
+    if (data?.id && data?.event) {
+      const ev = data.event;
+      (S.events[data.id] = S.events[data.id] || []).push(ev);
+      if (S.activeId === data.id && S.activeTab === 'events') appendEventNode(ev);
+    }
+  }
+}
+
+// ── API ────────────────────────────────────────────────────────────────────
+async function api(method, path, body, extraHdrs) {
+  const hdrs = { 'Authorization': `Bearer ${S.token}`, ...extraHdrs };
+  if (S.laptop) hdrs['X-Laptop-ID'] = S.laptop;
+  const opts = {
+    method,
+    headers: hdrs,
+  };
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const ct = r.headers.get('content-type') || '';
+  if (ct.includes('application/json')) return r.json();
+  return r.text();
+}
+
+async function ensureSessionData(id) {
+  if (S.fetched.has(id)) return;
+  S.fetched.add(id);
+  try {
+    const [evs, out] = await Promise.all([
+      api('GET', `/sessions/${encodeURIComponent(id)}/events`),
+      api('GET', `/sessions/${encodeURIComponent(id)}/output`),
+    ]);
+    // Merge: API returns history; WS may have pushed newer events during fetch
+    const wsEvents = S.events[id] || [];
+    const historyEvents = Array.isArray(evs) ? evs : [];
+    const historyUUIDs = new Set(historyEvents.map(e => e.uuid));
+    const newFromWs = wsEvents.filter(e => !historyUUIDs.has(e.uuid));
+    S.events[id] = historyEvents.concat(newFromWs);
+    S.outputs[id] = (typeof out === 'object' ? out?.output : out) || '';
+    if (S.activeId === id) {
+      if (S.activeTab === 'events') patchEventsList();
+      else patchTerminal();
+    }
+    // Restore scroll position after hot reload
+    const saved = sessionStorage.getItem('mc_scroll');
+    if (saved) {
+      sessionStorage.removeItem('mc_scroll');
+      setTimeout(() => {
+        const tc = document.getElementById('tab-content');
+        if (tc) tc.scrollTop = parseInt(saved);
+      }, 100);
+    }
+  } catch(e) {
+    S.fetched.delete(id); // allow retry on failure
+    console.warn('ensureSessionData:', e);
+  }
+}
+
+async function sendInput(id, text) {
+  const resp = await api('POST', `/sessions/${encodeURIComponent(id)}/input`, {text, sendEnter: true});
+  return resp;
+}
+
+async function doApprove(id) {
+  try { await api('POST', `/sessions/${encodeURIComponent(id)}/approve`, {}); }
+  catch(e) { alert('Approve failed: ' + e.message); }
+}
+
+async function doCancel(id) {
+  try { await api('POST', `/sessions/${encodeURIComponent(id)}/cancel`, {}); }
+  catch(e) { alert('Cancel failed: ' + e.message); }
+}
+
+// ── Three-dot menu ─────────────────────────────────────────────────────────
+S.dotMenuOpen = false;
+
+function getCurrentModel(id) {
+  const evs = S.events[id] || [];
+  for (let i = evs.length - 1; i >= 0; i--) {
+    if (evs[i].model) return evs[i].model;
+  }
+  return 'unknown';
+}
+
+function toggleDotMenu(id) {
+  const anchor = document.getElementById('dot-menu-anchor');
+  const existing = document.getElementById('dot-menu');
+  if (existing) { existing.remove(); S.dotMenuOpen = false; return; }
+
+  const model = getCurrentModel(id);
+  const shortModel = model.replace(/^claude-/, '').replace(/-\d{8}$/, '');
+
+  anchor.innerHTML = `<div class="dot-menu" id="dot-menu">
+    <div class="dot-menu-item" id="dm-model">
+      <span class="dm-icon">🧠</span>
+      <div><div>Model</div><div class="dm-sub">${esc(shortModel)}</div></div>
+    </div>
+    <div class="dot-menu-item" id="dm-usage">
+      <span class="dm-icon">📊</span>
+      <div>Token Usage</div>
+    </div>
+    <div class="dot-menu-item" id="dm-raw">
+      <span class="dm-icon">📜</span>
+      <div>Raw Output</div>
+    </div>
+  </div>`;
+  S.dotMenuOpen = true;
+
+  document.getElementById('dm-model').addEventListener('click', (e) => {
+    e.stopPropagation();
+    showModelPicker(id, model);
+  });
+  document.getElementById('dm-usage').addEventListener('click', () => {
+    closeDotMenu();
+    showTokenUsage(id);
+  });
+  document.getElementById('dm-raw').addEventListener('click', () => {
+    closeDotMenu();
+    showRawOutput(id);
+  });
+
+  // Close on outside click
+  setTimeout(() => {
+    const closeHandler = (e) => {
+      if (!e.target.closest('#dot-menu') && !e.target.closest('#dot-menu-btn')) {
+        closeDotMenu();
+        document.removeEventListener('click', closeHandler);
+      }
+    };
+    document.addEventListener('click', closeHandler);
+  }, 0);
+}
+
+function closeDotMenu() {
+  const m = document.getElementById('dot-menu');
+  if (m) m.remove();
+  S.dotMenuOpen = false;
+}
+
+const MODEL_OPTIONS = [
+  {id: 'opus', label: 'Opus', desc: 'Most capable'},
+  {id: 'sonnet', label: 'Sonnet', desc: 'Balanced'},
+  {id: 'haiku', label: 'Haiku', desc: 'Fast'},
+];
+
+function showModelPicker(id, currentModel) {
+  const menu = document.getElementById('dot-menu');
+  if (!menu) return;
+  const cur = currentModel.toLowerCase();
+  menu.innerHTML = `<div style="padding:12px 16px;font-size:13px;color:var(--text2);border-bottom:1px solid var(--border)">Switch Model</div>
+    <div class="model-list">${MODEL_OPTIONS.map(m => {
+      const active = cur.includes(m.id);
+      return `<div class="model-opt ${active?'active':''}" data-model="${m.id}">
+        <div><div>${esc(m.label)}</div><div style="font-size:11px;color:var(--text2)">${esc(m.desc)}</div></div>
+      </div>`;
+    }).join('')}</div>`;
+  menu.querySelectorAll('.model-opt').forEach(el => {
+    el.addEventListener('click', async () => {
+      closeDotMenu();
+      await sendInput(id, '/model ' + el.dataset.model);
+    });
+  });
+}
+
+async function showRawOutput(id) {
+  const overlay = document.createElement('div');
+  overlay.className = 'raw-overlay';
+  overlay.id = 'raw-overlay';
+  overlay.innerHTML = `<div class="raw-header">
+    <button class="nav-back" id="raw-close">‹ Back</button>
+    <div class="raw-title">Raw Output</div>
+  </div>
+  <pre id="raw-pre" style="flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;
+    margin:0;padding:12px 14px;font-family:'SF Mono',Menlo,'Courier New',monospace;
+    font-size:12px;line-height:1.55;word-break:break-all;white-space:pre-wrap;
+    background:#000;color:#e5e5e5">Loading…</pre>`;
+  document.body.appendChild(overlay);
+
+  let timer = null;
+
+  function cleanup() {
+    clearInterval(timer);
+    overlay.remove();
+  }
+  document.getElementById('raw-close').addEventListener('click', cleanup);
+
+  async function refresh() {
+    const pre = document.getElementById('raw-pre');
+    if (!pre) { clearInterval(timer); return; }
+    const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 60;
+    try {
+      const resp = await api('GET', `/sessions/${encodeURIComponent(id)}/output`);
+      const text = typeof resp === 'string' ? resp : (resp.output || '');
+      pre.innerHTML = ansi(text);
+      if (atBottom) pre.scrollTop = pre.scrollHeight;
+    } catch(e) {
+      pre.textContent = 'Failed to load: ' + e.message;
+      clearInterval(timer);
+    }
+  }
+
+  await refresh();
+  timer = setInterval(refresh, 500);
+}
+
+// Pricing per million tokens (April 2026)
+const MODEL_PRICING = {
+  opus:   { input:  5.00, output: 25.00, cacheWrite:  6.25, cacheRead: 0.50 },
+  sonnet: { input:  3.00, output: 15.00, cacheWrite:  3.75, cacheRead: 0.30 },
+  haiku:  { input:  1.00, output:  5.00, cacheWrite:  1.25, cacheRead: 0.10 },
+};
+
+function detectPricingTier(model) {
+  const m = (model || '').toLowerCase();
+  if (m.includes('opus'))   return MODEL_PRICING.opus;
+  if (m.includes('haiku'))  return MODEL_PRICING.haiku;
+  return MODEL_PRICING.sonnet; // default / sonnet
+}
+
+function fmtTokens(n) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'K';
+  return String(n);
+}
+
+function fmtCost(usd) {
+  if (usd < 0.01) return '<$0.01';
+  if (usd < 1) return '$' + usd.toFixed(3);
+  return '$' + usd.toFixed(2);
+}
+
+async function showTokenUsage(id) {
+  const overlay = document.createElement('div');
+  overlay.className = 'raw-overlay';
+  overlay.id = 'usage-overlay';
+  overlay.innerHTML = `<div class="raw-header">
+    <button class="nav-back" id="usage-close">‹ Back</button>
+    <div class="raw-title">Token Usage</div>
+  </div>
+  <div id="usage-body" style="flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:20px 16px">
+    <div class="loading">Loading…</div>
+  </div>`;
+  document.body.appendChild(overlay);
+  document.getElementById('usage-close').addEventListener('click', () => overlay.remove());
+
+  try {
+    const u = await api('GET', `/sessions/${encodeURIComponent(id)}/usage`);
+    const pricing = detectPricingTier(u.model);
+    const totalInput = u.inputTokens + u.cacheCreationTokens + u.cacheReadTokens;
+    const cost =
+      (u.inputTokens           / 1e6) * pricing.input +
+      (u.outputTokens          / 1e6) * pricing.output +
+      (u.cacheCreationTokens   / 1e6) * pricing.cacheWrite +
+      (u.cacheReadTokens       / 1e6) * pricing.cacheRead;
+    const shortModel = u.model ? u.model.replace(/^claude-/, '').replace(/-\d{8}$/, '') : 'unknown';
+    const el = document.getElementById('usage-body');
+    if (!el) return;
+    el.innerHTML = `
+      <div style="font-size:12px;color:var(--text2);margin-bottom:16px">${esc(shortModel)} · ${u.turnCount} turn${u.turnCount === 1 ? '' : 's'}</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:24px">
+        ${usageTile('Input', u.inputTokens, pricing.input, 'var(--blue)')}
+        ${usageTile('Output', u.outputTokens, pricing.output, 'var(--green)')}
+        ${usageTile('Cache Write', u.cacheCreationTokens, pricing.cacheWrite, 'var(--orange)')}
+        ${usageTile('Cache Read', u.cacheReadTokens, pricing.cacheRead, 'var(--purple)')}
+      </div>
+      <div style="background:var(--surf2);border-radius:12px;padding:16px;border:1px solid var(--border)">
+        <div style="font-size:12px;color:var(--text2);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;font-weight:600">Estimated Cost</div>
+        <div style="font-size:32px;font-weight:700;color:var(--text)">${fmtCost(cost)}</div>
+        <div style="font-size:12px;color:var(--text3);margin-top:4px">${fmtTokens(u.inputTokens + u.outputTokens + u.cacheCreationTokens + u.cacheReadTokens)} total tokens</div>
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:16px;line-height:1.5;text-align:center">
+        Prices: input $${pricing.input}/M · output $${pricing.output}/M<br>
+        cache write $${pricing.cacheWrite}/M · cache read $${pricing.cacheRead}/M
+      </div>`;
+  } catch(e) {
+    const el = document.getElementById('usage-body');
+    if (el) el.innerHTML = `<div style="color:var(--red);padding:20px">Failed to load: ${esc(e.message)}</div>`;
+  }
+}
+
+function usageTile(label, tokens, pricePerM, color) {
+  const cost = (tokens / 1e6) * pricePerM;
+  return `<div style="background:var(--surf2);border-radius:10px;padding:14px;border:1px solid var(--border)">
+    <div style="font-size:11px;color:var(--text2);margin-bottom:6px;font-weight:500">${esc(label)}</div>
+    <div style="font-size:20px;font-weight:700;color:${color}">${fmtTokens(tokens)}</div>
+    <div style="font-size:11px;color:var(--text3);margin-top:2px">${fmtCost(cost)}</div>
+  </div>`;
+}
+
+async function doCreate(cwd) {
+  S.modal = null;
+  try {
+    await api('POST', '/sessions', {cwd, runtime: 'tmux'});
+    render();
+  } catch(e) {
+    render();
+    alert('Create failed: ' + e.message);
+  }
+}
+
+async function loadProjects() {
+  S.loadingProjects = true;
+  patchProjectList();
+  try {
+    const data = await api('GET', '/projects');
+    S.projects = Array.isArray(data) ? data : [];
+  } catch(e) {
+    S.projects = [];
+  }
+  S.loadingProjects = false;
+  patchProjectList();
+}
+
+function requestMoreOutput(id) {
+  if (S.ws?.readyState === 1) {
+    S.ws.send(JSON.stringify({type: 'load_more', id, lines: 300}));
+  }
+}
+
+async function loadSkills() {
+  if (S.skillsLoaded) return;
+  try {
+    const data = await api('GET', '/skills');
+    S.skills = Array.isArray(data) ? data : [];
+    S.skillsLoaded = true;
+  } catch(e) {
+    S.skills = [];
+  }
+}
+
+// Stage a screenshot for preview — actual upload happens on send
+function stageScreenshot(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    S.pendingImage = {file, dataURL: reader.result};
+    renderImagePreview();
+  };
+  reader.readAsDataURL(file);
+  const fi = document.getElementById('file-input');
+  if (fi) fi.value = '';
+}
+
+function renderImagePreview() {
+  let el = document.getElementById('ipreview');
+  if (S.pendingImage) {
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'ipreview';
+      el.id = 'ipreview';
+      const ibar = document.querySelector('.ibar');
+      if (ibar) ibar.parentNode.insertBefore(el, ibar);
+    }
+    el.innerHTML = `<img src="${S.pendingImage.dataURL}"><div style="flex:1;font-size:12px;color:var(--text2)">Screenshot ready</div><button class="ipreview-remove" id="ipreview-rm">✕</button>`;
+    document.getElementById('ipreview-rm').addEventListener('click', clearPendingImage);
+  } else if (el) {
+    el.remove();
+  }
+}
+
+function clearPendingImage() {
+  S.pendingImage = null;
+  renderImagePreview();
+}
+
+// Upload the staged screenshot and send it
+async function uploadAndSendScreenshot(id) {
+  if (!S.pendingImage) return;
+  const {file, dataURL} = S.pendingImage;
+  const btn = document.getElementById('attach-btn');
+  if (btn) btn.classList.add('uploading');
+  try {
+    const buf = await file.arrayBuffer();
+    const resp = await fetch('/screenshots', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${S.token}` },
+      body: buf,
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    if (data.path) {
+      S.screenshotCache.set(data.path, dataURL);
+      // Combine with any text in the input field
+      const field = document.getElementById('ifield');
+      const text = field?.value?.trim() || '';
+      const msg = text ? data.path + ' ' + text : data.path;
+      sendInput(id, msg);
+      if (field) { field.value = ''; autoGrow(field); }
+    }
+  } catch(e) {
+    alert('Upload failed: ' + e.message);
+  } finally {
+    if (btn) btn.classList.remove('uploading');
+    S.pendingImage = null;
+    renderImagePreview();
+  }
+}
+
+// ── Render (full re-render) ────────────────────────────────────────────────
+function render() {
+  if (!S.token) { renderAuth(); return; }
+  const r = route();
+  if (r.page === 'settings') renderSettings();
+  else if (r.page === 'users') renderUsers();
+  else if (r.page === 'usage') renderUsageDashboard();
+  else if (r.page === 'session') renderDetail(r.id);
+  else renderDashboard();
+}
+
+// ── Auth screen ────────────────────────────────────────────────────────────
+function renderAuth() {
+  $app.innerHTML = `
+<div class="auth">
+  <div class="auth-icon">⚡</div>
+  <div class="auth-title">MClaude</div>
+  <div class="auth-sub">Enter your access token to connect</div>
+  <div class="auth-form">
+    <input type="password" id="tok" placeholder="Access token" autocomplete="off" />
+    <button class="btn" id="go-btn">Connect</button>
+  </div>
+</div>`;
+  const inp = document.getElementById('tok');
+  inp.value = S.token;
+  inp.addEventListener('keydown', e => e.key === 'Enter' && doLogin());
+  document.getElementById('go-btn').addEventListener('click', doLogin);
+  setTimeout(() => inp.focus(), 80);
+}
+
+async function doLogin() {
+  const v = document.getElementById('tok')?.value?.trim();
+  if (!v) return;
+  S.token = v;
+  localStorage.setItem('mc_tok', v);
+  await fetchUserInfo();
+  connectWS();
+  render();
+}
+
+// ── Dashboard ──────────────────────────────────────────────────────────────
+function renderDashboard() {
+  const attn = S.sessions.filter(s => s.status === 'needs_permission' || s.status === 'plan_mode').length;
+  const tmuxSessions = discoverTmuxSessions();
+  const showFilter = tmuxSessions.length > 1;
+
+  const userName = S.user?.name ? ` <span style="font-size:12px;color:var(--text2);font-weight:400">${esc(S.user.name)}</span>` : '';
+  $app.innerHTML = `
+<div class="nav">
+  <div class="nav-title">MClaude ${attn ? `<span class="badge">${attn}</span>` : ''}${userName}</div>
+  <button class="nav-icon" id="usage-btn" title="Token Usage">📊</button>
+  <button class="nav-icon" id="settings-btn">⚙</button>
+  <div class="cdot ${cdotClass()}" id="cdot"></div>
+</div>
+${showFilter ? tmuxFilterHTML(tmuxSessions) : ''}
+<div class="content" id="sc">${sessionsHTML()}</div>
+<button class="fab" id="fab">+</button>
+${S.modal === 'newSession' ? newSessionHTML() : ''}`;
+
+  document.getElementById('fab').addEventListener('click', openNewSession);
+  document.getElementById('usage-btn').addEventListener('click', () => navTo('usage'));
+  document.getElementById('settings-btn').addEventListener('click', () => navTo('settings'));
+  if (S.modal === 'newSession') bindSheetClose();
+  bindSessionRows();
+  if (showFilter) bindTmuxFilter();
+}
+
+// ── Tmux session filter ────────────────────────────────────────────────────
+function discoverTmuxSessions() {
+  const names = new Set();
+  for (const s of S.sessions) {
+    if (S.laptop && s.laptop !== S.laptop) continue;
+    if (s.tmuxSession) names.add(s.tmuxSession);
+  }
+  return Array.from(names).sort();
+}
+
+function getDefaultTmuxSession() {
+  // The first session alphabetically, or 'mclaude' if it exists
+  const names = discoverTmuxSessions();
+  if (names.includes('mclaude')) return 'mclaude';
+  return names[0] || null;
+}
+
+function filteredSessions() {
+  let list = S.sessions;
+  // Filter by laptop if one is selected
+  if (S.laptop) list = list.filter(s => s.laptop === S.laptop);
+  if (S.tmuxFilter === 'all') return list;
+  const target = S.tmuxFilter || getDefaultTmuxSession();
+  if (!target) return list;
+  return list.filter(s => s.tmuxSession === target);
+}
+
+function tmuxFilterHTML(tmuxSessions) {
+  const active = S.tmuxFilter || getDefaultTmuxSession();
+  let chips = tmuxSessions.map(name =>
+    `<div class="tmux-chip ${active === name && S.tmuxFilter !== 'all' ? 'on' : ''}" data-tmux="${esc(name)}">${esc(name)}</div>`
+  ).join('');
+  chips += `<div class="tmux-chip ${S.tmuxFilter === 'all' ? 'on' : ''}" data-tmux="all">All</div>`;
+  return `<div class="tmux-filter" id="tmux-filter">${chips}</div>`;
+}
+
+function bindTmuxFilter() {
+  document.querySelectorAll('.tmux-chip').forEach(el => {
+    el.addEventListener('click', () => {
+      const val = el.dataset.tmux;
+      if (val === 'all') {
+        S.tmuxFilter = 'all';
+      } else if (val === getDefaultTmuxSession() && S.tmuxFilter !== 'all') {
+        S.tmuxFilter = null; // back to default
+      } else {
+        S.tmuxFilter = val;
+      }
+      patchDashboard();
+    });
+  });
+}
+
+function sessionsHTML() {
+  const filtered = filteredSessions();
+  if (!filtered.length) {
+    if (S.sessions.length) {
+      return `<div class="empty"><h3>No Sessions</h3><p>No sessions in this tmux group</p></div>`;
+    }
+    return `<div class="empty"><h3>No Sessions</h3><p>Tap + to start a Claude session</p></div>`;
+  }
+  return `<ul class="slist">${filtered.map(s => {
+    const i = S.sessions.indexOf(s);
+    return `<li class="srow" data-i="${i}">
+  <div class="sdot ${s.status || 'unknown'}"></div>
+  <div class="sinfo">
+    <div class="sname">${esc(s.projectName || s.id)}</div>
+    <div class="smeta">${statusLabel(s)} · ${esc(shortPath(s.cwd))}</div>
+  </div>
+  <div class="schev">›</div>
+</li>`;
+  }).join('')}</ul>`;
+}
+
+function patchDashboard() {
+  if (route().page !== 'dashboard' || !S.token) return;
+
+  // If filter bar visibility changed, do a full re-render
+  const tmuxSessions = discoverTmuxSessions();
+  const filterEl = document.getElementById('tmux-filter');
+  const needsFilter = tmuxSessions.length > 1;
+  if (needsFilter !== !!filterEl) {
+    renderDashboard();
+    return;
+  }
+
+  const sc = document.getElementById('sc');
+  if (sc) sc.innerHTML = sessionsHTML();
+  const attn = S.sessions.filter(s => s.status === 'needs_permission' || s.status === 'plan_mode').length;
+  const t = document.querySelector('.nav-title');
+  if (t) t.innerHTML = `MClaude ${attn ? `<span class="badge">${attn}</span>` : ''}`;
+
+  // Update filter chip active states
+  if (filterEl && needsFilter) {
+    const active = S.tmuxFilter || getDefaultTmuxSession();
+    filterEl.innerHTML = tmuxSessions.map(name =>
+      `<div class="tmux-chip ${active === name && S.tmuxFilter !== 'all' ? 'on' : ''}" data-tmux="${esc(name)}">${esc(name)}</div>`
+    ).join('') + `<div class="tmux-chip ${S.tmuxFilter === 'all' ? 'on' : ''}" data-tmux="all">All</div>`;
+    bindTmuxFilter();
+  }
+
+  patchConnDot();
+  bindSessionRows();
+}
+
+function bindSessionRows() {
+  document.querySelectorAll('.srow').forEach(el => {
+    el.addEventListener('click', () => {
+      const i = parseInt(el.dataset.i);
+      const s = S.sessions[i];
+      if (s) navTo(`s/${encodeURIComponent(s.id)}`);
+    });
+  });
+}
+
+// ── New session modal ──────────────────────────────────────────────────────
+function newSessionHTML() {
+  return `
+<div class="overlay" id="overlay">
+  <div class="sheet">
+    <div class="sheet-hdr">
+      <div class="sheet-title">New Session</div>
+      <button class="sheet-close" id="sheet-x">✕</button>
+    </div>
+    <ul class="plist" id="plist">${projectsHTML()}</ul>
+  </div>
+</div>`;
+}
+
+function projectsHTML() {
+  if (S.loadingProjects) return `<div class="loading">Loading projects…</div>`;
+  // Filter projects by selected laptop
+  let projects = S.projects;
+  if (S.laptop) projects = projects.filter(p => p.laptop === S.laptop);
+  if (!projects.length) return `<div class="loading">No projects found</div>`;
+  // Sort: current session's cwd first, then alphabetically
+  const activeCwd = S.activeId && S.sessions.find(s => s.id === S.activeId)?.cwd;
+  projects = [...projects].sort((a, b) => {
+    if (activeCwd) {
+      if (a.path === activeCwd && b.path !== activeCwd) return -1;
+      if (b.path === activeCwd && a.path !== activeCwd) return 1;
+    }
+    return a.name.localeCompare(b.name);
+  });
+  return projects.map((p) => {
+    const idx = S.projects.indexOf(p);
+    return `<li class="prow" data-pi="${idx}"><div class="picon">📁</div><div>
+      <div class="pname">${esc(p.name)}</div>
+      <div class="ppath">${esc(p.path)}</div>
+    </div></li>`;
+  }).join('');
+}
+
+function patchProjectList() {
+  const pl = document.getElementById('plist');
+  if (pl) {
+    pl.innerHTML = projectsHTML();
+    bindProjectRows();
+  }
+}
+
+function bindSheetClose() {
+  const x = document.getElementById('sheet-x');
+  if (x) x.addEventListener('click', closeModal);
+  const ov = document.getElementById('overlay');
+  if (ov) ov.addEventListener('click', e => { if (e.target === ov) closeModal(); });
+  bindProjectRows();
+}
+
+function bindProjectRows() {
+  document.querySelectorAll('.prow').forEach(el => {
+    el.addEventListener('click', () => {
+      const i = parseInt(el.dataset.pi);
+      const p = S.projects[i];
+      if (p) doCreate(p.path);
+    });
+  });
+}
+
+function openNewSession() {
+  S.modal = 'newSession';
+  render();
+  bindSessionRows();
+  loadProjects();
+}
+
+function closeModal() {
+  S.modal = null;
+  render();
+  bindSessionRows();
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────
+function renderSettings() {
+  // Discover laptops from sessions or /laptops endpoint
+  const laptops = discoverLaptops();
+  const currentLaptop = S.laptop || 'all';
+
+  $app.innerHTML = `
+<div class="nav">
+  <button class="nav-back" id="settings-back">‹ Back</button>
+  <div class="nav-title" style="justify-content:center">Settings</div>
+  <div style="width:50px"></div>
+</div>
+<div class="content">
+  <div class="settings">
+    <div class="settings-section">
+      <div class="settings-label">Host</div>
+      <div class="settings-card">
+        <div class="settings-row">
+          <div class="settings-row-label">Active Host</div>
+          <select class="settings-select" id="laptop-select">
+            <option value="all" ${currentLaptop === 'all' ? 'selected' : ''}>All Hosts</option>
+            ${laptops.map(l => `<option value="${esc(l.id)}" ${currentLaptop === l.id ? 'selected' : ''}>${esc(l.id)}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-label">Connected Hosts</div>
+      <div class="settings-card">
+        ${laptops.length ? laptops.map(l => `
+        <div class="settings-row">
+          <div class="settings-dot" style="background:var(--green)"></div>
+          <div class="settings-row-label">${esc(l.id)}</div>
+          <div class="settings-row-value">${l.sessions} session${l.sessions !== 1 ? 's' : ''}</div>
+        </div>`).join('') : `
+        <div class="settings-row">
+          <div class="settings-row-label" style="color:var(--text2)">No hosts connected</div>
+        </div>`}
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-label">Connection</div>
+      <div class="settings-card">
+        <div class="settings-row">
+          <div class="settings-row-label">Status</div>
+          <div class="settings-row-value" style="display:flex;align-items:center;gap:6px">
+            <div class="settings-dot" style="background:${S.wsState === 'ok' ? 'var(--green)' : S.wsState === 'err' ? 'var(--red)' : 'var(--text3)'}"></div>
+            ${S.wsState === 'ok' ? 'Connected' : S.wsState === 'err' ? 'Error' : S.wsState === 'connecting' ? 'Connecting...' : 'Disconnected'}
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-label">Sessions</div>
+          <div class="settings-row-value">${S.sessions.length}</div>
+        </div>
+      </div>
+    </div>
+
+    ${S.user?.role === 'admin' ? `<div class="settings-section">
+      <div class="settings-label">Administration</div>
+      <div class="settings-card">
+        <div class="settings-row" id="users-row" style="cursor:pointer">
+          <div class="settings-row-label">User Management</div>
+          <div class="schev" style="color:var(--text3);font-size:18px">›</div>
+        </div>
+      </div>
+    </div>` : ''}
+
+    ${S.user ? `<div class="settings-section">
+      <div class="settings-label">Account</div>
+      <div class="settings-card">
+        <div class="settings-row">
+          <div class="settings-row-label">Name</div>
+          <div class="settings-row-value">${esc(S.user.name || '-')}</div>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-label">Role</div>
+          <div class="settings-row-value">${esc(S.user.role || '-')}</div>
+        </div>
+      </div>
+    </div>` : ''}
+
+    <div class="settings-section">
+      <div class="settings-card">
+        <div class="settings-row" id="logout-row" style="justify-content:center;cursor:pointer">
+          <div style="color:var(--red);font-weight:500">Sign Out</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>`;
+
+  document.getElementById('settings-back').addEventListener('click', () => navTo(''));
+  const usersRow = document.getElementById('users-row');
+  if (usersRow) usersRow.addEventListener('click', () => navTo('users'));
+  document.getElementById('laptop-select').addEventListener('change', e => {
+    const val = e.target.value;
+    S.laptop = val === 'all' ? null : val;
+    if (S.laptop) localStorage.setItem('mc_laptop', S.laptop);
+    else localStorage.removeItem('mc_laptop');
+    // Reconnect WS to target only the selected laptop
+    if (S.ws) { S.ws.close(); S.ws = null; }
+    connectWS();
+  });
+  document.getElementById('logout-row').addEventListener('click', () => {
+    S.token = '';
+    S.user = null;
+    localStorage.removeItem('mc_tok');
+    localStorage.removeItem('mc_laptop');
+    if (S.ws) S.ws.close();
+    navTo('');
+    render();
+  });
+}
+
+function discoverLaptops() {
+  const map = {};
+  // Include all laptops reported by the relay (even those with no sessions)
+  for (const id of (S.laptops || [])) {
+    map[id] = map[id] || 0;
+  }
+  // Count sessions per laptop
+  for (const s of S.sessions) {
+    const id = s.laptop || 'default';
+    map[id] = (map[id] || 0) + 1;
+  }
+  return Object.entries(map).map(([id, sessions]) => ({id, sessions})).sort((a, b) => a.id.localeCompare(b.id));
+}
+
+// ── Usage Dashboard ────────────────────────────────────────────────────────
+const MONTHLY_BUDGET = 140; // USD
+
+function getCalibFactor() { return parseFloat(localStorage.getItem('usageCalibFactor') || '1'); }
+function setCalibFactor(f) { localStorage.setItem('usageCalibFactor', String(f)); }
+
+function calibrateUsage(rawMtdCost) {
+  const hint = `Raw estimate: ${fmtCost(rawMtdCost)}\nEnter your actual MTD spend from Anthropic Console:`;
+  const val = prompt(hint);
+  if (val === null) return;
+  const actual = parseFloat(val.replace(/[$,\s]/g, ''));
+  if (isNaN(actual) || actual <= 0) { alert('Invalid amount'); return; }
+  setCalibFactor(actual / rawMtdCost);
+  loadUsageData();
+}
+
+function resetCalib() { localStorage.removeItem('usageCalibFactor'); loadUsageData(); }
+
+S._usageHours = 24;
+
+function renderUsageDashboard() {
+  $app.innerHTML = `
+<div style="height:100%;display:flex;flex-direction:column">
+  <div class="nav">
+    <button class="nav-back" id="usage-back">‹ Back</button>
+    <div class="nav-title" style="justify-content:center">Token Usage</div>
+  </div>
+  <div class="tmux-filter" id="usage-range">
+    ${['1H','6H','24H','7D','30D'].map((l,i) => {
+      const h = [1,6,24,168,720][i];
+      return `<div class="tmux-chip ${S._usageHours===h?'on':''}" data-h="${h}">${l}</div>`;
+    }).join('')}
+  </div>
+  <div class="content" id="usage-content" style="padding:16px;display:flex;flex-direction:column;gap:16px">
+    <div class="loading">Loading…</div>
+  </div>
+</div>`;
+
+  document.getElementById('usage-back').addEventListener('click', () => navTo(''));
+  document.querySelectorAll('#usage-range .tmux-chip').forEach(el => {
+    el.addEventListener('click', () => {
+      S._usageHours = parseInt(el.dataset.h);
+      document.querySelectorAll('#usage-range .tmux-chip').forEach(c => c.classList.toggle('on', c === el));
+      loadUsageData();
+    });
+  });
+
+  loadUsageData();
+}
+
+async function loadUsageData() {
+  const content = document.getElementById('usage-content');
+  if (!content) return;
+
+  // Fetch both the selected window AND 30 days for monthly budget
+  let windowData, monthData;
+  try {
+    [windowData, monthData] = await Promise.all([
+      api('GET', `/usage/timeline?hours=${S._usageHours}`),
+      api('GET', `/usage/timeline?hours=720`),
+    ]);
+  } catch(e) {
+    content.innerHTML = `<div style="color:var(--red);padding:20px;font-size:14px">Failed to load usage data: ${esc(String(e))}</div>`;
+    return;
+  }
+  // Relay may return raw string if Content-Type wasn't forwarded as application/json
+  if (typeof windowData === 'string') try { windowData = JSON.parse(windowData); } catch(_) {}
+  if (typeof monthData === 'string') try { monthData = JSON.parse(monthData); } catch(_) {}
+  windowData = windowData || {points:[]};
+  monthData = monthData || {points:[]};
+
+  const pts = windowData.points || [];
+  const monthPts = monthData.points || [];
+
+  // Compute month-to-date: only points from start of current month
+  const now = new Date();
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const mtdPts = monthPts.filter(p => new Date(p.ts) >= monthStart);
+
+  // Stats for the selected window
+  const totalInput = pts.reduce((s,p) => s + p.input, 0);
+  const totalOutput = pts.reduce((s,p) => s + p.output, 0);
+  const totalCacheRead = pts.reduce((s,p) => s + p.cacheRead, 0);
+  const totalCacheCreate = pts.reduce((s,p) => s + p.cacheCreate, 0);
+  const totalTokens = totalInput + totalOutput + totalCacheRead + totalCacheCreate;
+
+  // Detect model for pricing
+  // Per-point pricing — each call billed at its own model's rate
+  function pointCost(p) {
+    const pr = detectPricingTier(p.model);
+    return (p.input/1e6)*pr.input + (p.output/1e6)*pr.output +
+           (p.cacheRead/1e6)*pr.cacheRead + (p.cacheCreate/1e6)*pr.cacheWrite;
+  }
+
+  const windowCost = pts.reduce((s,p) => s + pointCost(p), 0);
+  const mtdCost = mtdPts.reduce((s,p) => s + pointCost(p), 0);
+
+  // Tokens per minute avg
+  const windowMs = S._usageHours * 3600 * 1000;
+  const tokPerMin = windowMs > 0 ? (totalTokens / (windowMs / 60000)) : 0;
+
+  // Trend: daily rate based on last 7 days of data
+  const sevenDaysAgo = new Date(now - 7 * 86400000);
+  const recentPts = monthPts.filter(p => new Date(p.ts) >= sevenDaysAgo);
+  const recentCost = recentPts.reduce((s,p) => s + pointCost(p), 0);
+
+  // Per-type cost totals (each type summed with per-point model pricing)
+  const inputCost = pts.reduce((s,p) => s + (p.input/1e6)*detectPricingTier(p.model).input, 0);
+  const outputCost = pts.reduce((s,p) => s + (p.output/1e6)*detectPricingTier(p.model).output, 0);
+  const cacheReadCost = pts.reduce((s,p) => s + (p.cacheRead/1e6)*detectPricingTier(p.model).cacheRead, 0);
+  const cacheWriteCost = pts.reduce((s,p) => s + (p.cacheCreate/1e6)*detectPricingTier(p.model).cacheWrite, 0);
+  const recentDays = Math.min(7, (now - sevenDaysAgo) / 86400000);
+  const dailyRate = recentDays > 0 ? recentCost / recentDays : 0;
+
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate();
+  const dayOfMonth = now.getDate();
+  const daysLeft = daysInMonth - dayOfMonth;
+  const projectedTotalRaw = mtdCost + dailyRate * daysLeft;
+
+  // Apply calibration factor to all displayed costs
+  const calibFactor = getCalibFactor();
+  const mtdCostDisp = mtdCost * calibFactor;
+  const windowCostDisp = windowCost * calibFactor;
+  const dailyRateDisp = dailyRate * calibFactor;
+  const projectedTotal = projectedTotalRaw * calibFactor;
+  const inputCostDisp = inputCost * calibFactor;
+  const outputCostDisp = outputCost * calibFactor;
+  const cacheReadCostDisp = cacheReadCost * calibFactor;
+  const cacheWriteCostDisp = cacheWriteCost * calibFactor;
+  const daysUntilLimit = dailyRateDisp > 0 ? (MONTHLY_BUDGET - mtdCostDisp) / dailyRateDisp : Infinity;
+
+  const budgetPct = Math.min((mtdCostDisp / MONTHLY_BUDGET) * 100, 100);
+  const projPct = Math.min((projectedTotal / MONTHLY_BUDGET) * 100, 100);
+  const budgetColor = budgetPct > 85 ? 'var(--red)' : budgetPct > 60 ? 'var(--orange)' : 'var(--green)';
+
+  const calibLabel = calibFactor !== 1
+    ? `<span style="font-size:10px;background:var(--orange);color:#fff;border-radius:4px;padding:1px 5px;cursor:pointer" onclick="resetCalib()">calibrated ×${calibFactor.toFixed(3)} ✕</span>`
+    : `<span style="font-size:11px;color:var(--text3);cursor:pointer;text-decoration:underline" onclick="calibrateUsage(${mtdCost})">Calibrate</span>`;
+
+  // Budget trend text
+  let trendText;
+  if (dailyRateDisp <= 0) {
+    trendText = 'No recent activity';
+  } else if (projectedTotal > MONTHLY_BUDGET) {
+    const hitDate = new Date(now.getTime() + daysUntilLimit * 86400000);
+    const hitStr = hitDate.toLocaleDateString(undefined, {month:'short', day:'numeric'});
+    trendText = `At current rate, hits $${MONTHLY_BUDGET} around <strong>${hitStr}</strong>`;
+  } else {
+    trendText = `Projected month-end: ${fmtCost(projectedTotal)} of $${MONTHLY_BUDGET}`;
+  }
+
+  // Build chart
+  const chartSVG = buildUsageChart(pts, S._usageHours);
+
+  content.innerHTML = `
+    <!-- Monthly Budget -->
+    <div style="background:var(--surf);border-radius:12px;padding:14px 16px;border:1px solid var(--border)">
+      <div style="display:flex;align-items:baseline;gap:6px;margin-bottom:10px">
+        <div style="font-size:22px;font-weight:700;color:${budgetColor}">${fmtCost(mtdCostDisp)}</div>
+        <div style="font-size:13px;color:var(--text2)">/ $${MONTHLY_BUDGET} this month</div>
+        <div style="margin-left:auto">${calibLabel}</div>
+      </div>
+      <!-- Budget bar: actual -->
+      <div style="height:10px;background:var(--surf3);border-radius:5px;overflow:hidden;position:relative;margin-bottom:6px">
+        <div style="height:100%;border-radius:5px;background:${budgetColor};width:${budgetPct.toFixed(1)}%;transition:width .4s"></div>
+        ${projectedTotal > mtdCostDisp ? `<div style="position:absolute;top:0;left:${budgetPct.toFixed(1)}%;height:100%;width:${Math.min(projPct-budgetPct,100-budgetPct).toFixed(1)}%;background:${budgetColor};opacity:.3"></div>` : ''}
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text3);margin-bottom:8px">
+        <span>${budgetPct.toFixed(0)}% used · ${dayOfMonth}/${daysInMonth} days</span>
+        <span>$${MONTHLY_BUDGET}</span>
+      </div>
+      <div style="font-size:12px;color:var(--text2)">${trendText}</div>
+    </div>
+
+    <!-- Stats row -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+      ${statTile('Tokens', fmtTokens(totalTokens), 'var(--text)')}
+      ${statTile('Cost', fmtCost(windowCostDisp), 'var(--blue)')}
+      ${statTile('Tok/min', fmtTokens(Math.round(tokPerMin)), 'var(--orange)')}
+    </div>
+
+    <!-- Chart -->
+    <div style="background:var(--surf);border-radius:12px;padding:12px 4px 8px;border:1px solid var(--border)">
+      <div style="font-size:11px;color:var(--text2);padding:0 12px;margin-bottom:8px">Tokens over time</div>
+      ${chartSVG}
+      <div style="display:flex;gap:12px;padding:6px 12px 0;flex-wrap:wrap">
+        ${legendDot('var(--blue)', 'Input')}
+        ${legendDot('var(--green)', 'Output')}
+        ${legendDot('var(--purple)', 'Cache Read')}
+        ${legendDot('var(--orange)', 'Cache Write')}
+      </div>
+    </div>
+
+    <!-- Token breakdown -->
+    <div style="background:var(--surf);border-radius:12px;border:1px solid var(--border);overflow:hidden">
+      ${tokenRowCost('Input', totalInput, inputCostDisp, 'var(--blue)')}
+      ${tokenRowCost('Output', totalOutput, outputCostDisp, 'var(--green)')}
+      ${tokenRowCost('Cache Read', totalCacheRead, cacheReadCostDisp, 'var(--purple)')}
+      ${tokenRowCost('Cache Write', totalCacheCreate, cacheWriteCostDisp, 'var(--orange)')}
+    </div>
+
+    <div style="font-size:11px;color:var(--text3);text-align:center;padding-bottom:8px">
+      ${modelSummary(pts)} · ${pts.length} API calls
+    </div>`;
+}
+
+function statTile(label, value, color) {
+  return `<div style="background:var(--surf);border-radius:10px;padding:12px 14px;border:1px solid var(--border);text-align:center">
+    <div style="font-size:18px;font-weight:700;color:${color}">${esc(value)}</div>
+    <div style="font-size:11px;color:var(--text2);margin-top:3px">${esc(label)}</div>
+  </div>`;
+}
+
+function tokenRow(label, tokens, pricePerM, color) {
+  return tokenRowCost(label, tokens, (tokens/1e6)*pricePerM, color);
+}
+
+function tokenRowCost(label, tokens, cost, color) {
+  return `<div style="display:flex;align-items:center;padding:11px 16px;border-bottom:1px solid var(--border)">
+    <div style="width:8px;height:8px;border-radius:50%;background:${color};flex-shrink:0;margin-right:10px"></div>
+    <div style="flex:1;font-size:14px">${esc(label)}</div>
+    <div style="font-size:14px;font-weight:500;margin-right:12px">${fmtTokens(tokens)}</div>
+    <div style="font-size:12px;color:var(--text2);min-width:48px;text-align:right">${fmtCost(cost)}</div>
+  </div>`;
+}
+
+function modelSummary(pts) {
+  const counts = {};
+  for (const p of pts) {
+    const m = (p.model || 'unknown').replace(/^claude-/, '').replace(/-\d{8}$/, '');
+    if (m && m !== '<synthetic>') counts[m] = (counts[m] || 0) + 1;
+  }
+  return Object.entries(counts)
+    .sort((a,b) => b[1]-a[1])
+    .map(([m,n]) => `${esc(m)} ×${n}`)
+    .join(' · ') || 'unknown';
+}
+
+function legendDot(color, label) {
+  return `<div style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text2)">
+    <div style="width:8px;height:8px;border-radius:2px;background:${color}"></div>${esc(label)}
+  </div>`;
+}
+
+function buildUsageChart(pts, hours) {
+  // Determine bucket size
+  const bucketConfigs = [
+    {maxH:1,  mins:5,  label:(d)=>d.getHours()+':'+(d.getMinutes()+'').padStart(2,'0')},
+    {maxH:6,  mins:30, label:(d)=>d.getHours()+':'+(''+d.getMinutes()).padStart(2,'0')},
+    {maxH:24, mins:120,label:(d)=>d.getHours()+'h'},
+    {maxH:168,mins:360,label:(d)=>`${d.getMonth()+1}/${d.getDate()} ${d.getHours()}h`},
+    {maxH:999,mins:1440,label:(d)=>`${d.getMonth()+1}/${d.getDate()}`},
+  ];
+  const cfg = bucketConfigs.find(c => hours <= c.maxH) || bucketConfigs[bucketConfigs.length-1];
+  const bucketMs = cfg.mins * 60000;
+  const now = Date.now();
+  const start = now - hours * 3600000;
+  const nBuckets = Math.ceil((now - start) / bucketMs);
+
+  // Fill buckets
+  const buckets = Array.from({length: nBuckets}, () => ({input:0,output:0,cacheRead:0,cacheCreate:0}));
+  for (const p of pts) {
+    const t = new Date(p.ts).getTime();
+    const i = Math.floor((t - start) / bucketMs);
+    if (i >= 0 && i < nBuckets) {
+      buckets[i].input += p.input;
+      buckets[i].output += p.output;
+      buckets[i].cacheRead += p.cacheRead;
+      buckets[i].cacheCreate += p.cacheCreate;
+    }
+  }
+
+  const maxVal = Math.max(1, ...buckets.map(b => b.input + b.output + b.cacheRead + b.cacheCreate));
+  const W = 320, H = 140, padL = 4, padR = 4, padT = 8, padB = 28;
+  const chartW = W - padL - padR;
+  const chartH = H - padT - padB;
+  const barW = Math.max(1, chartW / nBuckets - 1);
+  const gap = chartW / nBuckets;
+
+  let bars = '';
+  for (let i = 0; i < nBuckets; i++) {
+    const b = buckets[i];
+    const total = b.input + b.output + b.cacheRead + b.cacheCreate;
+    const x = padL + i * gap + (gap - barW) / 2;
+    const segments = [
+      {val: b.input,       color: '#0a84ff'},
+      {val: b.output,      color: '#30d158'},
+      {val: b.cacheRead,   color: '#bf5af2'},
+      {val: b.cacheCreate, color: '#ff9f0a'},
+    ];
+    let y = padT + chartH;
+    for (const seg of segments) {
+      if (!seg.val) continue;
+      const h = (seg.val / maxVal) * chartH;
+      y -= h;
+      bars += `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" fill="${seg.color}" rx="1"/>`;
+    }
+  }
+
+  // X-axis labels: ~4 evenly spaced
+  let labels = '';
+  const labelIndices = [0, Math.floor(nBuckets/3), Math.floor(2*nBuckets/3), nBuckets-1].filter((v,i,a) => a.indexOf(v)===i);
+  for (const i of labelIndices) {
+    const t = new Date(start + i * bucketMs);
+    const x = padL + i * gap + gap/2;
+    labels += `<text x="${x.toFixed(1)}" y="${H-6}" text-anchor="middle" fill="#48484a" font-size="10">${cfg.label(t)}</text>`;
+  }
+
+  // Baseline
+  const baseY = padT + chartH;
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="display:block;overflow:visible">
+    <line x1="${padL}" y1="${baseY}" x2="${W-padR}" y2="${baseY}" stroke="#38383a" stroke-width="1"/>
+    ${bars}${labels}
+  </svg>`;
+}
+
+// ── Session detail ─────────────────────────────────────────────────────────
+function renderDetail(id) {
+  const sess = S.sessions.find(s => s.id === id) || {id, projectName: id, status: 'unknown', cwd: ''};
+  const needsAct = sess.status === 'needs_permission' || sess.status === 'plan_mode';
+
+  $app.innerHTML = `
+<div class="detail">
+  <div class="nav">
+    <button class="nav-back" id="back-btn">‹ Back</button>
+    <div class="nav-title" style="justify-content:center">${esc(sess.projectName || id)}</div>
+    <button class="nav-icon" id="refresh-btn" title="Refresh events">↻</button>
+    <div class="cdot ${cdotClass()}" id="cdot"></div>
+    <button class="dot-menu-btn" id="dot-menu-btn">⋯</button>
+  </div>
+  <div id="dot-menu-anchor" style="position:relative"></div>
+  <div class="det-meta" id="det-meta">
+    <div class="sdot ${sess.status || 'unknown'}" id="sstat-dot"></div>
+    <span id="sstat-lbl">${statusLabel(sess)}</span>
+    <span class="win">#${esc(String(id))}</span>
+  </div>
+  ${needsAct ? actionBarHTML(id) : '<div id="act-bar-ph"></div>'}
+  ${sess.prompt ? promptBarHTML(sess.prompt, id) : ''}
+  <div class="tabs" id="tabs">
+    <div class="tab ${S.activeTab==='events'?'on':''}" data-tab="events">Events</div>
+    <div class="tab ${S.activeTab==='terminal'?'on':''}" data-tab="terminal">Terminal</div>
+  </div>
+  <div class="content" id="tab-content" style="${S.activeTab==='terminal'?'background:#000;padding:0':''}">
+    ${tabContentHTML(id)}
+  </div>
+  <div class="skill-picker" id="skill-picker" style="display:none"></div>
+  <div class="ibar" ${S.activeTab==='terminal'?'style="display:none"':''}>
+    ${sess.status === 'working' ? `<button class="istop" id="stop-btn" title="Stop Claude">✕</button>` : ''}
+    <label class="iattach" id="attach-btn" title="Attach screenshot">
+      📷<input type="file" id="file-input" accept="image/*,image/png,image/jpeg,image/gif,image/webp" style="display:none;position:absolute;width:0;height:0;opacity:0">
+    </label>
+    <textarea class="ifield" id="ifield" rows="1" placeholder="Message… or / for skills"></textarea>
+    <button class="ptt" id="ptt-btn" title="Hold to speak">🎙</button>
+    <button class="isend" id="isend">↑</button>
+  </div>
+</div>`;
+
+  bindDetail(id, sess);
+  scrollEventsToBottom();
+}
+
+function actionBarHTML(id) {
+  const sess = S.sessions.find(s => String(s.id) === String(id));
+  const isPlan = sess && sess.status === 'plan_mode';
+  const planCard = isPlan ? `<div class="plan-card" id="plan-card">
+    <div class="plan-hdr" id="plan-toggle">
+      <span style="color:var(--purple)">📋</span>
+      <span style="font-weight:600;font-size:13px">View Plan</span>
+      <span style="font-size:11px;color:var(--text2);margin-left:4px" id="plan-file-name"></span>
+      <span style="margin-left:auto;font-size:11px;color:var(--text3)" id="plan-chev">▶</span>
+    </div>
+    <div class="plan-body" id="plan-body" style="display:none">
+      <span style="color:var(--text3);font-size:12px">Loading plan…</span>
+    </div>
+  </div>` : '';
+  return `${planCard}<div class="act-bar" id="act-bar">
+    <button class="btn btn-green btn-sm" id="approve-btn">✓ Approve</button>
+    <button class="btn btn-red btn-sm" id="cancel-btn">✕ Cancel</button>
+  </div>`;
+}
+
+async function loadPlanContent(id) {
+  const body = document.getElementById('plan-body');
+  const nameEl = document.getElementById('plan-file-name');
+  try {
+    const resp = await api('GET', `/sessions/${encodeURIComponent(id)}/plan`);
+    if (resp && resp.plan) {
+      if (body) body.innerHTML = md(resp.plan);
+      if (nameEl && resp.fileName) nameEl.textContent = resp.fileName;
+    } else {
+      if (body) body.innerHTML = `<span style="color:var(--text3);font-size:12px">No plan file found in .claude/plans/</span>`;
+    }
+  } catch(e) {
+    if (body) body.innerHTML = `<span style="color:var(--red);font-size:12px">Failed to load plan: ${esc(e.message)}</span>`;
+  }
+}
+
+function promptBarHTML(prompt, id) {
+  const opts = prompt.options || [];
+  return `<div class="prompt-bar">
+    <div class="prompt-q">${esc(prompt.question)}</div>
+    ${opts.length ? `<div class="prompt-opts">${opts.map((o, i) =>
+      `<button class="popt" data-n="${i+1}">${i+1}. ${esc(o)}</button>`
+    ).join('')}</div>` : ''}
+  </div>`;
+}
+
+function tabContentHTML(id) {
+  if (S.activeTab === 'events') {
+    const evs = S.events[id] || [];
+    const grouped = groupEventsForRender(evs);
+    return `<div class="evlist" id="evlist">${grouped.map(renderGroupedItemHTML).join('')}</div>`;
+  } else if (S.ptyTextMode) {
+    return `<div style="position:relative;height:100%;width:100%">
+      <pre id="pty-text-view" style="height:100%;width:100%;margin:0;padding:10px;box-sizing:border-box;background:#000;color:#e5e5e5;font-family:'SF Mono',Menlo,'Courier New',monospace;font-size:12px;line-height:1.55;overflow-y:auto;white-space:pre-wrap;word-break:break-all;user-select:text;-webkit-user-select:text">${esc(S.ptyTextBuf)}</pre>
+      <button id="pty-mode-btn" style="position:absolute;bottom:8px;right:8px;z-index:10;background:rgba(40,40,40,.9);border:1px solid #444;color:#ccc;font-size:12px;cursor:pointer;padding:5px 10px;border-radius:6px">⌨ Live</button>
+    </div>`;
+  } else {
+    const kbtn = `background:rgba(40,40,40,.92);border:1px solid #555;color:#ddd;font-size:13px;cursor:pointer;padding:6px 11px;border-radius:6px;font-family:'SF Mono',Menlo,monospace`;
+    return `<div style="display:flex;flex-direction:column;height:100%;width:100%">
+      <div id="xterm-container" style="flex:1;min-height:0;width:100%;background:#000"></div>
+      <div id="pty-toolbar" style="display:flex;align-items:center;gap:5px;padding:5px 6px;background:#111;border-top:1px solid #333;overflow-x:auto;-webkit-overflow-scrolling:touch;flex-shrink:0">
+        <button data-key="esc"   style="${kbtn}">Esc</button>
+        <button data-key="ctrl"  id="pty-ctrl-btn" style="${kbtn}">Ctrl</button>
+        <button data-key="tab"   style="${kbtn}">Tab</button>
+        <button data-key="up"    style="${kbtn}">▲</button>
+        <button data-key="down"  style="${kbtn}">▼</button>
+        <button data-key="left"  style="${kbtn}">◀</button>
+        <button data-key="right" style="${kbtn}">▶</button>
+        <div style="flex:1"></div>
+        <button id="pty-paste-btn" style="${kbtn}">⌅ Paste</button>
+        <button id="pty-mode-btn"  style="${kbtn}">⎘ Text</button>
+      </div>
+    </div>`;
+  }
+}
+
+function bindDetail(id, sess) {
+  document.getElementById('back-btn').addEventListener('click', () => navTo(''));
+
+  document.getElementById('refresh-btn').addEventListener('click', () => {
+    S.fetched.delete(id);
+    delete S.events[id];
+    delete S.outputs[id];
+    ensureSessionData(id);
+  });
+
+  document.querySelectorAll('.tab').forEach(t => {
+    t.addEventListener('click', () => switchTab(t.dataset.tab, id));
+  });
+
+  const approve = document.getElementById('approve-btn');
+  const cancel  = document.getElementById('cancel-btn');
+  if (approve) approve.addEventListener('click', () => doApprove(id));
+  if (cancel)  cancel.addEventListener('click', () => doCancel(id));
+
+  const stopBtn = document.getElementById('stop-btn');
+  if (stopBtn) stopBtn.addEventListener('click', async () => {
+    stopBtn.disabled = true;
+    try { await api('POST', `/sessions/${encodeURIComponent(id)}/input`, {text: 'Escape', sendEnter: false}); }
+    catch(e) { stopBtn.disabled = false; }
+  });
+
+  // Three-dot menu
+  const dotBtn = document.getElementById('dot-menu-btn');
+  if (dotBtn) dotBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleDotMenu(id);
+  });
+
+  const planToggle = document.getElementById('plan-toggle');
+  if (planToggle) {
+    loadPlanContent(id);
+    planToggle.addEventListener('click', () => {
+      const body = document.getElementById('plan-body');
+      const chev = document.getElementById('plan-chev');
+      if (body) {
+        const show = body.style.display === 'none';
+        body.style.display = show ? 'block' : 'none';
+        if (chev) chev.textContent = show ? '▼' : '▶';
+      }
+    });
+  }
+
+  document.querySelectorAll('.popt').forEach(b => {
+    b.addEventListener('click', () => sendInput(id, b.dataset.n));
+  });
+
+  // Bind all event interactions (thinking, detail modal, agent groups, ask questions)
+  const evlist = document.getElementById('evlist');
+  if (evlist) bindEventInteractions(evlist);
+
+  const field   = document.getElementById('ifield');
+  const btn     = document.getElementById('isend');
+  const fileIn  = document.getElementById('file-input');
+
+  // Restore input text after hot reload
+  const savedInput = sessionStorage.getItem('mc_input');
+  if (savedInput && field) {
+    field.value = savedInput;
+    sessionStorage.removeItem('mc_input');
+    autoGrow(field);
+  }
+
+  field.addEventListener('input', () => {
+    autoGrow(field);
+    handleSkillInput(field.value, id);
+  });
+  field.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { hideSkillPicker(); return; }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(id); }
+  });
+  btn.addEventListener('click', () => doSend(id));
+
+  fileIn.addEventListener('change', () => {
+    const f = fileIn.files[0];
+    if (f) stageScreenshot(f);
+  });
+
+  // Paste image from clipboard (cmd+ctrl+shift+4 → paste)
+  field.addEventListener('paste', e => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (file) stageScreenshot(file);
+        return;
+      }
+    }
+  });
+
+  // Push-to-talk
+  const pttBtn = document.getElementById('ptt-btn');
+  if (pttBtn) bindPTT(pttBtn, id);
+
+  // Connect PTY if terminal tab is active on initial render
+  if (S.activeTab === 'terminal') {
+    const tc = document.getElementById('tab-content');
+    if (tc) { tc.style.overflow = 'hidden'; }
+    const hostname = sess?.laptop || S.laptop || (S.laptops[0]?.id || S.laptops[0]) || '';
+    if (!S.ptyTextMode) setTimeout(() => connectPty(hostname), 50);
+    bindPtyModeBtn(S.activeId);
+  }
+}
+
+// ── Skills autocomplete ────────────────────────────────────────────────────
+function handleSkillInput(val, id) {
+  if (!val.startsWith('/')) { hideSkillPicker(); return; }
+  const query = val.slice(1).toLowerCase();
+  loadSkills().then(() => {
+    const matches = S.skills.filter(s =>
+      s.name.toLowerCase().startsWith(query) ||
+      s.name.toLowerCase().includes(query)
+    ).slice(0, 12);
+    showSkillPicker(matches, id);
+  });
+}
+
+function showSkillPicker(skills, id) {
+  const el = document.getElementById('skill-picker');
+  if (!el) return;
+  if (!skills.length) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.innerHTML = skills.map((s, i) =>
+    `<div class="skill-row" data-si="${i}">
+      <span class="skill-name">/${esc(s.name)}</span>
+      <span class="skill-desc">${esc(s.description || '')}</span>
+      <span class="skill-src">${esc(s.source || '')}</span>
+    </div>`
+  ).join('');
+  el.querySelectorAll('.skill-row').forEach(row => {
+    row.addEventListener('click', () => {
+      const s = skills[parseInt(row.dataset.si)];
+      const field = document.getElementById('ifield');
+      if (field && s) {
+        field.value = `/${s.name} `;
+        autoGrow(field);
+        field.focus();
+      }
+      hideSkillPicker();
+    });
+  });
+}
+
+function hideSkillPicker() {
+  const el = document.getElementById('skill-picker');
+  if (el) el.style.display = 'none';
+}
+
+// ── Push-to-talk ───────────────────────────────────────────────────────────
+let pttRecognition = null;
+
+function bindPTT(btn, id) {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    // Speech API needs HTTPS. Show button but explain on tap.
+    const msg = location.protocol === 'http:'
+      ? 'Push-to-talk requires HTTPS'
+      : 'Speech recognition not supported in this browser';
+    btn.addEventListener('click', () => alert(msg));
+    btn.style.opacity = '0.4';
+    return;
+  }
+
+  function start() {
+    if (pttRecognition) return;
+    pttRecognition = new SR();
+    pttRecognition.lang = navigator.language || 'en-US';
+    pttRecognition.continuous = false;
+    pttRecognition.interimResults = false;
+
+    pttRecognition.onresult = e => {
+      const text = Array.from(e.results)
+        .map(r => r[0].transcript).join(' ').trim();
+      if (text) sendInput(id, text);
+    };
+
+    pttRecognition.onerror = e => {
+      if (e.error !== 'no-speech' && e.error !== 'aborted')
+        console.warn('PTT error:', e.error);
+    };
+
+    pttRecognition.onend = () => {
+      btn.classList.remove('rec');
+      pttRecognition = null;
+    };
+
+    pttRecognition.start();
+    btn.classList.add('rec');
+  }
+
+  function stop() {
+    if (pttRecognition) pttRecognition.stop();
+  }
+
+  // Touch: hold to record, release to submit
+  btn.addEventListener('touchstart', e => { e.preventDefault(); start(); }, {passive:false});
+  btn.addEventListener('touchend',   e => { e.preventDefault(); stop();  }, {passive:false});
+  btn.addEventListener('touchcancel',e => { e.preventDefault(); stop();  }, {passive:false});
+
+  // Mouse fallback (desktop testing)
+  btn.addEventListener('mousedown', e => { e.preventDefault(); start(); });
+  btn.addEventListener('mouseup',   e => { e.preventDefault(); stop();  });
+  btn.addEventListener('mouseleave',e => { if (pttRecognition) stop();   });
+}
+
+function doSend(id) {
+  const f = document.getElementById('ifield');
+  if (!f) return;
+  hideSkillPicker();
+  // If there's a pending image, upload and send it (with any text)
+  if (S.pendingImage) {
+    uploadAndSendScreenshot(id);
+    return;
+  }
+  const t = f.value.trim();
+  if (!t) return;
+  f.value = '';
+  autoGrow(f);
+  sendInput(id, t);
+}
+
+function autoGrow(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+
+function switchTab(tab, id) {
+  if (S.activeTab === tab) return;
+  // Detach xterm but keep shell alive when leaving terminal tab
+  if (S.activeTab === 'terminal') cleanupPty(true);
+  S.activeTab = tab;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === tab));
+  const tc = document.getElementById('tab-content');
+  if (tc) {
+    const dark = tab === 'terminal';
+    tc.style.background = dark ? '#000' : '';
+    tc.style.padding = dark ? '0' : '';
+    tc.style.overflow = dark ? 'hidden' : '';
+    tc.innerHTML = tabContentHTML(id);
+    if (tab === 'events') {
+      setTimeout(scrollEventsToBottom, 30);
+      const evlist = document.getElementById('evlist');
+      if (evlist) bindEventInteractions(evlist);
+    }
+    if (tab === 'terminal') {
+      const sess = S.sessions.find(s => s.id === id);
+      const hostname = sess?.laptop || S.laptop || (S.laptops[0]?.id || S.laptops[0]) || '';
+      if (!S.ptyTextMode) setTimeout(() => connectPty(hostname), 50);
+      bindPtyModeBtn(id);
+    }
+    // Show/hide input bar based on tab
+    const ibar = document.querySelector('.ibar');
+    if (ibar) ibar.style.display = tab === 'terminal' ? 'none' : '';
+  }
+}
+
+function patchSessionHeader() {
+  if (!S.activeId) return;
+  const sess = S.sessions.find(s => s.id === S.activeId);
+  if (!sess) return;
+
+  const dot = document.getElementById('sstat-dot');
+  const lbl = document.getElementById('sstat-lbl');
+  const title = document.querySelector('.nav-title');
+  if (dot) dot.className = `sdot ${sess.status || 'unknown'}`;
+  if (lbl) lbl.textContent = statusLabel(sess);
+  if (title) title.textContent = sess.projectName || sess.id;
+
+  const needsAct = sess.status === 'needs_permission' || sess.status === 'plan_mode';
+  const bar = document.getElementById('act-bar');
+  const ph  = document.getElementById('act-bar-ph');
+  const planCard = document.getElementById('plan-card');
+
+  // Remove stale plan card on status change
+  if (planCard && sess.status !== 'plan_mode') planCard.remove();
+
+  if (needsAct && !bar) {
+    // Insert action bar (+ plan card for plan_mode)
+    const det = document.querySelector('.det-meta');
+    if (det) det.insertAdjacentHTML('afterend', actionBarHTML(S.activeId));
+    if (ph) ph.remove();
+    const approve = document.getElementById('approve-btn');
+    const cancel  = document.getElementById('cancel-btn');
+    if (approve) approve.addEventListener('click', () => doApprove(S.activeId));
+    if (cancel)  cancel.addEventListener('click', () => doCancel(S.activeId));
+    const planToggle = document.getElementById('plan-toggle');
+    if (planToggle) {
+      loadPlanContent(S.activeId);
+      planToggle.addEventListener('click', () => {
+        const body = document.getElementById('plan-body');
+        const chev = document.getElementById('plan-chev');
+        if (body) {
+          const show = body.style.display === 'none';
+          body.style.display = show ? 'block' : 'none';
+          if (chev) chev.textContent = show ? '▼' : '▶';
+        }
+      });
+    }
+  } else if (!needsAct && bar) {
+    bar.remove();
+    if (planCard) planCard.remove();
+  }
+
+  // Toggle stop button in input bar based on working status
+  const existingStop = document.getElementById('stop-btn');
+  const ibar = document.querySelector('.ibar');
+  if (sess.status === 'working' && !existingStop && ibar) {
+    const btn = document.createElement('button');
+    btn.className = 'istop'; btn.id = 'stop-btn'; btn.title = 'Stop Claude'; btn.textContent = '✕';
+    ibar.insertBefore(btn, ibar.firstChild);
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try { await api('POST', `/sessions/${encodeURIComponent(S.activeId)}/input`, {text: 'Escape', sendEnter: false}); }
+      catch(e) { btn.disabled = false; }
+    });
+  } else if (sess.status !== 'working' && existingStop) {
+    existingStop.remove();
+  }
+}
+
+// ── Subagent grouping ──────────────────────────────────────────────────────
+// Groups subagent events and pairs tool_use + tool_result into unified tiles
+function groupEventsForRender(events) {
+  const subagentMap = {};  // parentToolUseId → [events]
+  for (const ev of events) {
+    if (ev.subagentInfo?.parentToolUseId) {
+      const pid = ev.subagentInfo.parentToolUseId;
+      (subagentMap[pid] = subagentMap[pid] || []).push(ev);
+    }
+  }
+
+  // Build tool_use ID → tool_result mapping for pairing
+  const resultMap = {};  // toolUseId → tool_result event
+  for (const ev of events) {
+    if (ev.type === 'tool_result' && ev.toolResults?.length) {
+      for (const r of ev.toolResults) {
+        if (r.toolUseId) resultMap[r.toolUseId] = ev;
+      }
+    }
+  }
+  const pairedResults = new Set(); // track which tool_results are already paired
+
+  const items = [];
+  for (let ei = 0; ei < events.length; ei++) {
+    const ev = events[ei];
+    if (ev.subagentInfo?.parentToolUseId) continue;
+
+    if (ev.type === 'tool_use' && ev.toolUse?.name === 'Agent') {
+      const subs = subagentMap[ev.toolUse?.id] || [];
+      if (subs.length) { items.push({kind:'agentGroup', toolUse:ev, subEvents:subs}); continue; }
+    }
+
+    // Pair tool_use with its result (by ID, or by next adjacent tool_result)
+    if (ev.type === 'tool_use') {
+      let result = ev.toolUse?.id ? resultMap[ev.toolUse.id] : null;
+      // Fallback: look ahead for adjacent tool_result
+      if (!result) {
+        for (let ni = ei + 1; ni < events.length && ni <= ei + 3; ni++) {
+          if (events[ni].type === 'tool_result' && !pairedResults.has(events[ni].uuid)) {
+            result = events[ni]; break;
+          }
+          if (events[ni].type === 'tool_use') break; // stop at next tool_use
+        }
+      }
+      if (result) pairedResults.add(result.uuid);
+      items.push({kind:'toolPair', toolUse:ev, toolResult: result || null});
+      continue;
+    }
+
+    // Skip tool_results that were already paired
+    if (ev.type === 'tool_result' && pairedResults.has(ev.uuid)) continue;
+
+    items.push({kind:'event', ev});
+  }
+  return items;
+}
+
+// ── Event detail modal ─────────────────────────────────────────────────────
+S.detailEvent = null;  // event to show in detail modal
+S.expandedAgents = new Set();
+S.askSelections = {};   // eventUuid → selected option index
+S.askSubmitted = new Set(); // eventUuids that have been submitted
+
+function openEventDetail(ev) {
+  S.detailEvent = ev;
+  renderEventDetailModal();
+}
+
+function closeEventDetail() {
+  S.detailEvent = null;
+  const ov = document.getElementById('ev-detail-overlay');
+  if (ov) ov.remove();
+}
+
+function renderEventDetailModal() {
+  const ev = S.detailEvent;
+  if (!ev) return;
+  // Remove existing
+  const existing = document.getElementById('ev-detail-overlay');
+  if (existing) existing.remove();
+
+  const typeInfo = eventTypeInfo(ev);
+  let bodyHTML = '';
+
+  if (ev.model) bodyHTML += `<div class="ev-detail-model">${esc(ev.model)}</div>`;
+
+  switch (ev.type) {
+    case 'user':
+      bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">Message</div><pre>${esc(ev.text || '')}</pre></div>`;
+      break;
+    case 'text':
+      bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">Response</div><pre>${esc(ev.text || '')}</pre></div>`;
+      break;
+    case 'thinking':
+      bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">Thinking</div><pre>${esc(ev.thinking || '')}</pre></div>`;
+      break;
+    case 'tool_use': {
+      const t = ev.toolUse || {};
+      bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">Tool</div><pre>${esc(t.name || '')}</pre></div>`;
+      if (t.id) bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">ID</div><pre style="font-size:11px">${esc(t.id)}</pre></div>`;
+      const input = t.fullInput ? parseToolJSON(t.fullInput) : null;
+      // Edit — render diff
+      if (t.name === 'Edit' && input && input.old_string != null && input.new_string != null) {
+        if (input.file_path) bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">File</div><pre>${esc(input.file_path)}</pre></div>`;
+        bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">Changes</div>${renderDiffHTML(input.old_string, input.new_string)}</div>`;
+      } else if (t.name === 'Bash' && input?.command) {
+        bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">Command</div><pre>${highlightCommand(input.command)}</pre></div>`;
+      } else {
+        const raw = t.fullInput || t.inputSummary || '';
+        if (raw) {
+          let formatted = raw;
+          try { formatted = JSON.stringify(JSON.parse(raw), null, 2); } catch(_) {}
+          bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">Input</div><pre>${esc(formatted)}</pre></div>`;
+        }
+      }
+      break;
+    }
+    case 'tool_result': {
+      const results = ev.toolResults || [];
+      results.forEach((r, i) => {
+        const label = r.isError ? `Result (error)` : `Result`;
+        bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">${label}</div><pre style="${r.isError?'color:var(--red)':''}">${esc(r.content || '')}</pre></div>`;
+      });
+      break;
+    }
+    case 'system':
+      if (ev.durationMs != null) bodyHTML += `<div class="ev-detail-field"><div class="ev-detail-field-label">Duration</div><pre>${(ev.durationMs/1000).toFixed(1)}s</pre></div>`;
+      else bodyHTML += `<pre>${esc(ev.text || 'system')}</pre>`;
+      break;
+  }
+
+  const html = `<div class="overlay" id="ev-detail-overlay">
+    <div class="ev-detail-sheet">
+      <div class="ev-detail-hdr">
+        <div class="ev-detail-title" style="color:${typeInfo.color}">${typeInfo.icon} ${esc(typeInfo.label)}</div>
+        <span class="ev-detail-time">${esc(ev.timestamp || '')}</span>
+        <button class="sheet-close" id="ev-detail-close" style="margin-left:12px">✕</button>
+      </div>
+      <div class="ev-detail-body">${bodyHTML}</div>
+    </div>
+  </div>`;
+
+  document.body.insertAdjacentHTML('beforeend', html);
+  document.getElementById('ev-detail-close').addEventListener('click', closeEventDetail);
+  document.getElementById('ev-detail-overlay').addEventListener('click', e => {
+    if (e.target.id === 'ev-detail-overlay') closeEventDetail();
+  });
+}
+
+function eventTypeInfo(ev) {
+  switch (ev.type) {
+    case 'user': return {icon:'👤', label:'User Message', color:'var(--blue)'};
+    case 'text': return {icon:'💬', label:'Assistant', color:'var(--text)'};
+    case 'thinking': return {icon:'🧠', label:'Thinking', color:'var(--purple)'};
+    case 'tool_use': return {icon:'🛠', label: ev.toolUse?.name || 'Tool Use', color:'var(--orange)'};
+    case 'tool_result': return {icon:'✓', label:'Tool Result', color:'var(--green)'};
+    case 'system': return {icon:'⚙', label:'System', color:'var(--text2)'};
+    case 'compaction': return {icon:'🔄', label:'Compaction', color:'var(--orange)'};
+    default: return {icon:'•', label: ev.type || 'Event', color:'var(--text2)'};
+  }
+}
+
+// ── Tool input parser ──────────────────────────────────────────────────────
+function parseToolJSON(str) {
+  try { return JSON.parse(str); } catch(_) { return null; }
+}
+
+// ── Bash syntax highlighting ──────────────────────────────────────────────
+function highlightBash(cmd) {
+  // Escape HTML first
+  let s = esc(cmd);
+
+  // Strings (double-quoted and single-quoted)
+  s = s.replace(/(&#34;)(.*?)(&#34;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(&#39;)(.*?)(&#39;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+
+  // Comments: # to end of line (but not inside strings — good enough heuristic)
+  s = s.replace(/(^|\n)(#.*)$/gm, '$1<span style="color:#666;font-style:italic">$2</span>');
+
+  // Operators: &&, ||, |, ;, >, >>, <, 2>&1
+  s = s.replace(/(&amp;&amp;|\|\||[|;]|&gt;&gt;|2&gt;&amp;1|&gt;|&lt;)/g, '<span style="color:#ff9f0a">$1</span>');
+
+  // Keywords at word boundaries
+  const kw = ['if','then','else','elif','fi','for','while','do','done','case','esac','in','function','return','exit','export','local','readonly','set','unset','shift','trap','eval','exec','source'];
+  const kwRe = new RegExp('(^|[\\s;|&])(' + kw.join('|') + ')(?=[\\s;|&(]|$)', 'gm');
+  s = s.replace(kwRe, '$1<span style="color:#bf5af2">$2</span>');
+
+  // Common commands (first word on a line or after operator)
+  const cmds = ['cd','ls','cat','echo','grep','find','sed','awk','rm','cp','mv','mkdir','chmod','chown','curl','wget','git','docker','npm','node','go','python3?','pip','make','sudo','ssh','scp','kill','ps','head','tail','wc','sort','uniq','xargs','tee','tr','cut','diff','touch','ln','tar','zip','unzip','mount','df','du','whoami','hostname','env','which','type','command','test','true','false','read','printf','sleep','date','nohup','pkill','pgrep','bash','sh','zsh'];
+  const cmdRe = new RegExp('(^|[\\s;|&(])(' + cmds.join('|') + ')(?=\\s|$|[;|&)])', 'gm');
+  s = s.replace(cmdRe, '$1<span style="color:#0a84ff">$2</span>');
+
+  // Flags: -something --something
+  s = s.replace(/(\s)(--?[\w-]+)/g, '$1<span style="color:#29b8db">$2</span>');
+
+  // Variables: $VAR, ${VAR}
+  s = s.replace(/(\$\{?\w+\}?)/g, '<span style="color:#f5f543">$1</span>');
+
+  return s;
+}
+
+// ── JS syntax highlighting ────────────────────────────────────────────────
+function highlightJS(code) {
+  let s = esc(code);
+
+  // Strings (double, single, backtick)
+  s = s.replace(/(&#34;)(.*?)(&#34;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(&#39;)(.*?)(&#39;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(`)(.*?)(`)/g, '<span style="color:#23d18b">$1$2$3</span>');
+
+  // Comments: // to end of line
+  s = s.replace(/(\/\/.*?)(?=<br>|$)/gm, '<span style="color:#666;font-style:italic">$1</span>');
+
+  // Keywords
+  const kw = ['const','let','var','function','return','if','else','for','while','do','switch','case','break','continue','new','try','catch','finally','throw','class','extends','import','from','export','default','async','await','yield','of','in','typeof','instanceof','void','delete','this','super','null','undefined','true','false'];
+  const kwRe = new RegExp('\\b(' + kw.join('|') + ')\\b', 'g');
+  s = s.replace(kwRe, '<span style="color:#bf5af2">$1</span>');
+
+  // Common globals/builtins
+  const builtins = ['console','require','process','module','exports','JSON','Math','Array','Object','String','Number','RegExp','Error','Promise','setTimeout','setInterval','Buffer','__dirname','__filename','document','window','fs'];
+  const builtinRe = new RegExp('\\b(' + builtins.join('|') + ')\\b', 'g');
+  s = s.replace(builtinRe, '<span style="color:#0a84ff">$1</span>');
+
+  // Methods after dot: .foo(
+  s = s.replace(/\.(\w+)\(/g, '.<span style="color:#f5f543">$1</span>(');
+
+  // Numbers
+  s = s.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:#ff9f0a">$1</span>');
+
+  // Operators
+  s = s.replace(/(===?|!==?|&amp;&amp;|\|\||=&gt;|[+\-*%]=?)/g, '<span style="color:#29b8db">$1</span>');
+
+  return s;
+}
+
+// ── Python syntax highlighting ─────────────────────────────────────────────
+function highlightPython(code) {
+  let s = esc(code);
+  s = s.replace(/(&#34;&#34;&#34;)([\s\S]*?)(&#34;&#34;&#34;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(&#39;&#39;&#39;)([\s\S]*?)(&#39;&#39;&#39;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(&#34;)(.*?)(&#34;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(&#39;)(.*?)(&#39;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(#.*?)(?=<br>|$)/gm, '<span style="color:#666;font-style:italic">$1</span>');
+  const kw = ['def','class','return','if','elif','else','for','while','break','continue','pass','import','from','as','try','except','finally','raise','with','yield','lambda','and','or','not','in','is','True','False','None','async','await','global','nonlocal','del','assert'];
+  s = s.replace(new RegExp('\\b(' + kw.join('|') + ')\\b', 'g'), '<span style="color:#bf5af2">$1</span>');
+  const builtins = ['print','len','range','list','dict','set','tuple','int','str','float','bool','type','isinstance','open','input','map','filter','zip','enumerate','sorted','reversed','any','all','min','max','sum','abs','round','format','super','property','staticmethod','classmethod','self','os','sys','re','json','math'];
+  s = s.replace(new RegExp('\\b(' + builtins.join('|') + ')\\b', 'g'), '<span style="color:#0a84ff">$1</span>');
+  s = s.replace(/\.(\w+)\(/g, '.<span style="color:#f5f543">$1</span>(');
+  s = s.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:#ff9f0a">$1</span>');
+  s = s.replace(/@(\w+)/g, '<span style="color:#29b8db">@$1</span>');
+  return s;
+}
+
+// ── Go syntax highlighting ────────────────────────────────────────────────
+function highlightGo(code) {
+  let s = esc(code);
+  s = s.replace(/(&#34;)(.*?)(&#34;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(`)([\s\S]*?)(`)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(\/\/.*?)(?=<br>|$)/gm, '<span style="color:#666;font-style:italic">$1</span>');
+  const kw = ['func','return','if','else','for','range','switch','case','default','break','continue','go','select','chan','defer','type','struct','interface','map','var','const','package','import','fallthrough','goto','nil','true','false','iota'];
+  s = s.replace(new RegExp('\\b(' + kw.join('|') + ')\\b', 'g'), '<span style="color:#bf5af2">$1</span>');
+  const types = ['string','int','int8','int16','int32','int64','uint','uint8','uint16','uint32','uint64','float32','float64','bool','byte','rune','error','any','comparable'];
+  s = s.replace(new RegExp('\\b(' + types.join('|') + ')\\b', 'g'), '<span style="color:#29b8db">$1</span>');
+  const builtins = ['fmt','log','os','io','net','http','json','strings','strconv','sync','context','time','errors','make','len','cap','append','copy','delete','close','new','panic','recover','print','println'];
+  s = s.replace(new RegExp('\\b(' + builtins.join('|') + ')\\b', 'g'), '<span style="color:#0a84ff">$1</span>');
+  s = s.replace(/\.(\w+)\(/g, '.<span style="color:#f5f543">$1</span>(');
+  s = s.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:#ff9f0a">$1</span>');
+  return s;
+}
+
+// ── Swift syntax highlighting ─────────────────────────────────────────────
+function highlightSwift(code) {
+  let s = esc(code);
+  s = s.replace(/(&#34;)(.*?)(&#34;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(\/\/.*?)(?=<br>|$)/gm, '<span style="color:#666;font-style:italic">$1</span>');
+  const kw = ['func','return','if','else','guard','for','while','repeat','switch','case','default','break','continue','let','var','class','struct','enum','protocol','extension','import','init','deinit','self','Self','super','nil','true','false','try','catch','throw','throws','async','await','actor','some','any','where','in','is','as','typealias','associatedtype','static','override','mutating','nonmutating','lazy','weak','unowned','private','public','internal','fileprivate','open','final','defer','do','inout','subscript','willSet','didSet','get','set'];
+  s = s.replace(new RegExp('\\b(' + kw.join('|') + ')\\b', 'g'), '<span style="color:#bf5af2">$1</span>');
+  const types = ['String','Int','Double','Float','Bool','Array','Dictionary','Set','Optional','Result','Error','Void','Any','AnyObject','Data','URL','Date','UUID','Codable','Sendable','Identifiable'];
+  s = s.replace(new RegExp('\\b(' + types.join('|') + ')\\b', 'g'), '<span style="color:#29b8db">$1</span>');
+  const builtins = ['print','debugPrint','fatalError','precondition','assert','DispatchQueue','Task','MainActor','FileManager','JSONDecoder','JSONEncoder','ProcessInfo'];
+  s = s.replace(new RegExp('\\b(' + builtins.join('|') + ')\\b', 'g'), '<span style="color:#0a84ff">$1</span>');
+  s = s.replace(/\.(\w+)\(/g, '.<span style="color:#f5f543">$1</span>(');
+  s = s.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:#ff9f0a">$1</span>');
+  return s;
+}
+
+// ── Ruby syntax highlighting ──────────────────────────────────────────────
+function highlightRuby(code) {
+  let s = esc(code);
+  s = s.replace(/(&#34;)(.*?)(&#34;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(&#39;)(.*?)(&#39;)/g, '<span style="color:#23d18b">$1$2$3</span>');
+  s = s.replace(/(#.*?)(?=<br>|$)/gm, '<span style="color:#666;font-style:italic">$1</span>');
+  const kw = ['def','end','class','module','if','elsif','else','unless','while','until','for','do','begin','rescue','ensure','raise','return','yield','block_given?','then','when','case','break','next','redo','retry','in','and','or','not','self','super','nil','true','false','require','require_relative','include','extend','attr_accessor','attr_reader','attr_writer','puts','print','p','lambda','proc'];
+  s = s.replace(new RegExp('\\b(' + kw.join('|').replace('?', '\\?') + ')\\b', 'g'), '<span style="color:#bf5af2">$1</span>');
+  s = s.replace(/:(\w+)/g, '<span style="color:#29b8db">:$1</span>');
+  s = s.replace(/(@\w+)/g, '<span style="color:#f5f543">$1</span>');
+  s = s.replace(/\.(\w+)/g, '.<span style="color:#f5f543">$1</span>');
+  s = s.replace(/\b(\d+\.?\d*)\b/g, '<span style="color:#ff9f0a">$1</span>');
+  return s;
+}
+
+// Choose highlighter based on command content
+function highlightCommand(cmd) {
+  // node -e "..." — JS
+  const nodeMatch = cmd.match(/^node\s+-e\s+["']\n?([\s\S]*)["']\s*$/);
+  if (nodeMatch) {
+    return '<span style="color:#0a84ff">node</span> <span style="color:#29b8db">-e</span> <span style="color:#23d18b">&quot;</span>\n' + highlightJS(nodeMatch[1]) + '<span style="color:#23d18b">&quot;</span>';
+  }
+  // python/python3 -c "..." — Python
+  const pyMatch = cmd.match(/^python3?\s+-c\s+["']\n?([\s\S]*)["']\s*$/);
+  if (pyMatch) {
+    const pyCmd = cmd.match(/^(python3?)/)[1];
+    return `<span style="color:#0a84ff">${pyCmd}</span> <span style="color:#29b8db">-c</span> <span style="color:#23d18b">&quot;</span>\n` + highlightPython(pyMatch[1]) + '<span style="color:#23d18b">&quot;</span>';
+  }
+  // ruby -e "..." — Ruby
+  const rbMatch = cmd.match(/^ruby\s+-e\s+["']\n?([\s\S]*)["']\s*$/);
+  if (rbMatch) {
+    return '<span style="color:#0a84ff">ruby</span> <span style="color:#29b8db">-e</span> <span style="color:#23d18b">&quot;</span>\n' + highlightRuby(rbMatch[1]) + '<span style="color:#23d18b">&quot;</span>';
+  }
+  // swift -e "..." — Swift
+  const swMatch = cmd.match(/^swift\s+-e\s+["']\n?([\s\S]*)["']\s*$/);
+  if (swMatch) {
+    return '<span style="color:#0a84ff">swift</span> <span style="color:#29b8db">-e</span> <span style="color:#23d18b">&quot;</span>\n' + highlightSwift(swMatch[1]) + '<span style="color:#23d18b">&quot;</span>';
+  }
+  // Detect inline go/swift/python/ruby by shebang or content heuristics
+  // For multi-line heredoc commands with go/python/swift content, use content detection
+  if (/\bfunc\s+\w+\s*\(/.test(cmd) && /\bpackage\s+\w+/.test(cmd)) return highlightGo(cmd);
+  if (/\b(def |class |import |from .* import)/.test(cmd)) return highlightPython(cmd);
+  if (/\b(func |let |var |struct |@State)/.test(cmd) && /\b(Swift|Foundation)\b/.test(cmd)) return highlightSwift(cmd);
+  return highlightBash(cmd);
+}
+
+// ── Unified Diff (GitHub-style, matching iOS) ─────────────────────────────
+
+function computeDiff(oldStr, newStr) {
+  const oldLines = oldStr.split('\n');
+  const newLines = newStr.split('\n');
+  const m = oldLines.length, n = newLines.length;
+
+  // LCS table
+  const dp = Array.from({length: m+1}, () => new Uint16Array(n+1));
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      dp[i][j] = oldLines[i-1] === newLines[j-1] ? dp[i-1][j-1]+1 : Math.max(dp[i-1][j], dp[i][j-1]);
+
+  // Backtrack
+  const raw = []; // {type:'ctx'|'rem'|'add', text}
+  let i = m, j = n;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && oldLines[i-1] === newLines[j-1]) {
+      raw.push({type:'ctx', text:oldLines[i-1]}); i--; j--;
+    } else if (j > 0 && (i === 0 || dp[i][j-1] >= dp[i-1][j])) {
+      raw.push({type:'add', text:newLines[j-1]}); j--;
+    } else {
+      raw.push({type:'rem', text:oldLines[i-1]}); i--;
+    }
+  }
+  raw.reverse();
+
+  // Pair consecutive rem/add runs for char-level diff
+  const result = [];
+  let idx = 0;
+  while (idx < raw.length) {
+    if (raw[idx].type === 'ctx') { result.push(raw[idx]); idx++; continue; }
+    if (raw[idx].type === 'rem') {
+      const removed = [];
+      while (idx < raw.length && raw[idx].type === 'rem') removed.push(raw[idx++].text);
+      const added = [];
+      while (idx < raw.length && raw[idx].type === 'add') added.push(raw[idx++].text);
+      const pairs = Math.max(removed.length, added.length);
+      for (let p = 0; p < pairs; p++) {
+        if (p < removed.length && p < added.length) {
+          const [remHL, addHL] = charDiff(removed[p], added[p]);
+          result.push({type:'rem', text:removed[p], hl:remHL});
+          result.push({type:'add', text:added[p], hl:addHL});
+        } else if (p < removed.length) {
+          result.push({type:'rem', text:removed[p], hl:[]});
+        } else {
+          result.push({type:'add', text:added[p], hl:[]});
+        }
+      }
+      continue;
+    }
+    result.push({...raw[idx], hl:[]}); idx++;
+  }
+  return result;
+}
+
+function charDiff(oldStr, newStr) {
+  const m = oldStr.length, n = newStr.length;
+  if (m * n > 500000) return [[], []]; // skip if too large
+
+  const dp = Array.from({length: m+1}, () => new Uint16Array(n+1));
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      dp[i][j] = oldStr[i-1] === newStr[j-1] ? dp[i-1][j-1]+1 : Math.max(dp[i-1][j], dp[i][j-1]);
+
+  const oldChanged = new Uint8Array(m).fill(1);
+  const newChanged = new Uint8Array(n).fill(1);
+  let ci = m, cj = n;
+  while (ci > 0 && cj > 0) {
+    if (oldStr[ci-1] === newStr[cj-1]) { oldChanged[ci-1]=0; newChanged[cj-1]=0; ci--; cj--; }
+    else if (dp[ci-1][cj] >= dp[ci][cj-1]) ci--;
+    else cj--;
+  }
+
+  function toRanges(changed) {
+    const ranges = [];
+    let start = -1;
+    for (let i = 0; i <= changed.length; i++) {
+      if (i < changed.length && changed[i]) { if (start < 0) start = i; }
+      else { if (start >= 0) { ranges.push([start, i]); start = -1; } }
+    }
+    return ranges;
+  }
+  return [toRanges(oldChanged), toRanges(newChanged)];
+}
+
+function renderDiffHTML(oldStr, newStr, filePath) {
+  const entries = computeDiff(oldStr, newStr);
+  const prefix = {ctx:' ', rem:'−', add:'+'};
+
+  let html = `<div class="diff-view">`;
+  if (filePath) html += `<div class="diff-file">📄 ${esc(filePath)}</div>`;
+
+  for (const entry of entries) {
+    const cls = entry.type;
+    const text = entry.text || '';
+    const hl = entry.hl || [];
+
+    let content;
+    if (hl.length && text) {
+      // Build HTML with highlight spans
+      let parts = [];
+      let last = 0;
+      for (const [s, e] of hl) {
+        if (s > last) parts.push(esc(text.slice(last, s)));
+        parts.push(`<span class="diff-hl">${esc(text.slice(s, e))}</span>`);
+        last = e;
+      }
+      if (last < text.length) parts.push(esc(text.slice(last)));
+      content = parts.join('');
+    } else {
+      content = esc(text) || ' ';
+    }
+
+    html += `<div class="diff-line ${cls}"><div class="diff-gutter">${prefix[cls]}</div><div class="diff-content">${content}</div></div>`;
+  }
+
+  html += `</div>`;
+  return html;
+}
+
+// ── Lightweight Markdown → HTML ────────────────────────────────────────────
+function md(text) {
+  if (!text) return '';
+  // Escape HTML first
+  let s = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  // Fenced code blocks: ```lang\n...\n```
+  s = s.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+    `<pre style="background:var(--surf2);padding:10px 12px;border-radius:8px;font-family:'SF Mono',Menlo,monospace;font-size:12px;line-height:1.5;overflow-x:auto;margin:8px 0">${code.replace(/\n$/, '')}</pre>`);
+
+  // Inline code: `code`
+  s = s.replace(/`([^`\n]+)`/g, '<code style="background:var(--surf2);padding:1px 5px;border-radius:4px;font-family:\'SF Mono\',Menlo,monospace;font-size:13px">$1</code>');
+
+  // Headers: ### h3, ## h2, # h1
+  s = s.replace(/^#### (.+)$/gm, '<div style="font-size:14px;font-weight:600;margin:12px 0 4px">$1</div>');
+  s = s.replace(/^### (.+)$/gm, '<div style="font-size:15px;font-weight:600;margin:14px 0 4px">$1</div>');
+  s = s.replace(/^## (.+)$/gm, '<div style="font-size:16px;font-weight:700;margin:16px 0 6px">$1</div>');
+  s = s.replace(/^# (.+)$/gm, '<div style="font-size:18px;font-weight:700;margin:16px 0 6px">$1</div>');
+
+  // Tables: | col | col | with optional separator row
+  s = s.replace(/(^|\n)(\|.+\|(?:\n\|.+\|)+)/gm, (_, pre, block) => {
+    const rows = block.trim().split('\n');
+    let html = '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch;margin:8px 0;border:1px solid var(--border);border-radius:8px"><table style="border-collapse:collapse;font-size:13px;min-width:100%">';
+    let isHeader = true;
+    for (const row of rows) {
+      // Skip separator rows like |---|---|
+      if (/^\|[\s\-:|]+$/.test(row)) {
+        isHeader = false;
+        continue;
+      }
+      const cells = row.split('|').slice(1, -1).map(c => c.trim());
+      const tag = isHeader ? 'th' : 'td';
+      const style = isHeader
+        ? 'padding:6px 10px;border-bottom:2px solid var(--border);text-align:left;font-weight:600;color:var(--text);white-space:nowrap'
+        : 'padding:6px 10px;border-bottom:1px solid var(--border);color:var(--text2);white-space:nowrap';
+      html += '<tr>' + cells.map(c => `<${tag} style="${style}">${c}</${tag}>`).join('') + '</tr>';
+      if (isHeader) isHeader = false;
+    }
+    html += '</table></div>';
+    return pre + html;
+  });
+
+  // Bold: **text**
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Italic: *text*
+  s = s.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+
+  // Unordered lists: - item (consecutive lines, allow sub-items with 2-space indent)
+  s = s.replace(/(^|\n)((?:- .+\n?)+)/g, (_, pre, block) => {
+    const items = block.trim().split('\n').map(l =>
+      `<li style="margin:2px 0">${l.replace(/^- /, '').replace(/^  - /, '&nbsp;&nbsp;• ')}</li>`
+    ).join('');
+    return `${pre}<ul style="margin:6px 0 6px 16px;list-style:disc;padding-left:4px">${items}</ul>`;
+  });
+
+  // Numbered lists: 1. item — match runs separated by up to one blank line
+  s = s.replace(/(^|\n)(\d+\. .+(?:\n(?:\d+\. .+|\n\d+\. .+|   .+| {2}.+))*)/gm, (_, pre, block) => {
+    const items = block.trim().split(/\n(?=\d+\. )/).map(chunk => {
+      const lines = chunk.split('\n');
+      const first = lines[0].replace(/^\d+\. /, '');
+      const rest = lines.slice(1).map(l => l.replace(/^   |^ {2}/, '')).filter(l => l.trim());
+      const content = rest.length ? first + '<br>' + rest.join('<br>') : first;
+      const num = chunk.match(/^(\d+)\./)?.[1] || '1';
+      return `<li style="margin:2px 0" value="${num}">${content}</li>`;
+    }).join('');
+    return `${pre}<ol style="margin:6px 0 6px 16px;padding-left:4px">${items}</ol>`;
+  });
+
+  // Paragraphs: double newlines
+  s = s.replace(/\n\n+/g, '<div style="height:10px"></div>');
+  // Single newlines → <br>
+  s = s.replace(/\n/g, '<br>');
+
+  return s;
+}
+
+// ── Event rendering ────────────────────────────────────────────────────────
+const SCREENSHOT_RE = /\/tmp\/mclaude-screenshots\/[^\s]+\.(?:png|jpg|jpeg|gif|webp)/gi;
+
+function renderUserEvent(text) {
+  // Split text on screenshot paths; render each path as an inline image
+  const parts = [];
+  let last = 0;
+  let m;
+  SCREENSHOT_RE.lastIndex = 0;
+  while ((m = SCREENSHOT_RE.exec(text)) !== null) {
+    if (m.index > last) parts.push({type:'text', v: text.slice(last, m.index).trim()});
+    parts.push({type:'img', path: m[0]});
+    last = m.index + m[0].length;
+  }
+  if (last < text.length && text.slice(last).trim())
+    parts.push({type:'text', v: text.slice(last).trim()});
+
+  const inner = parts.map(p => {
+    if (p.type === 'img') {
+      const src = S.screenshotCache.get(p.path);
+      if (src) {
+        return `<img src="${src}" style="max-width:100%;border-radius:8px;display:block;margin-top:4px" />`;
+      }
+      // Path not in cache (e.g. loaded from history) — show a chip
+      return `<span style="display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,.1);border-radius:6px;padding:2px 8px;font-size:13px">📷 photo</span>`;
+    }
+    return p.v ? `<span>${esc(p.v)}</span>` : '';
+  }).join('');
+
+  return `<div class="ev-user">${inner || '📷'}</div>`;
+}
+
+// Render a grouped item (from groupEventsForRender)
+function renderGroupedItemHTML(item) {
+  if (item.kind === 'agentGroup') return renderAgentGroupHTML(item.toolUse, item.subEvents);
+  if (item.kind === 'toolPair') return renderToolPairHTML(item.toolUse, item.toolResult);
+  return renderEventHTML(item.ev);
+}
+
+function renderToolPairHTML(toolUseEv, toolResultEv) {
+  if (!toolResultEv) return renderEventHTML(toolUseEv);
+
+  const t = toolUseEv.toolUse || {};
+  const tuUuid = toolUseEv.uuid || '';
+  const trUuid = toolResultEv.uuid || '';
+  const results = toolResultEv.toolResults || [];
+  const hasErr = results.some(r => r.isError);
+
+  if (!results.length) return renderEventHTML(toolUseEv);
+
+  // Build the tool header + body (input zone)
+  const icon = t.name === '!' ? '⚡' : t.name === 'Agent' ? '🤖' :
+               t.name === 'Bash' ? '💻' : t.name === 'Edit' ? '✏️' :
+               t.name === 'Write' ? '📝' : t.name === 'Read' ? '📄' :
+               t.name === 'Grep' ? '🔍' : t.name === 'Glob' ? '🔍' :
+               t.name.startsWith('/') ? '🔧' : '🛠';
+
+  let inputBody = '';
+  const input = t.fullInput ? parseToolJSON(t.fullInput) : null;
+
+  if (t.name === 'Edit' && input?.file_path) {
+    const shortFile = input.file_path.split('/').slice(-2).join('/');
+    inputBody = `<div class="tool-hdr">${icon} <span class="tool-name">Edit</span> <span style="color:var(--text2);font-size:11px;margin-left:4px">${esc(shortFile)}</span></div>`;
+  } else if (t.name === 'Write' && input?.file_path) {
+    const shortFile = input.file_path.split('/').slice(-2).join('/');
+    const preview = (input.content || '').slice(0, 500);
+    inputBody = `<div class="tool-hdr">${icon} <span class="tool-name">Write</span> <span style="color:var(--text2);font-size:11px;margin-left:4px">${esc(shortFile)}</span></div>` +
+      (preview ? `<div class="tool-body">${esc(preview)}${(input.content||'').length > 500 ? '…' : ''}</div>` : '');
+  } else if (t.name === 'Read' && input?.file_path) {
+    const shortFile = input.file_path.split('/').slice(-2).join('/');
+    let meta = '';
+    if (input.offset) meta += ` L${input.offset}`;
+    if (input.limit) meta += `${input.offset ? '-' : ' L0-'}${(parseInt(input.offset||0)+parseInt(input.limit))}`;
+    inputBody = `<div class="tool-hdr">${icon} <span class="tool-name">Read</span> <span style="color:var(--text2);font-size:11px;margin-left:4px">${esc(shortFile)}${meta}</span></div>`;
+  } else if (t.name === 'Bash' && input?.command) {
+    inputBody = `<div class="tool-hdr">${icon} <span class="tool-name">Bash</span></div><div class="tool-body">${highlightCommand(input.command)}</div>`;
+  } else if ((t.name === 'Grep' || t.name === 'Glob') && input?.pattern) {
+    const path = input.path ? input.path.split('/').slice(-2).join('/') : '';
+    inputBody = `<div class="tool-hdr">${icon} <span class="tool-name">${esc(t.name)}</span> <span style="color:var(--text2);font-size:11px;margin-left:4px">${esc(input.pattern)}${path ? ' in …/' + esc(path) : ''}</span></div>`;
+  } else {
+    const body = t.inputSummary || t.fullInput || '';
+    inputBody = `<div class="tool-hdr">${icon} <span class="tool-name">${esc(t.name)}</span></div>` +
+      (body ? `<div class="tool-body">${esc(body)}</div>` : '');
+  }
+
+  // Build result zone
+  const resultInner = results.map(r =>
+    `<div class="result-body" style="${r.isError?'color:var(--red)':''}">${esc(r.content || '')}</div>`
+  ).join('');
+
+  return `<div class="ev-tool" style="overflow:hidden">
+    <div class="ev-clickable" data-ev-uuid="${esc(tuUuid)}">${inputBody}</div>
+    <div class="tool-result-inline ev-clickable${hasErr?' err':''}" data-ev-uuid="${esc(trUuid)}">${resultInner}</div>
+  </div>`;
+}
+
+function renderAgentGroupHTML(toolUse, subEvents) {
+  const agentId = toolUse.uuid || '';
+  const isExpanded = S.expandedAgents.has(agentId);
+  const agentType = subEvents[0]?.subagentInfo?.agentType || 'Agent';
+  const desc = toolUse.toolUse?.inputSummary || subEvents[0]?.subagentInfo?.description || '';
+
+  return `<div class="ev-agent-group" data-agent-id="${esc(agentId)}">
+    <div class="agent-group-hdr" data-agent-toggle="${esc(agentId)}">
+      🤖 <span class="agent-group-type">Agent</span>
+      <span style="font-size:11px;padding:1px 6px;background:rgba(255,159,10,.15);border-radius:8px;color:var(--orange)">${esc(agentType)}</span>
+      <span class="agent-group-desc">${esc(desc)}</span>
+      <span class="agent-group-badge">${subEvents.length}</span>
+      <span class="agent-group-chev ${isExpanded?'open':''}">▼</span>
+    </div>
+    ${isExpanded ? `<div class="agent-group-body">${subEvents.map(renderEventHTML).join('')}</div>` : ''}
+  </div>`;
+}
+
+function renderEventHTML(ev) {
+  if (!ev) return '';
+  const uuid = ev.uuid || Math.random().toString(36).slice(2);
+  switch (ev.type) {
+    case 'user':
+      return renderUserEvent(ev.text || '');
+
+    case 'text':
+      if (!ev.text) return '';
+      return `<div class="ev-text ev-clickable" data-ev-uuid="${esc(uuid)}">${md(ev.text)}</div>`;
+
+    case 'thinking': {
+      const open = S.expanded.has(uuid);
+      return `<div class="ev-think" data-uuid="${uuid}">
+        <div class="think-hdr"><span>${open?'▼':'▶'}</span><span>Claude's thinking…</span></div>
+        ${open ? `<div class="think-body">${esc(ev.thinking || '')}</div>` : ''}
+      </div>`;
+    }
+
+    case 'tool_use': {
+      const t = ev.toolUse;
+      if (!t) return '';
+
+      // AskUserQuestion — render rich inline block
+      if (t.name === 'AskUserQuestion') return renderAskUserQuestion(ev);
+
+      const icon = t.name === '!' ? '⚡' : t.name === 'Agent' ? '🤖' :
+                   t.name === 'Bash' ? '💻' : t.name === 'Edit' ? '✏️' :
+                   t.name === 'Write' ? '📝' : t.name === 'Read' ? '📄' :
+                   t.name === 'Grep' ? '🔍' : t.name === 'Glob' ? '🔍' :
+                   t.name.startsWith('/') ? '🔧' : '🛠';
+      const body = t.inputSummary || t.fullInput || '';
+
+      // Flat subagent fallback (when not grouped)
+      if (t.name === 'Agent' && ev.subagentInfo) {
+        const sa = ev.subagentInfo;
+        return `<div class="ev-subagent">
+          <div class="subagent-hdr">🤖 <span class="subagent-type">${esc(sa.agentType || 'Agent')}</span> spawned</div>
+          <div class="subagent-desc">${esc(sa.description || body)}</div>
+        </div>`;
+      }
+
+      // Edit tool — compact chip (diff shows in detail modal)
+      if (t.name === 'Edit' && t.fullInput) {
+        const input = parseToolJSON(t.fullInput);
+        if (input && input.file_path) {
+          const shortFile = input.file_path.split('/').slice(-2).join('/');
+          return `<div class="ev-tool ev-clickable" data-ev-uuid="${esc(uuid)}">
+            <div class="tool-hdr">${icon} <span class="tool-name">Edit</span> <span style="color:var(--text2);font-size:11px;margin-left:4px">${esc(shortFile)}</span></div>
+          </div>`;
+        }
+      }
+
+      // Write tool — show file path + code preview
+      if (t.name === 'Write' && t.fullInput) {
+        const input = parseToolJSON(t.fullInput);
+        if (input && input.file_path) {
+          const shortFile = input.file_path.split('/').slice(-2).join('/');
+          const preview = (input.content || '').slice(0, 500);
+          return `<div class="ev-tool ev-clickable" data-ev-uuid="${esc(uuid)}">
+            <div class="tool-hdr">${icon} <span class="tool-name">Write</span> <span style="color:var(--text2);font-size:11px;margin-left:4px">${esc(shortFile)}</span></div>
+            ${preview ? `<div class="tool-body">${esc(preview)}${input.content.length > 500 ? '…' : ''}</div>` : ''}
+          </div>`;
+        }
+      }
+
+      // Read tool — show file path
+      if (t.name === 'Read' && t.fullInput) {
+        const input = parseToolJSON(t.fullInput);
+        if (input && input.file_path) {
+          const shortFile = input.file_path.split('/').slice(-2).join('/');
+          let meta = '';
+          if (input.offset) meta += ` L${input.offset}`;
+          if (input.limit) meta += `${input.offset ? '-' : ' L0-'}${(parseInt(input.offset||0)+parseInt(input.limit))}`;
+          return `<div class="ev-tool ev-clickable" data-ev-uuid="${esc(uuid)}">
+            <div class="tool-hdr">${icon} <span class="tool-name">Read</span> <span style="color:var(--text2);font-size:11px;margin-left:4px">${esc(shortFile)}${meta}</span></div>
+          </div>`;
+        }
+      }
+
+      // Bash tool — show command
+      if (t.name === 'Bash' && t.fullInput) {
+        const input = parseToolJSON(t.fullInput);
+        if (input && input.command) {
+          return `<div class="ev-tool ev-clickable" data-ev-uuid="${esc(uuid)}">
+            <div class="tool-hdr">${icon} <span class="tool-name">Bash</span></div>
+            <div class="tool-body">${esc(input.command)}</div>
+          </div>`;
+        }
+      }
+
+      // Grep/Glob — show pattern + path
+      if ((t.name === 'Grep' || t.name === 'Glob') && t.fullInput) {
+        const input = parseToolJSON(t.fullInput);
+        if (input && input.pattern) {
+          const path = input.path ? input.path.split('/').slice(-2).join('/') : '';
+          return `<div class="ev-tool ev-clickable" data-ev-uuid="${esc(uuid)}">
+            <div class="tool-hdr">${icon} <span class="tool-name">${esc(t.name)}</span> <span style="color:var(--text2);font-size:11px;margin-left:4px">${esc(input.pattern)}${path ? ' in …/' + esc(path) : ''}</span></div>
+          </div>`;
+        }
+      }
+
+      return `<div class="ev-tool ev-clickable" data-ev-uuid="${esc(uuid)}">
+        <div class="tool-hdr">${icon} <span class="tool-name">${esc(t.name)}</span></div>
+        ${body ? `<div class="tool-body">${esc(body)}</div>` : ''}
+      </div>`;
+    }
+
+    case 'tool_result': {
+      const results = ev.toolResults || [];
+      return results.map(r =>
+        `<div class="ev-result ev-clickable ${r.isError?'err':''}" data-ev-uuid="${esc(uuid)}">
+          <div class="result-body">${esc(r.content || '')}</div>
+        </div>`
+      ).join('');
+    }
+
+    case 'system': {
+      if (ev.durationMs != null) {
+        return `<div class="ev-sys">Turn completed in ${(ev.durationMs/1000).toFixed(1)}s</div>`;
+      }
+      return `<div class="ev-sys">${esc(ev.text || 'system')}</div>`;
+    }
+
+    case 'compaction':
+      return `<div class="ev-sys">— conversation compacted —</div>`;
+
+    default:
+      return '';
+  }
+}
+
+// ── AskUserQuestion inline block ───────────────────────────────────────────
+function renderAskUserQuestion(ev) {
+  const uuid = ev.uuid || '';
+  const submitted = S.askSubmitted.has(uuid);
+  let questions = [];
+  try {
+    const input = ev.toolUse?.fullInput || ev.toolUse?.inputSummary || '';
+    const parsed = JSON.parse(input);
+    questions = parsed.questions || [];
+  } catch(_) { return ''; }
+
+  if (!questions.length) return '';
+
+  let html = `<div class="ev-ask" data-ask-uuid="${esc(uuid)}">
+    <div class="ask-hdr">❓ Question</div>`;
+
+  questions.forEach((q, qi) => {
+    html += `<div class="ask-q-group">`;
+    if (q.header) html += `<div class="ask-q-header">${esc(q.header)}</div>`;
+    if (q.question) html += `<div class="ask-q-text">${esc(q.question)}</div>`;
+    const opts = q.options || [];
+    opts.forEach((o, oi) => {
+      const key = `${uuid}_${qi}`;
+      const selected = S.askSelections[key] === oi;
+      html += `<div class="ask-opt ${selected?'selected':''}" data-ask-key="${esc(key)}" data-ask-oi="${oi}">
+        <div class="ask-opt-radio"></div>
+        <div>
+          <div class="ask-opt-label">${esc(o.label || o)}</div>
+          ${o.description ? `<div class="ask-opt-desc">${esc(o.description)}</div>` : ''}
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
+  });
+
+  html += `<div style="display:flex;gap:8px;margin:8px 12px 12px">`;
+  html += `<button class="ask-submit ${submitted?'done':''}" data-ask-submit="${esc(uuid)}" ${submitted?'disabled':''} style="flex:1;margin:0;width:auto">${submitted ? '✓ Submitted' : 'Submit'}</button>`;
+  if (!submitted) html += `<button class="ask-cancel" data-ask-cancel="${esc(uuid)}" style="flex:0 0 auto;padding:10px 16px;border-radius:8px;background:rgba(255,69,58,.15);color:var(--red);border:none;font-size:14px;font-weight:600;cursor:pointer">Cancel</button>`;
+  html += `</div>`;
+  html += `</div>`;
+  return html;
+}
+
+function appendEventNode(ev) {
+  const list = document.getElementById('evlist');
+  if (!list) return;
+
+  // Check if this event belongs to a subagent group that's already rendered
+  if (ev.subagentInfo?.parentToolUseId) {
+    // Re-render to properly group — simpler than surgical insert into group
+    patchEventsList();
+    return;
+  }
+
+  const html = renderEventHTML(ev);
+  if (!html) return;
+
+  // Check if pinned to bottom BEFORE appending (new content may be taller than threshold)
+  const tc = document.getElementById('tab-content');
+  const wasNearBottom = tc && (tc.scrollTop + tc.clientHeight >= tc.scrollHeight - 80);
+
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  while (tmp.firstChild) list.appendChild(tmp.firstChild);
+
+  bindEventInteractions(list);
+
+  if (wasNearBottom && tc) tc.scrollTop = tc.scrollHeight;
+}
+
+function patchEventsList() {
+  const list = document.getElementById('evlist');
+  if (!list) return;
+  const tc = document.getElementById('tab-content');
+  const wasNearBottom = tc && (tc.scrollTop + tc.clientHeight >= tc.scrollHeight - 80);
+  const evs = S.events[S.activeId] || [];
+  const grouped = groupEventsForRender(evs);
+  list.innerHTML = grouped.map(renderGroupedItemHTML).join('');
+  bindEventInteractions(list);
+  if (wasNearBottom) scrollEventsToBottom();
+}
+
+function bindEventInteractions(root) {
+  const id = S.activeId;
+  const evs = S.events[id] || [];
+
+  // Thinking toggles
+  root.querySelectorAll('.ev-think').forEach(el => {
+    el.removeEventListener('click', el._thinkHandler);
+    el._thinkHandler = () => toggleThink(el.dataset.uuid, id);
+    el.addEventListener('click', el._thinkHandler);
+  });
+
+  // Event detail on tap
+  root.querySelectorAll('.ev-clickable').forEach(el => {
+    el.addEventListener('click', () => {
+      const uuid = el.dataset.evUuid;
+      const ev = evs.find(e => e.uuid === uuid);
+      if (ev) openEventDetail(ev);
+    });
+  });
+
+  // Agent group expand/collapse
+  root.querySelectorAll('[data-agent-toggle]').forEach(el => {
+    el.addEventListener('click', () => {
+      const agentId = el.dataset.agentToggle;
+      if (S.expandedAgents.has(agentId)) S.expandedAgents.delete(agentId);
+      else S.expandedAgents.add(agentId);
+      patchEventsList();
+    });
+  });
+
+  // AskUserQuestion option selection
+  root.querySelectorAll('.ask-opt').forEach(el => {
+    el.addEventListener('click', () => {
+      const key = el.dataset.askKey;
+      const oi = parseInt(el.dataset.askOi);
+      S.askSelections[key] = oi;
+      // Re-render the ask block to update selection state
+      patchEventsList();
+    });
+  });
+
+  // AskUserQuestion submit
+  root.querySelectorAll('[data-ask-submit]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const uuid = btn.dataset.askSubmit;
+      if (S.askSubmitted.has(uuid)) return;
+      // Find the event to get question count
+      const ev = evs.find(e => e.uuid === uuid);
+      if (!ev) return;
+      let questions = [];
+      try { questions = JSON.parse(ev.toolUse?.fullInput || '{}').questions || []; } catch(_){}
+      // Disable button while sending
+      btn.disabled = true;
+      btn.textContent = 'Sending…';
+      try {
+        // Send each selected option as numbered input, sequentially
+        for (let qi = 0; qi < questions.length; qi++) {
+          const key = `${uuid}_${qi}`;
+          const sel = S.askSelections[key];
+          if (sel != null) await sendInput(id, String(sel + 1));
+        }
+        // Send Enter to submit
+        await sendInput(id, '');
+        S.askSubmitted.add(uuid);
+      } catch(e) {
+        alert('Send failed: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = 'Submit';
+      }
+      patchEventsList();
+    });
+  });
+
+  // AskUserQuestion cancel (send Escape)
+  root.querySelectorAll('[data-ask-cancel]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const uuid = btn.dataset.askCancel;
+      if (S.askSubmitted.has(uuid)) return;
+      btn.disabled = true;
+      btn.textContent = 'Cancelling…';
+      try {
+        await api('POST', `/sessions/${encodeURIComponent(id)}/input`, {text: 'Escape', sendEnter: false});
+        S.askSubmitted.add(uuid);
+      } catch(e) {
+        btn.disabled = false;
+        btn.textContent = 'Cancel';
+      }
+      patchEventsList();
+    });
+  });
+}
+
+function patchTerminal() {
+  // Terminal tab is now a live PTY — no read-only rendering needed
+}
+
+function scrollEventsToBottom() {
+  const tc = document.getElementById('tab-content');
+  if (tc) setTimeout(() => { tc.scrollTop = tc.scrollHeight; }, 40);
+}
+
+function rebindThinkToggles(id) {
+  const list = document.getElementById('evlist');
+  if (list) bindEventInteractions(list);
+}
+
+function toggleThink(uuid, id) {
+  if (S.expanded.has(uuid)) S.expanded.delete(uuid);
+  else S.expanded.add(uuid);
+  patchEventsList();
+}
+
+// ── ANSI → HTML ────────────────────────────────────────────────────────────
+const FG = {
+  30:'#4d4d4d',31:'#cd3131',32:'#0dbc79',33:'#e5e510',
+  34:'#2472c8',35:'#bc3fbc',36:'#11a8cd',37:'#e5e5e5',
+  90:'#666',91:'#f14c4c',92:'#23d18b',93:'#f5f543',
+  94:'#3b8eea',95:'#d670d6',96:'#29b8db',97:'#f1f1f0',
+};
+
+function ansi(text) {
+  let out = '';
+  let spans = 0;
+  const re = /\x1b\[([0-9;]*)m|(\x1b\[[0-9;]*[A-HJKST])|([^\x1b]+)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m[3] !== undefined) {
+      // text — escape HTML
+      out += m[3].replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    } else if (m[1] !== undefined) {
+      // SGR
+      const codes = m[1] === '' ? [0] : m[1].split(';').map(Number);
+      if (codes[0] === 0 || codes.includes(0)) {
+        while (spans-- > 0) out += '</span>';
+        spans = 0;
+      } else {
+        let style = '';
+        for (const c of codes) {
+          if (FG[c]) style += `color:${FG[c]};`;
+          if (c === 1) style += 'font-weight:bold;';
+          if (c === 2) style += 'opacity:.6;';
+        }
+        if (style) { out += `<span style="${style}">`; spans++; }
+      }
+    }
+    // non-SGR escape sequences (cursor movement etc.) are dropped
+  }
+  while (spans-- > 0) out += '</span>';
+  return out;
+}
+
+// ── Patch helpers (surgical DOM updates) ──────────────────────────────────
+function patchConnDot() {
+  document.querySelectorAll('.cdot').forEach(d => {
+    d.className = `cdot ${cdotClass()}`;
+  });
+}
+
+function cdotClass() {
+  return S.wsState === 'ok' ? 'ok' : S.wsState === 'err' ? 'err' : '';
+}
+
+// ── Utility ────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function shortPath(p) {
+  if (!p) return '';
+  const parts = p.split('/').filter(Boolean);
+  if (parts.length <= 2) return p;
+  return '…/' + parts.slice(-2).join('/');
+}
+
+function statusLabel(s) {
+  const since = s.statusSince ? ' ' + ago(s.statusSince) : '';
+  const labels = {
+    working:           `Working${since}`,
+    waiting_for_input: 'Waiting',
+    needs_permission:  'Needs Permission',
+    plan_mode:         'Plan Ready',
+    idle:              `Idle${since}`,
+    unknown:           'Unknown',
+  };
+  return labels[s.status] || s.status || 'Unknown';
+}
+
+function ago(iso) {
+  const s = Math.floor((Date.now() - new Date(iso)) / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m/60)}h ${m%60}m`;
+}
+
+function navTo(hash) { location.hash = hash; }
+
+function safeParse(s, def) {
+  try { return JSON.parse(s); } catch(_) { return def; }
+}
+
+// ── User Management (admin) ─────────────────────────────────────────────
+
+async function loadAdminUsers() {
+  try {
+    const data = await api('GET', '/admin/users');
+    S.adminUsers = Array.isArray(data) ? data : [];
+  } catch(e) {
+    S.adminUsers = [];
+    console.warn('loadAdminUsers:', e);
+  }
+}
+
+function renderUsers() {
+  if (!S.user || S.user.role !== 'admin') { navTo('settings'); return; }
+
+  $app.innerHTML = `
+<div class="nav">
+  <button class="nav-back" id="users-back">‹ Settings</button>
+  <div class="nav-title" style="justify-content:center">Users</div>
+  <button class="btn btn-sm" id="add-user-btn" style="width:auto;padding:6px 14px;font-size:13px">+ Add</button>
+</div>
+<div class="content" id="users-content">
+  <div class="loading">Loading users...</div>
+</div>
+${S.modal === 'addUser' ? addUserModalHTML() : ''}
+${S.modal === 'editUser' ? editUserModalHTML() : ''}`;
+
+  document.getElementById('users-back').addEventListener('click', () => navTo('settings'));
+  document.getElementById('add-user-btn').addEventListener('click', () => { S.modal = 'addUser'; render(); });
+  if (S.modal === 'addUser') bindAddUserModal();
+  if (S.modal === 'editUser') bindEditUserModal();
+  loadAdminUsers().then(() => {
+    const el = document.getElementById('users-content');
+    if (el) { el.innerHTML = usersListHTML(); bindUserRows(); }
+  });
+}
+
+function usersListHTML() {
+  if (!S.adminUsers.length) return '<div class="empty"><h3>No Users</h3><p>Add a user to get started</p></div>';
+  return '<div class="settings" style="padding:12px">' + S.adminUsers.map(u =>
+    '<div class="settings-card" style="margin-bottom:8px"><div class="settings-row" data-uid="' + esc(u.id) + '" style="cursor:pointer"><div>' +
+    '<div style="font-size:15px;font-weight:500">' + esc(u.name) + (u.disabled ? ' <span style="color:var(--red);font-size:11px">(disabled)</span>' : '') + '</div>' +
+    '<div style="font-size:12px;color:var(--text2);margin-top:2px">' + esc(u.role) + ' · ' + esc(u.email || 'no email') + ' · token: ' + esc(u.token) + '</div>' +
+    '<div style="font-size:11px;color:var(--text3);margin-top:2px">Laptops: ' + (u.laptops && u.laptops.length ? esc(u.laptops.join(', ')) : '<span style="color:var(--red)">none</span>') + '</div>' +
+    '</div><div class="schev" style="color:var(--text3);font-size:18px;margin-left:auto;flex-shrink:0">›</div></div></div>'
+  ).join('') + '</div>';
+}
+
+function bindUserRows() {
+  document.querySelectorAll('[data-uid]').forEach(el => {
+    el.addEventListener('click', () => { S._editUserId = el.dataset.uid; S.modal = 'editUser'; render(); });
+  });
+}
+
+function addUserModalHTML() {
+  return '<div class="overlay" id="overlay"><div class="sheet">' +
+    '<div class="sheet-hdr"><div class="sheet-title">Add User</div><button class="sheet-close" id="modal-close">✕</button></div>' +
+    '<div style="padding:16px;display:flex;flex-direction:column;gap:10px">' +
+    '<input id="au-name" placeholder="Name" />' +
+    '<input id="au-email" placeholder="Email (optional)" />' +
+    '<select id="au-role" class="settings-select" style="width:100%"><option value="user">User</option><option value="admin">Admin</option></select>' +
+    '<input id="au-laptops" placeholder="Laptops (comma-separated, or * for all)" value="*" />' +
+    '<button class="btn" id="au-submit">Create User</button>' +
+    '<div id="au-result" style="font-size:12px;color:var(--green);display:none;word-break:break-all"></div>' +
+    '</div></div></div>';
+}
+
+function bindAddUserModal() {
+  document.getElementById('modal-close').addEventListener('click', () => { S.modal = null; render(); });
+  document.getElementById('overlay').addEventListener('click', e => { if (e.target.id === 'overlay') { S.modal = null; render(); }});
+  document.getElementById('au-submit').addEventListener('click', async () => {
+    const name = document.getElementById('au-name').value.trim();
+    const email = document.getElementById('au-email').value.trim();
+    const role = document.getElementById('au-role').value;
+    const laptopsStr = document.getElementById('au-laptops').value.trim();
+    const laptops = laptopsStr ? laptopsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
+    if (!name) { alert('Name is required'); return; }
+    try {
+      const user = await api('POST', '/admin/users', { name, email, role, laptops });
+      const resEl = document.getElementById('au-result');
+      if (resEl) {
+        resEl.style.display = 'block';
+        resEl.innerHTML = 'Created! Token: <strong style="user-select:all">' + esc(user.token) + '</strong><br><span style="color:var(--orange)">Copy this token now -- it will not be shown again.</span>';
+      }
+      document.getElementById('au-submit').disabled = true;
+      document.getElementById('au-submit').textContent = 'Created';
+    } catch(e) { alert('Create failed: ' + e.message); }
+  });
+}
+
+function editUserModalHTML() {
+  const u = S.adminUsers.find(u => u.id === S._editUserId);
+  if (!u) return '';
+  return '<div class="overlay" id="overlay"><div class="sheet">' +
+    '<div class="sheet-hdr"><div class="sheet-title">Edit User</div><button class="sheet-close" id="modal-close">✕</button></div>' +
+    '<div style="padding:16px;display:flex;flex-direction:column;gap:10px">' +
+    '<div style="font-size:11px;color:var(--text2);text-transform:uppercase">Name</div>' +
+    '<input id="eu-name" value="' + esc(u.name) + '" />' +
+    '<div style="font-size:11px;color:var(--text2);text-transform:uppercase">Email</div>' +
+    '<input id="eu-email" value="' + esc(u.email || '') + '" />' +
+    '<div style="font-size:11px;color:var(--text2);text-transform:uppercase">Role</div>' +
+    '<select id="eu-role" class="settings-select" style="width:100%"><option value="user"' + (u.role==='user'?' selected':'') + '>User</option><option value="admin"' + (u.role==='admin'?' selected':'') + '>Admin</option></select>' +
+    '<div style="font-size:11px;color:var(--text2);text-transform:uppercase">Laptops (comma-separated, * for all)</div>' +
+    '<input id="eu-laptops" value="' + esc((u.laptops||[]).join(', ')) + '" />' +
+    '<button class="btn" id="eu-save">Save Changes</button>' +
+    '<div style="display:flex;gap:8px"><button class="btn btn-surf btn-sm" id="eu-rotate" style="flex:1">Rotate Token</button><button class="btn btn-red btn-sm" id="eu-delete" style="flex:1">Delete User</button></div>' +
+    '<div id="eu-result" style="font-size:12px;color:var(--green);display:none;word-break:break-all"></div>' +
+    '</div></div></div>';
+}
+
+function bindEditUserModal() {
+  const uid = S._editUserId;
+  document.getElementById('modal-close').addEventListener('click', () => { S.modal = null; render(); });
+  document.getElementById('overlay').addEventListener('click', e => { if (e.target.id === 'overlay') { S.modal = null; render(); }});
+  document.getElementById('eu-save').addEventListener('click', async () => {
+    const name = document.getElementById('eu-name').value.trim();
+    const email = document.getElementById('eu-email').value.trim();
+    const role = document.getElementById('eu-role').value;
+    const laptopsStr = document.getElementById('eu-laptops').value.trim();
+    const laptops = laptopsStr ? laptopsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
+    try {
+      await api('PUT', '/admin/users/' + uid, { name, email, role, laptops });
+      S.modal = null; render();
+    } catch(e) { alert('Update failed: ' + e.message); }
+  });
+  document.getElementById('eu-rotate').addEventListener('click', async () => {
+    if (!confirm('Generate a new token? The old token will stop working.')) return;
+    try {
+      const data = await api('POST', '/admin/users/' + uid + '/rotate-token');
+      const resEl = document.getElementById('eu-result');
+      if (resEl) {
+        resEl.style.display = 'block';
+        resEl.innerHTML = 'New token: <strong style="user-select:all">' + esc(data.token) + '</strong><br><span style="color:var(--orange)">Copy this token now.</span>';
+      }
+    } catch(e) { alert('Rotate failed: ' + e.message); }
+  });
+  document.getElementById('eu-delete').addEventListener('click', async () => {
+    if (!confirm('Delete this user? This cannot be undone.')) return;
+    try {
+      await api('DELETE', '/admin/users/' + uid);
+      S.modal = null; render();
+    } catch(e) { alert('Delete failed: ' + e.message); }
+  });
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+const r = route();
+if (r.page === 'session') {
+  S.activeId = r.id;
+  S.activeTab = 'events';
+  if (S.token) ensureSessionData(r.id);
+}
+
+if (S.token) {
+  fetchUserInfo().then(() => { render(); });
+  connectWS();
+}
+render();
+
+// Tick status labels every 20s while on dashboard
+setInterval(() => {
+  if (route().page === 'dashboard' && S.sessions.length) patchDashboard();
+}, 20000);
+
+// Prevent iOS Safari double-tap and pinch zoom
+document.addEventListener('gesturestart', e => e.preventDefault());
+document.addEventListener('gesturechange', e => e.preventDefault());
+
+// ── Hot reload (dev mode) ─────────────────────────────────────────────────
+// Polls /__static-version for file changes; auto-reloads when mtime changes.
+// Only active when the endpoint exists (TUNNEL_STATIC + STATIC_DIR on connector).
+(function() {
+  let lastMtime = null;
+  let failed = 0;
+  async function checkVersion() {
+    try {
+      const r = await fetch('/__static-version', {
+        headers: S.token ? {'Authorization': `Bearer ${S.token}`} : {}
+      });
+      if (!r.ok) { failed++; return; }
+      const data = await r.json();
+      if (lastMtime === null) { lastMtime = data.mtime; failed = 0; return; }
+      if (data.mtime !== lastMtime) {
+        // Save state before reload
+        const tc = document.getElementById('tab-content');
+        if (tc) sessionStorage.setItem('mc_scroll', tc.scrollTop);
+        const field = document.getElementById('ifield');
+        if (field && field.value) sessionStorage.setItem('mc_input', field.value);
+        location.reload(); return;
+      }
+      failed = 0;
+    } catch(_) {
+      failed++;
+    }
+  }
+  // Start polling; stop silently after 3 consecutive failures (endpoint doesn't exist)
+  const timer = setInterval(() => {
+    if (failed >= 3) { clearInterval(timer); return; }
+    if (S.token) checkVersion();
+  }, 2000);
+})();
+
+// On returning to foreground (iOS suspends WS when tab is backgrounded):
+// force-reconnect WS and re-fetch active session data so nothing is missed.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  // Force WS reconnect — iOS may have silently killed it
+  if (S.ws) { S.ws.close(); S.ws = null; }
+  if (S.token) connectWS();
+  // Refresh active session data to catch events missed while backgrounded
+  if (S.activeId) {
+    delete S.events[S.activeId];
+    delete S.outputs[S.activeId];
+    S.fetched.delete(S.activeId);
+    ensureSessionData(S.activeId);
+  }
+});
+</script>
+</body>
+</html>

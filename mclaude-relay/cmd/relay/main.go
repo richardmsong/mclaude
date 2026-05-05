@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	relaypkg "mclaude-relay/relay"
 )
 
 //go:embed static
@@ -44,7 +46,7 @@ func main() {
 	if usersFile == "" {
 		usersFile = "/tmp/mclaude-users.json"
 	}
-	users := NewUserStore(usersFile)
+	users := relaypkg.NewUserStore(usersFile)
 
 	// Bootstrap: if user store is empty AND WEB_TOKEN is set, seed an admin user
 	if users.IsEmpty() && webToken != "" {
@@ -55,7 +57,7 @@ func main() {
 	tunnelStatic := os.Getenv("TUNNEL_STATIC") == "1" || os.Getenv("TUNNEL_STATIC") == "true"
 	tunnelStaticHost := os.Getenv("TUNNEL_STATIC_HOST") // which laptop serves static files
 
-	relay := NewRelay(tunnelToken, webToken, users)
+	r := relaypkg.New(tunnelToken, webToken, users)
 
 	// Static file serving strategy:
 	// 1. TUNNEL_STATIC=true → relay proxies static requests through tunnel to connector
@@ -88,11 +90,11 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
+	mux.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		path := req.URL.Path
 
 		// CORS preflight
-		if r.Method == http.MethodOptions {
+		if req.Method == http.MethodOptions {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Filename, X-Laptop-ID")
@@ -102,37 +104,37 @@ func main() {
 
 		// Tunnel endpoint — connector registers here
 		if path == "/tunnel" {
-			relay.HandleTunnel(w, r)
+			r.HandleTunnel(w, req)
 			return
 		}
 
 		// Auth endpoint — returns current user info
 		if path == "/auth/me" {
-			relay.HandleAuthMe(w, r)
+			r.HandleAuthMe(w, req)
 			return
 		}
 
 		// Admin endpoints — user management
 		if strings.HasPrefix(path, "/admin/") {
-			relay.HandleAdminUsers(w, r)
+			r.HandleAdminUsers(w, req)
 			return
 		}
 
 		// PTY WebSocket endpoint — browser shell connects here
 		if path == "/ws/pty" {
-			relay.HandlePtyWS(w, r)
+			r.HandlePtyWS(w, req)
 			return
 		}
 
 		// WebSocket endpoint — phone/browser connects here
 		if path == "/ws" {
-			relay.HandleClientWS(w, r)
+			r.HandleClientWS(w, req)
 			return
 		}
 
 		// Health endpoint (no auth)
 		if path == "/health" {
-			laptops := relay.ConnectedLaptops()
+			laptops := r.ConnectedLaptops()
 			w.Header().Set("Content-Type", "application/json")
 			data := map[string]interface{}{
 				"status":  "ok",
@@ -145,33 +147,13 @@ func main() {
 
 		// Laptops endpoint — filter by user ACL if authenticated
 		if path == "/laptops" {
-			laptops := relay.ConnectedLaptops()
-			// If user is authenticated, filter by their ACL
-			if user := relay.authenticateRequest(r); user != nil {
-				var filtered []string
-				for _, h := range laptops {
-					if relay.userCanAccessLaptop(user, h) {
-						filtered = append(filtered, h)
-					}
-				}
-				laptops = filtered
-			}
-			w.Header().Set("Content-Type", "application/json")
-			type laptopInfo struct {
-				ID        string `json:"id"`
-				Connected bool   `json:"connected"`
-			}
-			result := make([]laptopInfo, len(laptops))
-			for i, l := range laptops {
-				result[i] = laptopInfo{ID: l, Connected: true}
-			}
-			json.NewEncoder(w).Encode(result) //nolint:errcheck
+			r.HandleLaptops(w, req)
 			return
 		}
 
 		// API proxy
 		if isAPIPath(path) {
-			relay.HandleAPI(w, r)
+			r.HandleAPI(w, req)
 			return
 		}
 
@@ -181,9 +163,9 @@ func main() {
 			if host == "" {
 				host = "default"
 			}
-			relay.HandleTunnelStatic(w, r, host)
+			r.HandleTunnelStatic(w, req, host)
 		} else {
-			fileServer.ServeHTTP(w, r)
+			fileServer.ServeHTTP(w, req)
 		}
 	})
 
