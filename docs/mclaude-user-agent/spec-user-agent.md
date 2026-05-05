@@ -75,7 +75,7 @@ The user-agent does **not** mint session-agent NKeys or write `agent-nkey-{proje
 
 **On `agent.projects.delete`:**
 1. `kubectl delete deployment project-{projectId}` in the user namespace.
-2. Best-effort PVC cleanup (defer to ADR-0091 deferred — manual `kubectl delete pvc` if needed).
+2. PVC cleanup is **omitted in v1** — `project-{projectId}` and `nix-{projectId}` PVCs persist after the Deployment is deleted. Operators reclaim storage with `kubectl delete pvc` manually. Tracked alongside the deferred revocation flow (ADR-0091).
 
 **On user-agent restart:**
 1. Existing Deployments in the namespace continue running (k8s self-heals via Deployment replicas regardless of user-agent).
@@ -115,7 +115,7 @@ In this mode the `user-agent-key` Secret's `x25519-private` field is eliminated 
 | Challenge-response with CP fails (network, NKey not registered) | Retry with exponential backoff (cap 60s). User-agent never enters Ready until JWT acquired. |
 | `crypto_box_seal_open` fails | Reply `{ok: false, error: "decrypt_failed"}` to SPA; do not write Secret. SPA prompts user to retry. |
 | Project provision when no token in `/secrets/tokens/{provider}` | Reply `{error: "host_not_trusted"}`. CP surfaces "Authorize this host" to the SPA. |
-| `kubectl create deployment` fails (RBAC, quota, image pull) | Reply `{error: "...", message: "..."}` to CP; do not retry — let SPA re-issue. Pod creation is idempotent (same name) so a retry overwrites cleanly. |
+| `kubectl create deployment` fails (RBAC, quota, image pull) | Reply `{ok: false, status: "...", error: "<machine-readable code>: <human message>"}` to CP. Do not retry — let SPA re-issue. Pod creation is idempotent (same name) so a retry overwrites cleanly. The reply shape is the `ProvisionReply` struct with fields `OK`, `Status`, `Error`. |
 | Project delete when Deployment doesn't exist | Treat as success (idempotent). |
 | User-agent JWT TTL expires before refresh | NATS connection drops; on reconnect, JWT is re-acquired via challenge-response. Same as session-agent refresh pattern. |
 
@@ -125,7 +125,24 @@ In this mode the `user-agent-key` Secret's `x25519-private` field is eliminated 
 - Control-plane HTTP reachable for challenge-response.
 - Kubernetes API for `Deployment`, `Secret`, `PVC` operations within the user namespace.
 - libsodium (or equivalent X25519 sealed-box implementation) in the user-agent binary.
-- `{release}-session-agent-template` ConfigMap in `mclaude-system` (cross-namespace read for project pod template).
+- `session-agent-template` ConfigMap **in the user's own namespace** (copied from `mclaude-system/{release}-session-agent-template` by `mclaude-controller-k8s` at provisioning time). User-agent does not read from `mclaude-system`. If the per-namespace copy is absent, user-agent falls back to compiled-in defaults documented in the Project Pod Defaults section below.
+
+## Project Pod Defaults
+
+When fields in `session-agent-template` are absent, the user-agent applies the following compiled-in defaults to project Deployments and PVCs:
+
+| Field | Default |
+|-------|---------|
+| `image` | `mclaude-session-agent:latest` |
+| `imagePullPolicy` | `IfNotPresent` |
+| `terminationGracePeriodSeconds` | `30` |
+| `resourcesJson` | `{requests: {cpu: 200m, memory: 64Mi}, limits: {cpu: 2000m, memory: 2Gi}}` |
+| `projectPvcSize` | `10Gi` |
+| `projectPvcStorageClass` | (empty — uses cluster default) |
+| `nixPvcSize` | `10Gi` |
+| `nixPvcStorageClass` | (empty — uses cluster default) |
+
+The defaults exist for tests and degraded-mode operation. Production clusters should always have a populated `session-agent-template` ConfigMap.
 
 ## What This Component Does NOT Do
 

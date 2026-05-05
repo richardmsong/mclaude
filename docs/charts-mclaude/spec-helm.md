@@ -218,7 +218,7 @@ The `mcprojects.mclaude.io` CustomResourceDefinition is **removed** by ADR-0091 
 
 | Kind | Name | Notes |
 |---|---|---|
-| ConfigMap | `{release}-user-agent-template` | Pod template values for the per-user-namespace `user-agent` Deployment (image, resources, ServiceAccount config). Read by `mclaude-controller-k8s` when reconciling a `grants.create` event. |
+| ConfigMap | `{release}-user-agent-template` | Pod template values for the per-user-namespace `user-agent` Deployment: `image`, `imagePullPolicy`, and `resourcesJson`. Read by `mclaude-controller-k8s` when reconciling a `grants.create` event. (The user-agent's ServiceAccount name is fixed as `mclaude-user-agent` in the user namespace; not templated.) |
 
 ### Configuration Knobs
 

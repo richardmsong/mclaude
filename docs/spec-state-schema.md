@@ -508,39 +508,15 @@ Note: All agents (BYOH and K8s) connect directly to hub NATS (ADR-0054). Leaf-no
 
 ## Kubernetes Resources (Dynamic, per-user/per-project)
 
-Created by `mclaude-controller-k8s` (the cluster controller binary) per ADR-0054/ADR-0063. The control-plane is K8s-free; it triggers provisioning by publishing to `mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.create` and the controller reconciles `MCProject` CRs in response.
+Per ADR-0091, K8s resource creation is split:
+- **`mclaude-controller-k8s`** owns per-user resources (Namespace, RBAC, `user-secrets`, `user-config`, `user-agent-key`, empty `user-tokens-{uslug}`, `session-agent-template` ConfigMap copy, `user-agent` Deployment). Triggered by `mclaude.hosts.{hslug}.grants.create`.
+- **`mclaude-user-agent`** (per user namespace) owns per-project resources (project Deployment, project + nix PVCs). Triggered by `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.provision` from CP.
 
-### CRD: `MCProject` (`mcprojects.mclaude.io/v1alpha1`)
-
-Scope: Namespaced (in `mclaude-system`)
-Name: `{userSlug}-{projectSlug}` (e.g. `dev-default-project`)
-
-```yaml
-spec:
-  userId: string         # required — UUID v4
-  projectId: string      # required — UUID v4
-  userSlug: string       # typed slug (ADR-0050) — present in CRD schema but not in `required` list; should be required
-  projectSlug: string    # typed slug (ADR-0050) — present in CRD schema but not in `required` list; should be required
-  gitUrl: string         # optional
-  gitIdentityId: string  # optional — oauth_connections.id for git credential resolution
-status:
-  phase: Pending | Provisioning | Ready | Failed
-  userNamespace: string
-  conditions:
-    - type: string
-      status: string
-      reason: string
-      message: string
-      lastTransitionTime: date-time
-  lastReconciledAt: date-time
-```
-
-Writers: control-plane (created on project creation)
-Readers: reconciler (watches for changes, drives provisioning)
+The legacy `MCProject` CRD has been removed by ADR-0091 — k8s itself is the source of truth for which project pods exist; no parent CR, no reconciler.
 
 ### Namespace: `mclaude-{userSlug}`
 
-Labels: `mclaude.io/user-id={userId}`, `mclaude.io/managed=true`
+Labels: `mclaude.io/managed=true` (the legacy `mclaude.io/user-id={userId}` label was dropped by ADR-0091 — the userSlug embedded in the namespace name is sufficient for lookup, and the `grants.create` payload doesn't carry `userId`).
 
 Created by: `mclaude-controller-k8s` (`reconcileNamespace`).
 Contains all per-user resources below.
@@ -613,25 +589,25 @@ Static Helm-templated ConfigMap containing session-agent pod spec values:
 | `nixPvcStorageClass` | Nix PVC storage class |
 
 Writers: Helm install/upgrade
-Readers: reconciler — watches this ConfigMap (filtered by name + namespace) in addition to reading it on startup; on change, re-enqueues all `MCProject` CRs so updated pod specs (e.g. new image) are applied without a manual `helm upgrade` (ADR-0043)
+Readers: per ADR-0091, `mclaude-controller-k8s` copies this ConfigMap into each user namespace as `session-agent-template` at namespace provisioning time. The per-user copy is read by `mclaude-user-agent` to build project pods. The controller no longer watches `MCProject` CRs (CRD removed by ADR-0091).
 
 ### PVC: `project-{projectId}` (in `mclaude-{userSlug}`)
 
 - AccessMode: ReadWriteOnce
-- Size: from session-agent-template ConfigMap
-- StorageClass: from session-agent-template ConfigMap
+- Size: from per-namespace `session-agent-template` ConfigMap
+- StorageClass: from per-namespace `session-agent-template` ConfigMap
 - Contents: bare git repo, worktrees, Claude Code JSONL persistence
 - Mounted at: `/data` in session-agent pod
-- `ownerReferences`: back to the `MCProject` CR via `controllerutil.SetControllerReference`. Deleting the `MCProject` CR cascades to this PVC.
+- Created by: `mclaude-user-agent` (per ADR-0091) on `agent.projects.provision`. No `ownerReferences` (no parent CR — k8s is the source of truth).
 
 ### PVC: `nix-{projectId}` (in `mclaude-{userSlug}`)
 
 - AccessMode: ReadWriteOnce
-- Size: from session-agent-template ConfigMap
-- StorageClass: from session-agent-template ConfigMap
+- Size: from per-namespace `session-agent-template` ConfigMap
+- StorageClass: from per-namespace `session-agent-template` ConfigMap
 - Contents: shared Nix store (cached tools)
 - Mounted at: `/nix` in session-agent pod
-- `ownerReferences`: back to the `MCProject` CR via `controllerutil.SetControllerReference`. Deleting the `MCProject` CR cascades to this PVC.
+- Created by: `mclaude-user-agent` (per ADR-0091). No `ownerReferences`.
 
 ### Deployment: `project-{projectId}` (in `mclaude-{userSlug}`)
 
@@ -656,10 +632,10 @@ Per ADR-0091. New Deployment, one per user namespace, deployed by `mclaude-contr
 - Strategy: `RollingUpdate` (single-tenant; restart is non-disruptive — k8s pods are unchanged on user-agent restart)
 - Volumes: `user-agent-key` Secret (mounted at `/secrets/agent/`), `user-tokens-{uslug}` Secret (mounted at `/secrets/tokens/` — write access via the k8s API, not the mount, since user-agent writes new keys after unsealing)
 - Container: user-agent image with env vars `USER_SLUG`, `HOST_SLUG`, `NAMESPACE`, `NATS_URL`, `CONTROL_PLANE_URL`
-- ServiceAccount: `mclaude-user-agent` — Role in user namespace permits `get/list/watch/create/update/patch/delete` on `Deployment` and `PersistentVolumeClaim`, and `get/list/create/update/patch` on `Secret` (`user-tokens-{uslug}` only) and `ConfigMap` (project-pod template snapshot — see below)
+- ServiceAccount: `mclaude-user-agent` — Role in user namespace permits `get/list/watch/create/update/patch/delete` on `Deployment` and `PersistentVolumeClaim`, `get/update/patch` on `Secret` (`user-tokens-{uslug}` only — controller creates the empty Secret; user-agent only PATCHes per-provider keys), and `get/list/watch` on `ConfigMap` (project-pod template snapshot — see below)
 - Restart policy: Always
 
-The controller copies the `{release}-session-agent-template` ConfigMap from `mclaude-system` into each user namespace as `session-agent-template` at namespace provisioning time. The user-agent reads its own namespace's copy — no cross-namespace RBAC required. When the source ConfigMap changes (Helm upgrade rolls out new image / resources), the controller re-copies into all user namespaces and re-rolls user-agent Deployments.
+The controller copies the `{release}-session-agent-template` ConfigMap from `mclaude-system` into each user namespace as `session-agent-template` at namespace provisioning time. The user-agent reads its own namespace's copy — no cross-namespace RBAC required. The per-user copy is refreshed on the next `grants.create` re-delivery for that user; cross-namespace fan-out re-roll on source ConfigMap change is **deferred** (operators currently re-trigger via `kubectl rollout restart deployment/user-agent -n mclaude-{uslug}` per user namespace).
 
 Writers: `mclaude-controller-k8s` (creates Deployment + ServiceAccount + Role + RoleBinding when the host grants the user access).
 

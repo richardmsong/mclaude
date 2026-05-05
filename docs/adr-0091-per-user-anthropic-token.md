@@ -150,9 +150,9 @@ Deployed by host controller during Phase 1 (host grants user access). On startup
 5. If bootstrap JWT (grant pending): subscribe to `mclaude.users.{uslug}.hosts.{hslug}.agent.activate`. Wait for signal.
 6. When signal received on `.agent.activate`: re-run challenge-response → CP issues full JWT (grant now accepted) → reconnect with full permissions → subscribe to `mclaude.users.{uslug}.hosts.{hslug}.agent.>`.
 7. If full JWT on initial auth (grant already accepted, e.g. restart): skip to full subscription immediately.
-7. Check k8s Secret `user-tokens-{uslug}` for existing plaintext tokens (written by a previous instance).
-8. If tokens present: hold in memory. Ready to create project pods.
-9. If tokens absent: wait for credential delivery on `mclaude.users.{uslug}.hosts.{hslug}.agent.token-delivery`.
+7. Token availability is checked at provision time via `os.ReadFile("/secrets/tokens/{provider}")` rather than cached in memory at startup. The `user-tokens-{uslug}` Secret is k8s-managed and updates propagate to the mount via kubelet.
+8. Subscribe to `.agent.token-delivery` so subsequent SPA-initiated deliveries (re-auth, new providers) can be unsealed and patched into the Secret.
+9. Subscribe to `.agent.projects.provision` and `.agent.projects.delete` for project pod lifecycle.
 
 ### Client login (session hydration)
 
@@ -365,8 +365,8 @@ Mechanism changes only. UX flows specified in ADR-0092.
 ### charts/mclaude-worker
 
 - Remove `controller.config.devOAuthToken` and `DEV_OAUTH_TOKEN` env var.
-- Add user-agent Deployment template to user namespace provisioning.
-- Remove session pod templates from host controller (moved to user-agent).
+- Add `{release}-user-agent-template` ConfigMap (rendered into the chart) and the `userAgent.*` knobs that feed it.
+- Controller no longer uses `{release}-session-agent-template` for pod creation. The ConfigMap is **retained** in the chart (still rendered into `mclaude-system`) but is now consumed by `mclaude-user-agent` — the controller's per-user reconciler copies it into each user namespace as `session-agent-template`.
 
 ### .github/workflows/deploy-main.yml
 

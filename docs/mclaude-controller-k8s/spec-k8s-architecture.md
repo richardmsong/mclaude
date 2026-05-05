@@ -73,8 +73,7 @@ User namespaces and their contents (user-agent Deployment, project Deployments o
 | `HUB_NATS_URL` | Yes | Hub NATS WebSocket URL (e.g. `nats-wss://nats.mclaude.example:443`). |
 | `CONTROL_PLANE_URL` | Yes | Control-plane HTTP base URL for challenge-response auth. |
 | `HOST_NKEY_SEED_PATH` | No | Path to the NKey seed file (default `/etc/mclaude/host-creds/nkey_seed`). |
-| `HELM_RELEASE_NAME` | No | Used to locate the user-agent template ConfigMap (default `mclaude-worker`). |
-| `USER_AGENT_TEMPLATE_CM` | No | Explicit name of the user-agent template ConfigMap (image, resources, etc.). Overrides `HELM_RELEASE_NAME`-derived name. |
+| `HELM_RELEASE_NAME` | No | Used to locate the user-agent template ConfigMap (default `mclaude-worker`). The controller derives the ConfigMap name as `{HELM_RELEASE_NAME}-user-agent-template`. |
 | `METRICS_ADDR` | No | Prometheus metrics listen address (default `:8082`). |
 | `HEALTH_PROBE_ADDR` | No | Health/readiness probe listen address (default `:8081`). |
 | `LEADER_ELECTION` | No | Enable leader election (default `false`). |
@@ -119,7 +118,7 @@ On each `mclaude.hosts.{hslug}.grants.create` reception (and on resync):
 3. Ensure ServiceAccount + Role + RoleBinding for both `mclaude-sa` (used by future project pods) and `mclaude-user-agent` (for the user-agent itself). The `mclaude-user-agent` Role grants verbs on `Deployment`, `PersistentVolumeClaim`, `Secret` (only `user-tokens-{uslug}`), and `ConfigMap` (only the local `session-agent-template`) within the user namespace. No ClusterRole or cross-namespace permissions.
 4. Ensure `user-secrets` Secret (CLI helper configs only — no token field).
 5. Ensure `user-config` ConfigMap (Claude Code workspace settings, hooks, seed configuration).
-5b. Copy `{release}-session-agent-template` from `mclaude-system` into the user namespace as `session-agent-template` (so the user-agent can read it without cross-namespace RBAC). On Helm upgrade where the source ConfigMap changes, controller re-copies into all user namespaces and re-rolls user-agent Deployments via `kubectl rollout restart`.
+5b. Copy `{release}-session-agent-template` from `mclaude-system` into the user namespace as `session-agent-template` (so the user-agent can read it without cross-namespace RBAC). The copy refreshes on the next `grants.create` re-delivery for that user; cross-namespace fan-out (re-roll all user-agent Deployments when the source ConfigMap changes) is **deferred** — operators re-trigger by re-publishing `grants.create` or running `kubectl rollout restart` per user namespace.
 6. Ensure `user-agent-key` Secret. If absent or missing `nkey-seed`: generate NKey via `nkeys.CreateUser()`, write decorated seed to `nkey-seed` field, then NATS request `mclaude.hosts.{hslug}.api.agents.user-agent.register {uslug, nkey_public}` to CP. Idempotent — skip registration if Secret already has the seed and CP already has the pubkey for `(host, user)`.
 6b. Ensure **empty** `user-tokens-{uslug}` Secret (no data keys yet) so the user-agent's required volume mount resolves at pod startup. The user-agent itself populates per-provider keys after the first successful `.agent.token-delivery` unseal — the controller never writes any token material here. Idempotent: if the Secret already exists (with or without populated keys), skip.
 7. Ensure `user-agent` Deployment (single replica, RollingUpdate). Pod mounts: `user-agent-key` Secret at `/secrets/agent/`, `user-tokens-{uslug}` Secret at `/secrets/tokens/`. Env: `USER_SLUG`, `HOST_SLUG`, `NAMESPACE`, `NATS_URL` (= `HUB_NATS_URL`), `CONTROL_PLANE_URL`. ImagePullSecrets copied from the controller's namespace.
@@ -152,7 +151,7 @@ When the controller connects to hub NATS, hub publishes `$SYS.ACCOUNT.{accountKe
 | CP returns 404 on challenge-response (key not registered) | Log registration instruction with pubkey; retry every 5s (exponential backoff, cap 60s). Pod remains in boot loop until operator runs `mclaude host register`. K8s liveness probe deadline will crashloop the pod if operator never acts. |
 | Hub NATS unreachable at boot (after JWT acquired) | Retry with NATS client backoff. No provision requests processed during gap. |
 | Hub NATS drops at runtime | NATS client reconnects; existing JWT used until TTL; on TTL expiry, challenge-response refresh. If CP unreachable at refresh time, controller exits and K8s restarts. |
-| User-agent provisioning fails (RBAC, quota, image pull) | Logs error; controller retries on next resync. CP `host_grants` row remains; user-agent never registers; SPA shows host as needing authorization. |
+| User-agent provisioning fails (RBAC, quota, image pull) | Logs error. Controller retries only on re-delivery of `mclaude.hosts.{hslug}.grants.create` (no periodic resync). CP `host_grants` row remains; user-agent never registers; SPA shows host as needing authorization. Operators retry by re-publishing the grant. |
 | `agents.user-agent.register` returns FORBIDDEN (grant row missing) | Should not occur — controller publishes the grant before registering. If observed, file a bug. |
 | Operator uses different `--name` at registration than `host.name` Helm value | CP keys off public key, not name. Controller decodes actual slug from JWT. `host.name` value is informational (NOTES.txt only). |
 
