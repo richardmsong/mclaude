@@ -29,20 +29,23 @@ The smallest, most portable fix is to add `RUN chmod +x` in the Dockerfile so th
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Where to fix | `mclaude-control-plane/Dockerfile` — `RUN chmod +x` after `COPY` | Survives any future CI refactor (cross-runner artifact handoff, tarball roundtrip, native multi-arch). One image-layer instruction. |
+| Idiom | `COPY --chmod=0755 <src> <dest>` (single instruction, sets mode at copy time) | Survives any future CI refactor (cross-runner artifact handoff, tarball roundtrip, native multi-arch). One image-layer instruction. **USER-independent**: works regardless of whether the Dockerfile drops privileges via `USER` before the COPY. Requires `# syntax=docker/dockerfile:1.4` (or higher) at the top of the Dockerfile. |
+| Alternative considered | `RUN chmod +x` after `COPY` | Initial choice (commit `49f5f08`); broke when the Dockerfile had `USER 1000` already in effect — non-root user cannot chmod a root-owned file. Replaced by `COPY --chmod` in commit `19216f0`. |
 | Alternative considered | Tar before upload-artifact, untar before docker build | Adds a CI step that must be maintained; doesn't help if a future contributor copies the binary another way. |
 | Alternative considered | Build inside the Docker layer instead of upload-artifact handoff | Larger refactor; multi-arch build matrix already commits to cross-runner handoff. |
-| Scope | This ADR fixes only the `mclaude-control-plane` image | Other Go-binary images (`mclaude-controller-k8s`, `mclaude-session-agent`, `mclaude-user-agent`, `mclaude-cli`) potentially have the same risk. Each image's Dockerfile should `chmod +x` its `COPY`'d binary too — covered as in-scope cleanup. |
+| Scope | All Dockerfiles that `COPY` a Go binary from build context | `mclaude-control-plane`, `mclaude-controller-k8s`, `mclaude-session-agent`, `mclaude-user-agent`. `mclaude-cli` has no Dockerfile; other components build via `RUN go build` inside the Docker layer (no artifact handoff). |
 
 ## Component Changes
 
-### mclaude-control-plane/Dockerfile
+### All affected Dockerfiles
 
-Add a `RUN chmod +x /usr/local/bin/control-plane` line immediately after `COPY control-plane /usr/local/bin/control-plane`.
+Add `# syntax=docker/dockerfile:1.4` pragma at the top (required for `--chmod`). Replace any `COPY <bin> <dest>` (with or without a follow-up `RUN chmod +x <dest>`) with:
 
-### mclaude-controller-k8s/Dockerfile, mclaude-session-agent/Dockerfile, mclaude-user-agent/Dockerfile, mclaude-cli/Dockerfile
+```dockerfile
+COPY --chmod=0755 <bin> <dest>
+```
 
-Same treatment — `chmod +x` after `COPY` for each Go binary, to make every image robust to artifact-bit-stripping. Apply only to images that actually exist; skip any that build via `go install` or `go build` in a multi-stage build (no artifact handoff).
+Affected files: `mclaude-control-plane/Dockerfile`, `mclaude-controller-k8s/Dockerfile`, `mclaude-session-agent/Dockerfile` (also for `entrypoint.sh`), `mclaude-user-agent/Dockerfile`. The previous two-stage `alpine AS chmod-stage → distroless` workaround in `mclaude-user-agent/Dockerfile` is replaced by direct single-stage `COPY --chmod=0755` into distroless (distroless supports the buildkit `COPY --chmod` flag without a shell).
 
 ## Impact
 
