@@ -93,8 +93,7 @@ Source layout — each directory below has a matching `docs/<component>/` spec f
 - `mclaude-session-agent/` — per-session sidecar (Go)
 - `mclaude-cli/` — CLI binary (Go)
 - `mclaude-relay/` — WebSocket tunnel, deployed to VM (Go)
-- `mclaude-connector/` — local bridge to relay (Go)
-- `mclaude-server/` — macOS launchd service (Go)
 - `mclaude-web/` — web SPA (TypeScript/React)
 - `mclaude-common/` — shared Go types
-- `mclaude-mcp/` — MClaude MCP server (Go)
+- `mclaude-controller-k8s/` — K8s NATS controller (Go)
+- `mclaude-user-agent/` — per-user agent (Go)

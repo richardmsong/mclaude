@@ -48,7 +48,7 @@ Slug charset: `[a-z0-9][a-z0-9-]{0,62}`, excluding leading `_` and the reserved-
 Index: `UNIQUE (user_id, host_id, slug)` — projects are unique-by-slug per user per host.
 
 Writers: control-plane (CreateProject)
-Readers: control-plane (GetProjectsByUser, GetProjectsByHost, GetProjectBySlug), `mclaude-controller-k8s` and `mclaude-controller-local` (via NATS request payload — they receive `host_id` indirectly through the host-scoped subject; they do not query Postgres directly).
+Readers: control-plane (GetProjectsByUser, GetProjectsByHost, GetProjectBySlug), `mclaude-controller-k8s` (via NATS request payload — it receives `host_id` indirectly through the host-scoped subject; it does not query Postgres directly).
 
 ### `hosts`
 
@@ -439,7 +439,7 @@ Project creation flow (ADR-0054): SPA/CLI uses HTTP `POST /api/users/{uslug}/pro
 
 Host controllers subscribe to `mclaude.hosts.{hslug}.>`:
 - `mclaude-controller-k8s` — subscribes to `mclaude.hosts.{cluster-slug}.>`. Receives requests from every user granted access to the cluster.
-- `mclaude-controller-local` (BYOH variant, ADR-0058) — subscribes to `mclaude.hosts.{hslug}.>`. Zero JetStream access.
+- BYOH host controller (future, ADR-0058) — subscribes to `mclaude.hosts.{hslug}.>`. Zero JetStream access.
 
 **Session subjects** (user-scoped, consolidated `sessions.>` hierarchy per ADR-0054):
 
@@ -844,7 +844,7 @@ Contents:
 - `config.json` — host metadata (`{slug, hubUrl, userSlug}`)
 
 Writers: `mclaude host register` (on registration), host controller JWT refresh loop (HTTP challenge-response, 5-min TTL).
-Readers: host controller (`mclaude-controller-local`) NATS connection.
+Readers: host controller NATS connection.
 
 Active-host pointer: `~/.mclaude/active-host` is a symlink to the active `~/.mclaude/hosts/{hslug}/` directory. The host controller and the CLI consult this when `--host` is not provided.
 

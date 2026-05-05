@@ -554,10 +554,9 @@ func runDaemon(args []string) int {
 	// 1. Connect to hub NATS using cfg.CredsPath
 	// 2. Subscribe to mclaude.users.{uslug}.hosts.{hslug}.api.projects.>
 	// 3. Start session-agent subprocesses for each provisioned project
-	// This will be implemented in mclaude-controller-local.
 	fmt.Fprintf(os.Stdout, "\nDaemon for %s/%s would start here.\n", cfg.UserSlug, cfg.HostSlug)
 	fmt.Fprintln(os.Stdout, "The actual NATS connection and process supervision loop")
-	fmt.Fprintln(os.Stdout, "will be implemented in mclaude-controller-local.")
+	fmt.Fprintln(os.Stdout, "is not yet implemented.")
 
 	return 0
 }

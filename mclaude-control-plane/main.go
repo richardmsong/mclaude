@@ -2,9 +2,9 @@
 // NATS-based project lifecycle, host management.
 //
 // Per ADR-0035: the main server path has zero K8s imports. Project provisioning
-// is delegated to mclaude-controller-k8s (cluster) or mclaude-controller-local
-// (BYOH) via NATS request/reply. The "init-keys" subcommand (Helm pre-install
-// Job) is the only code path that uses client-go to write the operator-keys Secret.
+// is delegated to mclaude-controller-k8s (cluster) via NATS request/reply.
+// The "init-keys" subcommand (Helm pre-install Job) is the only code path
+// that uses client-go to write the operator-keys Secret.
 package main
 
 import (

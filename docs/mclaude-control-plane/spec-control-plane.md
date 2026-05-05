@@ -2,7 +2,7 @@
 
 ## Role
 
-The control plane is the central API server and trust root for mclaude. It authenticates all identity types (users, hosts, agents) via a unified HTTP NKey challenge-response protocol (ADR-0054), issues scoped NATS JWTs (signed by the deployment-level account key), manages user / project / host records in Postgres, publishes provisioning requests over NATS to the appropriate controller (`mclaude-controller-k8s` for cluster hosts, `mclaude-controller-local` for BYOH machines), manages host lifecycle (registration, access grants/revocation, deregistration, emergency credential revocation — ADR-0054), handles OAuth provider integrations (GitHub/GitLab), tracks host liveness via `$SYS` events, manages S3 pre-signed URLs for binary data (imports and attachments — ADR-0053), provisions per-user JetStream resources (KV buckets and sessions streams — ADR-0054), and exposes admin endpoints for cluster registration and access grants.
+The control plane is the central API server and trust root for mclaude. It authenticates all identity types (users, hosts, agents) via a unified HTTP NKey challenge-response protocol (ADR-0054), issues scoped NATS JWTs (signed by the deployment-level account key), manages user / project / host records in Postgres, publishes provisioning requests over NATS to the appropriate controller (`mclaude-controller-k8s` for cluster hosts), manages host lifecycle (registration, access grants/revocation, deregistration, emergency credential revocation — ADR-0054), handles OAuth provider integrations (GitHub/GitLab), tracks host liveness via `$SYS` events, manages S3 pre-signed URLs for binary data (imports and attachments — ADR-0053), provisions per-user JetStream resources (KV buckets and sessions streams — ADR-0054), and exposes admin endpoints for cluster registration and access grants.
 
 Per ADR-0035 the control-plane is **K8s-free**: no controller-runtime, no K8s client, no MCProject reconciler. All K8s mutation is delegated to `mclaude-controller-k8s` via NATS request/reply. The control-plane runs only inside the central `mclaude-cp` Kubernetes cluster (there is no local/standalone variant). All identity types generate their own NKeys — the control-plane never generates NKey pairs or handles private key material (ADR-0054).
 
@@ -147,7 +147,7 @@ Per ADR-0035 the control-plane communicates with controllers over host-scoped NA
 
 | Subject | Trigger | Description |
 |---------|---------|-------------|
-| `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.provision` | `POST /api/users/{uslug}/projects` or NATS project creation | ADR-0091. Replaces the old `mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.create` transplant. After CP creates the Postgres row + KV entry, it publishes to the **user-agent** in the user's namespace on the host. Payload: `{projectId, projectSlug, gitUrl, gitIdentityId}`. (The `backend` field listed in earlier drafts is deferred — v1 hardcodes the Anthropic backend; multi-backend selection per-project is a follow-up.) User-agent owns the pod creation step. Cluster vs machine host distinction collapses — cluster path goes through user-agent; BYOH machine path is unchanged (handled by `mclaude-controller-local`). |
+| `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.provision` | `POST /api/users/{uslug}/projects` or NATS project creation | ADR-0091. Replaces the old `mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.create` transplant. After CP creates the Postgres row + KV entry, it publishes to the **user-agent** in the user's namespace on the host. Payload: `{projectId, projectSlug, gitUrl, gitIdentityId}`. (The `backend` field listed in earlier drafts is deferred — v1 hardcodes the Anthropic backend; multi-backend selection per-project is a follow-up.) User-agent owns the pod creation step. Cluster vs machine host distinction collapses — cluster path goes through user-agent. |
 | `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.delete` | Project delete | ADR-0091. Replaces the old `mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.delete`. Best-effort — if user-agent is offline, the event is missed and the pod persists until manual `kubectl delete deployment`. v1 does not retroactively reconcile (see ADR-0091 Deferred). Payload: `{projectId, projectSlug, event: "deleted"}`. |
 | `mclaude.users.{uslug}.hosts.{hslug}.agent.activate` | `POST /api/users/{uslug}/hosts/{hslug}/grant/accept` (or auto-accept on default platform) | ADR-0091. Signal-only payload (`{}` or `{"status":"accepted"}`). User-agent receives the signal, re-runs HTTP challenge-response, and obtains a full JWT (since `host_grants.status='accepted'` now). No JWT in the payload — the activation channel is unprivileged. |
 | `mclaude.users.{uslug}.hosts.{hslug}.api.projects.update` | `PATCH /api/projects/{id}` | Asks the controller to apply project metadata changes (e.g., git identity rotation). |
@@ -288,7 +288,7 @@ Per ADR-0054, the control-plane uses the NATS full resolver (`resolver: nats`) a
 
 ### OAuth Provider Integration
 
-Supports GitHub and GitLab providers configured via Helm (`providers.json`). OAuth flows use an in-memory state store with 10-minute TTL and cryptographic random state tokens. On successful callback, the control-plane stores connection metadata in the `oauth_connections` Postgres table and publishes a NATS message on `mclaude.users.{uslug}.hosts.{hslug}.api.projects.update` so `mclaude-controller-k8s` (cluster hosts) can refresh the per-user `user-secrets` Secret with the new tokens. For BYOH machines, `mclaude-controller-local` receives the same message and writes credentials into the local credential helpers (`~/.mclaude/projects/{pslug}/.credentials/`).
+Supports GitHub and GitLab providers configured via Helm (`providers.json`). OAuth flows use an in-memory state store with 10-minute TTL and cryptographic random state tokens. On successful callback, the control-plane stores connection metadata in the `oauth_connections` Postgres table and publishes a NATS message on `mclaude.users.{uslug}.hosts.{hslug}.api.projects.update` so `mclaude-controller-k8s` (cluster hosts) can refresh the per-user `user-secrets` Secret with the new tokens. For BYOH machines, the host controller receives the same message and writes credentials into the local credential helpers (`~/.mclaude/projects/{pslug}/.credentials/`).
 
 PAT connections bypass OAuth and auto-detect provider type by probing GitHub and GitLab API endpoints.
 
@@ -300,7 +300,7 @@ A background goroutine runs every 15 minutes, querying `oauth_connections` for G
 
 ### Project Creation Flow
 
-Per ADR-0091, cluster hosts route the provisioning step through the user-agent in the user namespace. Machine hosts continue to use `mclaude-controller-local` (no user-agent on BYOH).
+Per ADR-0091, cluster hosts route the provisioning step through the user-agent in the user namespace. Machine hosts use a host controller directly (no user-agent on BYOH).
 
 1. SPA publishes to `mclaude.users.{uslug}.api.projects.create` (NATS) with `{name, hostSlug, gitUrl?, gitIdentityId?}`, or uses HTTP `POST /api/users/{uslug}/projects`.
 2. Control plane validates the request, including optional `gitIdentityId` hostname match, and verifies the calling user has access to `hostSlug` (owned + granted via `host_access` table).
@@ -308,7 +308,7 @@ Per ADR-0091, cluster hosts route the provisioning step through the user-agent i
 4. Creates a Postgres `projects` row (`host_id`, `slug`, `name`, `git_url`, optional `git_identity_id`).
 5. Writes the project to the per-user `mclaude-projects-{uslug}` KV bucket (key `hosts.{hslug}.projects.{pslug}` — hierarchical key format per ADR-0054).
 6. **Cluster host (ADR-0091):** Publishes to `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.provision` with `{projectId, projectSlug, gitUrl, gitIdentityId, backend}`. Awaits the user-agent's reply (`PROVISION_TIMEOUT_SECONDS`). The user-agent creates the project Deployment in the user namespace with `user-tokens-{uslug}` Secret mounted at `/secrets/tokens/`. If the user-agent returns "host not trusted" (no token for the requested provider), the SPA shows "Authorize this host". Session-agent JWT issuance inside the pod is unchanged (existing `mclaude.hosts.{hslug}.api.agents.register`).
-   **Machine host:** Publishes to `mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.create` (existing path, unchanged for BYOH). `mclaude-controller-local` materializes `~/.mclaude/projects/{pslug}/worktree/` and starts a session-agent subprocess.
+   **Machine host:** Publishes to `mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.create` (existing path, unchanged for BYOH). The host controller materializes `~/.mclaude/projects/{pslug}/worktree/` and starts a session-agent subprocess.
 7. Replies to the SPA with `{projectId, slug, hostSlug, status}`.
 
 If the agent times out or replies with an error, control-plane returns `503 Service Unavailable` with `{error: "host {hslug} unreachable"}` and rolls back the Postgres + KV writes (or marks `projects.status = 'failed'` — whichever the implementation chooses; see ADR-0035 Error Handling row "Project create on offline cluster").
@@ -409,7 +409,7 @@ NATS subject tests use `nc.Request` with a 3s timeout; `t.Fatal` on timeout.
 - **S3-compatible storage**: MinIO for self-hosted, AWS S3 for cloud (ADR-0053). Used for import archives and attachments. CP generates pre-signed URLs — never proxies binary data directly. Configured via `S3_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`.
 - **`mclaude-system/operator-keys` Secret**: mounted at `OPERATOR_KEYS_PATH`. Provides operator + account NKeys / JWTs for the trust chain and `sysAccountSeed` for JWT revocation via `$SYS.REQ.CLAIMS.UPDATE` (ADR-0054). Generated by the `mclaude-cp` Helm pre-install Job (`mclaude-cp init-keys`).
 - **`mclaude-controller-k8s`** (one per worker cluster): receives `mclaude.hosts.{cslug}.>` provisioning requests (ADR-0054 host-scoped scheme). Lives in `docs/mclaude-controller-k8s/spec-k8s-architecture.md`.
-- **`mclaude-controller-local`** (one per BYOH machine): receives `mclaude.hosts.{hslug}.>` provisioning requests directly from hub NATS (ADR-0054/ADR-0058). Lives in `docs/mclaude-controller-local/spec-controller-local.md`.
+- **BYOH host controller** (one per BYOH machine, future): receives `mclaude.hosts.{hslug}.>` provisioning requests directly from hub NATS (ADR-0054/ADR-0058).
 - **OAuth providers** (optional): GitHub and/or GitLab instances for token exchange, profile fetch, token revocation, token refresh, and repo listing.
 - **OpenTelemetry** (optional): tracer provider for distributed tracing (HTTP, DB, NATS request spans).
 

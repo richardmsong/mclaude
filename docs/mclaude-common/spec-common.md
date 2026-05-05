@@ -122,11 +122,11 @@ Generates a fresh operator + account NKey pair and the corresponding JWTs for th
 
 ### Package `hostauth`
 
-Shared NKey challenge-response authentication logic for host controllers. Both `mclaude-controller-k8s` and `mclaude-controller-local` import this package as `mclaude.io/common/pkg/hostauth`.
+Shared NKey challenge-response authentication logic for host controllers. `mclaude-controller-k8s` imports this package as `mclaude.io/common/pkg/hostauth`.
 
 **Constructors:**
 
-`NewHostAuthFromCredsFile(credsPath string, cpURL string, log zerolog.Logger) (*HostAuth, error)` — reads a `.creds`-formatted file (NKey seed + pre-existing JWT). Used by `mclaude-controller-local` where a JWT is already present from a prior `mclaude host register` invocation.
+`NewHostAuthFromCredsFile(credsPath string, cpURL string, log zerolog.Logger) (*HostAuth, error)` — reads a `.creds`-formatted file (NKey seed + pre-existing JWT). Used when a JWT is already present from a prior `mclaude host register` invocation.
 
 `NewHostAuthFromSeed(seedPath string, cpURL string, log zerolog.Logger) (*HostAuth, error)` — reads only the NKey seed from `seedPath`. No pre-existing JWT required. Used by `mclaude-controller-k8s` where the Helm pre-install Job writes only the seed and the operator runs `mclaude host register` separately.
 

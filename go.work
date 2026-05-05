@@ -3,10 +3,8 @@ go 1.26
 use (
 	./mclaude-cli
 	./mclaude-common
-	./mclaude-connector
 	./mclaude-control-plane
 	./mclaude-controller-k8s
-	./mclaude-controller-local
 	./mclaude-relay
 	./mclaude-session-agent
 	./mclaude-user-agent

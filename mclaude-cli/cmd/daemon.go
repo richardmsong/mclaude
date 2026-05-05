@@ -40,7 +40,7 @@ type DaemonConfig struct {
 //
 // This does NOT start the daemon — it returns the resolved config for the
 // caller to use. The actual daemon loop (NATS connection, project subscription,
-// session-agent process supervision) is implemented in mclaude-controller-local.
+// session-agent process supervision) is not yet implemented.
 func ResolveDaemonConfig(flags DaemonFlags, out io.Writer) (*DaemonConfig, error) {
 	// Resolve context.
 	ctxPath := flags.ContextPath

@@ -9,7 +9,7 @@ Per ADR-0035 the previous single `mclaude` chart is split into two independently
 
 A single-cluster degenerate deployment installs **both** charts into the same K8s cluster; `mclaude-worker` connects directly to the hub NATS service.
 
-BYOH machines do **not** use Helm — they install the `mclaude-cli` binary, run `mclaude host register`, and start `mclaude-controller-local`. See `docs/mclaude-controller-local/spec-controller-local.md`.
+BYOH machines do **not** use Helm — they install the `mclaude-cli` binary, run `mclaude host register`, and start the host controller daemon (`mclaude daemon`).
 
 ---
 

@@ -850,7 +850,7 @@ func (r *Relay) proxyToTunnel(t *tunnelEntry, w http.ResponseWriter, req *http.R
 // ── Phone WebSocket ────────────────────────────────────────────────────────
 
 // HandleClientWS handles a browser's /ws connection and bridges it through
-// all connected tunnels to mclaude-servers on each laptop.
+// all connected tunnels to hosts.
 func (r *Relay) HandleClientWS(w http.ResponseWriter, req *http.Request) {
 	user := r.authenticateRequest(req)
 	if user == nil {

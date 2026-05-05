@@ -6,9 +6,9 @@ The session agent is a per-project process supervisor that manages **multiple co
 
 The agent supports multiple CLI backends: Claude Code, Factory Droid, Devin ACP, and a GenericTerminal fallback. Each backend is implemented as a driver in the `internal/drivers/` package. The `DriverRegistry` maps `CLIBackend` enum values to driver instances; session creation specifies the backend (defaulting to `claude_code`).
 
-The agent operates as a standalone per-project process in all deployment modes: as a K8s pod (one per project) or as a subprocess of `mclaude-controller-local` on BYOH hosts (one per project, per ADR-0058).
+The agent operates as a standalone per-project process in all deployment modes: as a K8s pod (one per project) or as a subprocess of the host controller on BYOH hosts (one per project, per ADR-0058).
 
-> **Daemon mode deprecation (ADR-0058):** The previous `--daemon` mode (single-process, cross-project) is deprecated and will be removed. The `mclaude daemon` CLI command now launches `mclaude-controller-local` which spawns per-project agents. See the "Daemon Mode" section for the deprecation plan.
+> **Daemon mode deprecation (ADR-0058):** The previous `--daemon` mode (single-process, cross-project) is deprecated and will be removed. The `mclaude daemon` CLI command launches the host controller which spawns per-project agents. See the "Daemon Mode" section for the deprecation plan.
 
 Per ADR-0054, every NATS subject the agent uses is host-scoped: `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.…`. The host slug is required configuration — sourced from the `HOST_SLUG` env var in K8s pods and from the `--host` flag (or `~/.mclaude/active-host` symlink) on BYOH machines. Absence is fatal at startup.
 
@@ -88,15 +88,15 @@ Manages Claude Code version upgrades. Fetches changelog between current and targ
 
 ### BYOH Mode (Per-Project Agent)
 
-On BYOH hosts, the agent runs as a standalone per-project subprocess spawned by `mclaude-controller-local` (ADR-0058). Each project gets its own agent process with its own per-project JWT (ADR-0054). The host controller manages agent lifecycle; the agent manages session lifecycle within its project.
+On BYOH hosts, the agent runs as a standalone per-project subprocess spawned by the host controller (ADR-0058). Each project gets its own agent process with its own per-project JWT (ADR-0054). The host controller manages agent lifecycle; the agent manages session lifecycle within its project.
 
 Liveness is reported by the hub NATS via `$SYS.ACCOUNT.*.CONNECT/DISCONNECT` events that the control-plane subscribes to. The agent does **not** publish periodic heartbeats and does **not** write to `mclaude-hosts` or to any removed bucket (`mclaude-laptops`, `mclaude-heartbeats`).
 
 ### Daemon Mode (Deprecated)
 
-> **Deprecated per ADR-0058.** The `--daemon` flag is deprecated. The `mclaude daemon` CLI command now launches `mclaude-controller-local` instead of `mclaude-session-agent --daemon`. Existing launchd/systemd units pointing at `mclaude-session-agent --daemon` will stop working when ADR-0054's permission tightening is deployed (host JWTs lose JetStream access, agent JWTs become per-project scoped). No migration of in-flight sessions — sessions running under daemon mode at cut-over are terminated.
+> **Deprecated per ADR-0058.** The `--daemon` flag is deprecated. The `mclaude daemon` CLI command now launches the host controller instead of `mclaude-session-agent --daemon`. Existing launchd/systemd units pointing at `mclaude-session-agent --daemon` will stop working when ADR-0054's permission tightening is deployed (host JWTs lose JetStream access, agent JWTs become per-project scoped). No migration of in-flight sessions — sessions running under daemon mode at cut-over are terminated.
 >
-> **Phase 1 (parallel):** `mclaude daemon` redirects to `mclaude-controller-local`. Old `--daemon` still works.
+> **Phase 1 (parallel):** `mclaude daemon` redirects to the host controller. Old `--daemon` still works.
 > **Phase 2 (hard cut-over):** ADR-0054 deployment makes cross-project JetStream access impossible. All BYOH hosts must use controller + per-project agents.
 > **Phase 3 (code removal):** Remove `daemon.go`, `daemon_jobs.go`, `--daemon` flag, and daemon-specific goroutines (`runJWTRefresh`, `runLifecycleSubscriber`, `runJobDispatcher`, `runJobsHTTP`). The `runQuotaPublisher` goroutine has been moved to the per-project standalone agent (`agent.go`). Per-project agents subscribe to `manage.designate-quota-publisher` on startup and start/stop `runQuotaPublisher` on CP designation signals (ADR-0044). The daemon copy of `runQuotaPublisher` in `daemon_jobs.go` is retained during the daemon-deprecated period.
 
@@ -114,7 +114,7 @@ Liveness is reported by the hub NATS via `$SYS.ACCOUNT.*.CONNECT/DISCONNECT` eve
 | `--claude-path` / `CLAUDE_PATH` | Flag or env | Path to Claude binary (default: `claude`) |
 | `--data-dir` | Flag | Project PVC mount (default: `/data`) |
 | `--mode` | Flag | `k8s` or `standalone` (default: `standalone`) |
-| `--daemon` | Flag | **(Deprecated — ADR-0058)** Enable BYOH daemon mode. Use `mclaude-controller-local` instead. |
+| `--daemon` | Flag | **(Deprecated — ADR-0058)** Enable BYOH daemon mode. Use `mclaude daemon` instead. |
 | `--refresh-url` / `REFRESH_URL` | Flag or env | **(Deprecated — ADR-0058)** JWT refresh endpoint URL (daemon only). Agents now use HTTP challenge-response. |
 | `LOG_LEVEL` | Env | Zerolog level (default: `info`) |
 | `HOSTNAME` / `--hostname` | Flag or env | **Dead code** — daemon mode only. Stored in `DaemonConfig.Hostname` but never accessed. Remnant of the removed collision-detection flow. |
@@ -223,7 +223,7 @@ All API subscriptions are at host-and-project scope — the Agent subscribes onc
 - **Quota status** (per-session QuotaMonitor) via core NATS on `mclaude.users.{uslug}.quota`.
 - **Quota publisher re-designation** via core NATS on `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.manage.designate-quota-publisher` — CP publishes when re-designating the quota publisher after the previously designated agent goes offline (ADR-0044). On `quotaPublisher: true`, agent starts `runQuotaPublisher`; on `quotaPublisher: false`, agent stops it.
 
-The agent does **not** subscribe to project-creation requests; project provisioning per ADR-0054 is handled by `mclaude-controller-local` (BYOH) or `mclaude-controller-k8s` (cluster), each subscribing to `mclaude.hosts.{hslug}.>` (host-scoped, ADR-0054).
+The agent does **not** subscribe to project-creation requests; project provisioning per ADR-0054 is handled by `mclaude-controller-k8s` (cluster hosts), subscribing to `mclaude.hosts.{hslug}.>` (host-scoped, ADR-0054).
 
 ### Unix Sockets
 
@@ -629,7 +629,7 @@ Terminal sessions spawn a PTY shell and bridge I/O through core NATS subjects. T
 | Nix | Package manager for user-installed tools (K8s mode; PVC-backed store) |
 | Anthropic OAuth API | Quota polling via `api.anthropic.com/api/oauth/usage` (designated agent only, ADR-0044) |
 | `~/.claude/.credentials.json` | OAuth token for quota API (designated agent only) |
-| `mclaude-controller-local` | Spawns per-project agents on BYOH hosts, registers agent NKeys with CP (ADR-0058) |
+| BYOH host controller | Spawns per-project agents on BYOH hosts, registers agent NKeys with CP (ADR-0058) |
 | user-secrets K8s Secret | git CLI configs, OAuth connection tokens (K8s mode) — `oauth-token` field removed per ADR-0091 |
 | user-tokens-{uslug} K8s Secret | Model-provider token (`anthropic` key for v1) — mounted at `/secrets/tokens/`, read by entrypoint into `CLAUDE_CODE_OAUTH_TOKEN` |
 | user-config K8s ConfigMap | Claude Code seed settings and hooks (K8s mode) |

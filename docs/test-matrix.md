@@ -398,7 +398,7 @@ Comprehensive test matrix covering every user-facing behavior described in the s
 
 | ID | Description | Preconditions | Steps | Expected Result | Testable? |
 |----|-------------|---------------|-------|-----------------|-----------|
-| CLI-DAEMON-01 | Start daemon | Host registered, active-host set | Run `mclaude daemon` | Launches `mclaude-controller-local`. Connects to hub NATS. Subscribes to `mclaude.hosts.{hslug}.>`. Starts session-agent subprocesses for provisioned projects. | Yes |
+| CLI-DAEMON-01 | Start daemon | Host registered, active-host set | Run `mclaude daemon` | Connects to hub NATS. Subscribes to `mclaude.hosts.{hslug}.>`. Starts session-agent subprocesses for provisioned projects. | Yes |
 | CLI-DAEMON-02 | Daemon with explicit host | Multiple hosts | Run `mclaude daemon --host specific-host` | Controller uses specified host slug (not active-host). | Yes |
 | CLI-DAEMON-03 | Daemon — no host available | No hosts registered, no active-host | Run `mclaude daemon` | Fatal exit: `FATAL: HOST_SLUG required`. | Yes |
 

@@ -1,6 +1,6 @@
 // Package hostauth provides shared NKey challenge-response authentication logic
-// for host controllers. Both mclaude-controller-k8s and mclaude-controller-local
-// import this package as mclaude.io/common/pkg/hostauth (ADR-0063).
+// for host controllers. mclaude-controller-k8s imports this package as
+// mclaude.io/common/pkg/hostauth (ADR-0063).
 package hostauth
 
 import (
@@ -48,8 +48,7 @@ type HostAuth struct {
 // .creds file at credsPath. cpURL is the base URL of the control-plane for
 // HTTP challenge-response refresh (e.g. "https://cp.example.com"). If cpURL
 // is empty, JWT refresh is disabled and the host JWT is used as-is until it
-// expires. Used by mclaude-controller-local where a JWT is already present
-// from a prior mclaude host register invocation.
+// expires.
 func NewHostAuthFromCredsFile(credsPath string, cpURL string, log zerolog.Logger) (*HostAuth, error) {
 	credsData, err := os.ReadFile(credsPath)
 	if err != nil {

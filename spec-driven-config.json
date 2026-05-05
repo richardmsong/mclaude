@@ -4,7 +4,8 @@
     "mclaude-session-agent/**/*.go",
     "mclaude-cli/**/*.go",
     "mclaude-relay/**/*.go",
-    "mclaude-connector/**/*.go",
+    "mclaude-controller-k8s/**/*.go",
+    "mclaude-user-agent/**/*.go",
     "mclaude-web/src/**"
   ],
   "blocked_commands": [
