@@ -7,6 +7,7 @@
 //	mclaude-cli session list [-u <uslug>] [-p <pslug>] [--host <hslug>]
 //	mclaude-cli login [--server <url>]
 //	mclaude-cli import [--host <hslug>] [--server <url>]
+//	mclaude-cli auth anthropic [--token <v>] [--status] [--revoke]
 //	mclaude-cli host register [--name <name>]
 //	mclaude-cli host list
 //	mclaude-cli host use <hslug>
@@ -21,6 +22,7 @@
 //	session list     List sessions for a project (uses ~/.mclaude/context.json defaults).
 //	login            Authenticate via device-code flow; stores credentials in ~/.mclaude/auth.json.
 //	import           Import existing Claude Code session data into mclaude.
+//	auth anthropic   Connect Anthropic OAuth token; deliver to trusted hosts (ADR-0091).
 //	host register    Register this machine as a BYOH host (device-code flow).
 //	host list        List all hosts the user owns or has access to.
 //	host use         Set the active host.
@@ -70,6 +72,8 @@ func run(args []string) int {
 		return runLogin(args)
 	case "import":
 		return runImport(args)
+	case "auth":
+		return runAuth(args)
 	case "host":
 		return runHost(args)
 	case "cluster":
@@ -100,6 +104,10 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  import                      import existing Claude Code session data")
 	fmt.Fprintln(os.Stderr, "    --host <hslug>            host slug (default: ~/.mclaude/active-host)")
 	fmt.Fprintln(os.Stderr, "    --server <url>            control-plane base URL (default: context or https://api.mclaude.internal)")
+	fmt.Fprintln(os.Stderr, "  auth anthropic              connect Anthropic OAuth token (ADR-0091)")
+	fmt.Fprintln(os.Stderr, "    --token <v>              manual token paste (skip OAuth)")
+	fmt.Fprintln(os.Stderr, "    --status                 print connected/not-set + per-host pubkey status")
+	fmt.Fprintln(os.Stderr, "    --revoke                 delete tokens.anthropic from KV (client-side only)")
 	fmt.Fprintln(os.Stderr, "  host register               register this machine as a BYOH host")
 	fmt.Fprintln(os.Stderr, "    --name <name>             display name (default: hostname)")
 	fmt.Fprintln(os.Stderr, "  host list                   list all hosts")
@@ -246,6 +254,58 @@ func runImport(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// runAuth handles the "auth" subcommand and its sub-subcommands.
+func runAuth(args []string) int {
+	if len(args) < 3 {
+		fmt.Fprintln(os.Stderr, "Usage: mclaude-cli auth <provider>")
+		fmt.Fprintln(os.Stderr, "  anthropic   connect Anthropic OAuth token")
+		return 1
+	}
+	switch args[2] {
+	case "anthropic":
+		return runAuthAnthropic(args[3:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown auth provider: %s\n", args[2])
+		fmt.Fprintln(os.Stderr, "Usage: mclaude-cli auth anthropic [--token <v>] [--status] [--revoke]")
+		return 1
+	}
+}
+
+// runAuthAnthropic handles "mclaude auth anthropic".
+func runAuthAnthropic(args []string) int {
+	flags := cmd.AuthAnthropicFlags{}
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--token":
+			i++
+			if i < len(args) {
+				flags.Token = args[i]
+			}
+		case "--status":
+			flags.Status = true
+		case "--revoke":
+			flags.Revoke = true
+		case "--server":
+			i++
+			if i < len(args) {
+				flags.ServerURL = args[i]
+			}
+		}
+	}
+
+	result, err := cmd.RunAuthAnthropic(flags, os.Stdout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		// Return the exit code from the result if available.
+		if result != nil {
+			return result.ExitCode
+		}
+		return cmd.ExitAuthNoToken
+	}
+	return result.ExitCode
 }
 
 // runSession handles the "session" subcommand and its sub-subcommands.
