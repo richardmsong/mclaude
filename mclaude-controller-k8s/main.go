@@ -157,13 +157,21 @@ func main() {
 	}
 }
 
+// refresher is the subset of *hostauth.HostAuth used by bootRefresh.
+// Defined as an interface to allow test injection of a fake.
+type refresher interface {
+	Refresh(ctx context.Context) (string, error)
+}
+
 // bootRefresh calls auth.Refresh() with exponential backoff until a JWT is acquired.
 // Initial wait: 5s, doubles each attempt, capped at 60s (ADR-0063).
-func bootRefresh(ctx context.Context, auth *hostauth.HostAuth, log zerolog.Logger) string {
-	const (
-		initialInterval = 5 * time.Second
-		maxInterval     = 60 * time.Second
-	)
+func bootRefresh(ctx context.Context, auth refresher, log zerolog.Logger) string {
+	return bootRefreshWithInterval(ctx, auth, log, 5*time.Second, 60*time.Second)
+}
+
+// bootRefreshWithInterval is the testable implementation of bootRefresh.
+// initialInterval and maxInterval are exposed for test injection of short durations.
+func bootRefreshWithInterval(ctx context.Context, auth refresher, log zerolog.Logger, initialInterval, maxInterval time.Duration) string {
 	interval := initialInterval
 	for {
 		jwt, err := auth.Refresh(ctx)

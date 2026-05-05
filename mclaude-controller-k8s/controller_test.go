@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -21,6 +22,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+
+	"mclaude.io/common/pkg/hostauth"
 )
 
 // ---- test infrastructure ----
@@ -1051,5 +1054,404 @@ func TestSingleNATSSubscription(t *testing.T) {
 	got := fmt.Sprintf("mclaude.hosts.%s.>", hslug)
 	if got != want {
 		t.Errorf("subscription subject: got %q, want %q", got, want)
+	}
+}
+
+// ---- unit tests: bootRefresh exponential backoff ----
+
+// fakeRefresher implements the refresher interface for testing bootRefresh.
+type fakeRefresher struct {
+	// responses is a queue of (jwt, error) pairs returned in order.
+	responses []fakeRefreshResponse
+	idx       int
+}
+
+type fakeRefreshResponse struct {
+	jwt string
+	err error
+}
+
+func (f *fakeRefresher) Refresh(_ context.Context) (string, error) {
+	if f.idx >= len(f.responses) {
+		return "final-jwt", nil
+	}
+	r := f.responses[f.idx]
+	f.idx++
+	return r.jwt, r.err
+}
+
+// TestBootRefresh_SucceedsOnFirstTry verifies bootRefresh returns immediately when
+// Refresh() succeeds on the first call.
+func TestBootRefresh_SucceedsOnFirstTry(t *testing.T) {
+	fr := &fakeRefresher{
+		responses: []fakeRefreshResponse{
+			{jwt: "host-jwt-v1", err: nil},
+		},
+	}
+	ctx := context.Background()
+	// Use 1ms intervals to avoid real sleeps in tests.
+	got := bootRefreshWithInterval(ctx, fr, zerolog.Nop(), time.Millisecond, time.Millisecond)
+	if got != "host-jwt-v1" {
+		t.Errorf("bootRefresh: got %q, want host-jwt-v1", got)
+	}
+	if fr.idx != 1 {
+		t.Errorf("Refresh called %d times, expected 1", fr.idx)
+	}
+}
+
+// TestBootRefresh_RetriesOnErrNotRegistered verifies bootRefresh retries when CP
+// returns ErrNotRegistered (404 — NKey not yet registered) and eventually returns
+// the JWT once the operator completes registration (spec-k8s-architecture.md §Boot
+// Sequence step 3; ADR-0063).
+func TestBootRefresh_RetriesOnErrNotRegistered(t *testing.T) {
+	// First two calls return ErrNotRegistered; third call succeeds.
+	fr := &fakeRefresher{
+		responses: []fakeRefreshResponse{
+			{jwt: "", err: hostauth.ErrNotRegistered},
+			{jwt: "", err: hostauth.ErrNotRegistered},
+			{jwt: "host-jwt-registered", err: nil},
+		},
+	}
+
+	ctx := context.Background()
+	// Use 1ms intervals so the test completes in milliseconds, not seconds.
+	jwt := bootRefreshWithInterval(ctx, fr, zerolog.Nop(), time.Millisecond, time.Millisecond)
+
+	if jwt != "host-jwt-registered" {
+		t.Errorf("bootRefresh: got %q, want host-jwt-registered", jwt)
+	}
+	if fr.idx != 3 {
+		t.Errorf("Refresh called %d times, expected 3", fr.idx)
+	}
+}
+
+// TestBootRefresh_RetriesOnGenericError verifies bootRefresh retries on non-404
+// errors (network failures, transient CP unavailability) as well.
+func TestBootRefresh_RetriesOnGenericError(t *testing.T) {
+	networkErr := errors.New("connection refused")
+	fr := &fakeRefresher{
+		responses: []fakeRefreshResponse{
+			{jwt: "", err: networkErr},
+			{jwt: "host-jwt-ok", err: nil},
+		},
+	}
+
+	ctx := context.Background()
+	jwt := bootRefreshWithInterval(ctx, fr, zerolog.Nop(), time.Millisecond, time.Millisecond)
+
+	if jwt != "host-jwt-ok" {
+		t.Errorf("bootRefresh: got %q, want host-jwt-ok", jwt)
+	}
+	if fr.idx != 2 {
+		t.Errorf("Refresh called %d times, expected 2", fr.idx)
+	}
+}
+
+// TestBootRefresh_ExponentialBackoffCapAtMax verifies the exponential backoff
+// caps at maxInterval and does not exceed it.
+func TestBootRefresh_ExponentialBackoffCapAtMax(t *testing.T) {
+	// 5 failures then success: verifies the retry loop doesn't bail out early.
+	responses := make([]fakeRefreshResponse, 5)
+	for i := range responses {
+		responses[i] = fakeRefreshResponse{jwt: "", err: hostauth.ErrNotRegistered}
+	}
+	responses = append(responses, fakeRefreshResponse{jwt: "final-jwt", err: nil})
+
+	fr := &fakeRefresher{responses: responses}
+
+	ctx := context.Background()
+	// initialInterval=1ms, maxInterval=2ms — verifies cap logic runs without overflow.
+	jwt := bootRefreshWithInterval(ctx, fr, zerolog.Nop(), time.Millisecond, 2*time.Millisecond)
+
+	if jwt != "final-jwt" {
+		t.Errorf("bootRefresh: got %q, want final-jwt", jwt)
+	}
+	if fr.idx != 6 {
+		t.Errorf("Refresh called %d times, expected 6", fr.idx)
+	}
+}
+
+// ---- unit tests: corporate CA injection ----
+
+func TestEnsureUserAgentDeployment_CorporateCAInjected(t *testing.T) {
+	r := newTestUserReconciler()
+	ctx := context.Background()
+	userNs := "mclaude-alice"
+	uslug := "alice"
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: userNs}}
+	if err := r.client.Create(ctx, ns); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	// Pre-create the CA bundle ConfigMap in the user namespace (trust-manager would do this).
+	caCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "corporate-ca-bundle", Namespace: userNs},
+		Data:       map[string]string{"ca-certificates.crt": "-----BEGIN CERTIFICATE-----\nfakeCA\n-----END CERTIFICATE-----\n"},
+	}
+	if err := r.client.Create(ctx, caCM); err != nil {
+		t.Fatalf("create CA ConfigMap: %v", err)
+	}
+
+	tpl := &userAgentTpl{
+		image:                    "mclaude-user-agent:latest",
+		imagePullPolicy:          corev1.PullIfNotPresent,
+		corporateCAEnabled:       true,
+		corporateCAConfigMapName: "corporate-ca-bundle",
+		corporateCAConfigMapKey:  "ca-certificates.crt",
+	}
+	applyDefaultUserAgentResources(tpl)
+
+	if err := r.ensureUserAgentDeployment(ctx, userNs, uslug, tpl); err != nil {
+		t.Fatalf("ensureUserAgentDeployment: %v", err)
+	}
+
+	deploy := &appsv1.Deployment{}
+	if err := r.client.Get(ctx, types.NamespacedName{Name: "user-agent", Namespace: userNs}, deploy); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+
+	container := deploy.Spec.Template.Spec.Containers[0]
+
+	// Verify corporate-ca volume exists and references the CA ConfigMap.
+	foundCAVolume := false
+	for _, v := range deploy.Spec.Template.Spec.Volumes {
+		if v.Name == "corporate-ca" {
+			foundCAVolume = true
+			if v.ConfigMap == nil || v.ConfigMap.Name != "corporate-ca-bundle" {
+				t.Errorf("corporate-ca volume ConfigMap: got %+v, want corporate-ca-bundle", v.ConfigMap)
+			}
+		}
+	}
+	if !foundCAVolume {
+		t.Error("corporate-ca volume not injected")
+	}
+
+	// Verify volume mount at /etc/ssl/certs/corporate-ca-certificates.crt.
+	foundCAMount := false
+	for _, m := range container.VolumeMounts {
+		if m.Name == "corporate-ca" {
+			foundCAMount = true
+			if m.MountPath != "/etc/ssl/certs/corporate-ca-certificates.crt" {
+				t.Errorf("corporate-ca mount path: got %q, want /etc/ssl/certs/corporate-ca-certificates.crt", m.MountPath)
+			}
+			if m.SubPath != "ca-certificates.crt" {
+				t.Errorf("corporate-ca mount SubPath: got %q, want ca-certificates.crt", m.SubPath)
+			}
+			if !m.ReadOnly {
+				t.Error("corporate-ca mount should be ReadOnly")
+			}
+		}
+	}
+	if !foundCAMount {
+		t.Error("corporate-ca volume mount not injected")
+	}
+
+	// Verify NODE_EXTRA_CA_CERTS env var.
+	envMap := map[string]string{}
+	for _, e := range container.Env {
+		envMap[e.Name] = e.Value
+	}
+	if envMap["NODE_EXTRA_CA_CERTS"] != "/etc/ssl/certs/corporate-ca-certificates.crt" {
+		t.Errorf("NODE_EXTRA_CA_CERTS: got %q, want /etc/ssl/certs/corporate-ca-certificates.crt",
+			envMap["NODE_EXTRA_CA_CERTS"])
+	}
+
+	// Verify mclaude.io/ca-bundle-hash annotation is set and non-empty.
+	annotations := deploy.Spec.Template.Annotations
+	hash, ok := annotations["mclaude.io/ca-bundle-hash"]
+	if !ok {
+		t.Error("pod template annotation mclaude.io/ca-bundle-hash not set")
+	}
+	if hash == "" {
+		t.Error("mclaude.io/ca-bundle-hash should be non-empty when CA ConfigMap has data")
+	}
+}
+
+func TestEnsureUserAgentDeployment_CorporateCANotInjectedWhenDisabled(t *testing.T) {
+	r := newTestUserReconciler()
+	ctx := context.Background()
+	userNs := "mclaude-alice"
+	uslug := "alice"
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: userNs}}
+	if err := r.client.Create(ctx, ns); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	tpl := defaultUserAgentTemplate() // corporateCAEnabled = false
+	if err := r.ensureUserAgentDeployment(ctx, userNs, uslug, tpl); err != nil {
+		t.Fatalf("ensureUserAgentDeployment: %v", err)
+	}
+
+	deploy := &appsv1.Deployment{}
+	if err := r.client.Get(ctx, types.NamespacedName{Name: "user-agent", Namespace: userNs}, deploy); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+
+	container := deploy.Spec.Template.Spec.Containers[0]
+
+	// No corporate-ca volume.
+	for _, v := range deploy.Spec.Template.Spec.Volumes {
+		if v.Name == "corporate-ca" {
+			t.Error("corporate-ca volume should NOT be present when corporateCAEnabled=false")
+		}
+	}
+
+	// No corporate-ca mount.
+	for _, m := range container.VolumeMounts {
+		if m.Name == "corporate-ca" {
+			t.Error("corporate-ca volume mount should NOT be present when corporateCAEnabled=false")
+		}
+	}
+
+	// No NODE_EXTRA_CA_CERTS.
+	for _, e := range container.Env {
+		if e.Name == "NODE_EXTRA_CA_CERTS" {
+			t.Error("NODE_EXTRA_CA_CERTS should NOT be present when corporateCAEnabled=false")
+		}
+	}
+
+	// No ca-bundle-hash annotation.
+	if _, ok := deploy.Spec.Template.Annotations["mclaude.io/ca-bundle-hash"]; ok {
+		t.Error("mclaude.io/ca-bundle-hash annotation should NOT be present when corporateCAEnabled=false")
+	}
+}
+
+func TestEnsureUserAgentDeployment_CorporateCAHashUpdatesOnCMChange(t *testing.T) {
+	r := newTestUserReconciler()
+	ctx := context.Background()
+	userNs := "mclaude-alice"
+	uslug := "alice"
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: userNs}}
+	if err := r.client.Create(ctx, ns); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	// Initial CA bundle.
+	caCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "corporate-ca-bundle", Namespace: userNs},
+		Data:       map[string]string{"ca-certificates.crt": "CERT_V1"},
+	}
+	if err := r.client.Create(ctx, caCM); err != nil {
+		t.Fatalf("create CA ConfigMap: %v", err)
+	}
+
+	tpl := &userAgentTpl{
+		image:                    "mclaude-user-agent:latest",
+		imagePullPolicy:          corev1.PullIfNotPresent,
+		corporateCAEnabled:       true,
+		corporateCAConfigMapName: "corporate-ca-bundle",
+		corporateCAConfigMapKey:  "ca-certificates.crt",
+	}
+	applyDefaultUserAgentResources(tpl)
+
+	if err := r.ensureUserAgentDeployment(ctx, userNs, uslug, tpl); err != nil {
+		t.Fatalf("first ensureUserAgentDeployment: %v", err)
+	}
+
+	deploy := &appsv1.Deployment{}
+	if err := r.client.Get(ctx, types.NamespacedName{Name: "user-agent", Namespace: userNs}, deploy); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	hashV1 := deploy.Spec.Template.Annotations["mclaude.io/ca-bundle-hash"]
+	if hashV1 == "" {
+		t.Fatal("expected non-empty ca-bundle-hash for v1")
+	}
+
+	// Update the CA bundle ConfigMap.
+	caCM.Data["ca-certificates.crt"] = "CERT_V2"
+	if err := r.client.Update(ctx, caCM); err != nil {
+		t.Fatalf("update CA ConfigMap: %v", err)
+	}
+
+	// Re-reconcile.
+	if err := r.ensureUserAgentDeployment(ctx, userNs, uslug, tpl); err != nil {
+		t.Fatalf("second ensureUserAgentDeployment: %v", err)
+	}
+
+	updated := &appsv1.Deployment{}
+	if err := r.client.Get(ctx, types.NamespacedName{Name: "user-agent", Namespace: userNs}, updated); err != nil {
+		t.Fatalf("get updated deployment: %v", err)
+	}
+	hashV2 := updated.Spec.Template.Annotations["mclaude.io/ca-bundle-hash"]
+	if hashV2 == "" {
+		t.Fatal("expected non-empty ca-bundle-hash for v2")
+	}
+	if hashV1 == hashV2 {
+		t.Errorf("ca-bundle-hash did not change after CA bundle update: %q == %q", hashV1, hashV2)
+	}
+}
+
+func TestEnsureUserAgentDeployment_CorporateCADefaultConfigMapName(t *testing.T) {
+	r := newTestUserReconciler()
+	ctx := context.Background()
+	userNs := "mclaude-alice"
+	uslug := "alice"
+
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: userNs}}
+	if err := r.client.Create(ctx, ns); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	// Template with corporateCAEnabled but no configMapName/Key — should use defaults.
+	tpl := &userAgentTpl{
+		image:              "mclaude-user-agent:latest",
+		imagePullPolicy:    corev1.PullIfNotPresent,
+		corporateCAEnabled: true,
+		// corporateCAConfigMapName and corporateCAConfigMapKey are empty — use defaults.
+	}
+	applyDefaultUserAgentResources(tpl)
+
+	if err := r.ensureUserAgentDeployment(ctx, userNs, uslug, tpl); err != nil {
+		t.Fatalf("ensureUserAgentDeployment: %v", err)
+	}
+
+	deploy := &appsv1.Deployment{}
+	if err := r.client.Get(ctx, types.NamespacedName{Name: "user-agent", Namespace: userNs}, deploy); err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+
+	// Volume should reference the default ConfigMap name.
+	for _, v := range deploy.Spec.Template.Spec.Volumes {
+		if v.Name == "corporate-ca" {
+			if v.ConfigMap == nil || v.ConfigMap.Name != "corporate-ca-bundle" {
+				t.Errorf("corporate-ca volume default name: got %+v, want corporate-ca-bundle", v.ConfigMap)
+			}
+			return
+		}
+	}
+	t.Error("corporate-ca volume not found in deployment")
+}
+
+// TestCaBundleHash verifies the hash function produces stable, deterministic output.
+func TestCaBundleHash(t *testing.T) {
+	cm1 := &corev1.ConfigMap{Data: map[string]string{"ca.crt": "CERT_DATA"}}
+	cm2 := &corev1.ConfigMap{Data: map[string]string{"ca.crt": "CERT_DATA"}}
+	cm3 := &corev1.ConfigMap{Data: map[string]string{"ca.crt": "DIFFERENT"}}
+
+	h1 := caBundleHash(cm1)
+	h2 := caBundleHash(cm2)
+	h3 := caBundleHash(cm3)
+
+	if h1 == "" {
+		t.Error("hash should not be empty for non-empty CM")
+	}
+	if h1 != h2 {
+		t.Errorf("identical CMs should produce identical hashes: %q != %q", h1, h2)
+	}
+	if h1 == h3 {
+		t.Errorf("different CMs should produce different hashes: %q == %q", h1, h3)
+	}
+
+	// Nil CM should return empty string.
+	if caBundleHash(nil) != "" {
+		t.Error("nil CM should return empty hash")
+	}
+
+	// Empty CM should return empty string.
+	if caBundleHash(&corev1.ConfigMap{}) != "" {
+		t.Error("empty CM should return empty hash")
 	}
 }

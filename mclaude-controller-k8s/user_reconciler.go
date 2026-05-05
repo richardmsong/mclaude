@@ -15,8 +15,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -138,10 +140,12 @@ func (r *UserReconciler) ReconcileUser(ctx context.Context, uslug string) error 
 
 // userAgentTpl holds values read from the {release}-user-agent-template ConfigMap.
 type userAgentTpl struct {
-	image           string
-	imagePullPolicy corev1.PullPolicy
-	corporateCAEnabled bool
-	resources       corev1.ResourceRequirements
+	image                  string
+	imagePullPolicy        corev1.PullPolicy
+	corporateCAEnabled     bool
+	corporateCAConfigMapName string // name of the CA bundle ConfigMap in the user namespace
+	corporateCAConfigMapKey  string // key within that ConfigMap containing the PEM bundle
+	resources              corev1.ResourceRequirements
 }
 
 // loadUserAgentTemplate reads the {release}-user-agent-template ConfigMap.
@@ -158,6 +162,8 @@ func (r *UserReconciler) loadUserAgentTemplate(ctx context.Context) *userAgentTp
 		imagePullPolicy: corev1.PullPolicy(cm.Data["imagePullPolicy"]),
 	}
 	tpl.corporateCAEnabled = cm.Data["corporateCAEnabled"] == "true"
+	tpl.corporateCAConfigMapName = cm.Data["corporateCAConfigMapName"]
+	tpl.corporateCAConfigMapKey = cm.Data["corporateCAConfigMapKey"]
 
 	if tpl.image == "" {
 		tpl.image = "mclaude-user-agent:latest"
@@ -622,10 +628,42 @@ func (r *UserReconciler) copyImagePullSecrets(ctx context.Context, userNs string
 	return nil
 }
 
+// caBundleHash computes a deterministic SHA-256 hash over the data fields of a
+// ConfigMap so that CA bundle rotations trigger a Deployment rollout.
+// Returns the hex-encoded hash (64 chars). If the ConfigMap has no data, returns "".
+func caBundleHash(cm *corev1.ConfigMap) string {
+	if cm == nil || (len(cm.Data) == 0 && len(cm.BinaryData) == 0) {
+		return ""
+	}
+	h := sha256.New()
+	// Sort keys for determinism.
+	keys := make([]string, 0, len(cm.Data))
+	for k := range cm.Data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		h.Write([]byte(k))
+		h.Write([]byte(cm.Data[k]))
+	}
+	bkeys := make([]string, 0, len(cm.BinaryData))
+	for k := range cm.BinaryData {
+		bkeys = append(bkeys, k)
+	}
+	sort.Strings(bkeys)
+	for _, k := range bkeys {
+		h.Write([]byte(k))
+		h.Write(cm.BinaryData[k])
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
 // ensureUserAgentDeployment creates or updates the user-agent Deployment in the user namespace.
 // The Deployment uses a single replica with RollingUpdate strategy.
 // Mounts: user-agent-key at /secrets/agent/, user-tokens-{uslug} at /secrets/tokens/.
 // Env: USER_SLUG, HOST_SLUG, NAMESPACE, NATS_URL, CONTROL_PLANE_URL.
+// When corporateCAEnabled is set in the template: also injects corporate-ca volume/mount/env
+// and annotates the pod template with mclaude.io/ca-bundle-hash for rotation-driven rollout.
 func (r *UserReconciler) ensureUserAgentDeployment(ctx context.Context, userNs, uslug string, tpl *userAgentTpl) error {
 	replicas := int32(1)
 	userTokensSecretName := "user-tokens-" + uslug
@@ -641,47 +679,103 @@ func (r *UserReconciler) ensureUserAgentDeployment(ctx context.Context, userNs, 
 		}
 	}
 
+	// Base volumes and volume mounts.
+	volumes := []corev1.Volume{
+		{
+			Name: "agent-key",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: "user-agent-key"},
+			},
+		},
+		{
+			Name: "user-tokens",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: userTokensSecretName},
+			},
+		},
+	}
+	envVars := []corev1.EnvVar{
+		{Name: "USER_SLUG", Value: uslug},
+		{Name: "HOST_SLUG", Value: r.hslug},
+		{Name: "NAMESPACE", Value: userNs},
+		{Name: "NATS_URL", Value: r.hubNATSURL},
+		{Name: "CONTROL_PLANE_URL", Value: r.controlPlaneURL},
+	}
+	volumeMounts := []corev1.VolumeMount{
+		{Name: "agent-key", MountPath: "/secrets/agent/", ReadOnly: true},
+		{Name: "user-tokens", MountPath: "/secrets/tokens/", ReadOnly: false},
+	}
+
+	// Corporate CA injection (spec-k8s-architecture.md §"Corporate CA Support").
+	// When corporateCAEnabled is true in the template, inject the CA bundle volume,
+	// mount, NODE_EXTRA_CA_CERTS env var, and annotate the pod template with a
+	// SHA-256 hash of the CA ConfigMap data so CA rotations trigger a rollout.
+	podAnnotations := map[string]string{}
+	if tpl != nil && tpl.corporateCAEnabled {
+		caConfigMapName := tpl.corporateCAConfigMapName
+		caConfigMapKey := tpl.corporateCAConfigMapKey
+		if caConfigMapName == "" {
+			caConfigMapName = "corporate-ca-bundle"
+		}
+		if caConfigMapKey == "" {
+			caConfigMapKey = "ca-certificates.crt"
+		}
+
+		// Append corporate-ca volume referencing the trust-manager-synced ConfigMap.
+		volumes = append(volumes, corev1.Volume{
+			Name: "corporate-ca",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: caConfigMapName},
+				},
+			},
+		})
+
+		// Append volume mount at the well-known CA cert path.
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      "corporate-ca",
+			MountPath: "/etc/ssl/certs/corporate-ca-certificates.crt",
+			SubPath:   caConfigMapKey,
+			ReadOnly:  true,
+		})
+
+		// Inject NODE_EXTRA_CA_CERTS so Node.js/session-agent picks up the CA.
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "NODE_EXTRA_CA_CERTS",
+			Value: "/etc/ssl/certs/corporate-ca-certificates.crt",
+		})
+
+		// Compute hash of the CA ConfigMap's data for rotation-driven rollout.
+		// If the ConfigMap doesn't exist yet (trust-manager hasn't synced it),
+		// use an empty hash — the annotation will be updated on the next reconcile.
+		caCM := &corev1.ConfigMap{}
+		if err := r.client.Get(ctx, types.NamespacedName{Name: caConfigMapName, Namespace: userNs}, caCM); err == nil {
+			podAnnotations["mclaude.io/ca-bundle-hash"] = caBundleHash(caCM)
+		} else {
+			podAnnotations["mclaude.io/ca-bundle-hash"] = ""
+		}
+	}
+
 	podTpl := corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels: map[string]string{
-				"app":     "mclaude-user-agent",
-				"user":    uslug,
+				"app":  "mclaude-user-agent",
+				"user": uslug,
 			},
+			Annotations: podAnnotations,
 		},
 		Spec: corev1.PodSpec{
 			ServiceAccountName: "mclaude-user-agent",
 			ImagePullSecrets:   imagePullSecrets,
-			Volumes: []corev1.Volume{
-				{
-					Name: "agent-key",
-					VolumeSource: corev1.VolumeSource{
-						Secret: &corev1.SecretVolumeSource{SecretName: "user-agent-key"},
-					},
-				},
-				{
-					Name: "user-tokens",
-					VolumeSource: corev1.VolumeSource{
-						Secret: &corev1.SecretVolumeSource{SecretName: userTokensSecretName},
-					},
-				},
-			},
+			Volumes:            volumes,
 			Containers: []corev1.Container{
 				{
 					Name:            "user-agent",
 					Image:           tpl.image,
 					ImagePullPolicy: tpl.imagePullPolicy,
 					Resources:       tpl.resources,
-					Env: []corev1.EnvVar{
-						{Name: "USER_SLUG", Value: uslug},
-						{Name: "HOST_SLUG", Value: r.hslug},
-						{Name: "NAMESPACE", Value: userNs},
-						{Name: "NATS_URL", Value: r.hubNATSURL},
-						{Name: "CONTROL_PLANE_URL", Value: r.controlPlaneURL},
-					},
-					VolumeMounts: []corev1.VolumeMount{
-						{Name: "agent-key", MountPath: "/secrets/agent/", ReadOnly: true},
-						{Name: "user-tokens", MountPath: "/secrets/tokens/", ReadOnly: false},
-					},
+					Env:             envVars,
+					VolumeMounts:    volumeMounts,
 				},
 			},
 		},
