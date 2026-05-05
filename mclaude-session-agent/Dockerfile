@@ -52,6 +52,7 @@ RUN chmod +x /usr/local/bin/pkg && \
     ln -sf /usr/local/bin/pkg /usr/local/bin/brew
 
 COPY session-agent-${TARGETARCH} /usr/local/bin/session-agent
+RUN chmod +x /usr/local/bin/session-agent
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

@@ -11,6 +11,7 @@ RUN addgroup -g 1000 app && adduser -u 1000 -G app -s /bin/sh -D app
 USER 1000
 
 COPY control-plane-${TARGETARCH} /usr/local/bin/control-plane
+RUN chmod +x /usr/local/bin/control-plane
 
 ENV LOG_LEVEL=info
 ENV PORT=8080
