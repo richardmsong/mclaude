@@ -75,3 +75,12 @@ mclaude-cli/cmd/cli-integration/.test-creds.json
 *.db
 *.db-shm
 *.db-wal
+
+# Compiled binaries
+mclaude-control-plane/mclaude-control-plane
+mclaude-session-agent/mclaude-session-agent
+mclaude-cli/mclaude-cli
+mclaude-relay/mclaude-relay
+mclaude-connector/mclaude-connector
+mclaude-server/mclaude-server
+mclaude-mcp/mclaude-mcp
