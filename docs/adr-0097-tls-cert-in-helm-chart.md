@@ -1,9 +1,10 @@
 # ADR: TLS Certificate CR in mclaude-cp Helm chart with helm.sh/resource-policy: keep
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-05: draft
 - 2026-05-05: accepted — paired with docs/spec-tls-certs.md, docs/charts-mclaude/spec-helm.md, docs/adr-0033-letsencrypt-tls.md (supersede-in-part note)
+- 2026-05-05: implemented — all scope CLEAN (charts/mclaude-cp/templates/certificate.yaml + values + deploy-local-preview skill)
 
 ## Overview
 
