@@ -354,7 +354,7 @@ jobs:
     needs: [tag, merge-control-plane, merge-spa]
     if: always() && !failure() && !cancelled()
     runs-on: [self-hosted, tailscale]
-    environment: deploy
+    environment: deploy-cp
     steps:
       - name: Fetch secrets from Bitwarden
         env:
@@ -429,7 +429,7 @@ jobs:
     needs: [tag, deploy-cp, merge-session-agent, merge-controller-k8s]
     if: false
     runs-on: [self-hosted, tailscale]
-    environment: deploy
+    environment: deploy-worker
     steps:
       - uses: actions/checkout@v4
 
