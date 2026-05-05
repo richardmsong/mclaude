@@ -147,9 +147,9 @@ Deployed by host controller during Phase 1 (host grants user access). On startup
 2. Read or generate X25519 keypair. If `x25519-private` absent in Secret: generate → write to Secret.
 3. Authenticate with CP via challenge-response (`POST /api/auth/challenge` + `POST /api/auth/verify`). CP verifies NKey → issues bootstrap or full JWT depending on grant status. X25519 pubkey registered at this step.
 4. Connect to NATS with issued JWT. Re-run challenge-response before TTL expiry to renew (same refresh pattern as session-agent's `agentJWTRefreshBuffer`). Each renewal gets whatever JWT matches current grant status — bootstrap or full.
-5. If bootstrap JWT (grant pending): subscribe to `mclaude.users.{uslug}.hosts.{hslug}.agent.activate`. Wait for signal.
-6. When signal received on `.agent.activate`: re-run challenge-response → CP issues full JWT (grant now accepted) → reconnect with full permissions → subscribe to `mclaude.users.{uslug}.hosts.{hslug}.agent.>`.
-7. If full JWT on initial auth (grant already accepted, e.g. restart): skip to full subscription immediately.
+5. Subscribe to all four `agent.>` subjects on every connect. NATS RBAC enforces scope: with a bootstrap JWT, only `.agent.activate` succeeds; non-`activate` subscriptions are rejected and logged as warnings. The single subscription path keeps the lifecycle simple — JWT scope decides what delivers, not client-side branching.
+6. When signal received on `.agent.activate`: re-run challenge-response → CP issues full JWT (grant now accepted) → drain + reconnect with new JWT → re-subscribe to all four subjects (now all permitted).
+7. If full JWT on initial auth (grant already accepted, e.g. restart): the four subscriptions all succeed immediately on first connect.
 7. Token availability is checked at provision time via `os.ReadFile("/secrets/tokens/{provider}")` rather than cached in memory at startup. The `user-tokens-{uslug}` Secret is k8s-managed and updates propagate to the mount via kubelet.
 8. Subscribe to `.agent.token-delivery` so subsequent SPA-initiated deliveries (re-auth, new providers) can be unsealed and patched into the Secret.
 9. Subscribe to `.agent.projects.provision` and `.agent.projects.delete` for project pod lifecycle.

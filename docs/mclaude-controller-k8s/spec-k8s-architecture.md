@@ -105,16 +105,16 @@ For full schemas see `docs/spec-state-schema.md` — Kubernetes Resources. Summa
 - Per-user `user-secrets` Secret (OAuth credential helpers — `gh-hosts.yml`, `glab-config.yml`, `conn-{id}-*`). **No `oauth-token` field** (removed per ADR-0091).
 - Per-user `user-config` ConfigMap.
 - Per-user `user-agent` Deployment + ServiceAccount `mclaude-user-agent` + Role permitting `Deployment` and `Secret` access within the user namespace + RoleBinding.
-- Watched: `{release}-user-agent-template` ConfigMap in `mclaude-system` — changes trigger re-rollout of all user-agent Deployments.
+- Read on each `grants.create` reconcile: `{release}-user-agent-template` ConfigMap in `mclaude-system`. Cross-namespace fan-out re-roll on source ConfigMap change is **deferred** — operators re-trigger by re-publishing `grants.create` or running `kubectl rollout restart` per user namespace.
 
 The `MCProject` CRD, per-project `project-{projectId}` Deployments, per-project PVCs, and `agent-nkey-{projectId}` Secrets are no longer created by this controller — they are owned by the user-agent. (Existing CRDs from prior deployments are dropped during the migration; project pods recreate themselves under user-agent ownership when CP next publishes a `projects.provision`.)
 
 ## Reconciler Loop (per-user)
 
-On each `mclaude.hosts.{hslug}.grants.create` reception (and on resync):
+On each `mclaude.hosts.{hslug}.grants.create` reception:
 
 1. Load the user-agent template ConfigMap for image, resource limits, and ServiceAccount config.
-2. Ensure namespace `mclaude-{userSlug}` (ADR-0062: derived from userSlug, not UUID), labels `mclaude.io/user-id={userId}` (when CP supplies it; otherwise just `mclaude.io/managed=true`).
+2. Ensure namespace `mclaude-{userSlug}` (ADR-0062: derived from userSlug, not UUID), label `mclaude.io/managed=true`. (The legacy `mclaude.io/user-id={userId}` label was dropped by ADR-0091 because the `grants.create` payload doesn't carry `userId`; uslug embedded in the namespace name is sufficient for lookup.)
 3. Ensure ServiceAccount + Role + RoleBinding for both `mclaude-sa` (used by future project pods) and `mclaude-user-agent` (for the user-agent itself). The `mclaude-user-agent` Role grants verbs on `Deployment`, `PersistentVolumeClaim`, `Secret` (only `user-tokens-{uslug}`), and `ConfigMap` (only the local `session-agent-template`) within the user namespace. No ClusterRole or cross-namespace permissions.
 4. Ensure `user-secrets` Secret (CLI helper configs only — no token field).
 5. Ensure `user-config` ConfigMap (Claude Code workspace settings, hooks, seed configuration).
@@ -137,7 +137,7 @@ X25519 keypair generation is performed by the user-agent on first startup, not b
 When the session-agent-template ConfigMap has `corporateCAEnabled: "true"`, the controller:
 - Adds label `mclaude.io/user-namespace: "true"` to user namespaces for trust-manager targeting.
 - Injects a `corporate-ca` volume, volume mount at `/etc/ssl/certs/corporate-ca-certificates.crt`, and `NODE_EXTRA_CA_CERTS` env var.
-- Annotates the pod template with `mclaude.io/ca-bundle-hash` so CA rotations trigger a `Recreate` rollout.
+- Annotates the pod template with `mclaude.io/ca-bundle-hash` so CA rotations trigger a rolling update of the user-agent Deployment (the user-agent itself uses `RollingUpdate` strategy; project pods continue running unaffected).
 
 ## Liveness
 
@@ -167,7 +167,7 @@ Deployed by `charts/mclaude-worker`. See `docs/charts-mclaude/spec-helm.md` for 
 
 - Hub NATS reachable from the worker cluster (via `HUB_NATS_URL` Ingress at 443).
 - Control-plane HTTP reachable (for challenge-response).
-- Kubernetes API for Namespace, Deployment, PVC, Secret, ConfigMap, RBAC, and `MCProject` CRD.
+- Kubernetes API for Namespace, Deployment, Secret, ConfigMap, ServiceAccount, Role, RoleBinding. (PVC and `MCProject` CRD permissions removed by ADR-0091 — per-project resources now owned by the user-agent in each user namespace.)
 - The `{release}-session-agent-template` ConfigMap deployed by `mclaude-worker` Helm chart.
 - `mclaude.io/common/pkg/hostauth` for shared NKey challenge-response logic.
 - Optional: trust-manager for corporate CA bundle injection.

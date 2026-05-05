@@ -34,9 +34,7 @@ One Deployment per user namespace `mclaude-{uslug}` on each cluster host.
    - Sign nonce with NKey seed.
    - `POST /api/auth/verify {nkey_public, challenge, signature, x25519_pub}` → CP stores `x25519_pub` in `user_host_agents.x25519_pub` and returns either a bootstrap or full JWT depending on `host_grants.status`.
 4. Connect to hub NATS at `NATS_URL` with the issued JWT.
-5. Subscribe based on JWT scope:
-   - **Bootstrap JWT** (grant pending): subscribe to `mclaude.users.{uslug}.hosts.{hslug}.agent.activate` only. Wait.
-   - **Full JWT** (grant accepted): subscribe to `mclaude.users.{uslug}.hosts.{hslug}.agent.>`.
+5. Subscribe to all four agent subjects on every connect (`activate`, `token-delivery`, `projects.provision`, `projects.delete`). NATS RBAC enforces scope: with a bootstrap JWT, non-`activate` subscriptions are rejected and logged as warnings; with a full JWT, all four succeed. This single subscription path simplifies the lifecycle — the JWT scope is what gates which subjects deliver, not branching client-side logic.
 6. Background loop: re-run challenge-response before TTL expiry (5-minute JWT TTL — same refresh pattern as session-agent's `agentJWTRefreshBuffer`). Each renewal returns whatever JWT matches current grant status.
 7. On receipt of `.agent.activate` (signal-only payload, no JWT): re-run challenge-response to obtain the full JWT (since `host_grants.status='accepted'` now), reconnect with full permissions, re-subscribe to `mclaude.users.{uslug}.hosts.{hslug}.agent.>`.
 
@@ -115,7 +113,7 @@ In this mode the `user-agent-key` Secret's `x25519-private` field is eliminated 
 | Challenge-response with CP fails (network, NKey not registered) | Retry with exponential backoff (cap 60s). User-agent never enters Ready until JWT acquired. |
 | `crypto_box_seal_open` fails | Reply `{ok: false, error: "decrypt_failed"}` to SPA; do not write Secret. SPA prompts user to retry. |
 | Project provision when no token in `/secrets/tokens/{provider}` | Reply `{error: "host_not_trusted"}`. CP surfaces "Authorize this host" to the SPA. |
-| `kubectl create deployment` fails (RBAC, quota, image pull) | Reply `{ok: false, status: "...", error: "<machine-readable code>: <human message>"}` to CP. Do not retry — let SPA re-issue. Pod creation is idempotent (same name) so a retry overwrites cleanly. The reply shape is the `ProvisionReply` struct with fields `OK`, `Status`, `Error`. |
+| `kubectl create deployment` fails (RBAC, quota, image pull) | Reply with `ProvisionReply{Error: "<machine-readable code>: <human message>"}`. The `OK` field uses `omitempty` — it is present (`true`) on success and omitted on failure. Consumers must check for non-empty `error` to detect failure. Do not retry — let SPA re-issue. Pod creation is idempotent (same name) so a retry overwrites cleanly. |
 | Project delete when Deployment doesn't exist | Treat as success (idempotent). |
 | User-agent JWT TTL expires before refresh | NATS connection drops; on reconnect, JWT is re-acquired via challenge-response. Same as session-agent refresh pattern. |
 
