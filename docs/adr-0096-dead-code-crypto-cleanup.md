@@ -79,15 +79,12 @@ mclaude-<component>/
 | `providers/` | `providers.go` | OAuth provider management |
 | `server/` | `server.go`, `context.go`, `metrics.go`, `tracing.go`, `version.go` | HTTP server, middleware, observability |
 
-**`mclaude-session-agent`** (18 files + existing `internal/drivers/` → ~5 packages):
+**`mclaude-session-agent`** (18 files + existing `internal/drivers/` → 3 packages):
 
 | Package | Current files | Responsibility |
 |---|---|---|
 | `cmd/session-agent/` | `main.go` | Entrypoint, flag parsing, dependency wiring |
-| `agent/` | `agent.go`, `daemon.go`, `daemon_jobs.go`, `events.go`, `quota_monitor.go`, `metrics.go`, `state.go` | Core agent logic, NATS subscriptions, daemon lifecycle |
-| `session/` | `session.go`, `terminal.go`, `worktree.go`, `fswatch.go`, `shell_split.go`, `debug.go` | Session lifecycle, terminal management, worktree ops |
-| `auth/` | `agent_auth.go` | NKey auth, challenge-response |
-| `storage/` | `attachment.go`, `import.go`, `gitcreds.go` | S3 attachments, project import, git credential helpers |
+| `agent/` | all production files except main.go and drivers | Core agent logic — session lifecycle, NATS, auth, storage. Kept as one package because `Session`, `Agent`, `SessionState` are deeply coupled (circular imports if split further). |
 | `drivers/` | existing `internal/drivers/` (6 files) | Moves from `internal/drivers/` to `drivers/` (public) |
 
 **`mclaude-controller-k8s`** (4 files):
