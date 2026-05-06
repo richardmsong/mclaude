@@ -73,7 +73,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: control-plane-binaries
-          path: mclaude-control-plane
+          path: .
       - name: Authenticate to GHCR
         run: |
           mkdir -p "$RUNNER_TEMP/docker"
@@ -221,7 +221,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: session-agent-binaries
-          path: mclaude-session-agent
+          path: .
       - name: Authenticate to GHCR
         run: |
           mkdir -p "$RUNNER_TEMP/docker"
@@ -309,7 +309,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: controller-k8s-binaries
-          path: mclaude-controller-k8s
+          path: .
       - name: Authenticate to GHCR
         run: |
           mkdir -p "$RUNNER_TEMP/docker"
@@ -397,7 +397,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: user-agent-binaries
-          path: mclaude-user-agent
+          path: .
       - name: Authenticate to GHCR
         run: |
           mkdir -p "$RUNNER_TEMP/docker"
