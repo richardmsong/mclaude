@@ -58,7 +58,7 @@ For Postgres table schemas see `docs/spec-state-schema.md` — Postgres.
 
 | Kind | Name | Notes |
 |---|---|---|
-| Deployment | `{release}-control-plane` | Configurable replicas. Optional `dbmate` init container when `migrations.enabled` — uses the same `database.*` env contract as the main container (no hardcoded Postgres Secret name or DSN). Mounts `mclaude-system/operator-keys` at `OPERATOR_KEYS_PATH`. Mounts `provider-config` ConfigMap when OAuth providers are configured. **Postgres env contract** (per ADR-0094): `POSTGRES_PASSWORD` is loaded via `valueFrom.secretKeyRef` against the Secret named in `database.passwordSecretRef` (key `postgres-password`); `DATABASE_URL` is composed at pod runtime via env-var interpolation `postgres://{database.user}:$(POSTGRES_PASSWORD)@{database.host}:{database.port}/{database.name}?sslmode={database.sslmode}`. The `dbmate` init container (when enabled) and the `init-keys` Job use the identical contract. If the Secret named by `database.passwordSecretRef` does not exist, the pod stays in `CreateContainerConfigError` (env-from reference to a missing Secret); helm install with `--wait` fails fast. When `minio.enabled=true` and `ingress.minioHost` is non-empty: env vars `S3_ENDPOINT=https://{ingress.minioHost}`, `S3_BUCKET={minio.bucket}`, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` from Secret `{release}-minio` (or `minio.existingSecret`). `S3_REGION` is intentionally omitted — `loadS3Config()` defaults to `us-east-1` which is correct for MinIO path-style signing. |
+| Deployment | `{release}-control-plane` | Configurable replicas. Optional `dbmate` init container when `migrations.enabled` — uses the same `database.*` env contract as the main container (no hardcoded Postgres Secret name or DSN). Mounts `mclaude-system/operator-keys` at `OPERATOR_KEYS_PATH`. Mounts `provider-config` ConfigMap when OAuth providers are configured. **Postgres env contract** (per ADR-0094): `POSTGRES_PASSWORD` is loaded via `valueFrom.secretKeyRef` against the Secret named in `database.passwordSecretRef` (key `postgres-password`); `DATABASE_URL` is composed at pod runtime via env-var interpolation `postgres://{database.user}:$(POSTGRES_PASSWORD)@{database.host}:{database.port}/{database.name}?sslmode={database.sslmode}`. The `dbmate` init container (when enabled) and the `init-keys` Job use the identical contract. If the Secret named by `database.passwordSecretRef` does not exist, the pod stays in `CreateContainerConfigError` (env-from reference to a missing Secret); helm install with `--wait` fails fast. When `minio.enabled=true` and `ingress.minioHost` is non-empty: env vars `S3_ENDPOINT=https://{ingress.minioHost}`, `S3_BUCKET={minio.bucket}`, `S3_ACCESS_KEY_ID` and `S3_SECRET_ACCESS_KEY` from Secret `{release}-minio` (or `minio.existingSecret`). `S3_REGION` is intentionally omitted — `loadS3Config()` defaults to `us-east-1` which is correct for MinIO path-style signing. Also sets `HELM_RELEASE_NAME` (value: chart release name) for informational purposes. |
 | Service | `{release}-control-plane` | ClusterIP. Port: http (8080). `/metrics` is served on the same port, unauthenticated. |
 | ConfigMap | `{release}-provider-config` | `providers.json` — OAuth provider instances. Created only when `controlPlane.providers` is non-empty. |
 | ServiceAccount | `{release}-mclaude` | Used by the control-plane Deployment. **No K8s permissions** — the control-plane has no controller-runtime client per ADR-0035. |
@@ -70,7 +70,7 @@ The previous `ClusterRole` / `ClusterRoleBinding` granting cross-namespace pod/s
 | Kind | Name | Notes |
 |---|---|---|
 | Deployment | `{release}-spa` | nginx + the built SPA bundle. |
-| Service | `{release}-spa` | Maps 80 → 8080. |
+| Service | `{release}-spa` | Maps `spa.service.port` (default 80) → `spa.containerPort` (default 8080). |
 
 ### MinIO
 
@@ -271,7 +271,7 @@ A Helm pre-delete hook Job (Option B: automated deregistration without operator 
 
 | Kind | Name | Notes |
 |---|---|---|
-| Deployment | `{release}-controller` | Single replica. Mounts `{release}-host-creds` at `/etc/mclaude/host-creds/`. Env: `HUB_NATS_URL`, `CONTROL_PLANE_URL`, `HOST_NKEY_SEED_PATH=/etc/mclaude/host-creds/nkey_seed`. |
+| Deployment | `{release}-controller` | Single replica. Mounts `{release}-host-creds` at `/etc/mclaude/host-creds/`. Env: `HUB_NATS_URL`, `CONTROL_PLANE_URL`, `HOST_NKEY_SEED_PATH=/etc/mclaude/host-creds/nkey_seed`, `METRICS_ADDR`, `HEALTH_PROBE_ADDR`, `LOG_LEVEL`, `LEADER_ELECTION`, `SESSION_AGENT_TEMPLATE_CM` (name of the `{release}-session-agent-template` ConfigMap — passed through to user-agent via NATS so the user-agent can locate the ConfigMap; the controller itself reads this env var to derive the ConfigMap name to propagate). |
 | Service | `{release}-controller-metrics` | Prometheus scrape target. |
 | ServiceAccount | `{release}-controller` | K8s SA used by the controller. |
 | ClusterRole | `{release}-controller` | Per ADR-0091: namespace, deployment, secret, configmap, serviceaccount, role, rolebinding management. The `MCProject` CRD permission is **removed**. |
@@ -283,7 +283,7 @@ The `mcprojects.mclaude.io` CustomResourceDefinition is **removed** by ADR-0091 
 
 | Kind | Name | Notes |
 |---|---|---|
-| ConfigMap | `{release}-session-agent-template` | Static pod template values (image, imagePullPolicy, terminationGracePeriodSeconds, resourcesJson, projectPvcSize, projectPvcStorageClass, nixPvcSize, nixPvcStorageClass, corporateCAEnabled, corporateCAConfigMapName, corporateCAConfigMapKey). Per ADR-0091, read by **`mclaude-user-agent`** (not the controller) to build per-project Deployments. |
+| ConfigMap | `{release}-session-agent-template` | Static pod template values (image, imagePullPolicy, terminationGracePeriodSeconds, resourcesJson, projectPvcSize, projectPvcStorageClass, nixPvcSize, nixPvcStorageClass, corporateCAEnabled, corporateCAConfigMapName, corporateCAConfigMapKey). Per ADR-0091, read by **`mclaude-user-agent`** to build per-project Deployments. The controller receives the ConfigMap name via `SESSION_AGENT_TEMPLATE_CM` env var and propagates it to the user-agent over NATS so the user-agent can locate the ConfigMap in the worker namespace. |
 
 ### User-Agent Template (ADR-0091)
 
