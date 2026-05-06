@@ -67,14 +67,15 @@ No local files are written except `~/.mclaude/hosts/{hslug}/config.json` (for `h
 - In the `CREATE TABLE IF NOT EXISTS hosts` DDL: remove `type TEXT NOT NULL CHECK (type IN ('machine', 'cluster'))` and `role TEXT NOT NULL DEFAULT 'owner'` columns entirely. No migration DO block — prerelease, wipe and reinstall.
 
 **Remove type/role from all queries (exhaustive):**
-- `scanHost` helper (`db/db.go:414`): remove `type` and `role` from the scan list. Update `Host` struct to remove `Type` and `Role` fields.
+- `db.Host` struct (`db/db.go:74-87`): remove `Type string` (line 79) and `Role string` (line 80) fields entirely.
+- `scanHost` helper (`db/db.go:414`): remove `type` and `role` from the scan list (matches struct change).
 - `GetHostBySlug` (`db/db.go:464-466`): remove `type, role` from SELECT and remove `AND role = 'owner'` filter.
 - `GetHostByPublicKey` (`db/db.go:479`): remove `type, role` from SELECT.
 - `GetHostsByUser` (`db/db.go:429`): remove `type, role` from SELECT.
 - `GetHostsByUser` / `ListHosts` (`hosts.go:201-212`): remove `type` and `role` from SELECT and scan.
 - `HostResponse` struct (`server/hosts.go:24-35`): remove `Type string json:"type"` and `Role string json:"role"` fields. This is the HTTP response serialization struct — separate from the `Host` DB struct. Without removal, `GET /api/users/{uslug}/hosts` would serialize empty `type`/`role` fields.
 - All INSERT INTO hosts (`lifecycle.go`, `hosts.go`, `admin.go`): remove `type` and `role` from column lists and VALUES. `POST /api/users/{uslug}/hosts` HTTP endpoint (`server/hosts.go:270-274`): remove entirely — BYOH is dead, all registration goes through NATS. Remove the route from `handleHostRoutes`.
-- `HostKVState` struct (`sys_subscriber.go:16-22`): remove `Type` field. Remove `h.type` from the SQL query in the `$SYS CONNECT` handler (`sys_subscriber.go:100-104`). The DISCONNECT read-modify-write path (`sys_subscriber.go:133-148`) will silently strip `type` from existing KV entries on first DISCONNECT — this is the intended migration path (prerelease, no KV data preservation needed).
+- `HostKVState` struct (`sys_subscriber.go:16-22`): remove `Type` field. Remove `h.type` from SQL queries in BOTH the `$SYS CONNECT` handler (`sys_subscriber.go:100-104`) AND the DISCONNECT handler (`sys_subscriber.go:125-130`). Remove `htype` variable (`sys_subscriber.go:125`) and `Type: htype` from the fallback struct literal (`sys_subscriber.go:139`). The DISCONNECT read-modify-write path will silently strip `type` from existing KV entries — intended (prerelease).
 - `ManageUpdateRequest` (`lifecycle.go:713-716`): remove `Type` field. Update validation at `lifecycle.go:736` — check `req.Name == ""` only (remove `req.Type` from the condition).
 - `LoginHostEntry` (`server/auth.go:28-34`): remove `Type` and `Role` fields. Update `getLoginHosts` (`server/auth.go:480-481`) to stop assigning `h.Type` and `h.Role`.
 - `project_http.go:285`: raw SQL selects `COALESCE(h.type, '')` — remove `h.type` from the query.
