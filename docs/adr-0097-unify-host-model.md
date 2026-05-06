@@ -175,6 +175,7 @@ _(none — all resolved)_
 | Register host with default-platform (non-admin) | NATS publish with `defaultPlatform: true` as non-admin. Returns `admin_required`. | Non-admin user | mclaude-control-plane |
 | Schema has no type/role columns | Fresh `Migrate()` on empty DB: `hosts` table has no `type` or `role` columns. | Empty DB | mclaude-control-plane |
 | Admin cluster endpoints return 404 | `POST /admin/clusters` returns 404 after removal. | Admin JWT | mclaude-control-plane |
+| Existing admin cluster tests rewritten | `TestIntegration_ADR0091_AdminCluster_DefaultPlatform` and `_Conflict` (grants_integration_test.go:768,817) — rewrite to use NATS registration with `defaultPlatform: true` instead of `POST /admin/clusters`. `TestIntegration_ADR0091_DefaultPlatform_AutoGrant` (line 880) — rewrite raw INSERT to remove `type`/`role` columns. |  | mclaude-control-plane |
 | Project provisioning routes to user-agent | Create project, verify NATS publish goes to `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.provision` (no type branch). | Registered host + user | mclaude-control-plane |
 
 ## Implementation Plan
