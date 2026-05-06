@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/rs/zerolog"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -253,6 +254,38 @@ func TestProvisioner_DeploymentManagedLabel(t *testing.T) {
 	}
 	if deploy.Labels["mclaude/managed"] != "true" {
 		t.Errorf("mclaude/managed label = %q, want true", deploy.Labels["mclaude/managed"])
+	}
+}
+
+// TestProvisioner_DeploymentRecreateStrategy verifies that the Deployment uses
+// Recreate strategy, not RollingUpdate, so old pods exit before new pods start.
+// This prevents two pods consuming the same durable JetStream consumers simultaneously
+// (spec-state-schema.md §"Deployment: project-{projectId}").
+func TestProvisioner_DeploymentRecreateStrategy(t *testing.T) {
+	p, fakeK8s := newTestProvisioner(t, "alice", "mycluster", "anthropic", "sk-ant-test")
+	ns := p.namespace
+
+	req := ProvisionRequest{
+		ProjectID:   "proj-strategy",
+		ProjectSlug: "strategy-project",
+		Provider:    "anthropic",
+	}
+
+	reply := p.Provision(context.Background(), req)
+	if !reply.OK {
+		t.Fatalf("provision failed: %s", reply.Error)
+	}
+
+	deploy, err := fakeK8s.AppsV1().Deployments(ns).Get(
+		context.Background(), "project-proj-strategy", metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatalf("get Deployment: %v", err)
+	}
+
+	if deploy.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+		t.Errorf("deployment strategy = %q, want %q (Recreate)",
+			deploy.Spec.Strategy.Type, appsv1.RecreateDeploymentStrategyType)
 	}
 }
 

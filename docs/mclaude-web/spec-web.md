@@ -106,9 +106,40 @@ Download URLs are time-limited (5 minutes). The SPA re-requests a fresh URL if t
 
 Imported sessions (created via `mclaude import`) are treated identically to native sessions in the SPA. No "imported" badge, no visual distinction. They appear in the session list and project views like any other session. Import metadata is stored internally but not surfaced in the UI (ADR-0053).
 
+## Claude Token Management (ADR-0092)
+
+### Connect Sheet
+
+Bottom sheet component (same pattern as New Session, New Project) reused for first-run gate, Settings reconnect, and session-banner reconnect. Contains:
+- "Sign in with Claude" button (opens OAuth PKCE popup)
+- Collapsed "Or enter a token manually" `<details>` with password input + [Connect] button. Input cleared immediately after submit.
+- Error states: popup blocked → "Allow popups for this site and try again". OAuth failure → "Sign-in failed — try again or enter a token manually". Paste invalid → "Please enter a valid token".
+- On success: sheet shows "Connected" and auto-dismisses after 1 second.
+- On first-run: [✕] disabled. On reconnect: [✕] enabled.
+
+### OAuth Popup Flow
+
+SPA opens popup to `claude.ai/oauth/authorize` with PKCE parameters (`client_id=mclaude-cli`, `code_challenge`, `code_challenge_method=S256`, `state`, `redirect_uri={SPA_ORIGIN}/auth/oauth/callback`). The `code_verifier` and `state` stay in the parent window's JavaScript memory. The callback page is a static HTML page served by nginx (outside HashRouter). It extracts `code` and `state` from URL query params, posts `{ type: "mclaude:oauth-callback", code, state }` to `window.opener` via `postMessage`, and closes. The parent validates origin + state, then exchanges code for token via CP proxy `POST /api/auth/oauth/exchange`. Token written to KV as plain string.
+
+### Token Failure Banner
+
+When any session reports `status: "token_expired"` in session KV, the SPA renders an inline banner at the top of the session view (`--warning` background, `--text` foreground): "Your Claude token is invalid [Reconnect]". [Reconnect] opens the Connect sheet. After reconnect, SPA re-delivers K_wrapped to all accepted-grant hosts. Banner clears when the session-agent detects the updated Secret mount and transitions back to `running` status.
+
+### Re-delivery on Reconnect
+
+After a new token is written to KV, the SPA reads all grants from `GET /api/users/{uslug}/grants`, filters to `status === "accepted"` client-side, reads each user-agent's X25519 pubkey, wraps the token, and delivers via NATS request/reply. Progress states: "Updating N hosts…" → "Done" (all succeeded) or "N of M hosts updated — N offline hosts will receive the token on your next visit" (partial failure).
+
+### Stale Token Detection
+
+On login hydration, the SPA sends a request to each accepted-grant host's `agent.status` subject (5s timeout). Compares reported `tokenVersion` (first 8 hex of sha256) with the KV token's hash. Mismatch triggers auto-re-delivery.
+
+### Pending Delivery Retry
+
+`localStorage` key `mclaude.pendingDeliveries`: JSON array of `{ hslug, provider }`. Written on delivery failure (first-run or reconnect). Retried on login/NATS reconnect. Removed per-entry on success. Cleared entirely on logout.
+
 ## Routing
 
-React Router v6 with parametric segments: `/api/users/{uslug}/projects/{pslug}/sessions/{sslug}`. Display names render in UI; slugs in the URL path. The device-code verification page is served at `/auth/device-code/verify`.
+React Router v6 with parametric segments: `/api/users/{uslug}/projects/{pslug}/sessions/{sslug}`. Display names render in UI; slugs in the URL path. The device-code verification page is served at `/auth/device-code/verify`. The OAuth callback page is served at `/auth/oauth/callback` as a static HTML page by nginx (outside HashRouter, ADR-0092).
 
 ## TypeScript Slug/Subject Mirrors
 

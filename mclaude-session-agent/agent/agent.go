@@ -215,6 +215,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	// Deletes JSONL files older than 90 days from the session data directory.
 	go a.runJSONLCleanup(ctx)
 
+	// Start token Secret mount watcher (ADR-0092).
+	// Watches /secrets/tokens/ for updates; when the token file changes,
+	// restarts any token_expired sessions so they pick up the new token.
+	go a.watchTokenSecrets(ctx)
+
 	<-ctx.Done()
 	a.gracefulShutdown()
 	return nil

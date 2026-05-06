@@ -773,6 +773,15 @@ func (s *Session) handleSideEffect(line []byte, writeKV func(state SessionState)
 		if err := json.Unmarshal(line, &r); err == nil {
 			s.mu.Lock()
 			accumulateUsage(&s.state, r.Usage, r.TotalCostUSD)
+			// ADR-0092: If the Anthropic API returns 401/403, set status to
+			// token_expired so the SPA renders the reconnect banner.
+			// The error string from Claude Code contains HTTP status codes or
+			// Anthropic error types such as "authentication_error",
+			// "invalid x-api-key", "permission_error", "401", "403".
+			if r.IsError && isAnthropicAuthError(r.Error) {
+				s.state.State = StatusTokenExpired
+				s.state.StateSince = time.Now().UTC()
+			}
 			s.mu.Unlock()
 			s.flushKV(writeKV)
 		}
@@ -782,6 +791,34 @@ func (s *Session) handleSideEffect(line []byte, writeKV func(state SessionState)
 		// receives the JetStream seq of the published compact_boundary event.
 		// Nothing to do here — replayFromSeq is written by the agent.
 	}
+}
+
+// isAnthropicAuthError returns true when an Anthropic API error message indicates
+// a 401/403 authentication or authorization failure.
+//
+// Claude Code surfaces these via result.is_error=true with error messages containing
+// HTTP status codes ("401", "403") or Anthropic error type strings
+// ("authentication_error", "invalid x-api-key", "permission_error",
+// "invalid_api_key", "access_denied"). Matching is case-insensitive.
+func isAnthropicAuthError(msg string) bool {
+	lower := strings.ToLower(msg)
+	for _, pattern := range []string{
+		"401",
+		"403",
+		"authentication_error",
+		"authentication error",
+		"invalid x-api-key",
+		"invalid_api_key",
+		"permission_error",
+		"access_denied",
+		"unauthorized",
+		"forbidden",
+	} {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 // shouldAutoApprove returns true if the permission policy means the agent

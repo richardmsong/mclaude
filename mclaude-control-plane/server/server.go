@@ -24,6 +24,10 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/auth/challenge", s.handleAuthChallenge)
 	mux.HandleFunc("/api/auth/verify", s.handleAuthVerify)
 
+	// ADR-0092: OAuth PKCE token exchange proxy (protected — requires valid user JWT).
+	// Registered before /api/auth/device-code to ensure exact-path match takes priority.
+	mux.Handle("/api/auth/oauth/exchange", s.authMiddleware(http.HandlerFunc(s.handleOAuthExchange)))
+
 	// ADR-0054: CLI device-code auth flow.
 	mux.HandleFunc("/api/auth/device-code", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {

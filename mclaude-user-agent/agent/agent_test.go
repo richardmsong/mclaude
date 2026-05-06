@@ -439,6 +439,204 @@ func TestRunNATSLoop_FullJWTSubscribesAllSubjects(t *testing.T) {
 	cancel()
 }
 
+// TestRunNATSLoop_TokenRevokeHandlerResponds verifies that the token-revoke subscription
+// is active after startup and returns a valid reply from TokenManager.HandleRevoke.
+func TestRunNATSLoop_TokenRevokeHandlerResponds(t *testing.T) {
+	srv := startTestNATSServer(t)
+	natsURL := srv.ClientURL()
+
+	var jwtVal atomic.Value
+	jwtVal.Store("jwt")
+	cpSrv := newTestCPServerForLoop(t, &jwtVal)
+
+	auth, _ := newTestUserAgentAuth(t, cpSrv.URL)
+	if _, err := auth.Authenticate(context.Background()); err != nil {
+		t.Fatalf("initial authenticate: %v", err)
+	}
+
+	fakeFn := func(_ string, _ *agentauth.UserAgentAuth) (*nats.Conn, error) {
+		return nats.Connect(natsURL)
+	}
+
+	cfg := &Config{
+		UserSlug:        "alice",
+		HostSlug:        "cluster",
+		Namespace:       "mclaude-alice",
+		NATSURL:         natsURL,
+		ControlPlaneURL: cpSrv.URL,
+	}
+
+	fakeK8s := fake.NewClientset()
+	kp, err := agentcrypto.GenerateX25519Keypair()
+	if err != nil {
+		t.Fatalf("GenerateX25519Keypair: %v", err)
+	}
+	tokenMgr := NewTokenManager(fakeK8s, cfg.Namespace, cfg.UserSlug, kp, zerolog.Nop())
+	provisioner := NewProvisioner(fakeK8s, cfg.Namespace, cfg, zerolog.Nop())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		RunNATSLoop(ctx, cfg, auth, tokenMgr, provisioner, fakeFn) //nolint:errcheck
+	}()
+
+	// Allow subscriptions to be set up.
+	time.Sleep(300 * time.Millisecond)
+
+	// Send a token-revoke request; the Secret is absent so we expect ok=true (not found = idempotent).
+	revokeSubj := fmt.Sprintf("mclaude.users.%s.hosts.%s.agent.token-revoke", cfg.UserSlug, cfg.HostSlug)
+	caller := connectTestNATSPlain(t, natsURL)
+
+	payload, _ := json.Marshal(TokenRevokeRequest{Provider: "anthropic"})
+	msg, reqErr := caller.Request(revokeSubj, payload, 5*time.Second)
+	if reqErr != nil {
+		t.Fatalf("Request to token-revoke timed out: %v", reqErr)
+	}
+
+	var resp TokenRevokeReply
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		t.Fatalf("unmarshal token-revoke reply: %v", err)
+	}
+	if !resp.OK {
+		t.Errorf("expected ok=true from token-revoke, got error=%q", resp.Error)
+	}
+}
+
+// TestRunNATSLoop_AgentStatusHandlerResponds verifies that the agent.status subscription
+// is active after startup and returns a valid {hasToken, tokenVersion} reply.
+func TestRunNATSLoop_AgentStatusHandlerResponds(t *testing.T) {
+	srv := startTestNATSServer(t)
+	natsURL := srv.ClientURL()
+
+	var jwtVal atomic.Value
+	jwtVal.Store("jwt")
+	cpSrv := newTestCPServerForLoop(t, &jwtVal)
+
+	auth, _ := newTestUserAgentAuth(t, cpSrv.URL)
+	if _, err := auth.Authenticate(context.Background()); err != nil {
+		t.Fatalf("initial authenticate: %v", err)
+	}
+
+	fakeFn := func(_ string, _ *agentauth.UserAgentAuth) (*nats.Conn, error) {
+		return nats.Connect(natsURL)
+	}
+
+	cfg := &Config{
+		UserSlug:        "bob",
+		HostSlug:        "cluster",
+		Namespace:       "mclaude-bob",
+		NATSURL:         natsURL,
+		ControlPlaneURL: cpSrv.URL,
+	}
+
+	fakeK8s := fake.NewClientset()
+	kp, err := agentcrypto.GenerateX25519Keypair()
+	if err != nil {
+		t.Fatalf("GenerateX25519Keypair: %v", err)
+	}
+	tokenMgr := NewTokenManager(fakeK8s, cfg.Namespace, cfg.UserSlug, kp, zerolog.Nop())
+	provisioner := NewProvisioner(fakeK8s, cfg.Namespace, cfg, zerolog.Nop())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		RunNATSLoop(ctx, cfg, auth, tokenMgr, provisioner, fakeFn) //nolint:errcheck
+	}()
+
+	// Allow subscriptions to be set up.
+	time.Sleep(300 * time.Millisecond)
+
+	statusSubj := fmt.Sprintf("mclaude.users.%s.hosts.%s.agent.status", cfg.UserSlug, cfg.HostSlug)
+	caller := connectTestNATSPlain(t, natsURL)
+
+	msg, reqErr := caller.Request(statusSubj, []byte(`{}`), 5*time.Second)
+	if reqErr != nil {
+		t.Fatalf("Request to agent.status timed out: %v", reqErr)
+	}
+
+	var resp StatusReply
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		t.Fatalf("unmarshal agent.status reply: %v", err)
+	}
+	// Secret does not exist in this test — hasToken should be false.
+	if resp.HasToken {
+		t.Error("expected hasToken=false (no Secret pre-created in this test)")
+	}
+}
+
+// TestRunNATSLoop_UnsolicitedStatusOnStartup verifies that the loop publishes
+// an unsolicited agent.status message on startup (ADR-0092).
+func TestRunNATSLoop_UnsolicitedStatusOnStartup(t *testing.T) {
+	srv := startTestNATSServer(t)
+	natsURL := srv.ClientURL()
+
+	var jwtVal atomic.Value
+	jwtVal.Store("jwt")
+	cpSrv := newTestCPServerForLoop(t, &jwtVal)
+
+	auth, _ := newTestUserAgentAuth(t, cpSrv.URL)
+	if _, err := auth.Authenticate(context.Background()); err != nil {
+		t.Fatalf("initial authenticate: %v", err)
+	}
+
+	fakeFn := func(_ string, _ *agentauth.UserAgentAuth) (*nats.Conn, error) {
+		return nats.Connect(natsURL)
+	}
+
+	cfg := &Config{
+		UserSlug:        "carol",
+		HostSlug:        "cluster",
+		Namespace:       "mclaude-carol",
+		NATSURL:         natsURL,
+		ControlPlaneURL: cpSrv.URL,
+	}
+
+	fakeK8s := fake.NewClientset()
+	kp, err := agentcrypto.GenerateX25519Keypair()
+	if err != nil {
+		t.Fatalf("GenerateX25519Keypair: %v", err)
+	}
+	tokenMgr := NewTokenManager(fakeK8s, cfg.Namespace, cfg.UserSlug, kp, zerolog.Nop())
+	provisioner := NewProvisioner(fakeK8s, cfg.Namespace, cfg, zerolog.Nop())
+
+	statusSubj := fmt.Sprintf("mclaude.users.%s.hosts.%s.agent.status", cfg.UserSlug, cfg.HostSlug)
+
+	// Subscribe BEFORE starting the loop so we catch the unsolicited publish.
+	watcher := connectTestNATSPlain(t, natsURL)
+	received := make(chan []byte, 1)
+	if _, subErr := watcher.Subscribe(statusSubj, func(msg *nats.Msg) {
+		select {
+		case received <- msg.Data:
+		default:
+		}
+	}); subErr != nil {
+		t.Fatalf("subscribe watcher: %v", subErr)
+	}
+	watcher.Flush() //nolint:errcheck
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() {
+		RunNATSLoop(ctx, cfg, auth, tokenMgr, provisioner, fakeFn) //nolint:errcheck
+	}()
+
+	// Wait for the unsolicited publish.
+	select {
+	case data := <-received:
+		var resp StatusReply
+		if err := json.Unmarshal(data, &resp); err != nil {
+			t.Fatalf("unmarshal unsolicited status: %v", err)
+		}
+		// Valid JSON payload received — unsolicited publish happened.
+		t.Logf("unsolicited status: hasToken=%v tokenVersion=%q", resp.HasToken, resp.TokenVersion)
+	case <-time.After(5 * time.Second):
+		t.Error("did not receive unsolicited agent.status publish within 5 seconds of startup")
+	}
+}
+
 // TestRunNATSLoop_ShutdownOnContextCancel verifies that cancelling the context
 // causes the loop to exit cleanly without a reconnect.
 func TestRunNATSLoop_ShutdownOnContextCancel(t *testing.T) {

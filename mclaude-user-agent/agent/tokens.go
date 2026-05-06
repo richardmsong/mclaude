@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -138,8 +139,122 @@ func (tm *TokenManager) patchTokenSecret(ctx context.Context, provider string, t
 	return nil
 }
 
+// TokenRevokeRequest is the NATS payload for agent.token-revoke (request/reply).
+type TokenRevokeRequest struct {
+	Provider string `json:"provider"`
+}
+
+// TokenRevokeReply is the NATS reply for agent.token-revoke.
+type TokenRevokeReply struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// StatusReply is the NATS reply for agent.status.
+// tokenVersion is the first 8 hex chars of sha256(token), or "" if no token.
+type StatusReply struct {
+	HasToken     bool   `json:"hasToken"`
+	TokenVersion string `json:"tokenVersion,omitempty"`
+}
+
+// HandleRevoke processes a token-revoke request (ADR-0092):
+//  1. Parse {provider} from payload (defaults to "anthropic").
+//  2. Delete the provider key from user-tokens-{uslug} Secret.
+//  3. Return {ok: true} on success, {ok: false, error: "..."} on failure.
+func (tm *TokenManager) HandleRevoke(ctx context.Context, payload []byte) []byte {
+	var req TokenRevokeRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		tm.log.Warn().Err(err).Msg("token-revoke: bad payload")
+		return replyRevokeJSON(TokenRevokeReply{OK: false, Error: "bad_request"})
+	}
+	if req.Provider == "" {
+		req.Provider = "anthropic"
+	}
+
+	if err := tm.deleteTokenSecret(ctx, req.Provider); err != nil {
+		tm.log.Error().Err(err).Str("provider", req.Provider).Msg("token-revoke: delete Secret key failed")
+		return replyRevokeJSON(TokenRevokeReply{OK: false, Error: "secret_delete_failed"})
+	}
+
+	tm.log.Info().Str("provider", req.Provider).Msg("token-revoke: provider key deleted from Secret")
+	return replyRevokeJSON(TokenRevokeReply{OK: true})
+}
+
+// HandleStatus processes an agent.status request (ADR-0092):
+//
+// Request: {} (empty; payload ignored).
+// Reply: {hasToken: bool, tokenVersion: "<first-8-hex-of-sha256>"}.
+//
+// tokenVersion is computed over the raw bytes stored in the Secret for the
+// "anthropic" provider. If no token is stored, hasToken is false and
+// tokenVersion is omitted.
+func (tm *TokenManager) HandleStatus(ctx context.Context, _ []byte) []byte {
+	reply := tm.buildStatusReply(ctx)
+	b, _ := json.Marshal(reply)
+	return b
+}
+
+// buildStatusReply reads the current token from the Secret and returns a StatusReply.
+func (tm *TokenManager) buildStatusReply(ctx context.Context) StatusReply {
+	secret, err := tm.k8s.CoreV1().Secrets(tm.namespace).Get(ctx, tm.secretName, metav1.GetOptions{})
+	if err != nil {
+		tm.log.Warn().Err(err).Str("secret", tm.secretName).Msg("status: cannot read Secret")
+		return StatusReply{HasToken: false}
+	}
+	token := secret.Data["anthropic"]
+	if len(token) == 0 {
+		return StatusReply{HasToken: false}
+	}
+	return StatusReply{
+		HasToken:     true,
+		TokenVersion: tokenVersion(token),
+	}
+}
+
+// tokenVersion returns the first 8 hex characters of sha256(token).
+func tokenVersion(token []byte) string {
+	sum := sha256.Sum256(token)
+	return fmt.Sprintf("%x", sum[:4]) // 4 bytes = 8 hex chars
+}
+
+// deleteTokenSecret removes a single provider key from the user-tokens-{uslug} Secret
+// using a strategic merge patch that sets the key to nil (removes it).
+func (tm *TokenManager) deleteTokenSecret(ctx context.Context, provider string) error {
+	// A strategic merge patch with a null value removes the key from Secret.Data.
+	patchPayload, err := json.Marshal(map[string]interface{}{
+		"data": map[string]interface{}{
+			provider: nil,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal delete patch: %w", err)
+	}
+
+	_, err = tm.k8s.CoreV1().Secrets(tm.namespace).Patch(
+		ctx,
+		tm.secretName,
+		types.StrategicMergePatchType,
+		patchPayload,
+		metav1.PatchOptions{},
+	)
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			// Secret doesn't exist — treat as success (already deleted).
+			return nil
+		}
+		return fmt.Errorf("patch Secret %s: %w", tm.secretName, err)
+	}
+	return nil
+}
+
 // replyJSON marshals a TokenDeliveryReply to JSON bytes.
 func replyJSON(v interface{}) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
+
+// replyRevokeJSON marshals a TokenRevokeReply to JSON bytes.
+func replyRevokeJSON(v TokenRevokeReply) []byte {
 	b, _ := json.Marshal(v)
 	return b
 }

@@ -97,6 +97,7 @@ The `go test -tags integration` suite runs after Phase 1 as the gate before Phas
 | `GET` | `/api/users/{uslug}/hosts` | Lists hosts owned by or granted to the user. |
 | `PUT` | `/api/users/{uslug}/hosts/{hslug}` | Updates host display name. |
 | `DELETE` | `/api/users/{uslug}/hosts/{hslug}` | Removes a host (cascades to its projects + sessions). |
+| `POST` | `/api/auth/oauth/exchange` | ADR-0092. Proxies OAuth token exchange to claude.ai. Request: `{code, code_verifier, redirect_uri, client_id}`. CP adds `grant_type=authorization_code` and forwards as form-encoded POST to `claude.ai/oauth/token`. Returns `{access_token}` on success, `{error, error_description}` on failure. Auth: requires valid mclaude user JWT. CP does not store the token. |
 
 **HTTP project CRUD:**
 

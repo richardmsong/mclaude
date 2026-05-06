@@ -9,6 +9,7 @@ import { SessionStore } from '@/stores/session-store'
 import { EventStore } from '@/stores/event-store'
 import { HeartbeatMonitor } from '@/stores/heartbeat-monitor'
 import { LifecycleStore } from '@/stores/lifecycle-store'
+import { UserInfoStore } from '@/stores/user-info-store'
 import { SessionListVM } from '@/viewmodels/session-list-vm'
 import { ConversationVM } from '@/viewmodels/conversation-vm'
 import { TerminalVM } from '@/viewmodels/terminal-vm'
@@ -19,6 +20,15 @@ import { Settings } from './Settings'
 import { TokenUsage } from './TokenUsage'
 import { UserManagement } from './UserManagement'
 import { DeviceCodeVerifyPage } from './DeviceCodeVerifyPage'
+import { TokenGate } from './TokenGate'
+import { TokenFailureBanner } from './TokenFailureBanner'
+import { ConnectSheet } from './ConnectSheet'
+import {
+  deliverTokenToAllHosts,
+  checkAndRedeliverStaleTokens,
+  retryPendingDeliveries,
+} from '@/stores/token-delivery-service'
+import { clearPendingDeliveries } from '@/lib/token-delivery'
 
 // ── Hash routing helpers (React Router v6 with HashRouter) ────────────────
 // Kept for programmatic navigation — React Router v6 useNavigate returns
@@ -173,6 +183,17 @@ function AppInner() {
   const [sessionStore, setSessionStore] = useState<SessionStore | null>(null)
   const [heartbeatMonitor, setHeartbeatMonitor] = useState<HeartbeatMonitor | null>(null)
 
+  // ADR-0092: User info store (anthropic token from mclaude-user-info-{uslug} KV)
+  const [userInfoStore, setUserInfoStore] = useState<UserInfoStore | null>(null)
+  // ADR-0092: Token gate — true while awaiting first token + delivery
+  const [tokenGateActive, setTokenGateActive] = useState(false)
+  // ADR-0092: Default platform host slug for TokenGate delivery (first accepted grant)
+  const [defaultHostSlug, setDefaultHostSlug] = useState<string | undefined>(undefined)
+  // ADR-0092: Connect sheet state (for session banner reconnect)
+  const [showConnectSheet, setShowConnectSheet] = useState(false)
+  // ADR-0092: Re-delivery progress message
+  const [redeliveryMessage, setRedeliveryMessage] = useState<string | null>(null)
+
   // Toast state for post-redirect notifications
   const [toast, setToast] = useState<{ message: string; isError: boolean } | null>(null)
 
@@ -204,6 +225,12 @@ function AppInner() {
       sessionStoreRef.current?.startWatching()
       heartbeatMonitorRef.current?.stop()
       heartbeatMonitorRef.current?.start()
+      // ADR-0092: retry pending deliveries on reconnect
+      const uis = userInfoStoreRef.current
+      const uslug = authStateRef.current.userSlug ?? authStateRef.current.userId ?? ''
+      if (uis?.token && uslug) {
+        void retryPendingDeliveries(natsClient, authClientRef.current, uslug, uis.token)
+      }
     })
     return () => { unsub1(); unsub2() }
   }, [])
@@ -328,7 +355,7 @@ function AppInner() {
     })
   }, [sessionStore])
 
-  // Bootstrap session store after login
+  // Bootstrap session store + user info store after login
   useEffect(() => {
     if (authState.status === 'authenticated' && authState.userId) {
       const uslug = authState.userSlug ?? authState.userId
@@ -339,10 +366,44 @@ function AppInner() {
       const unsub = store.onSessionChanged(() => setSessionVersion(v => v + 1))
       setSessionStore(store)
       setHeartbeatMonitor(hb)
+
+      // ADR-0092: Start watching user-info KV for anthropic token
+      const uis = new UserInfoStore(natsClient, uslug)
+      uis.startWatching()
+      setUserInfoStore(uis)
+
+      // ADR-0092: Check token gate after brief settle time (KV watch delivers initial state)
+      const gateTimer = setTimeout(() => {
+        if (!uis.token) {
+          // Fetch grants to resolve the default platform host slug (first accepted grant).
+          // For a first-run user, the only accepted grant is the default platform grant
+          // (auto-accepted by CP). TokenGate delivers K_wrapped to this host.
+          authClient.getGrants(uslug)
+            .then(grants => {
+              const firstAccepted = grants.find(g => g.status === 'accepted')
+              setDefaultHostSlug(firstAccepted?.hostSlug)
+            })
+            .catch(() => {
+              // Grants fetch failed — TokenGate will skip delivery (no defaultHostSlug)
+              setDefaultHostSlug(undefined)
+            })
+          setTokenGateActive(true)
+        } else {
+          // Token exists — check stale tokens on login hydration (ADR-0092)
+          void checkAndRedeliverStaleTokens(natsClient, authClient, uslug, uis.token)
+          // Retry pending deliveries from localStorage
+          void retryPendingDeliveries(natsClient, authClient, uslug, uis.token)
+        }
+      }, 500)
+
       return () => {
         unsub()
         store.stopWatching()
         hb.stop()
+        uis.stopWatching()
+        clearTimeout(gateTimer)
+        // ADR-0092: clear pending deliveries on logout
+        clearPendingDeliveries()
       }
     }
     return undefined
@@ -355,9 +416,11 @@ function AppInner() {
   }, [sessionStore, heartbeatMonitor, authState.userId])
 
   // First-run: auto-create session if no sessions exist (handles seeded projects with no sessions)
+  // ADR-0092: blocked until tokenGateActive is false (token exists + delivered)
   const [initialMessage, setInitialMessage] = useState<string | null>(null)
   useEffect(() => {
     if (!sessionListVM) return
+    if (tokenGateActive) return  // ADR-0092: don't start first-run flow until token is connected
     const timer = setTimeout(async () => {
       const projs = sessionListVM.projects
       const totalSessions = projs.reduce((sum, p) => sum + p.sessions.length, 0)
@@ -383,7 +446,7 @@ function AppInner() {
       }
     }, 1000)
     return () => clearTimeout(timer)
-  }, [sessionListVM])
+  }, [sessionListVM, tokenGateActive])
 
   // Refs for reconnect handler — kept in sync so the NATS onReconnect callback
   // (which runs only once, on mount) can access the current instances.
@@ -391,6 +454,13 @@ function AppInner() {
   sessionStoreRef.current = sessionStore
   const heartbeatMonitorRef = useRef<HeartbeatMonitor | null>(null)
   heartbeatMonitorRef.current = heartbeatMonitor
+  // ADR-0092: refs for token delivery on reconnect
+  const userInfoStoreRef = useRef<UserInfoStore | null>(null)
+  userInfoStoreRef.current = userInfoStore
+  const authClientRef = useRef<AuthClient>(authClient)
+  authClientRef.current = authClient
+  const authStateRef = useRef(authState)
+  authStateRef.current = authState
 
   // Per-session EventStore + ConversationVM + TerminalVM
   const [eventStore, setEventStore] = useState<EventStore | null>(null)
@@ -542,8 +612,33 @@ function AppInner() {
     await authStore.logout()
     setSessionStore(null)
     setHeartbeatMonitor(null)
+    setUserInfoStore(null)
     setConnected(false)
+    clearPendingDeliveries()
     navigate('/')
+  }
+
+  // ── ADR-0092: Re-delivery on reconnect ───────────────────────────────────
+  const handleTokenReconnected = async (token: string) => {
+    const uslug = authState.userSlug ?? authState.userId ?? ''
+    if (!uslug) return
+    setRedeliveryMessage('Updating hosts…')
+    try {
+      const result = await deliverTokenToAllHosts(natsClient, authClient, uslug, token)
+      if (result.failed.length === 0) {
+        setRedeliveryMessage('Done')
+      } else {
+        const offlineCount = result.failed.length
+        const totalCount = result.total
+        const succeededCount = result.succeeded
+        setRedeliveryMessage(
+          `${succeededCount} of ${totalCount} hosts updated — ${offlineCount} offline host${offlineCount !== 1 ? 's' : ''} will receive the token on your next visit`
+        )
+      }
+    } catch {
+      setRedeliveryMessage(null)
+    }
+    setTimeout(() => setRedeliveryMessage(null), 5000)
   }
 
   // ── Device-code verification page ─────────────────────────────────────
@@ -610,6 +705,24 @@ function AppInner() {
     )
   }
 
+  // ── ADR-0092: Token gate (first-run) ──────────────────────────────────
+  if (tokenGateActive && userInfoStore && authState.status === 'authenticated') {
+    const uslug = authState.userSlug ?? authState.userId ?? ''
+    return (
+      <Fragment>
+        <TokenGate
+          nc={natsClient}
+          userInfoStore={userInfoStore}
+          authClient={authClient}
+          uslug={uslug}
+          defaultHostSlug={defaultHostSlug}
+          onReady={() => setTokenGateActive(false)}
+        />
+        {updateAvailable && <UpdateBanner />}
+      </Fragment>
+    )
+  }
+
   // ── Route rendering ───────────────────────────────────────────────────
   if (route.screen === 'settings') {
     return (
@@ -627,8 +740,13 @@ function AppInner() {
           projects={sessionStore?.projects}
           role={userRole}
           onNavigate={(path: string) => navigate(path.startsWith('/') ? path : `/${path}`)}
+          userSlug={(authState.userSlug ?? authState.userId) ?? undefined}
+          nc={natsClient}
+          userInfoStore={userInfoStore ?? undefined}
+          onTokenReconnected={handleTokenReconnected}
         />
         {toast && <Toast message={toast.message} isError={toast.isError} />}
+        {redeliveryMessage && <Toast message={redeliveryMessage} isError={false} />}
         {updateAvailable && <UpdateBanner />}
       </Fragment>
     )
@@ -667,8 +785,27 @@ function AppInner() {
     const project = session ? sessionStore.projects.get(session.projectId) : undefined
     const sessionProjectSlug = project?.slug ?? session?.projectSlug
     const sessionHostSlug = project?.hostSlug ?? session?.hostSlug ?? route.hostSlug ?? ''
+    // ADR-0092: Show token failure banner when session reports token_expired
+    const sessionTokenExpired = session?.state === 'token_expired'
     return (
       <Fragment>
+        {/* ADR-0092: Token failure banner */}
+        {sessionTokenExpired && (
+          <TokenFailureBanner onReconnect={() => setShowConnectSheet(true)} />
+        )}
+        {/* ADR-0092: Connect sheet (session banner reconnect) */}
+        {showConnectSheet && userInfoStore && (
+          <ConnectSheet
+            firstRun={false}
+            onTokenObtained={async (token) => {
+              userInfoStore.writeToken(token)
+              setShowConnectSheet(false)
+              await handleTokenReconnected(token)
+            }}
+            onDismiss={() => setShowConnectSheet(false)}
+            authClient={authClient}
+          />
+        )}
         <SessionDetailScreen
           sessionId={route.sessionId}
           sessionName={project?.name ?? session?.name ?? route.sessionId.slice(0, 8)}
@@ -688,6 +825,7 @@ function AppInner() {
           hostSlug={sessionHostSlug}
         />
         {toast && <Toast message={toast.message} isError={toast.isError} />}
+        {redeliveryMessage && <Toast message={redeliveryMessage} isError={false} />}
         {updateAvailable && <UpdateBanner />}
       </Fragment>
     )

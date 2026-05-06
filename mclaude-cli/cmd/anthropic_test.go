@@ -958,7 +958,8 @@ func TestRunAuthAnthropic_Status_HostNoPubkey(t *testing.T) {
 // --revoke tests
 // --------------------------------------------------------------------------
 
-func TestRunAuthAnthropic_Revoke(t *testing.T) {
+func TestRunAuthAnthropic_Revoke_NoHosts(t *testing.T) {
+	// --revoke with no accepted hosts: KV deleted, summary "Token removed."
 	dir := t.TempDir()
 	authPath := dir + "/auth.json"
 	creds := &cmd.AuthCredentials{
@@ -978,13 +979,14 @@ func TestRunAuthAnthropic_Revoke(t *testing.T) {
 	kv, _ := mockConn.kva.KeyValue("mclaude-user-info-alice")
 	_, _ = kv.Put("tokens.anthropic", []byte("to-be-revoked"))
 
-	var out bytes.Buffer
+	var out, errOut bytes.Buffer
 	flags := cmd.AuthAnthropicFlags{
 		Revoke:     true,
 		AuthPath:   authPath,
 		ServerURL:  cpSrv.URL,
 		NATSConn:   mockConn,
 		HTTPClient: cpSrv.Client(),
+		Stderr:     &errOut,
 	}
 
 	result, err := cmd.RunAuthAnthropic(flags, &out)
@@ -995,18 +997,28 @@ func TestRunAuthAnthropic_Revoke(t *testing.T) {
 		t.Errorf("ExitCode = %d; want 0", result.ExitCode)
 	}
 
-	// Token should be deleted.
+	// Token should be deleted from KV.
 	_, err = kv.Get("tokens.anthropic")
 	if err != nats.ErrKeyNotFound {
 		t.Errorf("expected ErrKeyNotFound after revoke, got: %v", err)
 	}
 
-	if !strings.Contains(out.String(), "deleted") {
-		t.Errorf("output %q; want mention of 'deleted'", out.String())
+	// No NATS requests should be sent (no hosts to revoke from).
+	if len(mockConn.requests) != 0 {
+		t.Errorf("expected 0 NATS requests with no accepted hosts, got %d", len(mockConn.requests))
+	}
+
+	if !strings.Contains(out.String(), "Token removed") {
+		t.Errorf("stdout %q; want mention of 'Token removed'", out.String())
+	}
+	if errOut.Len() != 0 {
+		t.Errorf("expected empty stderr with no hosts, got %q", errOut.String())
 	}
 }
 
-func TestRunAuthAnthropic_Revoke_MentionsClientSideOnly(t *testing.T) {
+func TestRunAuthAnthropic_Revoke_AllHostsSucceed(t *testing.T) {
+	// --revoke with 2 accepted hosts that both succeed.
+	// Summary: "Token removed. Revoked on 2/2 hosts."
 	dir := t.TempDir()
 	authPath := dir + "/auth.json"
 	creds := &cmd.AuthCredentials{
@@ -1018,29 +1030,304 @@ func TestRunAuthAnthropic_Revoke_MentionsClientSideOnly(t *testing.T) {
 		t.Fatalf("SaveAuth: %v", err)
 	}
 
-	cpSrv := mockCPServer(t, nil, nil)
+	cpSrv := mockCPServer(t, []string{"host-a", "host-b"}, nil)
 	defer cpSrv.Close()
 
 	mockConn := newMockAnthropicNATSConn()
 	mockConn.kva.createBucket("mclaude-user-info-alice")
+	kv, _ := mockConn.kva.KeyValue("mclaude-user-info-alice")
+	_, _ = kv.Put("tokens.anthropic", []byte("my-token"))
 
-	var out bytes.Buffer
+	// Pre-configure successful responses for both token-revoke subjects.
+	mockConn.responses["mclaude.users.alice.hosts.host-a.agent.token-revoke"] = []byte(`{"ok":true}`)
+	mockConn.responses["mclaude.users.alice.hosts.host-b.agent.token-revoke"] = []byte(`{"ok":true}`)
+
+	var out, errOut bytes.Buffer
 	flags := cmd.AuthAnthropicFlags{
 		Revoke:     true,
 		AuthPath:   authPath,
 		ServerURL:  cpSrv.URL,
 		NATSConn:   mockConn,
 		HTTPClient: cpSrv.Client(),
+		Stderr:     &errOut,
 	}
 
-	result, _ := cmd.RunAuthAnthropic(flags, &out)
-	if result.ExitCode != cmd.ExitAuthSuccess {
-		t.Errorf("ExitCode = %d; want 0", result.ExitCode)
+	result, err := cmd.RunAuthAnthropic(flags, &out)
+	if err != nil {
+		t.Fatalf("RunAuthAnthropic --revoke: %v", err)
 	}
-	// Spec: revoke output must note that host-side cleanup is deferred.
-	output := out.String()
-	if !strings.Contains(output, "client-side") && !strings.Contains(output, "deferred") && !strings.Contains(output, "future") {
-		t.Errorf("revoke output should mention client-side-only nature; got %q", output)
+	if result.ExitCode != cmd.ExitAuthSuccess {
+		t.Errorf("ExitCode = %d; want 0 (ExitAuthSuccess)", result.ExitCode)
+	}
+
+	// Token should be deleted from KV.
+	_, err = kv.Get("tokens.anthropic")
+	if err != nats.ErrKeyNotFound {
+		t.Errorf("expected ErrKeyNotFound after revoke, got: %v", err)
+	}
+
+	// Both hosts should have received a token-revoke NATS request.
+	if len(mockConn.requests) != 2 {
+		t.Fatalf("expected 2 NATS requests, got %d", len(mockConn.requests))
+	}
+	subjects := make(map[string]bool)
+	for _, req := range mockConn.requests {
+		subjects[req.Subject] = true
+		// Verify request payload has provider=anthropic.
+		var payload map[string]string
+		if err := json.Unmarshal(req.Data, &payload); err != nil {
+			t.Errorf("unmarshal revoke payload: %v", err)
+		}
+		if payload["provider"] != "anthropic" {
+			t.Errorf("revoke payload provider = %q; want anthropic", payload["provider"])
+		}
+	}
+	for _, hslug := range []string{"host-a", "host-b"} {
+		subj := fmt.Sprintf("mclaude.users.alice.hosts.%s.agent.token-revoke", hslug)
+		if !subjects[subj] {
+			t.Errorf("expected NATS request to %s, not found", subj)
+		}
+	}
+
+	stdout := out.String()
+	if !strings.Contains(stdout, "2/2") {
+		t.Errorf("stdout %q; want '2/2'", stdout)
+	}
+	if !strings.Contains(stdout, "Token removed") {
+		t.Errorf("stdout %q; want 'Token removed'", stdout)
+	}
+	// No warnings on stderr when all succeed.
+	if errOut.Len() != 0 {
+		t.Errorf("expected empty stderr when all hosts succeed, got %q", errOut.String())
+	}
+}
+
+func TestRunAuthAnthropic_Revoke_PartialFailure(t *testing.T) {
+	// --revoke with 2 accepted hosts; one fails.
+	// Summary: "Token removed. Revoked on 1/2 hosts."
+	// Exit code: still ExitAuthSuccess (KV delete succeeded).
+	dir := t.TempDir()
+	authPath := dir + "/auth.json"
+	creds := &cmd.AuthCredentials{
+		JWT:      "test-jwt",
+		NKeySeed: "SUANQQXHQ3Q4JS5O6BLQW2QIQIHDKFWQB4CJEWFZK2HBYJ76CCWMRGRQY",
+		UserSlug: "alice",
+	}
+	if err := cmd.SaveAuth(authPath, creds); err != nil {
+		t.Fatalf("SaveAuth: %v", err)
+	}
+
+	cpSrv := mockCPServer(t, []string{"host-ok", "host-offline"}, nil)
+	defer cpSrv.Close()
+
+	mockConn := newMockAnthropicNATSConn()
+	mockConn.kva.createBucket("mclaude-user-info-alice")
+	kv, _ := mockConn.kva.KeyValue("mclaude-user-info-alice")
+	_, _ = kv.Put("tokens.anthropic", []byte("my-token"))
+
+	// host-ok succeeds; host-offline fails via failingHostNATSConn.
+	mockConn.responses["mclaude.users.alice.hosts.host-ok.agent.token-revoke"] = []byte(`{"ok":true}`)
+	failConn := &failingHostNATSConn{
+		mockAnthropicNATSConn: mockConn,
+		failSubject:           "mclaude.users.alice.hosts.host-offline.agent.token-revoke",
+	}
+
+	var out, errOut bytes.Buffer
+	flags := cmd.AuthAnthropicFlags{
+		Revoke:     true,
+		AuthPath:   authPath,
+		ServerURL:  cpSrv.URL,
+		NATSConn:   failConn,
+		HTTPClient: cpSrv.Client(),
+		Stderr:     &errOut,
+	}
+
+	result, err := cmd.RunAuthAnthropic(flags, &out)
+	if err != nil {
+		t.Fatalf("RunAuthAnthropic --revoke: %v", err)
+	}
+	// Exit code must be 0 (ExitAuthSuccess) even with partial failure — KV delete succeeded.
+	if result.ExitCode != cmd.ExitAuthSuccess {
+		t.Errorf("ExitCode = %d; want 0 (ExitAuthSuccess) even on partial host failure", result.ExitCode)
+	}
+
+	// Token deleted from KV.
+	_, err = kv.Get("tokens.anthropic")
+	if err != nats.ErrKeyNotFound {
+		t.Errorf("expected ErrKeyNotFound after revoke, got: %v", err)
+	}
+
+	// Warning for failed host goes to stderr.
+	stderrOutput := errOut.String()
+	if !strings.Contains(stderrOutput, "Warning: could not revoke on host-offline") {
+		t.Errorf("stderr %q; want warning for host-offline", stderrOutput)
+	}
+	// Summary (1/2) goes to stdout.
+	stdoutOutput := out.String()
+	if !strings.Contains(stdoutOutput, "1/2") {
+		t.Errorf("stdout %q; want '1/2'", stdoutOutput)
+	}
+}
+
+func TestRunAuthAnthropic_Revoke_AllHostsFail(t *testing.T) {
+	// --revoke with 1 accepted host that fails.
+	// Summary: "Token removed from account. Warning: 1 hosts could not be reached..."
+	// Exit code: still ExitAuthSuccess (KV delete succeeded).
+	dir := t.TempDir()
+	authPath := dir + "/auth.json"
+	creds := &cmd.AuthCredentials{
+		JWT:      "test-jwt",
+		NKeySeed: "SUANQQXHQ3Q4JS5O6BLQW2QIQIHDKFWQB4CJEWFZK2HBYJ76CCWMRGRQY",
+		UserSlug: "alice",
+	}
+	if err := cmd.SaveAuth(authPath, creds); err != nil {
+		t.Fatalf("SaveAuth: %v", err)
+	}
+
+	cpSrv := mockCPServer(t, []string{"unreachable-host"}, nil)
+	defer cpSrv.Close()
+
+	mockConn := newMockAnthropicNATSConn()
+	mockConn.kva.createBucket("mclaude-user-info-alice")
+	kv, _ := mockConn.kva.KeyValue("mclaude-user-info-alice")
+	_, _ = kv.Put("tokens.anthropic", []byte("my-token"))
+
+	failConn := &failingHostNATSConn{
+		mockAnthropicNATSConn: mockConn,
+		failSubject:           "mclaude.users.alice.hosts.unreachable-host.agent.token-revoke",
+	}
+
+	var out, errOut bytes.Buffer
+	flags := cmd.AuthAnthropicFlags{
+		Revoke:     true,
+		AuthPath:   authPath,
+		ServerURL:  cpSrv.URL,
+		NATSConn:   failConn,
+		HTTPClient: cpSrv.Client(),
+		Stderr:     &errOut,
+	}
+
+	result, err := cmd.RunAuthAnthropic(flags, &out)
+	if err != nil {
+		t.Fatalf("RunAuthAnthropic --revoke: %v", err)
+	}
+	if result.ExitCode != cmd.ExitAuthSuccess {
+		t.Errorf("ExitCode = %d; want 0 (ExitAuthSuccess) when KV delete succeeded", result.ExitCode)
+	}
+
+	// Token deleted from KV.
+	_, err = kv.Get("tokens.anthropic")
+	if err != nats.ErrKeyNotFound {
+		t.Errorf("expected ErrKeyNotFound after revoke, got: %v", err)
+	}
+
+	// Warning for failing host goes to stderr.
+	stderrOutput := errOut.String()
+	if !strings.Contains(stderrOutput, "Warning: could not revoke on unreachable-host") {
+		t.Errorf("stderr %q; want warning for unreachable-host", stderrOutput)
+	}
+
+	// All-failed summary message goes to stdout.
+	stdoutOutput := out.String()
+	if !strings.Contains(stdoutOutput, "could not be reached") {
+		t.Errorf("stdout %q; want 'could not be reached'", stdoutOutput)
+	}
+	if !strings.Contains(stdoutOutput, "Token removed from account") {
+		t.Errorf("stdout %q; want 'Token removed from account'", stdoutOutput)
+	}
+}
+
+func TestRunAuthAnthropic_Revoke_AgentErrorResponse(t *testing.T) {
+	// --revoke where host agent returns { "ok": false, "error": "..." }
+	// Counts as a failure for that host; warning printed to stderr; exit code still 0.
+	dir := t.TempDir()
+	authPath := dir + "/auth.json"
+	creds := &cmd.AuthCredentials{
+		JWT:      "test-jwt",
+		NKeySeed: "SUANQQXHQ3Q4JS5O6BLQW2QIQIHDKFWQB4CJEWFZK2HBYJ76CCWMRGRQY",
+		UserSlug: "alice",
+	}
+	if err := cmd.SaveAuth(authPath, creds); err != nil {
+		t.Fatalf("SaveAuth: %v", err)
+	}
+
+	cpSrv := mockCPServer(t, []string{"error-host"}, nil)
+	defer cpSrv.Close()
+
+	mockConn := newMockAnthropicNATSConn()
+	mockConn.kva.createBucket("mclaude-user-info-alice")
+	kv, _ := mockConn.kva.KeyValue("mclaude-user-info-alice")
+	_, _ = kv.Put("tokens.anthropic", []byte("my-token"))
+
+	// Agent returns an application-level error.
+	mockConn.responses["mclaude.users.alice.hosts.error-host.agent.token-revoke"] = []byte(`{"ok":false,"error":"permission denied"}`)
+
+	var out, errOut bytes.Buffer
+	flags := cmd.AuthAnthropicFlags{
+		Revoke:     true,
+		AuthPath:   authPath,
+		ServerURL:  cpSrv.URL,
+		NATSConn:   mockConn,
+		HTTPClient: cpSrv.Client(),
+		Stderr:     &errOut,
+	}
+
+	result, err := cmd.RunAuthAnthropic(flags, &out)
+	if err != nil {
+		t.Fatalf("RunAuthAnthropic --revoke: %v", err)
+	}
+	if result.ExitCode != cmd.ExitAuthSuccess {
+		t.Errorf("ExitCode = %d; want 0 (ExitAuthSuccess)", result.ExitCode)
+	}
+
+	// Token deleted from KV despite host error.
+	_, err = kv.Get("tokens.anthropic")
+	if err != nats.ErrKeyNotFound {
+		t.Errorf("expected ErrKeyNotFound after revoke, got: %v", err)
+	}
+
+	// Warning goes to stderr.
+	stderrOutput := errOut.String()
+	if !strings.Contains(stderrOutput, "Warning: could not revoke on error-host") {
+		t.Errorf("stderr %q; want warning for error-host", stderrOutput)
+	}
+}
+
+func TestSendTokenRevoke_SendsToCorrectSubject(t *testing.T) {
+	nc := newMockNATSConn()
+	nc.responses["mclaude.users.alice.hosts.dev-local.agent.token-revoke"] = []byte(`{"ok":true}`)
+
+	if err := cmd.SendTokenRevoke(nc, "alice", "dev-local"); err != nil {
+		t.Fatalf("SendTokenRevoke: %v", err)
+	}
+
+	if len(nc.requests) != 1 {
+		t.Fatalf("expected 1 NATS request, got %d", len(nc.requests))
+	}
+	req := nc.requests[0]
+	if req.Subject != "mclaude.users.alice.hosts.dev-local.agent.token-revoke" {
+		t.Errorf("subject = %q; want mclaude.users.alice.hosts.dev-local.agent.token-revoke", req.Subject)
+	}
+
+	var payload map[string]string
+	if err := json.Unmarshal(req.Data, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload["provider"] != "anthropic" {
+		t.Errorf("provider = %q; want anthropic", payload["provider"])
+	}
+}
+
+func TestSendTokenRevoke_AgentError(t *testing.T) {
+	nc := newMockNATSConn()
+	nc.responses["mclaude.users.alice.hosts.bad-host.agent.token-revoke"] = []byte(`{"ok":false,"error":"not ready"}`)
+
+	err := cmd.SendTokenRevoke(nc, "alice", "bad-host")
+	if err == nil {
+		t.Fatal("expected error when agent returns ok=false, got nil")
+	}
+	if !strings.Contains(err.Error(), "not ready") {
+		t.Errorf("error %q; want mention of 'not ready'", err.Error())
 	}
 }
 

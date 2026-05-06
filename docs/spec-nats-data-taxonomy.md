@@ -63,7 +63,9 @@ mclaude
 │   ├── activate                           ← CP signals grant accepted; user-agent re-runs challenge-response
 │   ├── token-delivery                     ← SPA/CLI delivers crypto_box_seal-wrapped token; request/reply
 │   ├── projects.provision                 ← CP requests project pod creation after DB write
-│   └── projects.delete                    ← CP requests project pod deletion after DB delete
+│   ├── projects.delete                    ← CP requests project pod deletion after DB delete
+│   ├── token-revoke                       ← SPA/CLI requests token removal from host Secret; request/reply (ADR-0092)
+│   └── status                             ← SPA requests token availability; request/reply `{hasToken, tokenVersion}` (ADR-0092)
 ```
 
 ---

@@ -43,6 +43,7 @@ const (
 	StatusCompleted     = "completed"      // session_job_complete turn-end with stopReason==""
 	StatusCancelled     = "cancelled"      // explicit sessions.delete on quota-managed session
 	StatusNeedsSpecFix  = "needs_spec_fix" // strict-allowlist denied an out-of-scope tool
+	StatusTokenExpired  = "token_expired"  // Anthropic API returned 401/403 — token invalid (ADR-0092)
 )
 
 // eventHeader holds the minimum fields needed to dispatch an event.
@@ -98,6 +99,10 @@ type resultEvent struct {
 	TotalCostUSD float64    `json:"total_cost_usd"`
 	Usage       resultUsage `json:"usage"`
 	IsError     bool        `json:"is_error"`
+	// Error holds the error message when IsError is true. For Anthropic API
+	// authentication failures (401/403), this contains strings like "401",
+	// "authentication_error", "invalid x-api-key", or "permission_error".
+	Error       string      `json:"error,omitempty"`
 	DurationMs  int64       `json:"duration_ms"`
 	NumTurns    int         `json:"num_turns"`
 }
