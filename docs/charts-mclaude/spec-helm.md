@@ -27,7 +27,7 @@ Generates the deployment-level operator + account NKey trust chain on first inst
 | Kind | Name | Notes |
 |---|---|---|
 | Job | `mclaude-cp-init-keys` | Helm pre-install hook (weight `-20`). Runs `mclaude-cp init-keys`, which calls into `mclaude-common/pkg/nats/operator-keys.go` for the actual NKey + JWT generation logic. Generates `operatorNKey` + `accountNKey` pairs and corresponding JWTs (account JWT signed by operator key, operator JWT self-signed). Writes them to Secret `mclaude-system/operator-keys`. Idempotent: if the Secret already exists, exits without regenerating. Also creates the bootstrap admin row in Postgres when `controlPlane.bootstrapAdminEmail` is set. |
-| Secret | `mclaude-system/operator-keys` | Type `Opaque`, mode `0600`. Keys: `operatorJwt`, `operatorSeed`, `accountJwt`, `accountSeed`. Hub NATS pod template references this Secret for `resolver_preload`. Control-plane Deployment mounts it at `OPERATOR_KEYS_PATH` to sign per-host user JWTs. |
+| Secret | `mclaude-system/operator-keys` | Type `Opaque`, mode `0600`. Keys: `operatorJwt`, `operatorSeed`, `accountJwt`, `accountSeed`, `accountPublicKey`, `resolverPreload`. Hub NATS pod template references `resolverPreload` for the static `resolver_preload` entry. Control-plane Deployment mounts it at `OPERATOR_KEYS_PATH` to sign per-host user JWTs. |
 
 The Job is the only place the operator/account seeds are generated; subsequent deploys (and air-gapped installs) reuse the existing Secret. To rotate the trust chain, delete the Secret and re-run `helm upgrade`; cluster registrations + per-host JWTs must then be reissued.
 
@@ -156,11 +156,7 @@ S3-compatible object storage for import archives and chat attachments per ADR-00
 | `minio.existingSecret` | `""` | Name of an existing Kubernetes Secret with keys `access-key` and `secret-key`. When set, the chart does not create its own Secret and `minio.rootUser`/`minio.rootPassword` are ignored. |
 | `minio.rootUser` | `minioadmin` | MinIO root username. Used only when `minio.existingSecret` is unset. **Change for production.** |
 | `minio.rootPassword` | `minioadmin` | MinIO root password. Used only when `minio.existingSecret` is unset. **Change for production.** |
-| `minio.mcImage.registry` | `docker.io` | `minio/mc` image registry for the bucket-creation Job. Override for air-gapped deployments. |
-| `minio.mcImage.repository` | `minio/mc` | `minio/mc` image repository. |
-| `minio.mcImage.tag` | `latest` | `minio/mc` image tag. Uses `latest` because the previously-pinned tag `RELEASE.2025-04-16T18-25-19Z` did not exist on Docker Hub (ADR-0072). The bucket-creation command (`mc mb --ignore-existing`) is stable across mc versions. |
-| `minio.mcImage.pullPolicy` | `IfNotPresent` | `minio/mc` image pull policy. |
-| `minio.bucketJobDeadlineSeconds` | `300` | `activeDeadlineSeconds` for the minio-bucket Job. Increased from the original 120s to allow time for a cold image pull in environments where the `minio/mc` image is not pre-cached (ADR-0070). |
+| `minio.bucketJobDeadlineSeconds` | `300` | `activeDeadlineSeconds` for the minio-bucket Job. Increased from the original 120s to allow time for a cold image pull in environments where the image is not pre-cached (ADR-0070). |
 
 The `slug-backfill` Job is removed — per ADR-0035 there is no migration of existing data; deployment is a clean break.
 
