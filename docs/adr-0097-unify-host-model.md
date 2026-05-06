@@ -1,8 +1,9 @@
 # ADR: Unify host model — remove type distinction and admin cluster endpoints
 
-**Status**: draft
+**Status**: accepted
 **Status history**:
 - 2026-05-05: draft
+- 2026-05-06: accepted — spec-evaluator CLEAN across 12 specs
 
 ## Overview
 

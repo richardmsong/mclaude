@@ -121,6 +121,11 @@ React Router v6 with parametric segments: `/api/users/{uslug}/projects/{pslug}/s
 
 - `SessionState.state` union gains `"updating"`.
 - `LifecycleEvent.type` union gains `"session_upgrading"`.
+- Host TypeScript types (`HostKVState`, host response types) do not include a `type` or `role` field (ADR-0097). All hosts are treated uniformly — no machine/cluster distinction.
+
+### Host Display (ADR-0097)
+
+No host type badge (machine/cluster) is shown in the host list, host picker, or any display component. No admin cluster management UI exists. Hosts are displayed by name and online status only.
 
 ### Session State
 
@@ -172,7 +177,7 @@ Registers a one-shot listener that fires when a new session belonging to `projec
 
 ### Default Host Slug
 
-Throughout the SPA, `hostSlug` is resolved from the project's host or the user's default host (stored in localStorage). There is no hardcoded `'local'` fallback — hosts only exist through the BYOH attestation flow (ADR-0095). `ConversationVM`, `SessionListVM`, `EventStore`, `LifecycleStore`, and `TerminalVM` all require an explicit `hostSlug` constructor parameter. If the user has no registered hosts, the SPA shows an empty state prompting host registration before any project or session operations are available.
+Throughout the SPA, `hostSlug` is resolved from the project's host or the user's default host (stored in localStorage). There is no hardcoded `'local'` fallback — hosts only exist through the NATS registration flow (ADR-0095, ADR-0097). `ConversationVM`, `SessionListVM`, `EventStore`, `LifecycleStore`, and `TerminalVM` all require an explicit `hostSlug` constructor parameter. If the user has no registered hosts, the SPA shows an empty state prompting host registration before any project or session operations are available.
 
 ### KV Watch DEL/PURGE Handling
 

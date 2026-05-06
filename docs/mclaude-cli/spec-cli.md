@@ -6,7 +6,7 @@ mclaude-cli is a terminal client for the mclaude platform. It attaches to runnin
 
 ## Deployment
 
-Installed as a standalone Go binary (`mclaude-cli`). No container, no daemon -- invoked directly from the shell. Requires a running session agent exposing a unix socket for the attach command. The import command communicates with the control-plane via NATS using JWT + NKey credentials.
+Installed as a standalone Go binary (`mclaude-cli`). No container -- invoked directly from the shell. Requires a running session agent exposing a unix socket for the attach command. The import command communicates with the control-plane via NATS using JWT + NKey credentials.
 
 ## Interfaces
 
@@ -92,47 +92,31 @@ Flags:
 | `--host <hslug>` | Host slug | Read from `~/.mclaude/active-host` symlink |
 | `--server <url>` | Control-plane base URL (for NATS bootstrap) | Read from `~/.mclaude/context.json`'s `server` key, otherwise `https://api.mclaude.internal` |
 
-#### `mclaude host register [--name <name>]`
+#### `mclaude host register --name <name> --nkey-public <key> [--default-platform]`
 
-Device-code registration flow for BYOH machines. Prompts for a hostname (default = `hostname` output, slugified). Generates an NKey pair locally — the private seed never leaves the machine, written to `~/.mclaude/hosts/{hslug}/nkey.seed` (mode 0600). Calls `POST /api/users/{uslug}/hosts/code` with `{publicKey}` to get a 6-character device code, then prints instructions for the user to open the dashboard and enter the code. Polls `GET /api/users/{uslug}/hosts/code/{code}` until the status changes from `pending` to `completed`. On completion, writes `~/.mclaude/hosts/{hslug}/{nats.creds, config.json}` from the returned JWT + the locally-stored seed, and symlinks `~/.mclaude/active-host → {hslug}`.
+Registers a host with the control-plane via NATS. The CLI connects to NATS using the user's JWT (from `mclaude login`), publishes to `mclaude.users.{uslug}.hosts._.register` with `{name, nkey_public, defaultPlatform?}`, and prints the resulting host slug. The CLI validates the NKey public key format (56-char base32 starting with `U` — user-level NKey only; `N`-prefix server keys are rejected) before publishing. Errors: `"--nkey-public is required"` if omitted; `"invalid NKey public key format"` if the key fails format validation.
+
+On success, writes `~/.mclaude/hosts/{hslug}/config.json` with `hubUrl` (read from `auth.json.natsUrl`). No `nkey.seed`, no `nats.creds` — the CLI does not own the host's credentials.
 
 Flags:
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--name <name>` | Display name for the host | `hostname` output, slugified |
+| `--name <name>` | Display name for the host (required) | (none) |
+| `--nkey-public <key>` | NKey public key (required, U-prefix, 56-char base32) | (none) |
+| `--default-platform` | Set this host as the default platform (admin-only) | `false` |
 
 #### `mclaude host list`
 
-Lists all hosts the authenticated user owns or has been granted access to. Calls `GET /api/users/{uslug}/hosts` and prints a table of slug, name, type, role, and online status.
+Lists all hosts the authenticated user owns or has been granted access to. Calls `GET /api/users/{uslug}/hosts` and prints a table of slug, name, and online status.
 
 #### `mclaude host use <hslug>`
 
-Sets the active host by symlinking `~/.mclaude/active-host → ~/.mclaude/hosts/{hslug}/`. Subsequent commands that require a host slug (e.g. `mclaude daemon`) read from this symlink when `--host` is not provided.
+Sets the active host by symlinking `~/.mclaude/active-host → ~/.mclaude/hosts/{hslug}/`. Subsequent commands that require a host slug read from this symlink when `--host` is not provided.
 
 #### `mclaude host rm <hslug>`
 
 Removes a host registration. Calls `DELETE /api/users/{uslug}/hosts/{hslug}` and removes the local `~/.mclaude/hosts/{hslug}/` directory. If the removed host is the active host, the `active-host` symlink is also removed.
-
-#### `mclaude cluster register`
-
-Admin-only. Registers a new K8s worker cluster. Calls `POST /admin/clusters`.
-
-Flags:
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--slug <cslug>` | Cluster slug (required; becomes the `hosts.slug` for all granted users) | (none) |
-| `--name <display>` | Display name | Defaults to slug |
-| `--jetstream-domain <jsd>` | JetStream domain for the worker NATS | (required) |
-| `--leaf-url <url>` | Worker NATS leaf-node URL (e.g. `nats-leaf://hub:7422`) | (required) |
-| `--direct-nats-url <wss>` | Externally-reachable WebSocket URL for SPA direct-to-worker | (optional) |
-
-Returns `{slug, leafJwt, leafSeed, accountJwt, operatorJwt, jsDomain, directNatsUrl}` for the admin to drop into the worker cluster's NATS Secret + `mclaude-worker` Helm values.
-
-#### `mclaude cluster grant <cluster-slug> <uslug>`
-
-Admin-only. Grants a user access to a cluster. Calls `POST /admin/clusters/{cluster-slug}/grants` with `{userSlug}`. Control-plane creates a new `hosts` row for that user with the cluster-shared fields copied from the existing cluster host row, and mints a per-user JWT.
 
 #### `mclaude auth anthropic`
 
@@ -157,16 +141,6 @@ Behavior:
 `--status` prints `Connected` or `Not set` based on KV read; for each accepted host, prints whether the user-agent has registered an X25519 pubkey (i.e. is reachable for delivery).
 
 Exit codes: `0` success on all hosts, `1` token saved but at least one host could not receive it (transient — retry later), `2` no token configured / OAuth aborted, `3` KV write failed.
-
-#### `mclaude daemon --host <hslug>`
-
-Starts the BYOH local controller daemon. Reads `--host` from the flag or from `~/.mclaude/active-host` symlink if unset. Connects to hub NATS using the host's credentials from `~/.mclaude/hosts/{hslug}/nats.creds`, subscribes to `mclaude.users.{uslug}.hosts.{hslug}.api.projects.>`, and starts session-agent subprocesses for each provisioned project. Intended to run as a launchd / systemd service.
-
-Flags:
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--host <hslug>` | Host slug | Read from `~/.mclaude/active-host` symlink |
 
 ### Context file
 
@@ -257,7 +231,7 @@ The CP returns `natsUrl` in its device-code poll response (`s.natsWsURL`). The C
 
 `TestMain` creates an ephemeral test user via `POST /admin/users` (same admin API as Playwright). The response returns `{id, email, name, slug}`. TestMain supplies its own generated password in the request body; the password is not returned in the response.
 
-After creating the user, `TestMain` calls `grantClusterAccess(adminURL, adminJWT, hslug, user.Slug)` which calls `POST /admin/clusters/{hslug}/grants` with `Authorization: Bearer <adminJWT>` and body `{userSlug}`. The admin JWT is obtained by calling `POST /auth/login` with `BOOTSTRAP_ADMIN_EMAIL` + `BOOTSTRAP_ADMIN_PASSWORD`. This step is required before the device-code login: the user JWT is issued during login and includes only cluster slugs for which a `hosts` row already exists; without the grant the reconciler fails with "user does not have access to host" when provisioning the test project. The call is idempotent (`ON CONFLICT DO NOTHING`). If the grant call fails, `TestMain` deletes the test user and exits 1.
+After creating the user, `TestMain` grants host access by publishing to the host's `grants.create` NATS subject (or calling the appropriate admin API). The admin JWT is obtained by calling `POST /auth/login` with `BOOTSTRAP_ADMIN_EMAIL` + `BOOTSTRAP_ADMIN_PASSWORD`. This step is required before the device-code login: the user JWT is issued during login and includes only host slugs for which a grant exists; without the grant the reconciler fails with "user does not have access to host" when provisioning the test project. The call is idempotent (`ON CONFLICT DO NOTHING`). If the grant call fails, `TestMain` deletes the test user and exits 1.
 
 NATS credentials are then obtained by automating the device-code flow (no browser needed):
 
@@ -267,7 +241,7 @@ NATS credentials are then obtained by automating the device-code flow (no browse
 
 The JWT is bound to the CLI's `publicKey` (sent in step 1). The CLI signs NATS connections with the matching `nkeySeed`. Tests use this JWT as `Authorization: Bearer <jwt>` for all authenticated CP HTTP calls.
 
-`TestMain` teardown: delete test project via admin API (CP deletes S3 prefix `{uslug}/{hslug}/{pslug}/`), then delete the test user. No explicit revoke is needed — `deleteTestUser` cascades to all `hosts` rows for the user via the FK constraint, which drops the cluster grant automatically.
+`TestMain` teardown: delete test project via admin API (CP deletes S3 prefix `{uslug}/{hslug}/{pslug}/`), then delete the test user. No explicit revoke is needed — `deleteTestUser` cascades to all `hosts` rows for the user via the FK constraint, which drops the host grant automatically.
 
 ### Test cases
 

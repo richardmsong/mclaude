@@ -1,6 +1,6 @@
 # Spec: mclaude-web Host Picker
 
-The host picker is how users select which **host** (BYOH machine or K8s cluster) a project is created on, and how they switch between hosts when viewing existing projects. Per ADR-0035 every project is owned by exactly one host; the SPA surfaces the host throughout the navigation, the URL scheme, and the project-level UI.
+The host picker is how users select which **host** a project is created on, and how they switch between hosts when viewing existing projects. Per ADR-0035 every project is owned by exactly one host; the SPA surfaces the host throughout the navigation, the URL scheme, and the project-level UI.
 
 ## Where it appears
 
@@ -26,8 +26,8 @@ When the user opens the New Project sheet (from the dashboard overflow menu), th
 ```
 
 - Default selection: the user's first registered host (stored in localStorage `mclaude.defaultHostSlug`). If no hosts are registered, the host picker is disabled and the UI shows an empty state prompting the user to register a host (ADR-0095).
-- Dropdown lists every host in the login response's `hosts[]` array, ordered: machine hosts owned by the user first (alphabetical), then cluster hosts (alphabetical).
-- Each row in the dropdown shows: host display name + slug + a one-character type badge (🖥️ machine / ☁️ cluster) + role indicator (you / shared).
+- Dropdown lists every host in the login response's `hosts[]` array, ordered alphabetically by name.
+- Each row in the dropdown shows: host display name + slug + online indicator.
 - **Disabled** rows (not selectable) for hosts where `online === false`. Tapping shows a tooltip "{name} is offline — wait for it to reconnect or pick another host."
 
 ### B. Dashboard project header — host pill
@@ -40,7 +40,7 @@ MCLAUDE                                   [🖥️ MBP16]
    Working · ~/work/mclaude
 ```
 
-- Pill uses the host's display name; tooltip shows the slug + cluster jsDomain (when applicable).
+- Pill uses the host's display name; tooltip shows the slug.
 - Pill is **clickable** — opens the [Settings → Hosts](#screen-settings--hosts) screen scrolled to that host.
 
 ### C. Settings → Hosts
@@ -51,26 +51,23 @@ A new screen reachable from the existing Settings overview (after the existing A
 ┌─────────────────────────────────┐
 │ ←  Hosts                        │
 ├─────────────────────────────────┤
-│  Your hosts                     │
-│  🖥️  MBP16                      │
+│  MBP16                          │
 │      Online · 2 projects        │
 │                              ›  │
 │                                 │
-│  🖥️  Garage VM                  │
+│  Garage VM                      │
 │      Offline (2h ago) · 0       │
 │                              ›  │
 │                                 │
-│  Shared with you                │
-│  ☁️  us-east                    │
-│      Online · cluster · 1 proj  │
+│  us-east                        │
+│      Online · 1 proj            │
 │                              ›  │
 │                                 │
 │  [+ Register a new host]        │
 └─────────────────────────────────┘
 ```
 
-- Two sections: "Your hosts" (`role === 'owner'`) and "Shared with you" (`role === 'user'`).
-- Each row tappable → host detail screen with name, slug, type, online state, last seen, list of projects, and (for owned machine hosts) a "Remove host" destructive action.
+- Each row tappable → host detail screen with name, slug, online state, last seen, list of projects, and a "Remove host" destructive action.
 - "+ Register a new host" launches the device-code flow:
   1. SPA calls `POST /api/users/{uslug}/hosts/code` to obtain `{code, expiresAt}`.
   2. Renders a modal with the 6-character code, a copy button, and the CLI hint: "Open a terminal on the new machine and run `mclaude host register` then enter this code." Reading the dashboard URL in the CLI is also supported.
@@ -96,20 +93,7 @@ The dashboard at `/u/{uslug}` aggregates across hosts (no `hslug` in the URL).
 
 ## Connection strategy (ties into EventStore / SessionStore)
 
-The SPA always maintains a connection to **hub NATS** (`hubUrl` from login response). On project open, if the project's `hostType === 'cluster'` and `directNatsUrl` is set, the SessionStore additionally attempts a direct connection to the worker NATS:
-
-- Direct connection success → terminal I/O and event subscriptions use the direct connection (lower latency).
-- Direct connection failure (timeout, refused, TLS error) → fall back to hub-via-leaf-node. Mark the cluster as "Direct unavailable" in the host detail screen but keep the project usable.
-
-For machine hosts there is no direct URL; the hub connection is used uniformly.
-
-JetStream domain qualification (`$JS.{jsDomain}.API.>`) is applied **only** when `jsDomain` is non-empty in the login response — i.e., for cluster-type hosts. Machine hosts use unqualified JetStream calls. This is what makes single-host BYOH deployments work without code paths checking deployment shape.
-
-#### Mid-session leaf-link drop (cluster hosts)
-
-If the worker NATS leaf-link to the hub drops while a session is open and the SPA is currently using the hub-via-leaf path, JetStream domain reads start failing (the hub can no longer route the domain query). The SessionStore detects the failure and probes `directNatsUrl` for that cluster — if reachable, it transparently swaps the active connection to the direct path and the session view recovers without user action. If the direct probe also fails, the cluster is marked offline (via the `mclaude-hosts` KV update from control-plane's `$SYS` subscriber) and the session view freezes in "stale" mode until either path comes back. On reconnect, the SessionStore re-issues domain-qualified KV watches and resync is automatic.
-
-This runtime fallback is distinct from the **initial** direct-vs-hub selection performed when a project is first opened — that one prefers direct, falls back to hub if direct is unreachable; the runtime fallback is the inverse, triggered by hub-via-leaf failure.
+The SPA always maintains a connection to **hub NATS** (`hubUrl` from login response). All hosts connect hub-direct — the hub connection is used uniformly.
 
 ## Connection / liveness indicators
 
@@ -123,17 +107,16 @@ This runtime fallback is distinct from the **initial** direct-vs-hub selection p
 |-------|---------|
 | User has zero hosts | Settings → Hosts shows an empty state: "No hosts registered. Run `mclaude host register` on your machine to get started." and the `+ Register a new host` button. New Project button is disabled. (ADR-0095) |
 | User has exactly one host | New Project's Host field is non-disclosed (auto-selected, hidden) until a second host exists. |
-| All hosts offline at New Project time | All dropdown rows disabled. Banner at top: "No hosts online. Start `mclaude daemon` on a registered machine, or contact an admin to register a cluster." |
+| All hosts offline at New Project time | All dropdown rows disabled. Banner at top: "No hosts online. Contact an admin to check the host controller." |
 | Device-code expired before registration completes | Modal collapses to "Code expired — Try again." |
 | Device-code already redeemed (409) | Modal shows "This code was already used. Generate a new one." |
 | Host removal while it has active sessions | Confirm dialog: "{name} has N active sessions that will be stopped. Continue?" Destructive action calls `DELETE /api/users/{uslug}/hosts/{hslug}`. |
-| Cluster host shows offline mid-session | Toast: "us-east disconnected — reconnecting." Existing session views switch to a "stale" appearance (faded, no live updates) until reconnect. |
+| Host shows offline mid-session | Toast: "{name} disconnected — reconnecting." Existing session views switch to a "stale" appearance (faded, no live updates) until reconnect. |
 | Per-host JWT signed for the wrong host | Hub NATS auth rejects the publish/subscribe; SPA receives a connection error. Host picker surfaces "credentials invalid for this host." Common cause: host removed and re-registered with the same slug after the SPA loaded — login again to refresh JWTs. |
 
 ## Dependencies
 
 - Login response shape per `docs/spec-state-schema.md` — Login Response Shape.
 - AuthStore extension: `getHosts(): Host[]` and `getDefaultHostSlug(): string | null` (reads localStorage; returns `null` if no hosts registered — callers must handle the no-host case).
-- SessionStore extension: per-host JetStream KV watches with conditional `jsDomain` qualification.
-- EventStore extension: dual-NATS strategy (hub always, direct-to-worker on demand for cluster hosts).
+- SessionStore extension: per-host JetStream KV watches.
 - Control-plane endpoints `POST /api/users/{uslug}/hosts/code`, `POST /api/hosts/register`, `GET /api/users/{uslug}/hosts`, `DELETE /api/users/{uslug}/hosts/{hslug}` (see `docs/mclaude-control-plane/spec-control-plane.md`).

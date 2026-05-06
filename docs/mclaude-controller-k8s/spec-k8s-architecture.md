@@ -28,7 +28,7 @@ Single Deployment in `mclaude-system` on the worker cluster. Built with kubebuil
 3. Call `Refresh()` to perform HTTP challenge-response (`POST /api/auth/challenge` + `POST /api/auth/verify`) against `CONTROL_PLANE_URL`. If CP returns 404 (NKey not registered — operator has not yet run `mclaude host register`), log:
    ```
    NKey <pubkey> not registered with control-plane. To complete registration run:
-     mclaude host register --type cluster --name <display-name> --nkey-public <pubkey>
+     mclaude host register --name <display-name> --nkey-public <pubkey>
    ```
    and retry every 5s with exponential backoff capped at 60s. Controller does not proceed until JWT is acquired.
 4. Decode the host slug (`hslug`) from the received JWT. Use this slug for all subsequent NATS subscriptions — do not read `host.name` from Helm.
@@ -47,10 +47,10 @@ The operator must attest the host before the controller can boot:
 kubectl logs job/{release}-gen-host-nkey -n mclaude-system
 
 # Attest from workstation (operator's user JWT as attestation)
-mclaude host register --type cluster --name "us-east" --nkey-public <pubkey>
+mclaude host register --name "us-east" --nkey-public <pubkey>
 ```
 
-This publishes `mclaude.users.{uslug}.hosts._.register {name, type, nkey_public}` over NATS. CP slugifies `--name`, creates a `hosts` row keyed by `public_key`, returns `{ok, slug}`. No new API surface — same flow BYOH machines use.
+This publishes `mclaude.users.{uslug}.hosts._.register {name, nkey_public}` over NATS. CP slugifies `--name`, creates a `hosts` row keyed by `public_key`, returns `{ok, slug}`.
 
 ## Deregistration Flow
 
@@ -141,7 +141,7 @@ When the session-agent-template ConfigMap has `corporateCAEnabled: "true"`, the 
 
 ## Liveness
 
-When the controller connects to hub NATS, hub publishes `$SYS.ACCOUNT.{accountKey}.CONNECT` with `client.kind = "Client"`. Control-plane's `sys_subscriber.go` looks up the host by `public_key` (no type filter — matches both `type='machine'` and `type='cluster'`), updates `hosts.last_seen_at`, and upserts `mclaude-hosts` KV `online=true`. On disconnect, `online=false`.
+When the controller connects to hub NATS, hub publishes `$SYS.ACCOUNT.{accountKey}.CONNECT` with `client.kind = "Client"`. Control-plane's `sys_subscriber.go` looks up the host by `public_key`, updates `hosts.last_seen_at`, and upserts `mclaude-hosts` KV `online=true`. On disconnect, `online=false`.
 
 ## Error Handling
 

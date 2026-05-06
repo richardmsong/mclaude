@@ -2,7 +2,7 @@
 
 End-to-end walkthrough of every NATS interaction in the system. Uses **alice** as the persona. Every subject, payload, publisher, subscriber, and JetStream resource is enumerated.
 
-Depends on: `adr-0054-nats-jetstream-permission-tightening.md` (permission model), `adr-0058-byoh-architecture-redesign.md` (BYOH agent model).
+Depends on: `adr-0054-nats-jetstream-permission-tightening.md` (permission model).
 
 ---
 
@@ -12,7 +12,7 @@ Depends on: `adr-0054-nats-jetstream-permission-tightening.md` (permission model
 |----------|----------------|-------|
 | **Alice's SPA** | User JWT (`alice`) | Per-user buckets + per-host KV reads + session stream |
 | **Alice's CLI** | User JWT (`alice`) | Same as SPA |
-| **laptop-a controller** | Host JWT (`laptop-a`) | `mclaude.hosts.laptop-a.>` only. Zero JetStream. |
+| **laptop-a controller** | Host JWT (`laptop-a`) | `mclaude.hosts.laptop-a.>` (grants, agent registration). Zero JetStream. |
 | **Agent: alice/myapp on laptop-a** | Agent JWT (`alice`, `laptop-a`, `myapp`) | Per-project KV keys + per-project session subjects |
 | **Control plane (CP)** | Account signing key | Full access — trust root |
 
@@ -179,13 +179,13 @@ CLI now has a NATS connection with the same user JWT permissions as the SPA. The
 
 ---
 
-## 3. Host Registration (one-time, BYOH)
+## 3. Host Registration (one-time)
 
-Alice registers her laptop as a BYOH host.
+Alice registers her host.
 
 ```
 CLI → NATS: PUB mclaude.users.alice.hosts._.register
-            {"name":"My MacBook","type":"machine","nkey_public":"<host-public-key>"}
+            {"name":"My MacBook","nkey_public":"<host-public-key>"}
             (reply-to: _INBOX.xyz)
 CP:         Validates alice's identity from NATS connection.
             Creates host row in Postgres (slug: "laptop-a", user_id: alice, public_key: stored).
@@ -216,12 +216,12 @@ NATS server emits a `$SYS.ACCOUNT.*.CONNECT` event. CP subscribes to `$SYS`:
 NATS → CP:  $SYS.ACCOUNT.<acct>.CONNECT  {client: {nkey: "<host-public-key>", ...}}
 CP:         Looks up host by public key in Postgres → laptop-a
             Writes to hosts KV:
-CP → NATS:  PUB $KV.mclaude-hosts.laptop-a  {"slug":"laptop-a","name":"My MacBook","type":"machine","online":true,"lastSeenAt":"2026-04-30T12:00:00Z"}
+CP → NATS:  PUB $KV.mclaude-hosts.laptop-a  {"slug":"laptop-a","name":"My MacBook","online":true,"lastSeenAt":"2026-04-30T12:00:00Z"}
 ```
 
 Alice's SPA receives the KV watch update (step 2c) and shows laptop-a as online.
 
-Host controller subscribes to its provisioning subject:
+Host controller subscribes to its host-scoped subjects (grants, agent registration):
 
 ```
 laptop-a controller → NATS: SUB mclaude.hosts.laptop-a.>
@@ -256,16 +256,16 @@ SPA → CP:   POST /api/users/alice/projects
 CP:         Validates: alice has access to laptop-a ✓, slug "myapp" is unique ✓
             Creates project in Postgres. Writes project KV entry.
 CP → SPA:   HTTP 201 {"slug":"myapp","hostSlug":"laptop-a",...}
-CP → NATS:  PUB mclaude.hosts.laptop-a.users.alice.projects.myapp.create
+CP → NATS:  PUB mclaude.users.alice.hosts.laptop-a.agent.projects.provision
             {"id":"01JTRK...","ts":1714470085000,
              "projectPath":"/home/alice/projects/myapp","backend":"claude_code"}
 ```
 
-The SPA sends an HTTP POST to CP. CP validates the request (authorization, slug uniqueness, host assignment), creates the Postgres record, writes the project KV entry, and then **CP itself publishes** the NATS fan-out message. The host controller receives this via its `mclaude.hosts.laptop-a.>` subscription and starts the agent subprocess for alice/myapp.
+The SPA sends an HTTP POST to CP. CP validates the request (authorization, slug uniqueness, host assignment), creates the Postgres record, writes the project KV entry, and then **CP itself publishes** the provisioning message to the user-agent subject. The user-agent receives this and creates the session-agent pod for alice/myapp.
 
 Error feedback flows through the HTTP response — if CP rejects the project (slug collision, invalid host, authorization failure), the SPA receives an HTTP error (409, 404, 403) with a JSON error body. Users do not publish directly to host-scoped subjects per ADR-0054.
 
-The host controller starts the agent, which generates an NKey and the host controller registers it with CP via `mclaude.hosts.laptop-a.api.agents.register` (see scenario 7b).
+The user-agent starts the session-agent, which generates an NKey and the host controller registers it with CP via `mclaude.hosts.laptop-a.api.agents.register` (see scenario 7b).
 
 ---
 
@@ -379,7 +379,7 @@ NATS → Agent: Messages on mclaude.users.alice.hosts.laptop-a.projects.myapp.se
 Initial read (one-time direct-get):
 ```
 Agent → NATS: PUB $JS.API.DIRECT.GET.KV_mclaude-hosts.$KV.mclaude-hosts.laptop-a
-NATS → Agent: (reply) {"slug":"laptop-a","name":"My MacBook","type":"machine","online":true,...}
+NATS → Agent: (reply) {"slug":"laptop-a","name":"My MacBook","online":true,...}
 ```
 
 Then watch for live updates (host renamed, goes offline/online):
@@ -860,7 +860,7 @@ Agent → NATS: PUB ...sessions.sess-001.events
 
 ### 9n. Agent restart recovery (KV-based)
 
-Agent process crashes and restarts (pod eviction, daemon restart, OOM kill). Recovery uses KV — not stream replay — as the source of truth (ADR-0044):
+Agent process crashes and restarts (pod eviction, OOM kill). Recovery uses KV — not stream replay — as the source of truth (ADR-0044):
 
 ```
 Agent:        Iterates all entries in KV_mclaude-sessions-alice for its host and project scope
@@ -1050,11 +1050,11 @@ Alice deletes a project from the SPA. This tears down all sessions, the agent, a
 SPA → CP:   DELETE /api/users/alice/projects/myapp
 CP:         Validates: alice has access to laptop-a ✓, project myapp exists ✓
 CP → SPA:   HTTP 200 {"ok":true}
-CP → NATS:  PUB mclaude.hosts.laptop-a.users.alice.projects.myapp.delete
+CP → NATS:  PUB mclaude.users.alice.hosts.laptop-a.agent.projects.delete
             {"id":"01JTRK...","ts":1714470095000}
 ```
 
-The SPA sends an HTTP DELETE to CP. CP validates the request, then publishes the NATS fan-out message (same pattern as project creation — see section 6). The host controller receives this via its `mclaude.hosts.laptop-a.>` subscription. Users do not publish directly to host-scoped subjects per ADR-0054.
+The SPA sends an HTTP DELETE to CP. CP validates the request, then publishes the deletion message to the user-agent subject (same pattern as project creation — see section 6). The user-agent receives this and tears down the session-agent pod. Users do not publish directly to host-scoped subjects.
 
 **Host controller:**
 ```
@@ -1126,9 +1126,9 @@ CLI → NATS: PUB mclaude.users.alice.hosts.laptop-a.manage.deregister
             {}
             (reply-to: _INBOX.xyz)
 CP:         Validates: alice owns laptop-a ✓
-            Sends project delete for each active project (fan-out to host controller):
-CP → NATS:    PUB mclaude.hosts.laptop-a.users.alice.projects.myapp.delete  {"id":"01JTRK...","ts":1714470090000}
-            Host controller drains each agent (stops sessions, disconnects).
+            Sends project delete for each active project (via user-agent):
+CP → NATS:    PUB mclaude.users.alice.hosts.laptop-a.agent.projects.delete  {"id":"01JTRK...","ts":1714470090000}
+            User-agent drains each session-agent (stops sessions, disconnects).
             CP deletes host KV entry:
 CP → NATS:    PUB $KV.mclaude-hosts.laptop-a  (tombstone/DEL)
             CP removes host row from Postgres (nkey_public).
@@ -1182,7 +1182,7 @@ CP → NATS:  PUB _INBOX.xyz  {"ok":true}
 | Hosts KV | Read per-host (JWT-scoped, watch + direct-get) | Read + watch own host only | None | Write ($SYS) |
 | Sessions stream | Read all (ordered push, DeliverNew or DeliverAll) | Read (DeliverNew commands) + write own project events | None | None |
 | Binary data (S3) | Upload via pre-signed URL | Download via pre-signed URL | None | Signs URLs, validates ownership |
-| Host provisioning subjects | None (project create/delete via HTTP to CP) | None | Subscribe to `mclaude.hosts.laptop-a.>` | Subscribe to `mclaude.hosts.*.users.*.>` (fan-out); publishes create/delete after HTTP validation |
+| Host provisioning subjects | None (project create/delete via HTTP to CP) | None | Subscribe to `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.>` | Publishes provisioning/deletion to `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.{provision,delete}` after HTTP validation |
 | Host management | Publish `manage.*` for owned hosts | None | None | Subscribe + execute |
 | Quota | None | Subscribe (all); publish (designated only) | None | None |
 | JetStream wire protocol | STREAM.INFO, CONSUMER.CREATE/INFO, ACK, flow control | Same | None | Full access |
@@ -1224,17 +1224,20 @@ mclaude.
 │   ├── quota                                        # designated agent → all agents (core NATS, 60s interval)
 │   ├── hosts._.register                            # CLI → CP (request/reply): register new host public key
 │   └── hosts.{hslug}.manage.
-│       ├── update                                  # CLI → CP: rename, change type
+│       ├── update                                  # CLI → CP: rename
 │       ├── grant                                   # CLI → CP: grant another user access to this host
 │       ├── revoke-access                           # CLI → CP: revoke another user's access to this host
 │       ├── rekey                                   # CLI → CP: rotate NKey public key (SSH known_hosts model)
 │       ├── deregister                              # CLI → CP: drain sessions + cleanup
 │       └── revoke                                  # CLI → CP: emergency credential revocation
 │
-├── hosts.{hslug}.                                          # host-scoped subjects (fan-out)
-│   ├── users.{uslug}.projects.{pslug}.create       # SPA → CP + host controller (fan-out)
-│   ├── users.{uslug}.projects.{pslug}.delete       # SPA/CP → CP + host controller (fan-out)
-│   └── api.agents.register                         # host controller → CP (request/reply): register agent public key
+│   ├── hosts.{hslug}.agent.projects.provision       # CP → user-agent: create project
+│   └── hosts.{hslug}.agent.projects.delete          # CP → user-agent: delete project
+│
+├── hosts.{hslug}.                                          # host-scoped subjects (grants + agent registration)
+│   ├── api.agents.register                          # host controller → CP (request/reply): register agent public key
+│   ├── api.agents.user-agent.register               # host controller → CP: register user-agent public key
+│   └── grants.create                                # host controller → CP: grant user access
 
 $KV.
 ├── mclaude-sessions-{uslug}.hosts.{hslug}.projects.{pslug}.sessions.{sslug}     # agent writes, SPA reads

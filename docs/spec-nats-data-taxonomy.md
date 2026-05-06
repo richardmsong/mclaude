@@ -141,8 +141,6 @@ mclaude.users.{uslug}.hosts.{hslug}.agent.activate
 mclaude.users.{uslug}.hosts.{hslug}.agent.token-delivery
 mclaude.users.{uslug}.hosts.{hslug}.agent.projects.provision
 mclaude.users.{uslug}.hosts.{hslug}.agent.projects.delete
-mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.create   # LEGACY (ADR-0091 removes)
-mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.delete   # LEGACY (ADR-0091 removes)
 mclaude.hosts.{hslug}.api.agents.register
 mclaude.hosts.{hslug}.api.agents.user-agent.register
 mclaude.hosts.{hslug}.grants.create
@@ -150,7 +148,7 @@ mclaude.hosts.{hslug}.grants.create
 
 Two subtrees:
 - `mclaude.users.{uslug}.*` — user-scoped. Published by SPA/CLI/agents, captured by per-user streams.
-- `mclaude.hosts.{hslug}.*` — host-scoped. Published by CP and host controllers. Never captured by streams (ephemeral request/reply).
+- `mclaude.hosts.{hslug}.*` — host-scoped. Published by CP and host controllers. Never captured by streams (ephemeral request/reply). Used for grants and agent registration.
 
 ### 2. KV subjects (`$KV.`)
 

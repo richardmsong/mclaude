@@ -10,7 +10,7 @@ Per ADR-0035 the previous single `mclaude` chart was split into `mclaude-cp` and
 
 A single-cluster degenerate deployment installs **all three** charts into the same K8s cluster, in order: `mclaude-postgres` → `mclaude-cp` → `mclaude-worker`. `mclaude-worker` connects directly to the hub NATS service. Each `helm install` waits for its release to be Ready before the next.
 
-BYOH machines do **not** use Helm — they install the `mclaude-cli` binary, run `mclaude host register`, and start the host controller daemon (`mclaude daemon`).
+Non-Helm hosts register via `mclaude host register --name <name> --nkey-public <pubkey>` from a workstation.
 
 ---
 
@@ -26,7 +26,7 @@ Generates the deployment-level operator + account NKey trust chain on first inst
 
 | Kind | Name | Notes |
 |---|---|---|
-| Job | `mclaude-cp-init-keys` | Helm pre-install hook (weight `-20`). Runs `mclaude-cp init-keys`, which calls into `mclaude-common/pkg/nats/operator-keys.go` for the actual NKey + JWT generation logic (the same package home as `FormatNATSCredentials` in `pkg/nats/creds.go`, so the CLI can reuse the helpers for BYOH bootstrap). Generates `operatorNKey` + `accountNKey` pairs and corresponding JWTs (account JWT signed by operator key, operator JWT self-signed). Writes them to Secret `mclaude-system/operator-keys`. Idempotent: if the Secret already exists, exits without regenerating. Also creates the bootstrap admin row in Postgres when `controlPlane.bootstrapAdminEmail` is set. |
+| Job | `mclaude-cp-init-keys` | Helm pre-install hook (weight `-20`). Runs `mclaude-cp init-keys`, which calls into `mclaude-common/pkg/nats/operator-keys.go` for the actual NKey + JWT generation logic. Generates `operatorNKey` + `accountNKey` pairs and corresponding JWTs (account JWT signed by operator key, operator JWT self-signed). Writes them to Secret `mclaude-system/operator-keys`. Idempotent: if the Secret already exists, exits without regenerating. Also creates the bootstrap admin row in Postgres when `controlPlane.bootstrapAdminEmail` is set. |
 | Secret | `mclaude-system/operator-keys` | Type `Opaque`, mode `0600`. Keys: `operatorJwt`, `operatorSeed`, `accountJwt`, `accountSeed`. Hub NATS pod template references this Secret for `resolver_preload`. Control-plane Deployment mounts it at `OPERATOR_KEYS_PATH` to sign per-host user JWTs. |
 
 The Job is the only place the operator/account seeds are generated; subsequent deploys (and air-gapped installs) reuse the existing Secret. To rotate the trust chain, delete the Secret and re-run `helm upgrade`; cluster registrations + per-host JWTs must then be reissued.
@@ -235,7 +235,7 @@ DB state is **not preserved** across the cutover. The project has no live prod d
 
 ## Chart: `mclaude-worker`
 
-Independently installable into any Kubernetes cluster that can reach the control-plane over HTTPS and hub NATS over WebSocket (port 443). Registers the worker cluster as a host via the existing BYOH `mclaude host register` flow — no separate `mclaude cluster register` command, no local NATS StatefulSet, no leaf-node credentials.
+Independently installable into any Kubernetes cluster that can reach the control-plane over HTTPS and hub NATS over WebSocket (port 443). Registers the worker as a host via `mclaude host register` — no local NATS StatefulSet, no leaf-node credentials.
 
 ### Deployment
 
@@ -250,7 +250,7 @@ After install, read the NKey public key from the pre-install Job and attest the 
 
 ```bash
 kubectl logs job/mclaude-worker-gen-host-nkey -n mclaude-system
-mclaude host register --type cluster --name "us-east" --nkey-public <pubkey>
+mclaude host register --name "us-east" --nkey-public <pubkey>
 ```
 
 ### Deregistration
@@ -332,7 +332,7 @@ helm install mclaude-worker charts/mclaude-worker -n mclaude-system \
   --set host.hubNatsUrl=nats://mclaude-cp-nats.mclaude-system.svc:4222
 
 kubectl logs job/mclaude-worker-gen-host-nkey -n mclaude-system
-mclaude host register --type cluster --name "local" --nkey-public <pubkey>
+mclaude host register --name "local" --nkey-public <pubkey>
 ```
 
 ### Migration from Leaf-NATS Worker Chart
@@ -376,4 +376,4 @@ Brief downtime for K8s-hosted projects during cutover. No in-place upgrade path.
 - Optional: trust-manager for corporate CA bundle injection into session-agent pods (worker chart).
 - For HTTPS: **cert-manager** in the cluster with a `ClusterIssuer` that owns the Secret named in `ingress.tls[0].secretName`. See `docs/spec-tls-certs.md`.
 - For DNS automation: **ExternalDNS** in the cluster, configured with the DigitalOcean provider and `domainFilters=[mclaude.richardmcsong.com]`. See `docs/spec-tls-certs.md`.
-- For each worker chart install: the operator must run `mclaude host register --type cluster --name <name> --nkey-public <pubkey>` against the running hub control-plane to register the cluster host before the controller can connect.
+- For each worker chart install: the operator must run `mclaude host register --name <name> --nkey-public <pubkey>` against the running hub control-plane to register the host before the controller can connect.

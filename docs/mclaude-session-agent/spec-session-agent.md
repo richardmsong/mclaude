@@ -6,11 +6,9 @@ The session agent is a per-project process supervisor that manages **multiple co
 
 The agent supports multiple CLI backends: Claude Code, Factory Droid, Devin ACP, and a GenericTerminal fallback. Each backend is implemented as a driver in the `internal/drivers/` package. The `DriverRegistry` maps `CLIBackend` enum values to driver instances; session creation specifies the backend (defaulting to `claude_code`).
 
-The agent operates as a standalone per-project process in all deployment modes: as a K8s pod (one per project) or as a subprocess of the host controller on BYOH hosts (one per project, per ADR-0058).
+The agent operates as a standalone per-project process: a K8s pod (one per project) created by the per-user `mclaude-user-agent`.
 
-> **Daemon mode deprecation (ADR-0058):** The previous `--daemon` mode (single-process, cross-project) is deprecated and will be removed. The `mclaude daemon` CLI command launches the host controller which spawns per-project agents. See the "Daemon Mode" section for the deprecation plan.
-
-Per ADR-0054, every NATS subject the agent uses is host-scoped: `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.…`. The host slug is required configuration — sourced from the `HOST_SLUG` env var in K8s pods and from the `--host` flag (or `~/.mclaude/active-host` symlink) on BYOH machines. Absence is fatal at startup.
+Per ADR-0054, every NATS subject the agent uses is host-scoped: `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.…`. The host slug is required configuration — sourced from the `HOST_SLUG` env var. Absence is fatal at startup.
 
 ## Deployment
 
@@ -86,20 +84,6 @@ A daily cleanup job (cron or entrypoint background goroutine) deletes JSONL file
 
 Manages Claude Code version upgrades. Fetches changelog between current and target version, analyzes for breaking changes (stream-json events, CLI flags, control protocol, hooks), proposes patches if breaking changes found, and updates the pinned version in Dockerfile on an `upgrade/claude-{version}` branch with a PR.
 
-### BYOH Mode (Per-Project Agent)
-
-On BYOH hosts, the agent runs as a standalone per-project subprocess spawned by the host controller (ADR-0058). Each project gets its own agent process with its own per-project JWT (ADR-0054). The host controller manages agent lifecycle; the agent manages session lifecycle within its project.
-
-Liveness is reported by the hub NATS via `$SYS.ACCOUNT.*.CONNECT/DISCONNECT` events that the control-plane subscribes to. The agent does **not** publish periodic heartbeats and does **not** write to `mclaude-hosts` or to any removed bucket (`mclaude-laptops`, `mclaude-heartbeats`).
-
-### Daemon Mode (Deprecated)
-
-> **Deprecated per ADR-0058.** The `--daemon` flag is deprecated. The `mclaude daemon` CLI command now launches the host controller instead of `mclaude-session-agent --daemon`. Existing launchd/systemd units pointing at `mclaude-session-agent --daemon` will stop working when ADR-0054's permission tightening is deployed (host JWTs lose JetStream access, agent JWTs become per-project scoped). No migration of in-flight sessions — sessions running under daemon mode at cut-over are terminated.
->
-> **Phase 1 (parallel):** `mclaude daemon` redirects to the host controller. Old `--daemon` still works.
-> **Phase 2 (hard cut-over):** ADR-0054 deployment makes cross-project JetStream access impossible. All BYOH hosts must use controller + per-project agents.
-> **Phase 3 (code removal):** Remove `daemon.go`, `daemon_jobs.go`, `--daemon` flag, and daemon-specific goroutines (`runJWTRefresh`, `runLifecycleSubscriber`, `runJobDispatcher`, `runJobsHTTP`). The `runQuotaPublisher` goroutine has been moved to the per-project standalone agent (`agent.go`). Per-project agents subscribe to `manage.designate-quota-publisher` on startup and start/stop `runQuotaPublisher` on CP designation signals (ADR-0044). The daemon copy of `runQuotaPublisher` in `daemon_jobs.go` is retained during the daemon-deprecated period.
-
 ### Configuration
 
 | Knob | Source | Description |
@@ -109,20 +93,16 @@ Liveness is reported by the hub NATS via `$SYS.ACCOUNT.*.CONNECT/DISCONNECT` eve
 | `--user-id` / `USER_ID` | Flag or env | User UUID (required) |
 | `--project-id` / `PROJECT_ID` | Flag or env | Project UUID (required in standalone) |
 | `--user-slug` / `USER_SLUG` | Flag or env | User typed slug per ADR-0024 |
-| `--host` / `HOST_SLUG` | Flag or env | **Required.** Host slug per ADR-0035 (`mclaude.users.{uslug}.hosts.{hslug}.…`). K8s pods read `HOST_SLUG` injected by `mclaude-controller-k8s`'s `buildPodTemplate`. BYOH daemons read `--host` (defaulting to the target of `~/.mclaude/active-host` if unset). If no valid slug is derivable from any source, the agent exits fatally with `FATAL: HOST_SLUG required`. |
+| `--host` / `HOST_SLUG` | Flag or env | **Required.** Host slug per ADR-0035 (`mclaude.users.{uslug}.hosts.{hslug}.…`). K8s pods read `HOST_SLUG` injected by the user-agent's pod template. If no valid slug is derivable from any source, the agent exits fatally with `FATAL: HOST_SLUG required`. |
 | `--project-slug` / `PROJECT_SLUG` | Flag or env | Project typed slug per ADR-0024 |
 | `--claude-path` / `CLAUDE_PATH` | Flag or env | Path to Claude binary (default: `claude`) |
 | `--data-dir` | Flag | Project PVC mount (default: `/data`) |
 | `--mode` | Flag | `k8s` or `standalone` (default: `standalone`) |
-| `--daemon` | Flag | **(Deprecated — ADR-0058)** Enable BYOH daemon mode. Use `mclaude daemon` instead. |
-| `--refresh-url` / `REFRESH_URL` | Flag or env | **(Deprecated — ADR-0058)** JWT refresh endpoint URL (daemon only). Agents now use HTTP challenge-response. |
 | `LOG_LEVEL` | Env | Zerolog level (default: `info`) |
-| `HOSTNAME` / `--hostname` | Flag or env | **Dead code** — daemon mode only. Stored in `DaemonConfig.Hostname` but never accessed. Remnant of the removed collision-detection flow. |
-| `MACHINE_ID` / `--machine-id` | Flag or env | **Dead code** — daemon mode only. Stored in `DaemonConfig.MachineID` but never accessed. Remnant of the removed collision-detection flow. |
 | `METRICS_ADDR` | Env | Prometheus metrics listen address (default: `:9091`) |
 | `GIT_URL` | Env | Git remote URL for initial clone (K8s mode) |
 | `GIT_IDENTITY_ID` | Env | OAuth connection ID for credential identity selection (K8s mode) |
-| `CLAUDE_CODE_TMPDIR` | Env | Base directory for Claude Code temp files (K8s mode). Set to `/data/claude-tmp` and backed by the `project-data` PVC (`SubPath: claude-tmp`). Enables shell output files to survive pod restarts. When unset (BYOH/daemon mode), in-flight shell tracking is disabled. |
+| `CLAUDE_CODE_TMPDIR` | Env | Base directory for Claude Code temp files. Set to `/data/claude-tmp` and backed by the `project-data` PVC (`SubPath: claude-tmp`). Enables shell output files to survive pod restarts. |
 
 ### Health and Readiness
 
@@ -223,7 +203,7 @@ All API subscriptions are at host-and-project scope — the Agent subscribes onc
 - **Quota status** (per-session QuotaMonitor) via core NATS on `mclaude.users.{uslug}.quota`.
 - **Quota publisher re-designation** via core NATS on `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.manage.designate-quota-publisher` — CP publishes when re-designating the quota publisher after the previously designated agent goes offline (ADR-0044). On `quotaPublisher: true`, agent starts `runQuotaPublisher`; on `quotaPublisher: false`, agent stops it.
 
-The agent does **not** subscribe to project-creation requests; project provisioning per ADR-0054 is handled by `mclaude-controller-k8s` (cluster hosts), subscribing to `mclaude.hosts.{hslug}.>` (host-scoped, ADR-0054).
+The agent does **not** subscribe to project-creation requests; project provisioning is handled by the user-agent (`mclaude-user-agent`), which subscribes to `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.provision` (ADR-0097). CP publishes to this subject; the user-agent creates the session-agent pod.
 
 ### Unix Sockets
 
@@ -351,7 +331,7 @@ On startup, after NATS connection and KV bucket initialization, the agent checks
    a. Request a pre-signed download URL from the control-plane via NATS request/reply on `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.import.download`, sending `{importId}`.
    b. Download the tar.gz archive directly from S3 using the pre-signed URL.
    c. Verify archive integrity: validate `metadata.json` schema, verify SHA-256 checksum if present, validate JSONL line format.
-   d. Unpack JSONL session transcripts, subagent data, and memory files into the session data directory (PVC `/data/projects/` on K8s, `~/.claude/projects/{encoded-cwd}/` on BYOH).
+   d. Unpack JSONL session transcripts, subagent data, and memory files into the session data directory (PVC `/data/projects/`).
    e. For each session ID in the archive: if a `SessionState` KV entry already exists for that session ID, **skip** the session with a warning log and continue importing remaining sessions (session ID collision handling).
    f. On successful unpack: clear `importRef` from project KV state (`KV_mclaude-projects-{uslug}`), publish `import.complete` via NATS to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.import.complete` with standard envelope payload `{"id":"...","ts":...}`. The control-plane receives the signal, resolves the import ID from project KV, and deletes the S3 object.
    g. Report import completion via `session_import_complete` lifecycle event.
@@ -407,7 +387,7 @@ The event router goroutine reads from the driver's event channel and for each `S
    - **Phase 1 — Pending:** On `tool_call` event with a `Bash` tool where `input.run_in_background == true`, adds a `pendingShell{toolUseId, command, startedAt}` entry to `sess.pendingShells`.
    - **Phase 2 — Promoted:** On `tool_result` event whose `toolUseId` matches a pending entry, extracts `backgroundTaskId` from the result text (pattern: `"Command was manually backgrounded with ID: (\S+)"`), constructs `outputFilePath` as `{CLAUDE_CODE_TMPDIR}/claude-{uid}/{sanitizePath(cwd)}/{sessionId}/tasks/{taskId}.output`, and promotes the entry to `sess.inFlightShells`. `sanitizePath` replaces every character outside `[a-zA-Z0-9]` with `-`.
    - **Removal:** On `message` event with `origin.kind == "task-notification"` referencing the shell's toolUseId (shell completed naturally).
-   - Shell tracking is disabled when `CLAUDE_CODE_TMPDIR` is not set (BYOH mode).
+   - Shell tracking is disabled when `CLAUDE_CODE_TMPDIR` is not set.
 3. Truncates events exceeding the 8 MB NATS payload limit (removes `content` field, adds `truncated: true`).
 4. Marshals as JSON and publishes to the session's NATS events subject (`sessions.{sslug}.events`). Note: user input messages arrive on the `sessions.{sslug}.input` subject which is already captured by the `MCLAUDE_SESSIONS_{uslug}` stream's `sessions.>` filter — no separate republish to the events subject is needed.
 5. Notifies the compact-boundary callback to update `replayFromSeq`.
@@ -446,7 +426,7 @@ The `strict-allowlist` policy invokes an `onStrictDeny` callback on denial, whic
 All session-agents authenticate via HTTP challenge-response to the control-plane (ADR-0054 unified credential protocol):
 
 1. Agent generates its own NKey pair at startup (private seed never leaves the agent process).
-2. Agent exposes its public key to the host controller via local IPC (stdout/file on BYOH, shared volume on K8s).
+2. Agent exposes its public key to the host controller (user-agent registers it with CP).
 3. Host controller registers the public key with CP via `mclaude.hosts.{hslug}.api.agents.register` (NATS request/reply).
 4. Agent authenticates itself via HTTP: `POST /api/auth/challenge {nkey_public}` → `POST /api/auth/verify {nkey_public, challenge, signature}` → receives per-project JWT.
 5. Agent JWT has a **5-minute TTL**. The agent runs the same HTTP challenge-response flow before TTL expiry (proactive refresh).
@@ -568,14 +548,6 @@ The shutdown sequence preserves in-progress work and enables zero-downtime upgra
 8. Publish `session_upgrading` lifecycle event per session.
 9. Exit.
 
-### Daemon: JWT Refresh (Deprecated)
-
-> **Deprecated per ADR-0058.** Agents now use HTTP challenge-response for credential refresh (see Credential Management section). The daemon JWT refresh mechanism is replaced by the per-agent 5-minute TTL proactive refresh.
-
-### Daemon: Job Dispatcher (Removed)
-
-> **Eliminated per ADR-0044.** The job dispatcher goroutine, `mclaude-job-queue` KV bucket, and `localhost:8378` HTTP API are all removed. Callers publish `sessions.create` with quota fields directly. The session-agent handles quota management per-session via `QuotaMonitor`.
-
 ### Liveness
 
 Liveness is signalled by the NATS connection itself. When an agent connects to hub NATS, the hub publishes `$SYS.ACCOUNT.{accountKey}.CONNECT`; control-plane subscribes and updates `hosts.last_seen_at` and the `mclaude-hosts` KV entry. On disconnect, control-plane sets `online=false`. There is no periodic heartbeat publish; slug uniqueness is enforced server-side at registration time.
@@ -588,7 +560,7 @@ Terminal sessions spawn a PTY shell and bridge I/O through core NATS subjects. T
 
 | Failure | Behavior |
 |---------|----------|
-| NATS connection lost | NATS client auto-reconnects; state changes buffered in memory during outage and flushed on reconnect. CLI processes continue running. Reconnection counter incremented. `natsConnect()` sets `MaxReconnects(-1)` (unlimited) and `RetryOnFailedConnect(true)` — BYOH agents reconnect indefinitely after NATS outages. |
+| NATS connection lost | NATS client auto-reconnects; state changes buffered in memory during outage and flushed on reconnect. CLI processes continue running. Reconnection counter incremented. `natsConnect()` sets `MaxReconnects(-1)` (unlimited) and `RetryOnFailedConnect(true)` — agents reconnect indefinitely after NATS outages. |
 | KV bucket not found on startup | Fatal: session agent exits (control-plane has not created per-user buckets yet) |
 | Session create — worktree collision | `api_error` event published to `sessions._api` |
 | Session create — git worktree add fails | `api_error` event published to `sessions._api` |
@@ -629,7 +601,7 @@ Terminal sessions spawn a PTY shell and bridge I/O through core NATS subjects. T
 | Nix | Package manager for user-installed tools (K8s mode; PVC-backed store) |
 | Anthropic OAuth API | Quota polling via `api.anthropic.com/api/oauth/usage` (designated agent only, ADR-0044) |
 | `~/.claude/.credentials.json` | OAuth token for quota API (designated agent only) |
-| BYOH host controller | Spawns per-project agents on BYOH hosts, registers agent NKeys with CP (ADR-0058) |
+| `mclaude-user-agent` | Creates per-project Deployments, registers agent NKeys with CP (ADR-0091) |
 | user-secrets K8s Secret | git CLI configs, OAuth connection tokens (K8s mode) — `oauth-token` field removed per ADR-0091 |
 | user-tokens-{uslug} K8s Secret | Model-provider token (`anthropic` key for v1) — mounted at `/secrets/tokens/`, read by entrypoint into `CLAUDE_CODE_OAUTH_TOKEN` |
 | user-config K8s ConfigMap | Claude Code seed settings and hooks (K8s mode) |

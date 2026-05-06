@@ -65,14 +65,14 @@ The three legacy filters (`FilterMclaudeAPI`, `FilterMclaudeEvents`, `FilterMcla
 **Host-scoped subject helpers:**
 `UserHostStatus(u UserSlug, h HostSlug) string` -- host presence heartbeat.
 
-**Host-scoped provisioning subject helpers (ADR-0054 — fan-out from CP to host controllers):**
+**User-agent provisioning subject helpers (ADR-0097 — CP to user-agent):**
 
 | Helper                      | Signature              | Pattern                                                                  |
 |-----------------------------|------------------------|--------------------------------------------------------------------------|
-| `HostUserProjectsCreate`    | `(h HostSlug, u UserSlug, p ProjectSlug)` | `mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.create`  |
-| `HostUserProjectsDelete`    | `(h HostSlug, u UserSlug, p ProjectSlug)` | `mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.delete`  |
+| `UserHostAgentProjectsProvision` | `(u UserSlug, h HostSlug)` | `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.provision`  |
+| `UserHostAgentProjectsDelete`    | `(u UserSlug, h HostSlug)` | `mclaude.users.{uslug}.hosts.{hslug}.agent.projects.delete`     |
 
-CP publishes to these subjects after validating the HTTP project creation/deletion request. Host controllers receive them via their `mclaude.hosts.{hslug}.>` subscription. See ADR-0054 §BYOH Host / Platform Controller for the fan-out scheme.
+CP publishes to these subjects after validating the HTTP project creation/deletion request. User-agents receive them via their `mclaude.users.*.hosts.{hslug}.agent.>` subscription.
 
 **User+host+project-scoped subject helpers (ADR-0054 — consolidated `sessions.>` hierarchy):**
 `UserHostProjectSessionsCreate`, `UserHostProjectSessionsInput`, `UserHostProjectSessionsControl`, `UserHostProjectSessionsConfig`, `UserHostProjectSessionsDelete`, `UserHostProjectSessionsEvents`, `UserHostProjectSessionsLifecycle`
@@ -96,7 +96,7 @@ Note: `ClustersKVKey` and `LaptopsKVKey` (pre-ADR-0035) have been removed. Use `
 
 ### Package `nats`
 
-NATS credential formatting and key management helpers shared across mclaude components. Moved from `mclaude-control-plane` per ADR-0035 so the CLI can reuse `FormatNATSCredentials` for BYOH bootstrap.
+NATS credential formatting and key management helpers shared across mclaude components. Moved from `mclaude-control-plane` per ADR-0035 so components can reuse `FormatNATSCredentials`.
 
 **`FormatNATSCredentials(jwt string, seed []byte) []byte`**
 
@@ -141,9 +141,9 @@ Performs HTTP challenge-response against `cpURL`:
 When constructed via `NewHostAuthFromSeed` and the public key is not yet registered (CP returns HTTP 404), `Refresh()` returns a sentinel retryable error and logs:
 ```
 NKey <pubkey> not registered with control-plane. To complete registration run:
-  mclaude host register --type cluster --name <display-name> --nkey-public <pubkey>
+  mclaude host register --name <display-name> --nkey-public <pubkey>
 ```
-Callers must implement the retry loop. The recommended pattern for K8s: retry every 5s with exponential backoff capped at 60s.
+Callers must implement the retry loop. The recommended pattern: retry every 5s with exponential backoff capped at 60s.
 
 **`PublicKey() string`** — returns the NKey public key (U-prefix). Used to extract the key for logging or NOTES.txt display before JWT acquisition.
 
