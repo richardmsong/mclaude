@@ -107,7 +107,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  auth anthropic              connect Anthropic OAuth token (ADR-0091)")
 	fmt.Fprintln(os.Stderr, "    --token <v>              manual token paste (skip OAuth)")
 	fmt.Fprintln(os.Stderr, "    --status                 print connected/not-set + per-host pubkey status")
-	fmt.Fprintln(os.Stderr, "    --revoke                 delete tokens.anthropic from KV (client-side only)")
+	fmt.Fprintln(os.Stderr, "    --revoke                 delete token from KV and revoke from all accepted hosts")
 	fmt.Fprintln(os.Stderr, "  host register               register this machine as a BYOH host")
 	fmt.Fprintln(os.Stderr, "    --name <name>             display name (default: hostname)")
 	fmt.Fprintln(os.Stderr, "  host list                   list all hosts")

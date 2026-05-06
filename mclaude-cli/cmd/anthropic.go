@@ -29,6 +29,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -95,6 +96,9 @@ type AuthAnthropicFlags struct {
 	HTTPClient *http.Client
 	// ServerURL overrides the control-plane base URL.
 	ServerURL string
+	// Stderr is the writer for warning messages (per-host revoke failures go to stderr per spec).
+	// When nil, defaults to os.Stderr in production. Tests inject a bytes.Buffer to capture.
+	Stderr io.Writer
 }
 
 // AuthAnthropicResult is returned by RunAuthAnthropic on success.
@@ -685,6 +689,12 @@ func runPKCEOAuth(ctx context.Context, cfg AnthropicOAuthConfig, out io.Writer, 
 // RunAuthAnthropic implements "mclaude auth anthropic" and its sub-commands.
 // Returns (exitCode, error). The exit code is one of ExitAuth*.
 func RunAuthAnthropic(flags AuthAnthropicFlags, out io.Writer) (*AuthAnthropicResult, error) {
+	// Resolve stderr for warning messages (per-host revoke failures go to stderr per spec).
+	errOut := flags.Stderr
+	if errOut == nil {
+		errOut = os.Stderr
+	}
+
 	// Resolve context.
 	ctxPath := flags.ContextPath
 	if ctxPath == "" {
@@ -746,7 +756,7 @@ func RunAuthAnthropic(flags AuthAnthropicFlags, out io.Writer) (*AuthAnthropicRe
 
 	// --revoke
 	if flags.Revoke {
-		return runRevoke(kvAcc, uslug, out)
+		return runRevoke(kvAcc, natsConn, uslug, serverURL, creds.JWT, httpClient, out, errOut)
 	}
 
 	// --status
@@ -813,15 +823,91 @@ func RunAuthAnthropic(flags AuthAnthropicFlags, out io.Writer) (*AuthAnthropicRe
 	}, nil
 }
 
-// runRevoke deletes tokens.anthropic from KV.
-func runRevoke(js jsKVAccessor, uslug string, out io.Writer) (*AuthAnthropicResult, error) {
-	fmt.Fprintln(out, "Revoking Anthropic token from KV (client-side only)...")
+// tokenRevokePayload is the NATS request payload for agent.token-revoke.
+// Spec: ADR-0092 §Data Model → New NATS subjects
+type tokenRevokePayload struct {
+	Provider string `json:"provider"`
+}
+
+// SendTokenRevoke sends a token-revoke request/reply to one user-agent.
+// Uses a 10-second timeout per host (spec §mclaude auth anthropic --revoke).
+// Exported for testing.
+func SendTokenRevoke(nc NATSConn, uslug, hslug string) error {
+	payload := tokenRevokePayload{Provider: "anthropic"}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal revoke payload: %w", err)
+	}
+	subject := fmt.Sprintf("mclaude.users.%s.hosts.%s.agent.token-revoke", uslug, hslug)
+	msg, err := nc.Request(subject, data, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("NATS request to %s: %w", subject, err)
+	}
+	// Check for error response: { "ok": false, "error": "..." }
+	var respMap map[string]interface{}
+	if jsonErr := json.Unmarshal(msg.Data, &respMap); jsonErr == nil {
+		if ok, _ := respMap["ok"].(bool); !ok {
+			if errMsg, _ := respMap["error"].(string); errMsg != "" {
+				return fmt.Errorf("user-agent returned error: %s", errMsg)
+			}
+		}
+	}
+	return nil
+}
+
+// runRevoke deletes tokens.anthropic from KV, then publishes token-revoke to
+// all accepted-grant hosts. Per spec (ADR-0092 §mclaude-cli):
+//   - KV delete always happens first (failure = hard error, ExitAuthKVFailed).
+//   - Per-host failures are non-fatal; warnings printed to errOut (stderr).
+//   - Summary line printed to out (stdout).
+//   - Exit code is always ExitAuthSuccess when KV delete succeeded.
+//   - Summary: "Token removed. Revoked on N/M hosts." or all-failed variant.
+func runRevoke(
+	js jsKVAccessor,
+	nc NATSConn,
+	uslug, serverURL, jwt string,
+	httpClient *http.Client,
+	out io.Writer,
+	errOut io.Writer,
+) (*AuthAnthropicResult, error) {
+	// Step 1: delete token from KV (always first).
 	if err := kvDeleteToken(js, uslug); err != nil {
 		return &AuthAnthropicResult{ExitCode: ExitAuthKVFailed},
 			fmt.Errorf("delete token: %w", err)
 	}
-	fmt.Fprintln(out, "Token deleted from mclaude-user-info KV.")
-	fmt.Fprintln(out, "Note: host-side cleanup (Secret deletion, JWT revocation) is deferred to a future release.")
+
+	// Step 2: fetch accepted hosts and send token-revoke to each.
+	acceptedHosts, err := fetchAcceptedGrants(serverURL, uslug, jwt, httpClient)
+	if err != nil {
+		// Non-fatal: KV delete succeeded; report warning and still exit 0.
+		fmt.Fprintf(errOut, "Warning: could not fetch accepted grants: %v\n", err)
+		fmt.Fprintln(out, "Token removed from account. Warning: host revocation could not be attempted — token may still be cached on some hosts.")
+		return &AuthAnthropicResult{ExitCode: ExitAuthSuccess}, nil
+	}
+
+	total := len(acceptedHosts)
+	revokedCount := 0
+
+	for _, hslug := range acceptedHosts {
+		if err := SendTokenRevoke(nc, uslug, hslug); err != nil {
+			// Per spec: "print warning 'Warning: could not revoke on {hslug}: {error}' to stderr"
+			fmt.Fprintf(errOut, "Warning: could not revoke on %s: %v\n", hslug, err)
+		} else {
+			revokedCount++
+		}
+	}
+
+	// Print summary to stdout per spec.
+	if total == 0 {
+		fmt.Fprintln(out, "Token removed.")
+	} else if revokedCount == total {
+		fmt.Fprintf(out, "Token removed. Revoked on %d/%d hosts.\n", revokedCount, total)
+	} else if revokedCount == 0 {
+		fmt.Fprintf(out, "Token removed from account. Warning: %d hosts could not be reached — token may still be cached on those hosts.\n", total)
+	} else {
+		fmt.Fprintf(out, "Token removed. Revoked on %d/%d hosts.\n", revokedCount, total)
+	}
+
 	return &AuthAnthropicResult{ExitCode: ExitAuthSuccess}, nil
 }
 
