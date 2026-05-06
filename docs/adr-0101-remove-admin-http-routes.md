@@ -1,9 +1,10 @@
 # ADR: Remove Admin HTTP Routes and SCIM Stubs
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-06: draft
 - 2026-05-06: accepted
+- 2026-05-06: implemented — mclaude-control-plane CLEAN
 
 ## Overview
 
