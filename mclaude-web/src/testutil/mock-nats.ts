@@ -116,13 +116,32 @@ export class MockNATSClient implements INATSClient {
     return { key, value: entry.value, revision: entry.revision }
   }
 
-  // Test helper: set a KV value and notify watchers
+  // Test helper: set a KV value (JSON-encoded) and notify watchers
   kvSet(bucket: string, key: string, value: unknown): void {
     if (!this._kvStore.has(bucket)) this._kvStore.set(bucket, new Map())
     const bucketStore = this._kvStore.get(bucket)!
     const existing = bucketStore.get(key)
     const revision = (existing?.revision ?? 0) + 1
     const encoded = new TextEncoder().encode(JSON.stringify(value))
+    bucketStore.set(key, { value: encoded, revision })
+
+    const watchers = this._kvWatchers.get(bucket) ?? []
+    const entry: KVEntry = { key, value: encoded, revision }
+    for (const w of watchers) {
+      if (this._matchKVKey(w.pattern, key)) {
+        w.callback(entry)
+      }
+    }
+  }
+
+  // Test helper: set a KV value (raw string, not JSON-encoded) and notify watchers.
+  // Use for KV buckets where the value is a plain string (e.g. mclaude-user-info-{uslug}).
+  simulateKvPut(bucket: string, key: string, rawValue: string): void {
+    if (!this._kvStore.has(bucket)) this._kvStore.set(bucket, new Map())
+    const bucketStore = this._kvStore.get(bucket)!
+    const existing = bucketStore.get(key)
+    const revision = (existing?.revision ?? 0) + 1
+    const encoded = new TextEncoder().encode(rawValue)
     bucketStore.set(key, { value: encoded, revision })
 
     const watchers = this._kvWatchers.get(bucket) ?? []

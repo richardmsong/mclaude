@@ -136,6 +136,8 @@ export type SessionState =
   | 'updating'
   | 'unknown'
   | 'waiting_for_input'
+  /** ADR-0092: model-provider token invalid (401/403 from Anthropic); session-agent sets this, SPA renders reconnect banner. */
+  | 'token_expired'
 
 export interface SessionKVState {
   id: string

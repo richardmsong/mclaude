@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Connecting…</title>
+</head>
+<body>
+  <script>
+    // ADR-0092: Static OAuth callback page served by nginx at /auth/oauth/callback.
+    // Extracts code and state from URL query params, posts them to the parent window
+    // (the SPA that opened this popup), then closes.
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      var code = params.get('code');
+      var state = params.get('state');
+      var error = params.get('error');
+      var errorDescription = params.get('error_description');
+
+      if (window.opener) {
+        window.opener.postMessage(
+          {
+            type: 'mclaude:oauth-callback',
+            code: code || null,
+            state: state || null,
+            error: error || null,
+            errorDescription: errorDescription || null,
+          },
+          window.location.origin
+        );
+      }
+      window.close();
+    })();
+  </script>
+  <p>Connecting… you can close this window.</p>
+</body>
+</html>

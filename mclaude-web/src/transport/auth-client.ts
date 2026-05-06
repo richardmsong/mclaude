@@ -113,6 +113,54 @@ export class AuthClient implements IAuthClient {
     return res.json() as Promise<{ connectionId: string; providerType: string; displayName: string; username: string }>
   }
 
+  // ── ADR-0092: Anthropic OAuth token exchange proxy ────────────────────────
+
+  /** Exchange an OAuth authorization code for an access token via CP proxy.
+   *  CP forwards to claude.ai/oauth/token server-side to avoid CORS issues. */
+  async exchangeOAuthCode(params: {
+    code: string
+    code_verifier: string
+    redirect_uri: string
+    client_id: string
+  }): Promise<string> {
+    const res = await fetch(`${this.baseUrl}/api/auth/oauth/exchange`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(this._tokens ? { Authorization: `Bearer ${this._tokens.jwt}` } : {}),
+      },
+      body: JSON.stringify(params),
+    })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({})) as { error?: string; error_description?: string }
+      throw new Error(body.error_description ?? body.error ?? `OAuth exchange failed: ${res.status}`)
+    }
+    const data = await res.json() as { access_token: string }
+    return data.access_token
+  }
+
+  // ── ADR-0091 / ADR-0092: Grant and user-agent pubkey endpoints ─────────────
+
+  /** Get all host grants for the user. SPA filters to accepted grants client-side. */
+  async getGrants(userSlug: string): Promise<Array<{ hostSlug: string; status: string }>> {
+    const res = await fetch(`${this.baseUrl}/api/users/${userSlug}/grants`, {
+      headers: this._tokens ? { Authorization: `Bearer ${this._tokens.jwt}` } : {},
+    })
+    if (!res.ok) throw new Error(`getGrants failed: ${res.status}`)
+    const data = await res.json() as { grants: Array<{ hostSlug: string; status: string }> }
+    return data.grants ?? []
+  }
+
+  /** Get the X25519 public key of the user-agent for a specific host. */
+  async getUserAgentPubkey(userSlug: string, hostSlug: string): Promise<string> {
+    const res = await fetch(`${this.baseUrl}/api/users/${userSlug}/hosts/${hostSlug}/user-agent/pubkey`, {
+      headers: this._tokens ? { Authorization: `Bearer ${this._tokens.jwt}` } : {},
+    })
+    if (!res.ok) throw new Error(`getUserAgentPubkey failed: ${res.status}`)
+    const data = await res.json() as { pubkey: string }
+    return data.pubkey
+  }
+
   async updateProjectIdentity(userSlug: string, projectSlug: string, connectionId: string | null): Promise<void> {
     // ADR-0024: URL uses slug-based path /api/users/{uslug}/projects/{pslug}
     const res = await fetch(`${this.baseUrl}/api/users/${userSlug}/projects/${projectSlug}`, {
