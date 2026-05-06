@@ -90,7 +90,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: npm ci
+      - run: npm install --no-audit --no-fund
         working-directory: mclaude-web
       - run: npm test
         working-directory: mclaude-web
