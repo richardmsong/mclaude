@@ -186,3 +186,216 @@ func TestHandleDelivery_BadPayload(t *testing.T) {
 		t.Error("expected ok=false for bad JSON payload")
 	}
 }
+
+// TestHandleRevoke_Success verifies that token-revoke deletes the provider key from the Secret.
+func TestHandleRevoke_Success(t *testing.T) {
+	mgr, kp, fakeK8s := newTestTokenManager(t)
+
+	// First, deliver a token so the Secret has content.
+	token := []byte("sk-ant-oat01-mytoken")
+	sealed, _ := agentcrypto.SealedBoxSeal(token, &kp.Public)
+	deliverPayload, _ := json.Marshal(TokenDeliveryRequest{
+		Provider:     "anthropic",
+		TokenWrapped: base64.StdEncoding.EncodeToString(sealed),
+	})
+	deliverReply := mgr.HandleDelivery(context.Background(), deliverPayload)
+	var deliverResp TokenDeliveryReply
+	if err := json.Unmarshal(deliverReply, &deliverResp); err != nil || !deliverResp.OK {
+		t.Fatalf("setup delivery failed: %v / %q", err, deliverResp.Error)
+	}
+
+	// Now revoke.
+	revokePayload, _ := json.Marshal(TokenRevokeRequest{Provider: "anthropic"})
+	reply := mgr.HandleRevoke(context.Background(), revokePayload)
+
+	var resp TokenRevokeReply
+	if err := json.Unmarshal(reply, &resp); err != nil {
+		t.Fatalf("unmarshal revoke reply: %v", err)
+	}
+	if !resp.OK {
+		t.Errorf("expected ok=true, got error=%q", resp.Error)
+	}
+
+	// Verify the provider key is now empty (deleted) in the Secret.
+	secret, err := fakeK8s.CoreV1().Secrets("mclaude-testuser").Get(
+		context.Background(), "user-tokens-testuser", metav1.GetOptions{},
+	)
+	if err != nil {
+		t.Fatalf("get Secret: %v", err)
+	}
+	if len(secret.Data["anthropic"]) != 0 {
+		t.Errorf("expected anthropic key to be empty after revoke, got %q", secret.Data["anthropic"])
+	}
+}
+
+// TestHandleRevoke_DefaultProvider verifies that a missing "provider" field defaults to "anthropic".
+func TestHandleRevoke_DefaultProvider(t *testing.T) {
+	mgr, kp, fakeK8s := newTestTokenManager(t)
+
+	// Deliver a token first.
+	token := []byte("mytoken")
+	sealed, _ := agentcrypto.SealedBoxSeal(token, &kp.Public)
+	deliverPayload, _ := json.Marshal(TokenDeliveryRequest{
+		Provider:     "anthropic",
+		TokenWrapped: base64.StdEncoding.EncodeToString(sealed),
+	})
+	mgr.HandleDelivery(context.Background(), deliverPayload) //nolint:errcheck
+
+	// Revoke without provider field (should default to "anthropic").
+	reply := mgr.HandleRevoke(context.Background(), []byte(`{}`))
+	var resp TokenRevokeReply
+	if err := json.Unmarshal(reply, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp.OK {
+		t.Errorf("expected ok=true, got error=%q", resp.Error)
+	}
+
+	secret, _ := fakeK8s.CoreV1().Secrets("mclaude-testuser").Get(
+		context.Background(), "user-tokens-testuser", metav1.GetOptions{},
+	)
+	if len(secret.Data["anthropic"]) != 0 {
+		t.Errorf("expected anthropic key empty after revoke-default-provider")
+	}
+}
+
+// TestHandleRevoke_BadPayload verifies that malformed JSON returns bad_request.
+func TestHandleRevoke_BadPayload(t *testing.T) {
+	mgr, _, _ := newTestTokenManager(t)
+
+	reply := mgr.HandleRevoke(context.Background(), []byte("{invalid"))
+	var resp TokenRevokeReply
+	if err := json.Unmarshal(reply, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.OK {
+		t.Error("expected ok=false for bad JSON payload")
+	}
+	if resp.Error != "bad_request" {
+		t.Errorf("expected error=bad_request, got %q", resp.Error)
+	}
+}
+
+// TestHandleRevoke_SecretNotFound verifies that revoking when the Secret is missing
+// returns ok=true (idempotent — already deleted counts as success).
+func TestHandleRevoke_SecretNotFound(t *testing.T) {
+	kp, _ := agentcrypto.GenerateX25519Keypair()
+	fakeK8s := fake.NewClientset() // no Secret pre-created
+	mgr := NewTokenManager(fakeK8s, "mclaude-testuser", "testuser", kp, zerolog.Nop())
+
+	payload, _ := json.Marshal(TokenRevokeRequest{Provider: "anthropic"})
+	reply := mgr.HandleRevoke(context.Background(), payload)
+
+	var resp TokenRevokeReply
+	if err := json.Unmarshal(reply, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp.OK {
+		t.Errorf("expected ok=true when Secret is missing (treat as already revoked), got error=%q", resp.Error)
+	}
+}
+
+// TestHandleStatus_NoToken verifies that HandleStatus returns hasToken=false when no token is present.
+func TestHandleStatus_NoToken(t *testing.T) {
+	mgr, _, _ := newTestTokenManager(t) // Secret exists but empty
+
+	reply := mgr.HandleStatus(context.Background(), nil)
+
+	var resp StatusReply
+	if err := json.Unmarshal(reply, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.HasToken {
+		t.Error("expected hasToken=false for empty Secret")
+	}
+	if resp.TokenVersion != "" {
+		t.Errorf("expected tokenVersion empty, got %q", resp.TokenVersion)
+	}
+}
+
+// TestHandleStatus_WithToken verifies that HandleStatus returns hasToken=true and the correct tokenVersion.
+func TestHandleStatus_WithToken(t *testing.T) {
+	mgr, kp, _ := newTestTokenManager(t)
+
+	// Deliver a token.
+	token := []byte("sk-ant-oat01-mytoken12345")
+	sealed, _ := agentcrypto.SealedBoxSeal(token, &kp.Public)
+	deliverPayload, _ := json.Marshal(TokenDeliveryRequest{
+		Provider:     "anthropic",
+		TokenWrapped: base64.StdEncoding.EncodeToString(sealed),
+	})
+	reply := mgr.HandleDelivery(context.Background(), deliverPayload)
+	var deliverResp TokenDeliveryReply
+	if err := json.Unmarshal(reply, &deliverResp); err != nil || !deliverResp.OK {
+		t.Fatalf("delivery failed: %v / %q", err, deliverResp.Error)
+	}
+
+	// Check status.
+	statusReply := mgr.HandleStatus(context.Background(), []byte(`{}`))
+	var resp StatusReply
+	if err := json.Unmarshal(statusReply, &resp); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if !resp.HasToken {
+		t.Error("expected hasToken=true after delivery")
+	}
+	if len(resp.TokenVersion) != 8 {
+		t.Errorf("expected tokenVersion to be 8 hex chars, got %q", resp.TokenVersion)
+	}
+	// Verify the tokenVersion matches the expected sha256 prefix.
+	expected := tokenVersion(token)
+	if resp.TokenVersion != expected {
+		t.Errorf("tokenVersion = %q, want %q", resp.TokenVersion, expected)
+	}
+}
+
+// TestHandleStatus_AfterRevoke verifies that HandleStatus returns hasToken=false after revoke.
+func TestHandleStatus_AfterRevoke(t *testing.T) {
+	mgr, kp, _ := newTestTokenManager(t)
+
+	// Deliver then revoke.
+	token := []byte("sk-ant-oat01-revtest")
+	sealed, _ := agentcrypto.SealedBoxSeal(token, &kp.Public)
+	deliverPayload, _ := json.Marshal(TokenDeliveryRequest{
+		Provider:     "anthropic",
+		TokenWrapped: base64.StdEncoding.EncodeToString(sealed),
+	})
+	mgr.HandleDelivery(context.Background(), deliverPayload) //nolint:errcheck
+
+	revokePayload, _ := json.Marshal(TokenRevokeRequest{Provider: "anthropic"})
+	mgr.HandleRevoke(context.Background(), revokePayload) //nolint:errcheck
+
+	// Status should show no token.
+	statusReply := mgr.HandleStatus(context.Background(), nil)
+	var resp StatusReply
+	if err := json.Unmarshal(statusReply, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.HasToken {
+		t.Error("expected hasToken=false after revoke")
+	}
+}
+
+// TestTokenVersion verifies the tokenVersion helper produces 8 hex chars.
+func TestTokenVersion(t *testing.T) {
+	cases := []struct {
+		token string
+		want  int // expected length
+	}{
+		{"sk-ant-oat01-abc", 8},
+		{"", 8}, // sha256 of empty string still produces 8 hex chars
+		{"a", 8},
+	}
+	for _, tc := range cases {
+		got := tokenVersion([]byte(tc.token))
+		if len(got) != tc.want {
+			t.Errorf("tokenVersion(%q) = %q (len %d), want len %d", tc.token, got, len(got), tc.want)
+		}
+		// Verify all hex characters.
+		for _, c := range got {
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+				t.Errorf("tokenVersion(%q) = %q contains non-hex char %q", tc.token, got, c)
+			}
+		}
+	}
+}

@@ -36,6 +36,8 @@ func RunNATSLoop(
 
 	activateSubj := fmt.Sprintf("mclaude.users.%s.hosts.%s.agent.activate", uslug, hslug)
 	tokenDeliverySubj := fmt.Sprintf("mclaude.users.%s.hosts.%s.agent.token-delivery", uslug, hslug)
+	tokenRevokeSubj := fmt.Sprintf("mclaude.users.%s.hosts.%s.agent.token-revoke", uslug, hslug)
+	agentStatusSubj := fmt.Sprintf("mclaude.users.%s.hosts.%s.agent.status", uslug, hslug)
 	provisionSubj := fmt.Sprintf("mclaude.users.%s.hosts.%s.agent.projects.provision", uslug, hslug)
 	deleteSubj := fmt.Sprintf("mclaude.users.%s.hosts.%s.agent.projects.delete", uslug, hslug)
 
@@ -88,9 +90,43 @@ func RunNATSLoop(
 					log.Warn().Err(pubErr).Msg("token-delivery: publish reply failed")
 				}
 			}
+			// ADR-0092: publish unsolicited status after token change (delivery success or failure).
+			// Publish regardless of ok — even a failed delivery may change perceived state.
+			publishUnsolicitedStatus(ctx, nc, agentStatusSubj, tokenMgr)
 		}); err != nil {
 			log.Warn().Err(err).Str("subject", tokenDeliverySubj).Msg("subscribe token-delivery failed (bootstrap JWT — will re-subscribe after activate)")
 		}
+
+		// Subscribe to token-revoke (request/reply) — ADR-0092.
+		// NATS RBAC rejects if bootstrap JWT; logged as warning.
+		if _, err := nc.Subscribe(tokenRevokeSubj, func(msg *nats.Msg) {
+			reply := tokenMgr.HandleRevoke(ctx, msg.Data)
+			if msg.Reply != "" {
+				if pubErr := nc.Publish(msg.Reply, reply); pubErr != nil {
+					log.Warn().Err(pubErr).Msg("token-revoke: publish reply failed")
+				}
+			}
+			// Publish unsolicited status after revoke (token removed — hasToken may change).
+			publishUnsolicitedStatus(ctx, nc, agentStatusSubj, tokenMgr)
+		}); err != nil {
+			log.Warn().Err(err).Str("subject", tokenRevokeSubj).Msg("subscribe token-revoke failed (bootstrap JWT — will re-subscribe after activate)")
+		}
+
+		// Subscribe to agent.status (request/reply) — ADR-0092.
+		// NATS RBAC rejects if bootstrap JWT; logged as warning.
+		if _, err := nc.Subscribe(agentStatusSubj, func(msg *nats.Msg) {
+			reply := tokenMgr.HandleStatus(ctx, msg.Data)
+			if msg.Reply != "" {
+				if pubErr := nc.Publish(msg.Reply, reply); pubErr != nil {
+					log.Warn().Err(pubErr).Msg("agent.status: publish reply failed")
+				}
+			}
+		}); err != nil {
+			log.Warn().Err(err).Str("subject", agentStatusSubj).Msg("subscribe agent.status failed (bootstrap JWT — will re-subscribe after activate)")
+		}
+
+		// ADR-0092: publish unsolicited status on startup so any watching SPA gets current state.
+		publishUnsolicitedStatus(ctx, nc, agentStatusSubj, tokenMgr)
 
 		// Subscribe to projects.provision (request/reply).
 		if _, err := nc.Subscribe(provisionSubj, func(msg *nats.Msg) {
@@ -163,6 +199,16 @@ func AuthenticateWithBackoff(ctx context.Context, auth *agentauth.UserAgentAuth)
 		return jwt, nil
 	}, backoff.WithBackOff(bo))
 	return jwt, err
+}
+
+// publishUnsolicitedStatus publishes the current agent status to agentStatusSubj
+// without a reply-to address. Used on startup and after token changes (ADR-0092).
+// Errors are logged and silently ignored — unsolicited publishes are best-effort.
+func publishUnsolicitedStatus(ctx context.Context, nc *nats.Conn, subj string, tokenMgr *TokenManager) {
+	data := tokenMgr.HandleStatus(ctx, nil)
+	if pubErr := nc.Publish(subj, data); pubErr != nil {
+		log.Warn().Err(pubErr).Str("subject", subj).Msg("agent.status: unsolicited publish failed")
+	}
 }
 
 // ConnectNATS creates a NATS connection using the user-agent's JWT + NKey signing.
