@@ -22,7 +22,7 @@ rules:
   ## PVC management (per-project data volumes)
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "create", "delete"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   ## Secret management (per-namespace credentials and token secrets)
   - apiGroups: [""]
     resources: ["secrets"]
