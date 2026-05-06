@@ -40,7 +40,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: mclaude-control-plane/go.mod
-          cache: false
+          cache: true
       - name: Build binaries
         working-directory: mclaude-control-plane
         run: |
@@ -187,7 +187,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: mclaude-session-agent/go.mod
-          cache: false
+          cache: true
       - name: Build binaries
         working-directory: mclaude-session-agent
         run: |
@@ -274,7 +274,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: mclaude-controller-k8s/go.mod
-          cache: false
+          cache: true
       - name: Build binaries
         working-directory: mclaude-controller-k8s
         run: |
@@ -361,7 +361,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: mclaude-user-agent/go.mod
-          cache: false
+          cache: true
       - name: Build binaries
         working-directory: mclaude-user-agent
         run: |
