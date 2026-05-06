@@ -414,36 +414,6 @@ func TestCluster_AuthMiddlewareAcceptsValidJWT(t *testing.T) {
 	}
 }
 
-// ---- ADR-0089: Admin JWT helper ----
-
-// adminJWT obtains a JWT for the bootstrap admin by logging in via
-// POST /auth/login using CLUSTER_TEST_ADMIN_EMAIL + CLUSTER_TEST_ADMIN_PASSWORD.
-func adminJWT(t *testing.T) string {
-	t.Helper()
-	email := os.Getenv("CLUSTER_TEST_ADMIN_EMAIL")
-	password := os.Getenv("CLUSTER_TEST_ADMIN_PASSWORD")
-	if email == "" || password == "" {
-		t.Skip("CLUSTER_TEST_ADMIN_EMAIL and CLUSTER_TEST_ADMIN_PASSWORD not set — skipping admin test")
-	}
-	body, _ := json.Marshal(map[string]string{"email": email, "password": password})
-	resp, err := http.Post(cluster.CPURL+"/auth/login", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("admin login request: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("admin login status: %d", resp.StatusCode)
-	}
-	var lr LoginResponse
-	if err := json.NewDecoder(resp.Body).Decode(&lr); err != nil {
-		t.Fatalf("decode admin login response: %v", err)
-	}
-	if lr.JWT == "" {
-		t.Fatal("admin login returned empty JWT")
-	}
-	return lr.JWT
-}
-
 // ---- ADR-0089/ADR-0101: User project KV test ----
 // Admin HTTP route removed per ADR-0101; user seeded via direct DB access.
 
