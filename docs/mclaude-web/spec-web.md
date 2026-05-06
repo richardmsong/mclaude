@@ -232,11 +232,11 @@ These should be cleaned up in a future commit.
 
 ## E2E Test Infrastructure
 
-Playwright tests run against the live k3d cluster at `https://dev.mclaude.richardmcsong.com`. A global setup script creates a fresh test user before each invocation; a global teardown script deletes it after.
+Playwright tests run against the live k3d cluster at `https://dev.mclaude.richardmcsong.com`. A global setup script authenticates as the bootstrap admin before each invocation; a global teardown script removes the test state file after.
 
 ### Running tests against k3d
 
-Admin routes are served on the main port and are accessible at the same public URL as the CP — no port-forward needed:
+No port-forward needed — the CP is accessible at the same public URL as the SPA:
 
 ```bash
 BASE_URL=https://dev.mclaude.richardmcsong.com \
@@ -246,7 +246,7 @@ BOOTSTRAP_ADMIN_PASSWORD=<admin-password> \
 npx playwright test --project=chromium
 ```
 
-Global setup logs in as the bootstrap admin via `POST /auth/login` to obtain an admin JWT, then uses that JWT for all admin API calls.
+Global setup logs in as the bootstrap admin via `POST /auth/login` to obtain a JWT for NATS session setup.
 
 ### Test user isolation
 
@@ -255,7 +255,7 @@ Global setup logs in as the bootstrap admin via `POST /auth/login` to obtain an 
 2. If `DEV_EMAIL` and `DEV_TOKEN` env vars are both set, skips creation: writes `{skipped: true}` to `.test-user.json` and returns.
 3. If `ADMIN_URL` is not set, skips creation: writes `{skipped: true}` and returns — spec files fall back to their hardcoded dev defaults.
 4. Logs in as bootstrap admin: `POST {ADMIN_URL}/auth/login` with `{email: BOOTSTRAP_ADMIN_EMAIL, password: BOOTSTRAP_ADMIN_PASSWORD}`. Throws `"global-setup: admin login failed {status}: {body}"` if the response is not 200. Stores the resulting JWT as `adminJWT`.
-5. Generates `userId = crypto.randomUUID()` and calls `POST {ADMIN_URL}/admin/users` with `Authorization: Bearer {adminJWT}`, body `{id: userId, email: "e2e-{Date.now()}@mclaude.local", name: "E2E Test User", password: "<random 16-char hex>"}`. The `id` field is required by the CP `AdminUserRequest` struct.
+5. Resolves test credentials using the bootstrap admin identity directly: `email = BOOTSTRAP_ADMIN_EMAIL`, `token = BOOTSTRAP_ADMIN_PASSWORD`. No ephemeral user is created — `POST /admin/users` is removed (ADR-0101).
 6. Computes `userSlug = slugify(email)` (lowercase, replace non-`[a-z0-9]` runs with `-`, trim, truncate to 63 chars). Sets `process.env['DEV_EMAIL'] = email`, `process.env['DEV_TOKEN'] = token`, and `process.env['DEV_USER_SLUG'] = userSlug` so spec files inherit the test user credentials and slug.
 7. **Session seeding** — generates an NKey pair, calls `POST {BASE_URL}/auth/login` with `{email, password: token, nkey_public}` to receive `{jwt, natsUrl, userSlug}` (no `nkeySeed` in response — ADR-0100). Derives the NATS WebSocket URL: uses `natsUrl` from the response if non-empty; otherwise replaces `https://` with `wss://` in `BASE_URL` and appends `/nats`. Connects to NATS: `connect({ servers: [natsWsUrl], authenticator: jwtAuthenticator(jwt, seed) })` where `seed` is the locally-generated NKey seed.
 8. **Host registration** — registers a test host via `POST {BASE_URL}/api/hosts/register` (or NATS `mclaude.users.{uslug}.hosts._.register`) with a generated NKey pair. Stores the resulting `hostSlug` as `process.env['DEV_HOST_SLUG']`. This step is required because no automatic `local` host exists (ADR-0095).
@@ -266,10 +266,7 @@ Global setup logs in as the bootstrap admin via `POST /auth/login` to obtain an 
 
 **Global teardown** (`e2e/global-teardown.ts`):
 1. Reads `e2e/.test-user.json`. If missing or `skipped: true`, returns immediately.
-2. Deletes `e2e/.test-user.json` eagerly before the API call (prevents re-read on a subsequent crashed run).
-3. Logs in as bootstrap admin: `POST {ADMIN_URL}/auth/login` with `{email: BOOTSTRAP_ADMIN_EMAIL, password: BOOTSTRAP_ADMIN_PASSWORD}`. On login failure, logs a warning and returns.
-4. Calls `DELETE {ADMIN_URL}/admin/users/{userId}` with `Authorization: Bearer {adminJWT}`.
-5. Logs a warning on deletion failure (does not throw — teardown runs after tests complete regardless).
+2. Deletes `e2e/.test-user.json`. No user deletion is performed — `DELETE /admin/users/{userId}` is removed (ADR-0101) and no ephemeral user was created.
 
 **`playwright.config.ts`** declares `globalSetup: './e2e/global-setup.ts'` and `globalTeardown: './e2e/global-teardown.ts'`.
 

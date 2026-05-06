@@ -2,13 +2,13 @@
 
 ## Role
 
-The control plane is the central API server and trust root for mclaude. It authenticates all identity types (users, hosts, agents) via a unified HTTP NKey challenge-response protocol (ADR-0054), issues scoped NATS JWTs (signed by the deployment-level account key), manages user / project / host records in Postgres, publishes provisioning requests over NATS to the user-agent on each host, manages host lifecycle (registration, access grants/revocation, deregistration, emergency credential revocation — ADR-0054), handles OAuth provider integrations (GitHub/GitLab), tracks host liveness via `$SYS` events, manages S3 pre-signed URLs for binary data (imports and attachments — ADR-0053), provisions per-user JetStream resources (KV buckets and sessions streams — ADR-0054), and exposes admin endpoints for user management.
+The control plane is the central API server and trust root for mclaude. It authenticates all identity types (users, hosts, agents) via a unified HTTP NKey challenge-response protocol (ADR-0054), issues scoped NATS JWTs (signed by the deployment-level account key), manages user / project / host records in Postgres, publishes provisioning requests over NATS to the user-agent on each host, manages host lifecycle (registration, access grants/revocation, deregistration, emergency credential revocation — ADR-0054), handles OAuth provider integrations (GitHub/GitLab), tracks host liveness via `$SYS` events, manages S3 pre-signed URLs for binary data (imports and attachments — ADR-0053), and provisions per-user JetStream resources (KV buckets and sessions streams — ADR-0054).
 
 Per ADR-0035 the control-plane is **K8s-free**: no controller-runtime, no K8s client, no MCProject reconciler. All K8s mutation is delegated to `mclaude-controller-k8s` via NATS request/reply. The control-plane runs only inside the central `mclaude-cp` Kubernetes cluster (there is no local/standalone variant). All identity types generate their own NKeys — the control-plane never generates NKey pairs or handles private key material (ADR-0054).
 
 ## Deployment
 
-Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central `mclaude-cp` cluster, built from an Alpine-based container image. Listens on a single port: the main API port (default 8080) for all routes — public, authenticated, and admin. Admin endpoints are protected by `isAdminMiddleware`, which validates the caller's JWT via the standard auth middleware and then checks that the authenticated user has `is_admin=true` in Postgres.
+Runs as a Kubernetes Deployment in the `mclaude-system` namespace of the central `mclaude-cp` cluster, built from an Alpine-based container image. Listens on a single port: the main API port (default 8080) for all routes — public and authenticated.
 
 ### Two-Phase Deployment
 
@@ -20,7 +20,7 @@ Deployment is split into two phases with an explicit CI gate between them:
 
 **Phase 1 NATS state:** `mclaude-hosts` KV bucket exists and is empty. No per-user KV buckets or streams (created lazily on first login). No leafnode connections.
 
-**What works at Phase 1:** `POST /auth/login` (bootstrap admin can authenticate, gets JWT), `POST /admin/users` (admin can create additional users), `/readyz` (200), NKey challenge/verify, device-code flow, SPA loads with empty dashboard.
+**What works at Phase 1:** `POST /auth/login` (bootstrap admin can authenticate, gets JWT), `/readyz` (200), NKey challenge/verify, device-code flow, SPA loads with empty dashboard. Additional users must be created via `BOOTSTRAP_ADMIN_EMAIL`/`BOOTSTRAP_ADMIN_PASSWORD` in Helm values (ADR-0101).
 
 **What requires Phase 2:** Sessions (no controller to provision session-agent pods), NATS provisioning requests (published by CP but nothing subscribed), any `$SYS.ACCOUNT.*.CONNECT` events (no hosts have ever connected).
 
@@ -77,7 +77,7 @@ The `go test -tags integration` suite runs after Phase 1 as the gate before Phas
 | `GET` | `/readyz` | Kubernetes readiness probe. Checks Postgres connectivity — returns 503 when DB is unreachable so the pod stops receiving traffic. NATS outage does not mark pod unready. |
 | `GET` | `/auth/providers/{id}/callback` | OAuth callback -- exchanges code for token, stores connection, redirects browser |
 
-**Protected (per-host NATS JWT or admin bearer token in Authorization header):**
+**Protected (per-host NATS JWT in Authorization header):**
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -91,7 +91,7 @@ The `go test -tags integration` suite runs after Phase 1 as the gate before Phas
 | `POST` | `/api/attachments/{id}/confirm` | Confirm attachment upload (ADR-0053). CP verifies the S3 object exists, sets `attachments.confirmed=true`. Records metadata (filename, mimeType, sizeBytes). |
 | `GET` | `/api/attachments/{id}` | Get attachment download URL (ADR-0053). CP validates requester owns the project, returns `{id, filename, mimeType, sizeBytes, downloadUrl}` with a pre-signed S3 download URL (5-min TTL). |
 | `PATCH` | `/api/projects/{id}` | Updates a project's `gitIdentityId` |
-| `GET` | `/api/users/{uslug}/grants` | ADR-0091. Lists pending and accepted `host_grants` for the user. Each entry includes `{hostSlug, status, createdAt, acceptedAt?, x25519Fingerprint?}` where the fingerprint is `sha256(user_host_agents.x25519_pub)` (hex), present only after the user-agent has registered. SPA shows "Host X granted you access — fingerprint Y" so the user can pin trust before accepting. Auth: self (`uslug` must match JWT subject; admin bypass per existing middleware). |
+| `GET` | `/api/users/{uslug}/grants` | ADR-0091. Lists pending and accepted `host_grants` for the user. Each entry includes `{hostSlug, status, createdAt, acceptedAt?, x25519Fingerprint?}` where the fingerprint is `sha256(user_host_agents.x25519_pub)` (hex), present only after the user-agent has registered. SPA shows "Host X granted you access — fingerprint Y" so the user can pin trust before accepting. Auth: self (`uslug` must match JWT subject). |
 | `POST` | `/api/users/{uslug}/hosts/{hslug}/grant/accept` | ADR-0091. Body: `{x25519_fingerprint}` (hex). CP looks up `user_host_agents.x25519_pub` for `(hslug, uslug)`, computes `sha256(pub)`, compares to the supplied fingerprint. Match → sets `host_grants.status='accepted'`, `accepted_at=NOW()`, publishes `{}` (or `{"status":"accepted"}`) to `mclaude.users.{uslug}.hosts.{hslug}.agent.activate`; returns 204. Mismatch → 409 with `{error:"fingerprint_mismatch"}`. Pubkey not yet registered → 404 with `{error:"agent_not_registered"}`. Auth: self. |
 | `GET` | `/api/users/{uslug}/hosts/{hslug}/user-agent/pubkey` | ADR-0091. Returns `{x25519_pub}` (base64) for the user-agent serving (uslug, hslug). SPA reads this to perform `crypto_box_seal(token, x25519_pub)` before publishing to `.agent.token-delivery`. 404 if `user_host_agents.x25519_pub` is NULL (agent not yet registered). Auth: self. |
 | `GET` | `/api/users/{uslug}/hosts` | Lists hosts owned by or granted to the user. |
@@ -110,27 +110,11 @@ HTTP handlers for project CRUD are wired and functional. `POST` (create) inserts
 | `GET` | `/api/users/{uslug}/projects/{pslug}` | Gets a single project by slug. |
 | `DELETE` | `/api/users/{uslug}/projects/{pslug}` | Deletes a project. |
 
-**SCIM 2.0 (IdP user provisioning) — not yet implemented:**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/scim/v2/Users` | IdP provisions user. **Not yet implemented.** |
-| `PUT` | `/scim/v2/Users/{id}` | IdP updates user. **Not yet implemented.** |
-| `DELETE` | `/scim/v2/Users/{id}` | IdP deprovisions user. **Not yet implemented.** |
-| `GET` | `/scim/v2/Users` | IdP syncs user list. **Not yet implemented.** |
-
-**Admin-only (`isAdminMiddleware` — valid JWT where `users.is_admin = true`):**
-
-Admin routes are served on the main port (8080). `isAdminMiddleware` calls the standard JWT auth middleware first, then fetches the user from Postgres and checks `is_admin = true`. Returns 401 if no JWT, 403 if JWT valid but user is not admin.
+**Metrics (unauthenticated):**
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/metrics` | Prometheus metrics (unauthenticated — internal scraping) |
-| `POST` | `/admin/users` | Creates a user (`{id, email, name, password?, isAdmin?}`). Returns `{id, email, name, slug}`. |
-| `POST` | `/admin/users/{uslug}/promote` | Sets `users.is_admin = true`. |
-| `GET` | `/admin/users` | Lists all users. |
-| `DELETE` | `/admin/users/{id}` | Deletes a user from Postgres (cascades to hosts, projects, oauth_connections). **Known gap:** does not revoke the user's NATS JWT or publish NATS delete requests to controllers — orphaned K8s resources persist until manual cleanup. |
-| `POST` | `/admin/sessions/stop` | Break-glass session stop. Publishes a sessions.delete NATS message to `mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.api.sessions.delete`. Returns 202 Accepted (fire-and-forget). |
 
 ### NATS Subjects
 
@@ -275,7 +259,7 @@ The chain is **non-short-circuiting** (per ADR-0098): each ensure-step's error i
 
 **Default-platform auto-grant is invoked idempotently on every user JWT issuance** — both `POST /auth/login` (password + `nkey_public`) and `POST /api/auth/verify` (NKey challenge-response), and on authorized device-code poll (ADR-0100). The logic queries `SELECT slug FROM hosts WHERE is_default_platform = true LIMIT 1`; if a default platform exists, it `UpsertHostGrant`s a row `(host_slug=<default>, user_slug, status='accepted', accepted_at=NOW())` and publishes to `mclaude.hosts.{<default>}.grants.create` on behalf of the host. `UpsertHostGrant` uses `ON CONFLICT DO NOTHING` so re-fires are no-ops. The host controller spins up the user-agent + namespace on first delivery; subsequent fires are idempotent. Once the user-agent registers and authenticates, CP issues a full JWT immediately.
 
-The auth middleware on protected routes decodes and validates the JWT against the account public key, extracts the user UUID into the request context, and enforces access boundaries: returns 403 Forbidden when the JWT subject (user slug) does not match the URL `{uslug}` parameter. Admin users bypass the slug-match check. Admin routes additionally require `isAdminMiddleware`: after JWT validation, the user's `is_admin` flag is fetched from Postgres; 403 Forbidden is returned if false. Admin = a normal user with `is_admin=true` — no separate token or port.
+The auth middleware on protected routes decodes and validates the JWT against the account public key, extracts the user UUID into the request context, and enforces access boundaries: returns 403 Forbidden when the JWT subject (user slug) does not match the URL `{uslug}` parameter. No admin bypass — `is_admin=true` users are subject to the same slug-match check as any other user (ADR-0101).
 
 ### JWT Revocation
 
@@ -332,22 +316,21 @@ On project deletion (ADR-0053), in addition to the standard Postgres + KV + prov
 ## Error Handling
 
 - **Postgres unavailable at startup**: fatal exit.
-- **Postgres unavailable at runtime**: affected HTTP handlers return 503; admin routes return 503.
+- **Postgres unavailable at runtime**: affected HTTP handlers return 503.
 - **`OPERATOR_KEYS_PATH` mount missing or unreadable**: warning logged at startup; JWT revocation is disabled (TTL-only fallback). Control-plane can still mint and validate JWTs without this path — only the `$SYS.REQ.CLAIMS.UPDATE` revocation path is unavailable. This is the expected behavior in dev environments that lack the operator-keys Secret mount.
 - **NATS connection failure**: retries indefinitely with unlimited reconnects. KV writes are best-effort; DB row is authoritative.
 - **Provisioning request timeout**: `POST /api/users/{uslug}/projects` returns 503 with `{error: "host {hslug} unreachable"}`. The Postgres row is rolled back (or marked failed); the SPA presents the host as offline. Project creation queueing for retry is out of scope for v1.
 - **Device-code expired (>10 min)**: `POST /api/hosts/register` returns 410 Gone with `{error: "code expired, restart registration"}`.
 - **Device-code already redeemed**: returns 409 Conflict.
-- **Admin endpoint called by non-admin**: returns 403 Forbidden.
 - **Login without `nkey_public`**: `POST /auth/login` returns 400 with `{error: "nkey_public is required"}` (ADR-0100).
 - **Login with invalid `nkey_public` format**: `POST /auth/login` returns 400 with `{error: "invalid nkey_public format"}` — validates U-prefix, 56-char base32 (ADR-0100).
-- **Removed admin cluster endpoints** (`/admin/clusters`, `/admin/clusters/grants`): return 404 (routes no longer registered, ADR-0097).
+- **Requests to `/admin/*` or `/scim/v2/*`**: return 404 (routes not registered, ADR-0101).
 - **Project creation with no registered hosts**: returns 422 with `{error: "no_hosts", message: "Register a host before creating a project"}` (ADR-0095). Applies to both HTTP and NATS project creation paths.
 - **Project creation with multiple hosts and no `hostSlug`**: returns 422 with `{error: "host_required", message: "Specify hostSlug — user has multiple hosts"}` (ADR-0095).
 
 ## Integration Tests
 
-The `go test -tags integration` suite is the Phase 1 CI gate. All tests use `httptest.NewRecorder()` + direct handler calls. The `newIntegrationServer(t, db, nc) *Server` helper constructs a test server with a real Postgres (testcontainers) and real NATS (testcontainers). No static admin token — admin tests create an `is_admin=true` user via `db.CreateUser` + `db.SetUserAdmin`, log in via `handleLogin`, and use the resulting JWT.
+The `go test -tags integration` suite is the Phase 1 CI gate. All tests use `httptest.NewRecorder()` + direct handler calls. The `newIntegrationServer(t, db, nc) *Server` helper constructs a test server with a real Postgres (testcontainers) and real NATS (testcontainers).
 
 **Phase 1 invariants:**
 
@@ -361,15 +344,13 @@ The `go test -tags integration` suite is the Phase 1 CI gate. All tests use `htt
 | `TestIntegration_CreateProject_BlockedWithoutHosts` | `POST /api/users/{uslug}/projects` returns 422 `no_hosts` when user has zero registered hosts (ADR-0095) |
 | `TestIntegration_CreateProject_SucceedsWithHost` | `POST /api/users/{uslug}/projects` succeeds when user has at least one registered host (ADR-0095) |
 
-**Admin routes (main port, `isAdminMiddleware`):**
+**Admin/SCIM surface removed (ADR-0101):**
 
-| Test name | Method / Path | What it verifies |
-|-----------|--------------|-----------------|
-| `TestIntegration_AdminCreateUser` | `POST /admin/users` | Creates user; response has `{id, email, name, slug}` |
-| `TestIntegration_AdminListUsers` | `GET /admin/users` | Lists created users |
-| `TestIntegration_AdminDeleteUser` | `DELETE /admin/users/{id}` | Deletes user; subsequent DB fetch returns nil |
-| `TestIntegration_AdminMiddleware_RejectsNoToken` | `GET /admin/users` (no auth) | 401 without JWT |
-| `TestIntegration_AdminMiddleware_RejectsNonAdmin` | `GET /admin/users` (non-admin JWT) | 403 with valid JWT for a non-admin user |
+| Test name | What it verifies |
+|-----------|-----------------|
+| `TestAdminRoutes_AllReturn404` | GET `/admin/users`, POST `/admin/users`, DELETE `/admin/users/x`, POST `/admin/sessions/stop`, GET `/scim/v2/Users` all return 404 |
+| `TestAuthMiddleware_AdminBypassRemoved` | A user with `is_admin=true` cannot access `/api/users/{other-uslug}/...` — gets 403, same as non-admin |
+| `TestRequireSelfOrAdmin_AdminCannotAccessOtherUserGrants` | A user with `is_admin=true` gets 403 on `GET /api/users/{other-uslug}/grants` |
 
 **Auth surface:**
 
@@ -399,7 +380,7 @@ NATS subject tests use `nc.Request` with a 3s timeout; `t.Fatal` on timeout.
 
 **`cluster_test.go`:**
 
-- `TestCluster_UserProjectInKV` — replaces `TestCluster_DevUserProjectInKV`. Creates an ephemeral user via `POST /admin/users` using an admin JWT obtained from `POST /auth/login` (not `ADMIN_TOKEN`). Publishes a project-create NATS message, verifies the KV entry, then tears down. All uses of `ADMIN_TOKEN` env var removed from `cluster_test.go`.
+- `TestCluster_UserProjectInKV` — Creates an ephemeral user via `db.CreateUser` directly (no HTTP admin route), publishes a project-create NATS message, verifies the KV entry, then tears down.
 
 **Deleted tests (ADR-0089):**
 - `TestIntegration_SeedDev_WritesLocalHostKV` — removed with seedDev
@@ -409,7 +390,6 @@ NATS subject tests use `nc.Request` with a 3s timeout; `t.Fatal` on timeout.
 - **PAT validation failure**: returns 400 with descriptive error (invalid token vs. unreachable provider).
 - **GitLab refresh failure**: logged as warning per connection; expired refresh tokens trigger automatic connection deletion.
 - **`EXTERNAL_URL` not set**: fatal exit on startup.
-- **Duplicate user email**: admin create returns 409 Conflict.
 - **Duplicate host slug** (user tries to register a slug already in use): returns 409 Conflict.
 - **Slug validation failure at ingress**: returns HTTP 400 with `{code: "invalid_slug", reason: "reserved_word|charset|length", field: "slug"}`.
 - **Reserved-word match in slugify**: fallback kicks in automatically (deterministic `{prefix}-{6 base32}`).

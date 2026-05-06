@@ -90,7 +90,7 @@ S3-compatible object storage for import archives and chat attachments per ADR-00
 
 | Kind | Name | Notes |
 |---|---|---|
-| Ingress | `{release}` | Routes `/auth`, `/api`, `/admin`, `/scim` to control-plane; `/` to SPA. Created when `ingress.enabled`. |
+| Ingress | `{release}` | Routes `/auth`, `/api` to control-plane; `/` to SPA. Created when `ingress.enabled`. `/admin` and `/scim` paths are removed (ADR-0101). |
 | Ingress | `{release}-nats-ws` | NATS WebSocket on a dedicated hostname → hub NATS WebSocket port. Created when `ingress.natsHost` is set. |
 | Ingress | `{release}-leaf` | Optional. Exposes `leafnodes` port 7422 over a TLS-terminated TCP/WS proxy when worker clusters live outside the hub's network. Created when `ingress.leafHost` is set. |
 | Ingress | `{release}-minio` | MinIO S3 API at `ingress.minioHost` → `{release}-minio:9000`. Created when `ingress.enabled` AND `ingress.minioHost` non-empty. Inherits `ingress.annotations` (via `deepCopy`+`mergeOverwrite`) with `nginx.ingress.kubernetes.io/proxy-body-size: "0"` override (unlimited — supports 500MB import archives). ExternalDNS annotations point at `ingress.minioHost`/`ingress.externalDnsTarget`. TLS: iterates `ingress.tls`, appends `minioHost` to each entry's `hosts` list so Traefik SNI routing works. |

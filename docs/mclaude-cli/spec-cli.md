@@ -224,14 +224,14 @@ The CP returns `natsUrl` in its device-code poll response (`s.natsWsURL`). The C
 
 ### Prerequisites
 
-- `ADMIN_URL` must be set (e.g. `https://dev.mclaude.richardmcsong.com`). No port-forward needed — admin routes are served on the main port. If unset, `TestMain` writes `{skipped:true}` to `cli-integration/.test-creds.json` and exits without error — tests are skipped, not failed. This matches the Playwright global-setup skip behavior (ADR-0064).
+- `ADMIN_URL` must be set (e.g. `https://dev.mclaude.richardmcsong.com`). No port-forward needed — the CP is accessible at the same public URL as the SPA. If unset, `TestMain` writes `{skipped:true}` to `cli-integration/.test-creds.json` and exits without error — tests are skipped, not failed. This matches the Playwright global-setup skip behavior (ADR-0064).
 - `MCLAUDE_TEST_HOST_SLUG` must refer to a host that is already registered in the cluster and has a running session-agent. `TestMain` does **not** register a throwaway host — the host is pre-existing infrastructure. Default: `dev-local`.
 
 ### Test user setup
 
-`TestMain` creates an ephemeral test user via `POST /admin/users` (same admin API as Playwright). The response returns `{id, email, name, slug}`. TestMain supplies its own generated password in the request body; the password is not returned in the response.
+`TestMain` uses the bootstrap admin identity as the test user: `email = BOOTSTRAP_ADMIN_EMAIL`, `token = BOOTSTRAP_ADMIN_PASSWORD`. No ephemeral user is created — `POST /admin/users` is removed (ADR-0101).
 
-After creating the user, `TestMain` grants host access by publishing to the host's `grants.create` NATS subject (or calling the appropriate admin API). The admin JWT is obtained by calling `POST /auth/login` with `BOOTSTRAP_ADMIN_EMAIL` + `BOOTSTRAP_ADMIN_PASSWORD`. This step is required before the device-code login: the user JWT is issued during login and includes only host slugs for which a grant exists; without the grant the reconciler fails with "user does not have access to host" when provisioning the test project. The call is idempotent (`ON CONFLICT DO NOTHING`). If the grant call fails, `TestMain` deletes the test user and exits 1.
+`TestMain` grants host access by publishing to the host's `grants.create` NATS subject. The admin JWT is obtained by calling `POST /auth/login` with `BOOTSTRAP_ADMIN_EMAIL` + `BOOTSTRAP_ADMIN_PASSWORD`. This step is required before the device-code login: the user JWT is issued during login and includes only host slugs for which a grant exists; without the grant the reconciler fails with "user does not have access to host" when provisioning the test project. The call is idempotent (`ON CONFLICT DO NOTHING`). If the grant call fails, `TestMain` exits 1.
 
 NATS credentials are then obtained by automating the device-code flow (no browser needed):
 
@@ -241,7 +241,7 @@ NATS credentials are then obtained by automating the device-code flow (no browse
 
 The JWT is bound to the CLI's `publicKey` (sent in step 1). The CLI signs NATS connections with the matching `nkeySeed`. Tests use this JWT as `Authorization: Bearer <jwt>` for all authenticated CP HTTP calls.
 
-`TestMain` teardown: delete test project via admin API (CP deletes S3 prefix `{uslug}/{hslug}/{pslug}/`), then delete the test user. No explicit revoke is needed — `deleteTestUser` cascades to all `hosts` rows for the user via the FK constraint, which drops the host grant automatically.
+`TestMain` teardown: delete test project via its API (CP deletes S3 prefix `{uslug}/{hslug}/{pslug}/`). No user deletion — the bootstrap admin is a permanent account and `DELETE /admin/users/{userId}` is removed (ADR-0101).
 
 ### Test cases
 
