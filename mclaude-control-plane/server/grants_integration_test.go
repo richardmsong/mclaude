@@ -1132,78 +1132,46 @@ func TestIntegration_EnsureUserResources_Backfill(t *testing.T) {
 }
 
 // TestIntegration_HandleLogin_ProvisionsAllFour verifies that POST /auth/login
-// provisions all four per-user JetStream resources for both the legacy path
-// (no nkey_public) and the NKey path — the root cause of ADR-0098.
+// provisions all four per-user JetStream resources. Per ADR-0100, nkey_public is
+// required; there is no legacy path.
 func TestIntegration_HandleLogin_ProvisionsAllFour(t *testing.T) {
 	ctx := context.Background()
 	db := mustConnectDB(t, ctx)
 	nc := mustNATSConn(t)
 	srv := newIntegrationServer(t, db, nc)
 
-	t.Run("legacy path (no nkey_public)", func(t *testing.T) {
-		uslug := "login-legacy-" + uuid.NewString()[:8]
-		userID := uslug
-		email := userID + "@test.example.com"
-		hash, err := HashPassword("pw-" + userID)
-		if err != nil {
-			t.Fatalf("HashPassword: %v", err)
-		}
-		_, err = db.CreateUser(ctx, userID, email, "LegacyUser", hash)
-		if err != nil {
-			t.Fatalf("CreateUser: %v", err)
-		}
-		// Override slug to match our test slug (email slug differs from our uslug).
-		if _, err := db.Pool().Exec(ctx, `UPDATE users SET slug = $1 WHERE id = $2`, uslug, userID); err != nil {
-			t.Fatalf("update slug: %v", err)
-		}
-		t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+	uslug := "login-nkey-" + uuid.NewString()[:8]
+	userID := uslug
+	email := userID + "@test.example.com"
+	hash, err := HashPassword("pw-" + userID)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	_, err = db.CreateUser(ctx, userID, email, "NKeyUser", hash)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if _, err := db.Pool().Exec(ctx, `UPDATE users SET slug = $1 WHERE id = $2`, uslug, userID); err != nil {
+		t.Fatalf("update slug: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
 
-		body := fmt.Sprintf(`{"email":%q,"password":%q}`, email, "pw-"+userID)
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		srv.handleLogin(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("login status = %d; body: %s", rec.Code, rec.Body.String())
-		}
+	userKP, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatalf("CreateUser NKey: %v", err)
+	}
+	userPub, _ := userKP.PublicKey()
 
-		assertAllFourResourcesExist(t, nc, uslug)
-	})
+	body := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":%q}`, email, "pw-"+userID, userPub)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login status = %d; body: %s", rec.Code, rec.Body.String())
+	}
 
-	t.Run("NKey path (nkey_public provided)", func(t *testing.T) {
-		uslug := "login-nkey-" + uuid.NewString()[:8]
-		userID := uslug
-		email := userID + "@test.example.com"
-		hash, err := HashPassword("pw-" + userID)
-		if err != nil {
-			t.Fatalf("HashPassword: %v", err)
-		}
-		_, err = db.CreateUser(ctx, userID, email, "NKeyUser", hash)
-		if err != nil {
-			t.Fatalf("CreateUser: %v", err)
-		}
-		if _, err := db.Pool().Exec(ctx, `UPDATE users SET slug = $1 WHERE id = $2`, uslug, userID); err != nil {
-			t.Fatalf("update slug: %v", err)
-		}
-		t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
-
-		userKP, err := nkeys.CreateUser()
-		if err != nil {
-			t.Fatalf("CreateUser NKey: %v", err)
-		}
-		userPub, _ := userKP.PublicKey()
-
-		body := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":%q}`, email, "pw-"+userID, userPub)
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		srv.handleLogin(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("login status = %d; body: %s", rec.Code, rec.Body.String())
-		}
-
-		assertAllFourResourcesExist(t, nc, uslug)
-	})
+	assertAllFourResourcesExist(t, nc, uslug)
 }
 
 // assertAllFourResourcesExist checks that all four per-user JetStream resources exist.
@@ -1353,5 +1321,352 @@ func TestIntegration_ADR0091_UserJWT_HasUserInfoPermissions(t *testing.T) {
 		if !found {
 			t.Errorf("user JWT missing Sub permission %q; Sub list: %v", want, claims.Permissions.Sub.Allow)
 		}
+	}
+}
+
+// ----- ADR-0100: remove legacy NKey login tests -----
+
+// TestIntegration_ADR0100_Login_WithoutNKeyPublic_Returns400 verifies that
+// POST /auth/login without nkey_public returns 400 {error: "nkey_public is required"}.
+func TestIntegration_ADR0100_Login_WithoutNKeyPublic_Returns400(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	srv := newIntegrationServer(t, db, nil)
+
+	suffix := uuid.NewString()[:8]
+	userID := "adr0100-nopub-" + suffix
+	email := userID + "@test.example.com"
+	hash, err := HashPassword("pw-" + userID)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	_, err = db.CreateUser(ctx, userID, email, "ADR0100NoPub", hash)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Login without nkey_public.
+	body := fmt.Sprintf(`{"email":%q,"password":%q}`, email, "pw-"+userID)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["error"] != "nkey_public is required" {
+		t.Errorf("error = %q; want 'nkey_public is required'", resp["error"])
+	}
+}
+
+// TestIntegration_ADR0100_Login_InvalidNKeyFormat_Returns400 verifies that
+// POST /auth/login with an invalid nkey_public format returns 400 {error: "invalid nkey_public format"}.
+func TestIntegration_ADR0100_Login_InvalidNKeyFormat_Returns400(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	srv := newIntegrationServer(t, db, nil)
+
+	suffix := uuid.NewString()[:8]
+	userID := "adr0100-badpub-" + suffix
+	email := userID + "@test.example.com"
+	hash, err := HashPassword("pw-" + userID)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	_, err = db.CreateUser(ctx, userID, email, "ADR0100BadPub", hash)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Login with invalid nkey_public (not a valid user key — missing U prefix).
+	body := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":"NOTAVALIDUSERKEY1234567890"}`, email, "pw-"+userID)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["error"] != "invalid nkey_public format" {
+		t.Errorf("error = %q; want 'invalid nkey_public format'", resp["error"])
+	}
+}
+
+// TestIntegration_ADR0100_Login_Response_NoNKeySeed verifies that the login response
+// does not contain nkeySeed (ADR-0100: server never returns private key material).
+func TestIntegration_ADR0100_Login_Response_NoNKeySeed(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	srv := newIntegrationServer(t, db, nil)
+
+	suffix := uuid.NewString()[:8]
+	userID := "adr0100-noseed-" + suffix
+	email := userID + "@test.example.com"
+	hash, err := HashPassword("pw-" + userID)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	_, err = db.CreateUser(ctx, userID, email, "ADR0100NoSeed", hash)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Login with valid nkey_public.
+	userKP, _ := nkeys.CreateUser()
+	userPub, _ := userKP.PublicKey()
+	body := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":%q}`, email, "pw-"+userID, userPub)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d; want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Decode as raw map to check for nkeySeed presence.
+	var respMap map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&respMap); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if _, hasField := respMap["nkeySeed"]; hasField {
+		t.Error("login response must not contain nkeySeed (ADR-0100): server never returns private key material")
+	}
+	// JWT must be present.
+	if jwtVal, _ := respMap["jwt"].(string); jwtVal == "" {
+		t.Error("login response missing jwt")
+	}
+}
+
+// TestIntegration_ADR0100_Login_TriggersDefaultPlatformAutoGrant verifies that
+// POST /auth/login with nkey_public creates a host_grants row for the default platform
+// and publishes grants.create (ADR-0100).
+func TestIntegration_ADR0100_Login_TriggersDefaultPlatformAutoGrant(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	nc := mustNATSConn(t)
+	srv := newIntegrationServer(t, db, nc)
+
+	suffix := uuid.NewString()[:8]
+
+	// Create an owner for the default platform host.
+	ownerID := "adr0100-owner-" + suffix
+	_, err := db.CreateUser(ctx, ownerID, ownerID+"@test.example.com", "ADR0100Owner", "")
+	if err != nil {
+		t.Fatalf("CreateUser owner: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, ownerID) }) //nolint:errcheck
+
+	// Insert a default platform host row directly.
+	hostID := uuid.NewString()
+	defaultHostSlug := "adr0100-default-" + suffix
+	_, err = db.Pool().Exec(ctx,
+		`INSERT INTO hosts (id, user_id, slug, name, is_default_platform) VALUES ($1, $2, $3, $4, TRUE)`,
+		hostID, ownerID, defaultHostSlug, defaultHostSlug)
+	if err != nil {
+		t.Fatalf("insert default platform host: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Pool().Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) //nolint:errcheck
+	})
+
+	// Create a user with a password.
+	userID := "adr0100-user-" + suffix
+	email := userID + "@test.example.com"
+	hash, err := HashPassword("pw-" + userID)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	user, err := db.CreateUser(ctx, userID, email, "ADR0100User", hash)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Subscribe to grants.create to observe the auto-publish.
+	grantSubj := "mclaude.hosts." + defaultHostSlug + ".grants.create"
+	grantCh := make(chan *nats.Msg, 1)
+	sub, err := nc.Subscribe(grantSubj, func(msg *nats.Msg) {
+		grantCh <- msg
+	})
+	if err != nil {
+		t.Fatalf("subscribe grants.create: %v", err)
+	}
+	defer sub.Unsubscribe() //nolint:errcheck
+
+	// Login with nkey_public — should trigger auto-grant.
+	userKP, _ := nkeys.CreateUser()
+	userPub, _ := userKP.PublicKey()
+	body := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":%q}`, email, "pw-"+userID, userPub)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login status = %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify host_grants row was created with status='accepted'.
+	grant, err := db.GetHostGrant(ctx, defaultHostSlug, user.Slug)
+	if err != nil {
+		t.Fatalf("GetHostGrant: %v", err)
+	}
+	if grant == nil {
+		t.Fatal("GetHostGrant returned nil; expected auto-accepted grant after login")
+	}
+	if grant.Status != "accepted" {
+		t.Errorf("grant.Status = %q; want 'accepted'", grant.Status)
+	}
+
+	// Verify grants.create was published.
+	select {
+	case msg := <-grantCh:
+		var payload map[string]string
+		_ = json.Unmarshal(msg.Data, &payload)
+		if payload["uslug"] != user.Slug {
+			t.Errorf("grants.create payload uslug = %q; want %q", payload["uslug"], user.Slug)
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("grants.create not published within 3s after login")
+	}
+}
+
+// TestIntegration_ADR0100_DeviceCodePoll_TriggersAutoGrant verifies that an authorized
+// device-code poll fires the default-platform auto-grant (ADR-0100).
+func TestIntegration_ADR0100_DeviceCodePoll_TriggersAutoGrant(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	nc := mustNATSConn(t)
+	srv := newIntegrationServer(t, db, nc)
+
+	suffix := uuid.NewString()[:8]
+
+	// Create an owner for the default platform host.
+	ownerID := "adr0100-dc-owner-" + suffix
+	_, err := db.CreateUser(ctx, ownerID, ownerID+"@test.example.com", "ADR0100DCOwner", "")
+	if err != nil {
+		t.Fatalf("CreateUser owner: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, ownerID) }) //nolint:errcheck
+
+	// Insert a default platform host row directly.
+	hostID := uuid.NewString()
+	defaultHostSlug := "adr0100-dc-default-" + suffix
+	_, err = db.Pool().Exec(ctx,
+		`INSERT INTO hosts (id, user_id, slug, name, is_default_platform) VALUES ($1, $2, $3, $4, TRUE)`,
+		hostID, ownerID, defaultHostSlug, defaultHostSlug)
+	if err != nil {
+		t.Fatalf("insert default platform host: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Pool().Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) //nolint:errcheck
+	})
+
+	// Create a user.
+	userID := "adr0100-dc-user-" + suffix
+	email := userID + "@test.example.com"
+	hash, err := HashPassword("pw-" + userID)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	user, err := db.CreateUser(ctx, userID, email, "ADR0100DCUser", hash)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Generate NKey for CLI.
+	cliKP, _ := nkeys.CreateUser()
+	cliPub, _ := cliKP.PublicKey()
+
+	// Initiate device-code flow.
+	createBody := fmt.Sprintf(`{"publicKey":%q}`, cliPub)
+	createRec := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/auth/device-code", strings.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	srv.handleCLIDeviceCodeCreate(createRec, createReq)
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("device-code create status = %d; body: %s", createRec.Code, createRec.Body.String())
+	}
+	var codeResp CLIDeviceCodeResponse
+	if err := json.NewDecoder(createRec.Body).Decode(&codeResp); err != nil {
+		t.Fatalf("decode device-code response: %v", err)
+	}
+
+	// Simulate authorization by completing the device-code flow (POST /verify with credentials).
+	verifyBody := fmt.Sprintf("user_code=%s&email=%s&password=pw-%s", codeResp.UserCode, email, userID)
+	verifyRec := httptest.NewRecorder()
+	verifyReq := httptest.NewRequest(http.MethodPost, "/api/auth/device-code/verify",
+		strings.NewReader(verifyBody))
+	verifyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	srv.handleCLIDeviceCodeVerify(verifyRec, verifyReq)
+	if verifyRec.Code != http.StatusOK {
+		t.Fatalf("device-code verify status = %d; body: %s", verifyRec.Code, verifyRec.Body.String())
+	}
+
+	// Subscribe to grants.create before polling.
+	grantSubj := "mclaude.hosts." + defaultHostSlug + ".grants.create"
+	grantCh := make(chan *nats.Msg, 1)
+	sub, err := nc.Subscribe(grantSubj, func(msg *nats.Msg) {
+		grantCh <- msg
+	})
+	if err != nil {
+		t.Fatalf("subscribe grants.create: %v", err)
+	}
+	defer sub.Unsubscribe() //nolint:errcheck
+
+	// Poll — when authorized, auto-grant fires.
+	pollBody := fmt.Sprintf(`{"deviceCode":%q}`, codeResp.DeviceCode)
+	pollRec := httptest.NewRecorder()
+	pollReq := httptest.NewRequest(http.MethodPost, "/api/auth/device-code/poll", strings.NewReader(pollBody))
+	pollReq.Header.Set("Content-Type", "application/json")
+	srv.handleCLIDeviceCodePoll(pollRec, pollReq)
+	if pollRec.Code != http.StatusOK {
+		t.Fatalf("poll status = %d; body: %s", pollRec.Code, pollRec.Body.String())
+	}
+	var pollResp CLIDeviceCodePollResponse
+	if err := json.NewDecoder(pollRec.Body).Decode(&pollResp); err != nil {
+		t.Fatalf("decode poll response: %v", err)
+	}
+	if pollResp.Status != "authorized" {
+		t.Fatalf("poll status = %q; want 'authorized'", pollResp.Status)
+	}
+
+	// Verify host_grants row created with status='accepted'.
+	grant, err := db.GetHostGrant(ctx, defaultHostSlug, user.Slug)
+	if err != nil {
+		t.Fatalf("GetHostGrant: %v", err)
+	}
+	if grant == nil {
+		t.Fatal("GetHostGrant returned nil; expected auto-accepted grant after device-code authorization")
+	}
+	if grant.Status != "accepted" {
+		t.Errorf("grant.Status = %q; want 'accepted'", grant.Status)
+	}
+
+	// Verify grants.create was published.
+	select {
+	case msg := <-grantCh:
+		var payload map[string]string
+		_ = json.Unmarshal(msg.Data, &payload)
+		if payload["uslug"] != user.Slug {
+			t.Errorf("grants.create payload uslug = %q; want %q", payload["uslug"], user.Slug)
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("grants.create not published within 3s after device-code poll authorized")
 	}
 }

@@ -40,25 +40,18 @@ func UserInfoBucket(uslug string) string {
 	return "mclaude-user-info-" + uslug
 }
 
-// Lowercase aliases for internal use within the auth package.
-func userSessionsBucket(uslug string) string  { return UserSessionsBucket(uslug) }
-func userProjectsBucket(uslug string) string  { return UserProjectsBucket(uslug) }
-func userSessionsStream(uslug string) string  { return UserSessionsStream(uslug) }
-func kvStreamName(bucket string) string       { return KVStreamName(bucket) }
-func userInfoBucket(uslug string) string      { return UserInfoBucket(uslug) }
-
 // UserSubjectPermissions returns the NATS pub/sub permissions for a user (SPA/CLI).
 // Per ADR-0054: explicit, per-user-resource scoped allow-lists replacing broad wildcards.
 // Per ADR-0091: adds mclaude-user-info-{uslug} bucket access.
 // hostSlugs is the list of host slugs the user has access to (owned + granted).
 func UserSubjectPermissions(uslug string, hostSlugs []string) NATSPermissions {
-	sessBucket := userSessionsBucket(uslug)
-	projBucket := userProjectsBucket(uslug)
-	infoBucket := userInfoBucket(uslug)
-	sessStream := userSessionsStream(uslug)
-	sessStreamName := kvStreamName(sessBucket)
-	projStreamName := kvStreamName(projBucket)
-	infoStreamName := kvStreamName(infoBucket)
+	sessBucket := UserSessionsBucket(uslug)
+	projBucket := UserProjectsBucket(uslug)
+	infoBucket := UserInfoBucket(uslug)
+	sessStream := UserSessionsStream(uslug)
+	sessStreamName := KVStreamName(sessBucket)
+	projStreamName := KVStreamName(projBucket)
+	infoStreamName := KVStreamName(infoBucket)
 
 	pub := []string{
 		// Core user subjects
@@ -141,11 +134,11 @@ func UserSubjectPermissions(uslug string, hostSlugs []string) NATSPermissions {
 // hslug is the host slug where the agent runs.
 // pslug is the project slug the agent manages.
 func SessionAgentSubjectPermissions(uslug, hslug, pslug string) NATSPermissions {
-	sessBucket := userSessionsBucket(uslug)
-	projBucket := userProjectsBucket(uslug)
-	sessStream := userSessionsStream(uslug)
-	sessStreamName := kvStreamName(sessBucket)
-	projStreamName := kvStreamName(projBucket)
+	sessBucket := UserSessionsBucket(uslug)
+	projBucket := UserProjectsBucket(uslug)
+	sessStream := UserSessionsStream(uslug)
+	sessStreamName := KVStreamName(sessBucket)
+	projStreamName := KVStreamName(projBucket)
 
 	// KV key prefixes for this project
 	sessKeyPrefix := "$KV." + sessBucket + ".hosts." + hslug + ".projects." + pslug + ".sessions."
@@ -317,7 +310,9 @@ func IssueUserJWT(publicKey string, userID string, userSlug string, hostSlugs []
 // Per ADR-0054: host-scoped subjects only, zero JetStream access, 5-min TTL.
 //
 // publicKey: the host controller's NKey public key (generated at registration,
-//   stored in hosts.public_key).
+//
+//	stored in hosts.public_key).
+//
 // hslug: the host's slug.
 func IssueHostJWT(publicKey string, hslug string, accountKP nkeys.KeyPair) (string, error) {
 	perms := HostSubjectPermissions(hslug)
@@ -329,7 +324,9 @@ func IssueHostJWT(publicKey string, hslug string, accountKP nkeys.KeyPair) (stri
 // Per ADR-0054: per-project scoped, 5-min TTL.
 //
 // publicKey: the agent's NKey public key (generated at startup,
-//   registered via mclaude.hosts.{hslug}.api.agents.register).
+//
+//	registered via mclaude.hosts.{hslug}.api.agents.register).
+//
 // uslug: the owning user's slug.
 // hslug: the host slug where the agent runs.
 // pslug: the project slug the agent manages.
@@ -373,84 +370,6 @@ func IssueUserAgentJWT(publicKey string, uslug, hslug string, accountKP nkeys.Ke
 	}
 	const agentTTLSecs = 5 * 60 // 5-minute TTL (ADR-0091)
 	return issueJWT(publicKey, "user-agent-"+uslug+"-"+hslug, accountKP, agentTTLSecs, perms)
-}
-
-// IssueUserJWTLegacy is a backward-compatible wrapper that generates an NKey pair
-// and issues a user JWT with the OLD broad-wildcard permissions PLUS per-user KV
-// bucket permissions required by ADR-0061.
-// DEPRECATED: Use IssueUserJWT with a client-provided public key.
-// Retained for the old /auth/login and /auth/refresh flows during migration.
-func IssueUserJWTLegacy(userID string, userSlug string, accountKP nkeys.KeyPair, expirySecs int64) (jwt string, seed []byte, err error) {
-	userKP, userSeed, err := GenerateUserNKey()
-	if err != nil {
-		return "", nil, fmt.Errorf("generate user nkey: %w", err)
-	}
-
-	// Legacy broad permissions (pre-ADR-0054) — used only when client has not
-	// provided an NKey public key (old login protocol).
-	prefix := fmt.Sprintf("mclaude.%s.>", userID)
-	kvProjects := fmt.Sprintf("$KV.mclaude-projects.%s.>", userID)
-	kvSessions := fmt.Sprintf("$KV.mclaude-sessions.%s.>", userID)
-	kvHosts := fmt.Sprintf("$KV.mclaude-hosts.%s.>", userSlug)
-	hostsPrefix := fmt.Sprintf("mclaude.users.%s.hosts.*.>", userSlug)
-
-	// ADR-0061: per-user KV bucket subjects required for the SPA to open the
-	// new per-user KV buckets (mclaude-sessions-{uslug}, mclaude-projects-{uslug}).
-	// The old shared-bucket $KV entries (kvSessions, kvProjects) used userID as a
-	// prefix; the new per-user buckets use userSlug in the bucket name itself.
-	sessBucket := userSessionsBucket(userSlug)
-	projBucket := userProjectsBucket(userSlug)
-	sessStreamName := kvStreamName(sessBucket)
-	projStreamName := kvStreamName(projBucket)
-	kvPerUserSessions := "$KV." + sessBucket + ".>"
-	kvPerUserProjects := "$KV." + projBucket + ".>"
-
-	perms := NATSPermissions{
-		PubAllow: []string{
-			prefix,
-			"_INBOX.>",
-			"$JS.API.>",
-			hostsPrefix,
-			// ADR-0061: stream info needed by NATS client for KV bucket init on per-user buckets.
-			"$JS.API.STREAM.INFO." + sessStreamName,
-			"$JS.API.STREAM.INFO." + projStreamName,
-			// ADR-0061: consumer create for KV watch on per-user buckets.
-			"$JS.API.CONSUMER.CREATE." + sessStreamName + ".>",
-			"$JS.API.CONSUMER.CREATE." + projStreamName + ".>",
-			// ADR-0061: KV put on per-user buckets (pub side of $KV subjects).
-			kvPerUserSessions,
-			kvPerUserProjects,
-		},
-		SubAllow: []string{
-			prefix,
-			"_INBOX.>",
-			kvProjects,
-			kvSessions,
-			kvHosts,
-			"$JS.API.>",
-			"$JS.API.DIRECT.GET.>",
-			hostsPrefix,
-			// ADR-0061: KV watch push delivery on per-user buckets (sub side of $KV subjects).
-			kvPerUserSessions,
-			kvPerUserProjects,
-		},
-	}
-
-	claims := natsjwt.NewUserClaims(userKP.PublicKey)
-	claims.Name = userID
-	if expirySecs > 0 {
-		claims.Expires = time.Now().Unix() + expirySecs
-	}
-	claims.IssuerAccount, _ = accountKP.PublicKey()
-	claims.Permissions.Pub.Allow = perms.PubAllow
-	claims.Permissions.Sub.Allow = perms.SubAllow
-
-	encoded, err := claims.Encode(accountKP)
-	if err != nil {
-		return "", nil, fmt.Errorf("encode user jwt: %w", err)
-	}
-
-	return encoded, userSeed, nil
 }
 
 // IssueHostJWTLegacy is a backward-compatible wrapper that generates an NKey pair
@@ -525,4 +444,3 @@ func UserSubjectPermissionsLegacy(userID string, userSlug string) NATSPermission
 		SubAllow: []string{prefix, "_INBOX.>", kvProjects, kvSessions, kvHosts, "$JS.API.>", "$JS.API.DIRECT.GET.>", hostsPrefix},
 	}
 }
-

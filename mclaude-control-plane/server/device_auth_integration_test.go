@@ -56,9 +56,11 @@ func TestIntegration_HandleGetProjectHTTP_ImportRefNull(t *testing.T) {
 	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour)
 
 	// Issue a JWT for the user so the auth middleware provides userID.
-	jwt, _, err := cpauth.IssueUserJWTLegacy(userID, proj.Slug, accountKP, int64(8*time.Hour.Seconds()))
+	userKP1, _ := nkeys.CreateUser()
+	userPub1, _ := userKP1.PublicKey()
+	jwt, err := cpauth.IssueUserJWT(userPub1, userID, proj.Slug, nil, accountKP, int64(8*time.Hour.Seconds()))
 	if err != nil {
-		t.Fatalf("cpauth.IssueUserJWTLegacy: %v", err)
+		t.Fatalf("cpauth.IssueUserJWT: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -128,9 +130,11 @@ func TestIntegration_HandleGetProjectHTTP_ImportRefNonNull(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
 	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour)
 
-	jwt, _, err := cpauth.IssueUserJWTLegacy(userID, proj.Slug, accountKP, int64(8*time.Hour.Seconds()))
+	userKP2, _ := nkeys.CreateUser()
+	userPub2, _ := userKP2.PublicKey()
+	jwt, err := cpauth.IssueUserJWT(userPub2, userID, proj.Slug, nil, accountKP, int64(8*time.Hour.Seconds()))
 	if err != nil {
-		t.Fatalf("cpauth.IssueUserJWTLegacy: %v", err)
+		t.Fatalf("cpauth.IssueUserJWT: %v", err)
 	}
 
 	mux := http.NewServeMux()

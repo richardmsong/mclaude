@@ -36,15 +36,20 @@ func fakeHTTPResponse(status int, body string) *http.Response {
 	}
 }
 
-// authHeader returns a valid Bearer token for the given server (uses legacy path for simplicity).
+// authHeader returns a valid Bearer token for the given server.
 func authHeader(t *testing.T, srv *Server) string {
 	t.Helper()
 	accountKP := srv.accountKP
-	jwt, _, err := cpauth.IssueUserJWTLegacy("unit-test-user", "unit-test-slug", accountKP, int64(time.Hour.Seconds()))
+	userKP, err := nkeys.CreateUser()
 	if err != nil {
-		t.Fatalf("IssueUserJWTLegacy: %v", err)
+		t.Fatalf("CreateUser nkey: %v", err)
 	}
-	return "Bearer " + jwt
+	userPub, _ := userKP.PublicKey()
+	jwtStr, err := cpauth.IssueUserJWT(userPub, "unit-test-user", "unit-test-slug", nil, accountKP, int64(time.Hour.Seconds()))
+	if err != nil {
+		t.Fatalf("IssueUserJWT: %v", err)
+	}
+	return "Bearer " + jwtStr
 }
 
 // newOAuthTestServer creates a Server with a real account key pair (no DB/NATS needed).

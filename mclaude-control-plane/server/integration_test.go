@@ -153,15 +153,15 @@ func TestIntegration_NATSSubjectPermissions(t *testing.T) {
 		t.Fatalf("create account key: %v", err)
 	}
 
-	expiresAt := time.Now().Add(time.Hour).Unix()
-	aliceJWT, aliceSeed, err := cpauth.IssueUserJWTLegacy("alice", "alice-slug", accountKP, expiresAt)
+	aliceKP, err := nkeys.CreateUser()
 	if err != nil {
-		t.Fatalf("cpauth.IssueUserJWTLegacy: %v", err)
+		t.Fatalf("CreateUser nkey: %v", err)
 	}
-
-	aliceKP, err := nkeys.FromSeed(aliceSeed)
+	alicePub, _ := aliceKP.PublicKey()
+	expiresAt := time.Now().Add(time.Hour).Unix()
+	aliceJWT, err := cpauth.IssueUserJWT(alicePub, "alice", "alice-slug", nil, accountKP, expiresAt)
 	if err != nil {
-		t.Fatalf("FromSeed: %v", err)
+		t.Fatalf("cpauth.IssueUserJWT: %v", err)
 	}
 
 	// Attempt JWT auth; fall back to no-auth if broker has no operator configured.
@@ -333,11 +333,16 @@ func TestIntegration_HandleLogin_UserSlugInResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
+	t.Cleanup(func() { db.DeleteUser(ctx, "login-slug-u1") }) //nolint:errcheck
 
 	accountKP, _ := nkeys.CreateAccount()
 	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour)
 
-	body := `{"email":"bob.jones@example.com","password":"secret-pw"}`
+	// ADR-0100: nkey_public is required. Generate one client-side.
+	userKP, _ := nkeys.CreateUser()
+	userPub, _ := userKP.PublicKey()
+
+	body := fmt.Sprintf(`{"email":"bob.jones@example.com","password":"secret-pw","nkey_public":%q}`, userPub)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -362,6 +367,7 @@ func TestIntegration_HandleLogin_UserSlugInResponse(t *testing.T) {
 
 // TestIntegration_HandleRefresh_ReturnsSlug verifies that POST /auth/refresh
 // returns a fresh JWT along with both userId (UUID) and userSlug (ADR-0046).
+// Per ADR-0100: login requires nkey_public; refresh uses the stored nkey_public.
 func TestIntegration_HandleRefresh_ReturnsSlug(t *testing.T) {
 	ctx := context.Background()
 	db := mustConnectDB(t, ctx)
@@ -374,12 +380,17 @@ func TestIntegration_HandleRefresh_ReturnsSlug(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
+	t.Cleanup(func() { db.DeleteUser(ctx, "refresh-slug-u1") }) //nolint:errcheck
 
 	accountKP, _ := nkeys.CreateAccount()
 	srv := NewServer(db, accountKP, "nats://localhost:4222", "", 8*time.Hour)
 
+	// ADR-0100: generate NKey client-side before login.
+	userKP, _ := nkeys.CreateUser()
+	userPub, _ := userKP.PublicKey()
+
 	// Log in to get an initial JWT.
-	loginBody := `{"email":"refresh.slug@example.com","password":"refresh-pw"}`
+	loginBody := fmt.Sprintf(`{"email":"refresh.slug@example.com","password":"refresh-pw","nkey_public":%q}`, userPub)
 	loginRec := httptest.NewRecorder()
 	loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(loginBody))
 	loginReq.Header.Set("Content-Type", "application/json")
@@ -389,6 +400,20 @@ func TestIntegration_HandleRefresh_ReturnsSlug(t *testing.T) {
 	}
 	var loginResp LoginResponse
 	json.NewDecoder(loginRec.Body).Decode(&loginResp) //nolint:errcheck
+
+	// ADR-0100: no nkeySeed in login response.
+	var loginRespMap map[string]any
+	loginRec2 := httptest.NewRecorder()
+	loginReq2 := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(loginBody))
+	loginReq2.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(loginRec2, loginReq2)
+	json.NewDecoder(loginRec2.Body).Decode(&loginRespMap) //nolint:errcheck
+	if _, hasField := loginRespMap["nkeySeed"]; hasField {
+		t.Error("login response must not contain nkeySeed (ADR-0100)")
+	}
+
+	// Sleep 1s so refresh JWT has a later iat than the login JWT.
+	time.Sleep(1 * time.Second)
 
 	// Now refresh the JWT.
 	refreshRec := httptest.NewRecorder()
@@ -407,8 +432,15 @@ func TestIntegration_HandleRefresh_ReturnsSlug(t *testing.T) {
 	if resp.JWT == "" {
 		t.Error("refreshed response missing JWT")
 	}
-	if resp.NKeySeed == "" {
-		t.Error("refreshed response missing NKeySeed")
+	// ADR-0100: no nkeySeed in refresh response either.
+	var refreshRespMap map[string]any
+	refreshRec2 := httptest.NewRecorder()
+	refreshReq2 := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	refreshReq2.Header.Set("Authorization", "Bearer "+loginResp.JWT)
+	srv.handleRefresh(refreshRec2, refreshReq2)
+	json.NewDecoder(refreshRec2.Body).Decode(&refreshRespMap) //nolint:errcheck
+	if _, hasField := refreshRespMap["nkeySeed"]; hasField {
+		t.Error("refresh response must not contain nkeySeed (ADR-0100)")
 	}
 	if resp.UserID != "refresh-slug-u1" {
 		t.Errorf("userID = %q; want refresh-slug-u1", resp.UserID)
@@ -417,7 +449,7 @@ func TestIntegration_HandleRefresh_ReturnsSlug(t *testing.T) {
 	if resp.UserSlug != "refresh-slug-example-com" {
 		t.Errorf("userSlug = %q; want refresh-slug-example-com", resp.UserSlug)
 	}
-	// New JWT must differ from original.
+	// New JWT must differ from original (different iat due to 1s sleep above).
 	if resp.JWT == loginResp.JWT {
 		t.Error("refreshed JWT should differ from original")
 	}
@@ -797,7 +829,10 @@ func mustAdminJWT(t *testing.T, db *DB, srv *Server) string {
 	}
 	t.Cleanup(func() { db.DeleteUser(ctx, adminID) }) //nolint:errcheck
 
-	body := fmt.Sprintf(`{"email":%q,"password":%q}`, adminEmail, "admin-pw-"+adminID)
+	// ADR-0100: nkey_public is required for login.
+	adminKP, _ := nkeys.CreateUser()
+	adminPub, _ := adminKP.PublicKey()
+	body := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":%q}`, adminEmail, "admin-pw-"+adminID, adminPub)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -931,7 +966,10 @@ func TestIntegration_BootstrapAdminUser_FreshWithPassword(t *testing.T) {
 	srv := NewServer(db, accountKP, integDeps.NATSAddr, "", 8*time.Hour)
 	srv.SetExternalURL("http://localhost:8080")
 
-	loginBody := fmt.Sprintf(`{"email":%q,"password":%q}`, email, password)
+	// ADR-0100: nkey_public is required for login.
+	bsKP, _ := nkeys.CreateUser()
+	bsPub, _ := bsKP.PublicKey()
+	loginBody := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":%q}`, email, password, bsPub)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(loginBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -1016,7 +1054,10 @@ func TestIntegration_BootstrapAdminUser_ExistingUserGetsPassword(t *testing.T) {
 	srv := NewServer(db, accountKP, integDeps.NATSAddr, "", 8*time.Hour)
 	srv.SetExternalURL("http://localhost:8080")
 
-	loginBody := fmt.Sprintf(`{"email":%q,"password":%q}`, email, password)
+	// ADR-0100: nkey_public is required for login.
+	existingKP, _ := nkeys.CreateUser()
+	existingPub, _ := existingKP.PublicKey()
+	loginBody := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":%q}`, email, password, existingPub)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(loginBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -1079,7 +1120,10 @@ func TestIntegration_BootstrapAdminUser_PasswordRotation(t *testing.T) {
 	srv := NewServer(db, accountKP, integDeps.NATSAddr, "", 8*time.Hour)
 	srv.SetExternalURL("http://localhost:8080")
 
-	loginBody := fmt.Sprintf(`{"email":%q,"password":%q}`, email, newPassword)
+	// ADR-0100: nkey_public is required for login.
+	rotKP, _ := nkeys.CreateUser()
+	rotPub, _ := rotKP.PublicKey()
+	loginBody := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":%q}`, email, newPassword, rotPub)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(loginBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -1088,8 +1132,10 @@ func TestIntegration_BootstrapAdminUser_PasswordRotation(t *testing.T) {
 		t.Errorf("login with new password: status = %d; want 200; body: %s", rec.Code, rec.Body.String())
 	}
 
-	// Verify old password no longer authenticates.
-	oldLoginBody := fmt.Sprintf(`{"email":%q,"password":%q}`, email, initialPassword)
+	// Verify old password no longer authenticates (nkey_public included to pass validation).
+	rot2KP, _ := nkeys.CreateUser()
+	rot2Pub, _ := rot2KP.PublicKey()
+	oldLoginBody := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":%q}`, email, initialPassword, rot2Pub)
 	rec2 := httptest.NewRecorder()
 	req2 := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(oldLoginBody))
 	req2.Header.Set("Content-Type", "application/json")
@@ -1149,7 +1195,10 @@ func TestIntegration_BootstrapAdminUser_EmptyPasswordPreservesHash(t *testing.T)
 	srv := NewServer(db, accountKP, integDeps.NATSAddr, "", 8*time.Hour)
 	srv.SetExternalURL("http://localhost:8080")
 
-	loginBody := fmt.Sprintf(`{"email":%q,"password":%q}`, email, password)
+	// ADR-0100: nkey_public is required for login.
+	preserveKP, _ := nkeys.CreateUser()
+	preservePub, _ := preserveKP.PublicKey()
+	loginBody := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":%q}`, email, password, preservePub)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(loginBody))
 	req.Header.Set("Content-Type", "application/json")
@@ -1317,7 +1366,10 @@ func TestIntegration_AdminMiddleware_RejectsNonAdmin(t *testing.T) {
 	}
 	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
 
-	loginBody := fmt.Sprintf(`{"email":%q,"password":%q}`, email, "pw-"+userID)
+	// ADR-0100: nkey_public is required for login.
+	nonAdminKP, _ := nkeys.CreateUser()
+	nonAdminPub, _ := nonAdminKP.PublicKey()
+	loginBody := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":%q}`, email, "pw-"+userID, nonAdminPub)
 	loginRec := httptest.NewRecorder()
 	loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(loginBody))
 	loginReq.Header.Set("Content-Type", "application/json")
@@ -1360,7 +1412,10 @@ func TestIntegration_HandleLogin_InvalidCreds(t *testing.T) {
 
 	srv := newIntegrationServer(t,db, nil)
 
-	body := fmt.Sprintf(`{"email":%q,"password":"wrong-password"}`, userID+"@test.example.com")
+	// ADR-0100: nkey_public is required; include a valid one so we exercise the password check path.
+	invalidCredKP, _ := nkeys.CreateUser()
+	invalidCredPub, _ := invalidCredKP.PublicKey()
+	body := fmt.Sprintf(`{"email":%q,"password":"wrong-password","nkey_public":%q}`, userID+"@test.example.com", invalidCredPub)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -1405,8 +1460,10 @@ func TestIntegration_AuthMiddleware_Accepts_ValidJWT(t *testing.T) {
 	}
 	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
 
-	// Login to get JWT.
-	loginBody := fmt.Sprintf(`{"email":%q,"password":%q}`, userID+"@test.example.com", "pw-"+userID)
+	// Login to get JWT. ADR-0100: nkey_public is required.
+	authValidKP, _ := nkeys.CreateUser()
+	authValidPub, _ := authValidKP.PublicKey()
+	loginBody := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":%q}`, userID+"@test.example.com", "pw-"+userID, authValidPub)
 	loginRec := httptest.NewRecorder()
 	loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(loginBody))
 	loginReq.Header.Set("Content-Type", "application/json")
@@ -2078,10 +2135,12 @@ func TestIntegration_CreateProject_BlockedWithoutHosts(t *testing.T) {
 	srv := NewServer(db, accountKP, integDeps.NATSAddr, "", 8*time.Hour)
 	srv.SetExternalURL("http://localhost:8080")
 
-	// Issue a JWT for the user (no password needed — use legacy JWT issuance).
-	jwt, _, err := cpauth.IssueUserJWTLegacy(user.ID, user.Slug, accountKP, int64(8*time.Hour.Seconds()))
+	// Issue a JWT for the user using a client-generated NKey.
+	userKP, _ := nkeys.CreateUser()
+	userPub, _ := userKP.PublicKey()
+	jwt, err := cpauth.IssueUserJWT(userPub, user.ID, user.Slug, nil, accountKP, int64(8*time.Hour.Seconds()))
 	if err != nil {
-		t.Fatalf("cpauth.IssueUserJWTLegacy: %v", err)
+		t.Fatalf("cpauth.IssueUserJWT: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -2134,9 +2193,11 @@ func TestIntegration_CreateProject_SucceedsWithHost(t *testing.T) {
 	srv := NewServer(db, accountKP, integDeps.NATSAddr, "", 8*time.Hour)
 	srv.SetExternalURL("http://localhost:8080")
 
-	jwt, _, err := cpauth.IssueUserJWTLegacy(user.ID, user.Slug, accountKP, int64(8*time.Hour.Seconds()))
+	userKP2, _ := nkeys.CreateUser()
+	userPub2, _ := userKP2.PublicKey()
+	jwt, err := cpauth.IssueUserJWT(userPub2, user.ID, user.Slug, nil, accountKP, int64(8*time.Hour.Seconds()))
 	if err != nil {
-		t.Fatalf("cpauth.IssueUserJWTLegacy: %v", err)
+		t.Fatalf("cpauth.IssueUserJWT: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -2271,9 +2332,11 @@ func TestIntegration_HTTP_ProjectCreate_HostRequired(t *testing.T) {
 	srv := NewServer(db, accountKP, integDeps.NATSAddr, "", 8*time.Hour)
 	srv.SetExternalURL("http://localhost:8080")
 
-	jwt, _, err := cpauth.IssueUserJWTLegacy(user.ID, user.Slug, accountKP, int64(8*time.Hour.Seconds()))
+	userKP3, _ := nkeys.CreateUser()
+	userPub3, _ := userKP3.PublicKey()
+	jwt, err := cpauth.IssueUserJWT(userPub3, user.ID, user.Slug, nil, accountKP, int64(8*time.Hour.Seconds()))
 	if err != nil {
-		t.Fatalf("cpauth.IssueUserJWTLegacy: %v", err)
+		t.Fatalf("cpauth.IssueUserJWT: %v", err)
 	}
 
 	mux := http.NewServeMux()

@@ -17,11 +17,18 @@ import (
 	cpdb "mclaude-control-plane/db"
 )
 
+// writeJSONError writes a JSON error response body: {"error": "<msg>"}.
+func writeJSONError(w http.ResponseWriter, msg string, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg}) //nolint:errcheck
+}
+
 // LoginRequest is the body for POST /auth/login.
 type LoginRequest struct {
 	Email      string `json:"email"`
 	Password   string `json:"password"`
-	NKeyPublic string `json:"nkey_public,omitempty"` // ADR-0054: client-generated NKey public key
+	NKeyPublic string `json:"nkey_public"` // ADR-0054/ADR-0100: required; client-generated NKey public key
 }
 
 // LoginHostEntry is a host in the login response hosts[] array.
@@ -48,11 +55,6 @@ type LoginResponse struct {
 	NATSUrl string `json:"natsUrl,omitempty"`
 	// JWT is the NATS user JWT signed by the account key.
 	JWT string `json:"jwt"`
-	// NKeySeed is the user's NKey seed. Returned only in legacy mode (when
-	// the client did not provide nkey_public in the login request).
-	// Per ADR-0054, new clients generate their own NKey pairs and do not
-	// receive seeds from the server.
-	NKeySeed string `json:"nkeySeed,omitempty"`
 	// UserID is the authenticated user's UUID.
 	UserID string `json:"userId"`
 	// UserSlug is the authenticated user's URL-safe slug (ADR-0046).
@@ -121,7 +123,8 @@ func (s *Server) SetNATSConn(nc *nats.Conn) {
 
 // handleLogin handles POST /auth/login.
 // Validates email+password against Postgres, issues a NATS user JWT, and
-// returns it alongside the NKey seed and NATS URL.
+// returns it alongside the NATS URL. Per ADR-0100, nkey_public is required —
+// clients generate their own NKey pairs; the server never generates seeds.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -130,6 +133,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Email == "" || req.Password == "" {
 		http.Error(w, "email and password required", http.StatusBadRequest)
+		return
+	}
+
+	// ADR-0100: nkey_public is required.
+	if req.NKeyPublic == "" {
+		writeJSONError(w, "nkey_public is required", http.StatusBadRequest)
+		return
+	}
+	// ADR-0100: validate NKey format (U-prefix, valid base32 encoding).
+	if !nkeys.IsValidPublicUserKey(req.NKeyPublic) {
+		writeJSONError(w, "invalid nkey_public format", http.StatusBadRequest)
 		return
 	}
 
@@ -156,49 +170,29 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	expirySecs := int64(s.jwtExpiry.Seconds())
 	expiresAt := time.Now().Add(s.jwtExpiry).Unix()
 
-	var jwtStr string
-	var seed []byte
-
-	if req.NKeyPublic != "" {
-		// ADR-0054: client provided its own NKey public key.
-		// Store it in the DB for future challenge-response auth.
-		if s.db != nil {
-			if setErr := s.db.SetUserNKeyPublic(r.Context(), user.ID, req.NKeyPublic); setErr != nil {
-				// Non-fatal: log but continue (challenge-response may not work until next login)
-				_ = setErr
-			}
-		}
-		// Resolve host slugs for scoped JWT.
-		hostSlugs := s.getUserHostSlugs(r.Context(), user.ID)
-		var issueErr error
-		jwtStr, issueErr = cpauth.IssueUserJWT(req.NKeyPublic, user.ID, user.Slug, hostSlugs, s.accountKP, expirySecs)
-		if issueErr != nil {
-			http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
-			return
-		}
-		// No seed returned — client already has its NKey seed.
-	} else {
-		// ADR-0054: CP never generates NKey pairs for clients.
-		// Backward compatibility: if a client does not provide nkey_public, use the
-		// legacy path so old SPA/CLI versions continue to work during migration.
-		// DEPRECATED: will be removed once all clients support nkey_public.
-		var legacyErr error
-		jwtStr, seed, legacyErr = cpauth.IssueUserJWTLegacy(user.ID, user.Slug, s.accountKP, expirySecs)
-		if legacyErr != nil {
-			http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
-			return
-		}
+	// ADR-0054/ADR-0100: client provided its own NKey public key.
+	// Store it in the DB for future challenge-response auth.
+	if setErr := s.db.SetUserNKeyPublic(r.Context(), user.ID, req.NKeyPublic); setErr != nil {
+		// Non-fatal: log but continue (challenge-response may not work until next login)
+		_ = setErr
+	}
+	// Resolve host slugs for scoped JWT.
+	hostSlugs := s.getUserHostSlugs(r.Context(), user.ID)
+	jwtStr, issueErr := cpauth.IssueUserJWT(req.NKeyPublic, user.ID, user.Slug, hostSlugs, s.accountKP, expirySecs)
+	if issueErr != nil {
+		http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
+		return
 	}
 
-	// ADR-0098: ensure per-user JetStream resources exist on every successful login,
-	// regardless of whether NKey or legacy path was used. The call is idempotent —
-	// resources that already exist are no-ops. This backfills users who previously
-	// logged in via the legacy path (no NKey), which did not call ensureUserResources.
+	// ADR-0098: ensure per-user JetStream resources exist on every successful login.
+	// The call is idempotent — resources that already exist are no-ops.
 	if s.nc != nil {
 		if resErr := ensureUserResources(s.nc, user.Slug); resErr != nil {
 			// Non-fatal: log at WARN and continue. Missing resources retry on next login.
 			log.Warn().Err(resErr).Str("uslug", user.Slug).Msg("handleLogin: ensureUserResources partial failure")
 		}
+		// ADR-0100: fire default-platform auto-grant on every login (idempotent).
+		s.fireDefaultPlatformAutoGrant(r.Context(), user.Slug)
 	}
 
 	// KNOWN-17: Populate hosts[] and projects[].
@@ -213,9 +207,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt: expiresAt,
 		Hosts:     loginHosts,
 		Projects:  loginProjects,
-	}
-	if len(seed) > 0 {
-		resp.NKeySeed = string(seed)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -261,26 +252,18 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	expirySecs := int64(s.jwtExpiry.Seconds())
 	expiresAt := time.Now().Add(s.jwtExpiry).Unix()
 
-	var newJWT string
-	var seed []byte
+	if user.NKeyPublic == nil || *user.NKeyPublic == "" {
+		// ADR-0100: user has no stored NKey public key — they must re-login with nkey_public.
+		http.Error(w, "no nkey_public stored; please re-login with nkey_public", http.StatusUnauthorized)
+		return
+	}
 
-	if user.NKeyPublic != nil && *user.NKeyPublic != "" {
-		// ADR-0054: user has a stored NKey public key. Issue scoped JWT.
-		hostSlugs := s.getUserHostSlugs(r.Context(), user.ID)
-		var issueErr error
-		newJWT, issueErr = cpauth.IssueUserJWT(*user.NKeyPublic, user.ID, user.Slug, hostSlugs, s.accountKP, expirySecs)
-		if issueErr != nil {
-			http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
-			return
-		}
-	} else {
-		// Legacy mode: generate NKey pair and return seed.
-		var legacyErr error
-		newJWT, seed, legacyErr = cpauth.IssueUserJWTLegacy(user.ID, user.Slug, s.accountKP, expirySecs)
-		if legacyErr != nil {
-			http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
-			return
-		}
+	// ADR-0054: user has a stored NKey public key. Issue scoped JWT.
+	hostSlugs := s.getUserHostSlugs(r.Context(), user.ID)
+	newJWT, issueErr := cpauth.IssueUserJWT(*user.NKeyPublic, user.ID, user.Slug, hostSlugs, s.accountKP, expirySecs)
+	if issueErr != nil {
+		http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
+		return
 	}
 
 	// KNOWN-17: Populate hosts[] and projects[].
@@ -295,9 +278,6 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt: expiresAt,
 		Hosts:     loginHosts,
 		Projects:  loginProjects,
-	}
-	if len(seed) > 0 {
-		resp.NKeySeed = string(seed)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -459,6 +439,28 @@ func (s *Server) getUserHostSlugs(ctx context.Context, userID string) []string {
 		return nil
 	}
 	return slugs
+}
+
+// fireDefaultPlatformAutoGrant upserts a host_grants row for the default platform
+// and publishes grants.create so the host controller can spin up the user-agent
+// and namespace. This is idempotent — UpsertHostGrant uses ON CONFLICT DO NOTHING.
+// Per ADR-0100: invoked on login and device-code authorization.
+// s.nc must be non-nil when calling this function.
+func (s *Server) fireDefaultPlatformAutoGrant(ctx context.Context, userSlug string) {
+	if s.db == nil || s.nc == nil {
+		return
+	}
+	defaultHostSlug, defErr := s.db.GetDefaultPlatformHostSlug(ctx)
+	if defErr != nil || defaultHostSlug == "" {
+		return
+	}
+	if upsertErr := s.db.UpsertHostGrant(ctx, defaultHostSlug, userSlug, "accepted"); upsertErr != nil {
+		log.Warn().Err(upsertErr).Str("uslug", userSlug).Str("hslug", defaultHostSlug).
+			Msg("fireDefaultPlatformAutoGrant: UpsertHostGrant failed")
+		return
+	}
+	grantPayload, _ := json.Marshal(map[string]string{"uslug": userSlug})
+	_ = s.nc.Publish("mclaude.hosts."+defaultHostSlug+".grants.create", grantPayload)
 }
 
 // getLoginHosts returns the hosts[] array for LoginResponse (KNOWN-17).

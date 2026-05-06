@@ -174,6 +174,11 @@ func (s *Server) handleCLIDeviceCodePoll(w http.ResponseWriter, r *http.Request)
 	}
 
 	if entry.Completed {
+		// ADR-0100: fire default-platform auto-grant on authorized poll.
+		// Idempotent — UpsertHostGrant uses ON CONFLICT DO NOTHING, so re-fires are no-ops.
+		if s.nc != nil && entry.UserSlug != "" {
+			s.fireDefaultPlatformAutoGrant(r.Context(), entry.UserSlug)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(CLIDeviceCodePollResponse{ //nolint:errcheck
 			Status:   "authorized",

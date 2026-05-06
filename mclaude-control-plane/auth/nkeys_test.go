@@ -500,69 +500,6 @@ func TestIssueUserJWT_ExpirySet(t *testing.T) {
 	}
 }
 
-// ---- Legacy functions (backward compat) ----
-
-func TestIssueUserJWTLegacy_ClaimsRoundTrip(t *testing.T) {
-	accountKP, _ := nkeys.CreateAccount()
-	accountPub, _ := accountKP.PublicKey()
-
-	userID := "legacy-user-001"
-	expiry := int64(8 * 60 * 60)
-
-	jwt, seed, err := cpauth.IssueUserJWTLegacy(userID, "legacy-slug", accountKP, expiry)
-	if err != nil {
-		t.Fatalf("IssueUserJWTLegacy: %v", err)
-	}
-	if jwt == "" {
-		t.Error("empty jwt")
-	}
-	if len(seed) == 0 {
-		t.Error("empty seed (legacy should return seed)")
-	}
-
-	claims, err := cpauth.DecodeUserJWT(jwt, accountPub)
-	if err != nil {
-		t.Fatalf("DecodeUserJWT: %v", err)
-	}
-	if claims.Name != userID {
-		t.Errorf("claims.Name = %q; want %q", claims.Name, userID)
-	}
-}
-
-func TestIssueUserJWTLegacy_PerUserBucketPermissions(t *testing.T) {
-	accountKP, _ := nkeys.CreateAccount()
-	accountPub, _ := accountKP.PublicKey()
-
-	userID := "legacy-perm-user"
-	userSlug := "legacy-perm-slug"
-
-	jwtStr, _, err := cpauth.IssueUserJWTLegacy(userID, userSlug, accountKP, 28800)
-	if err != nil {
-		t.Fatalf("IssueUserJWTLegacy: %v", err)
-	}
-
-	claims, err := cpauth.DecodeUserJWT(jwtStr, accountPub)
-	if err != nil {
-		t.Fatalf("DecodeUserJWT: %v", err)
-	}
-
-	pub := claims.Permissions.Pub.Allow
-	sub := claims.Permissions.Sub.Allow
-
-	sessBucket := "$KV.mclaude-sessions-" + userSlug + ".>"
-	mustContainStr(t, "pub allow", pub, sessBucket)
-	mustContainStr(t, "sub allow", sub, sessBucket)
-
-	projBucket := "$KV.mclaude-projects-" + userSlug + ".>"
-	mustContainStr(t, "pub allow", pub, projBucket)
-	mustContainStr(t, "sub allow", sub, projBucket)
-
-	mustContainStr(t, "pub allow", pub, "$JS.API.STREAM.INFO.KV_mclaude-sessions-"+userSlug)
-	mustContainStr(t, "pub allow", pub, "$JS.API.STREAM.INFO.KV_mclaude-projects-"+userSlug)
-	mustContainStr(t, "pub allow", pub, "$JS.API.CONSUMER.CREATE.KV_mclaude-sessions-"+userSlug+".>")
-	mustContainStr(t, "pub allow", pub, "$JS.API.CONSUMER.CREATE.KV_mclaude-projects-"+userSlug+".>")
-}
-
 // ---- NATSCredentials format ----
 
 func TestFormatNATSCredentials_Format(t *testing.T) {

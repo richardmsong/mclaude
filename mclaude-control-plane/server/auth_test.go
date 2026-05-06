@@ -84,10 +84,14 @@ func TestHandleLogin_MissingFields(t *testing.T) {
 
 func TestHandleLogin_NilDB(t *testing.T) {
 	// Server with nil DB should return 503 Service Unavailable, not panic.
+	// Per ADR-0100, nkey_public must be provided (valid format) to reach the DB check.
 	srv := newTestServer(t) // db=nil
+	userKP, _ := nkeys.CreateUser()
+	userPub, _ := userKP.PublicKey()
+	body := `{"email":"nobody@example.com","password":"pw","nkey_public":"` + userPub + `"}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/login",
-		bytes.NewBufferString(`{"email":"nobody@example.com","password":"pw"}`))
+		bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	srv.handleLogin(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {
@@ -136,15 +140,20 @@ func TestHandleRefresh_NilDB(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
 	srv := NewServer(nil, accountKP, "nats://localhost:4222", "", 8*time.Hour)
 
-	expiresAt := int64(8 * 60 * 60) // 8 hours in seconds
-	jwt, _, err := cpauth.IssueUserJWTLegacy("refresh-user-uuid", "refresh-user-slug", accountKP, expiresAt)
+	// Issue a JWT using IssueUserJWT with a client-generated NKey.
+	userKP, err := nkeys.CreateUser()
 	if err != nil {
-		t.Fatalf("cpauth.IssueUserJWTLegacy: %v", err)
+		t.Fatalf("CreateUser nkey: %v", err)
+	}
+	userPub, _ := userKP.PublicKey()
+	jwtStr, err := cpauth.IssueUserJWT(userPub, "refresh-user-uuid", "refresh-user-slug", nil, accountKP, int64(8*60*60))
+	if err != nil {
+		t.Fatalf("cpauth.IssueUserJWT: %v", err)
 	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
-	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("Authorization", "Bearer "+jwtStr)
 	srv.handleRefresh(rec, req)
 
 	// db=nil → service unavailable
@@ -159,11 +168,13 @@ func TestHandleRefresh_WrongAccountKey(t *testing.T) {
 	accountB, _ := nkeys.CreateAccount()
 	srv := NewServer(nil, accountB, "nats://localhost:4222", "", time.Hour)
 
-	jwt, _, _ := cpauth.IssueUserJWTLegacy("user", "user-slug", accountA, int64(time.Hour.Seconds()))
+	userKP, _ := nkeys.CreateUser()
+	userPub, _ := userKP.PublicKey()
+	jwtStr, _ := cpauth.IssueUserJWT(userPub, "user", "user-slug", nil, accountA, int64(time.Hour.Seconds()))
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
-	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("Authorization", "Bearer "+jwtStr)
 	srv.handleRefresh(rec, req)
 
 	if rec.Code != http.StatusUnauthorized {
@@ -195,8 +206,10 @@ func TestAuthMiddleware_ValidToken_InjectsUserID(t *testing.T) {
 	accountKP, _ := nkeys.CreateAccount()
 	srv := NewServer(nil, accountKP, "nats://test", "", time.Hour)
 
-	// Use legacy JWT issuance to produce a JWT with userID in claims.Name.
-	jwt, _, _ := cpauth.IssueUserJWTLegacy("middleware-user", "middleware-slug", accountKP, int64(time.Hour.Seconds()))
+	// Issue a JWT with userID in claims.Name using client-generated NKey.
+	userKP, _ := nkeys.CreateUser()
+	userPub, _ := userKP.PublicKey()
+	jwtStr, _ := cpauth.IssueUserJWT(userPub, "middleware-user", "middleware-slug", nil, accountKP, int64(time.Hour.Seconds()))
 
 	var gotUserID string
 	handler := srv.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -206,7 +219,7 @@ func TestAuthMiddleware_ValidToken_InjectsUserID(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
-	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("Authorization", "Bearer "+jwtStr)
 	handler.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -319,10 +332,10 @@ func TestRegisterRoutes_LoginRouteExists(t *testing.T) {
 
 func TestLoginResponse_NATSURLField(t *testing.T) {
 	// LoginResponse must carry natsUrl so clients know where to connect NATS.
+	// Per ADR-0100: no nkeySeed field — server never returns client private key material.
 	resp := LoginResponse{
 		NATSUrl:   "wss://mclaude.example.com/nats",
 		JWT:       "test.jwt.value",
-		NKeySeed:  "SUABC123",
 		UserID:    "user-001",
 		ExpiresAt: time.Now().Add(8 * time.Hour).Unix(),
 	}
@@ -331,10 +344,14 @@ func TestLoginResponse_NATSURLField(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	body := string(b)
-	for _, field := range []string{`"natsUrl"`, `"jwt"`, `"nkeySeed"`, `"userId"`, `"expiresAt"`} {
+	for _, field := range []string{`"natsUrl"`, `"jwt"`, `"userId"`, `"expiresAt"`} {
 		if !strings.Contains(body, field) {
 			t.Errorf("LoginResponse JSON missing field %s", field)
 		}
+	}
+	// ADR-0100: nkeySeed must NOT be present in login response.
+	if strings.Contains(body, `"nkeySeed"`) {
+		t.Error("LoginResponse JSON must not contain nkeySeed (ADR-0100)")
 	}
 }
 

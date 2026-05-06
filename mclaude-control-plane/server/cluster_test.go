@@ -102,7 +102,7 @@ type testUser struct {
 	Email    string
 	Password string
 	JWT      string
-	NKeySeed string
+	NKeyKP   nkeys.KeyPair // client-generated NKey pair (ADR-0100)
 }
 
 // createTestUser creates a user in the DB, logs in, and returns credentials.
@@ -152,8 +152,15 @@ func createTestUser(t *testing.T) *testUser {
 		}
 	})
 
-	// Login via HTTP
-	body, _ := json.Marshal(map[string]string{"email": email, "password": password})
+	// ADR-0100: generate NKey client-side before login.
+	userNKeyKP, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatalf("create user nkey: %v", err)
+	}
+	userNKeyPub, _ := userNKeyKP.PublicKey()
+
+	// Login via HTTP with nkey_public (ADR-0100 required).
+	body, _ := json.Marshal(map[string]string{"email": email, "password": password, "nkey_public": userNKeyPub})
 	resp, err := http.Post(cluster.CPURL+"/auth/login", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("login request: %v", err)
@@ -174,7 +181,7 @@ func createTestUser(t *testing.T) *testUser {
 		Email:    email,
 		Password: password,
 		JWT:      loginResp.JWT,
-		NKeySeed: loginResp.NKeySeed,
+		NKeyKP:   userNKeyKP,
 	}
 }
 
@@ -182,15 +189,10 @@ func createTestUser(t *testing.T) *testUser {
 func connectNATS(t *testing.T, user *testUser) *nats.Conn {
 	t.Helper()
 
-	userKP, err := nkeys.FromSeed([]byte(user.NKeySeed))
-	if err != nil {
-		t.Fatalf("parse user seed: %v", err)
-	}
-
 	nc, err := nats.Connect(cluster.NATSAddr,
 		nats.UserJWT(
 			func() (string, error) { return user.JWT, nil },
-			func(nonce []byte) ([]byte, error) { return userKP.Sign(nonce) },
+			func(nonce []byte) ([]byte, error) { return user.NKeyKP.Sign(nonce) },
 		),
 		nats.MaxReconnects(0),
 		nats.Timeout(5*time.Second),
@@ -209,8 +211,8 @@ func TestCluster_LoginAndJWTIssuance(t *testing.T) {
 	if user.JWT == "" {
 		t.Fatal("JWT is empty")
 	}
-	if user.NKeySeed == "" {
-		t.Fatal("NKeySeed is empty")
+	if user.NKeyKP == nil {
+		t.Fatal("NKeyKP is nil — client NKey pair not set after login")
 	}
 	// Decode JWT and verify it has $JS.API.> permissions
 	claims, err := cpauth.DecodeUserJWT(user.JWT, "")
@@ -499,8 +501,15 @@ func TestCluster_UserProjectInKV(t *testing.T) {
 		db.Close()
 	})
 
-	// Login as the new user
-	loginBody, _ := json.Marshal(map[string]string{"email": email, "password": password})
+	// ADR-0100: generate NKey client-side before login.
+	userNKeyKP, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatalf("create user nkey: %v", err)
+	}
+	userNKeyPub, _ := userNKeyKP.PublicKey()
+
+	// Login as the new user with nkey_public (ADR-0100).
+	loginBody, _ := json.Marshal(map[string]string{"email": email, "password": password, "nkey_public": userNKeyPub})
 	loginResp, err := http.Post(cluster.CPURL+"/auth/login", "application/json", bytes.NewReader(loginBody))
 	if err != nil {
 		t.Fatalf("user login: %v", err)
@@ -514,15 +523,11 @@ func TestCluster_UserProjectInKV(t *testing.T) {
 		t.Fatalf("decode login response: %v", err)
 	}
 
-	// Connect to NATS as the user
-	userKP, err := nkeys.FromSeed([]byte(lr.NKeySeed))
-	if err != nil {
-		t.Fatalf("parse user nkey seed: %v", err)
-	}
+	// Connect to NATS as the user using the client-generated NKey.
 	nc, err := nats.Connect(cluster.NATSAddr,
 		nats.UserJWT(
 			func() (string, error) { return lr.JWT, nil },
-			func(nonce []byte) ([]byte, error) { return userKP.Sign(nonce) },
+			func(nonce []byte) ([]byte, error) { return userNKeyKP.Sign(nonce) },
 		),
 		nats.MaxReconnects(0),
 		nats.Timeout(5*time.Second),
