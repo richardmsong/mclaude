@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"os"
@@ -15,11 +15,13 @@ func buildAgentBinary(t *testing.T) string {
 	t.Helper()
 
 	_, thisFile, _, _ := runtime.Caller(0)
-	srcDir := filepath.Dir(thisFile)
+	// thisFile is agent/main_test.go; go up one level to module root, then
+	// into cmd/session-agent/ which is where main.go lives after the restructure.
+	moduleRoot := filepath.Dir(filepath.Dir(thisFile))
+	cmdDir := filepath.Join(moduleRoot, "cmd", "session-agent")
 	binPath := filepath.Join(t.TempDir(), "session-agent")
 
-	cmd := exec.Command("go", "build", "-o", binPath, ".")
-	cmd.Dir = srcDir
+	cmd := exec.Command("go", "build", "-o", binPath, cmdDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build session-agent:\n%s\n%v", out, err)
 	}

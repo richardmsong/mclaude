@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"archive/tar"
@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
-	"mclaude.io/common/pkg/slug"
-	"mclaude.io/common/pkg/subj"
+	"mclaude-control-plane/slug"
+	subj "mclaude-control-plane/subjects"
 )
 
 // importMetadata holds the metadata.json from an import archive.

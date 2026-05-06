@@ -1,4 +1,4 @@
-// Package main implements NaCl crypto_box_seal / crypto_box_seal_open
+// Package crypto implements NaCl crypto_box_seal / crypto_box_seal_open
 // (libsodium anonymous sealed box) using golang.org/x/crypto/nacl/box.
 //
 // The sealed box format is:
@@ -8,9 +8,11 @@
 // where nonce = Blake2b-512(ephemeralPK || recipientPK)[:24].
 //
 // Reference: https://doc.libsodium.org/public-key_cryptography/sealed_boxes
-package main
+package crypto
 
 import (
+	"crypto/ecdh"
+	"crypto/rand"
 	"fmt"
 
 	"golang.org/x/crypto/blake2b"
@@ -39,6 +41,32 @@ func SealedBoxOpen(sealed []byte, recipientPub, recipientPriv *[32]byte) ([]byte
 		return nil, fmt.Errorf("box.Open failed: authentication failed or wrong key")
 	}
 	return plaintext, nil
+}
+
+// SealedBoxSeal encrypts plaintext for the recipient's X25519 public key (sealed box).
+// Returns the sealed box: ephemeralPK (32 bytes) || NaCl box ciphertext.
+// Uses crypto/ecdh for key generation per ADR-0096.
+func SealedBoxSeal(plaintext []byte, recipientPub *[32]byte) ([]byte, error) {
+	// Generate ephemeral keypair using crypto/ecdh (handles RFC 7748 clamping internally).
+	ephemeralKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generate ephemeral keypair: %w", err)
+	}
+
+	var ephemeralPub [32]byte
+	copy(ephemeralPub[:], ephemeralKey.PublicKey().Bytes())
+
+	var ephemeralPriv [32]byte
+	copy(ephemeralPriv[:], ephemeralKey.Bytes())
+
+	nonce := sealedBoxNonce(&ephemeralPub, recipientPub)
+
+	ciphertext := box.Seal(nil, plaintext, nonce, recipientPub, &ephemeralPriv)
+
+	result := make([]byte, 32+len(ciphertext))
+	copy(result[:32], ephemeralPub[:])
+	copy(result[32:], ciphertext)
+	return result, nil
 }
 
 // sealedBoxNonce computes the 24-byte nonce for a sealed box per libsodium's

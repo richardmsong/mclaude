@@ -1,41 +1,9 @@
-package main
+package crypto
 
 import (
 	"bytes"
-	"crypto/ecdh"
-	"crypto/rand"
-	"fmt"
 	"testing"
-
-	"golang.org/x/crypto/nacl/box"
 )
-
-// SealedBoxSeal encrypts plaintext for the recipient's X25519 public key (sealed box).
-// Returns the sealed box: ephemeralPK (32 bytes) || NaCl box ciphertext.
-// Test-only helper — production user-agent only needs SealedBoxOpen.
-// Uses crypto/ecdh for key generation per ADR-0096.
-func SealedBoxSeal(plaintext []byte, recipientPub *[32]byte) ([]byte, error) {
-	// Generate ephemeral keypair using crypto/ecdh (handles RFC 7748 clamping internally).
-	ephemeralKey, err := ecdh.X25519().GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("generate ephemeral keypair: %w", err)
-	}
-
-	var ephemeralPub [32]byte
-	copy(ephemeralPub[:], ephemeralKey.PublicKey().Bytes())
-
-	var ephemeralPriv [32]byte
-	copy(ephemeralPriv[:], ephemeralKey.Bytes())
-
-	nonce := sealedBoxNonce(&ephemeralPub, recipientPub)
-
-	ciphertext := box.Seal(nil, plaintext, nonce, recipientPub, &ephemeralPriv)
-
-	result := make([]byte, 32+len(ciphertext))
-	copy(result[:32], ephemeralPub[:])
-	copy(result[32:], ciphertext)
-	return result, nil
-}
 
 // TestSealedBoxRoundtrip verifies that SealedBoxSeal followed by SealedBoxOpen
 // recovers the original plaintext.

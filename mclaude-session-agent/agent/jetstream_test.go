@@ -1,4 +1,4 @@
-package main
+package agent
 
 // jetstream_test.go — tests for JetStream-based API delivery (plan-graceful-upgrades.md)
 //
@@ -36,7 +36,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/rs/zerolog"
 
-	"mclaude.io/common/pkg/slug"
+	"mclaude-control-plane/slug"
 	testutil "mclaude-session-agent/testutil"
 )
 

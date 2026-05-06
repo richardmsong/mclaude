@@ -1,144 +1,35 @@
-package main
+package agent
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
 	"github.com/nats-io/nats.go"
-	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
+	agentauth "mclaude-user-agent/auth"
 )
 
-// AgentConfig holds environment-sourced configuration for the user-agent.
-type AgentConfig struct {
-	UserSlug        string
-	HostSlug        string
-	Namespace       string
-	NATSURL         string
-	ControlPlaneURL string
-}
+// NATSConnectFn is a function that creates a NATS connection. Injected for testing.
+type NATSConnectFn func(natsURL string, auth *agentauth.UserAgentAuth) (*nats.Conn, error)
 
-func envRequired(key string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		log.Fatal().Str("env", key).Msg("required environment variable not set")
-	}
-	return v
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func main() {
-	level, err := zerolog.ParseLevel(os.Getenv("LOG_LEVEL"))
-	if err != nil || level == zerolog.NoLevel {
-		level = zerolog.InfoLevel
-	}
-	zerolog.SetGlobalLevel(level)
-	log.Logger = zerolog.New(os.Stderr).With().
-		Str("component", "user-agent").
-		Timestamp().
-		Logger()
-
-	cfg := &AgentConfig{
-		UserSlug:        envRequired("USER_SLUG"),
-		HostSlug:        envRequired("HOST_SLUG"),
-		Namespace:       envOr("NAMESPACE", "mclaude-"+os.Getenv("USER_SLUG")),
-		NATSURL:         envRequired("NATS_URL"),
-		ControlPlaneURL: envRequired("CONTROL_PLANE_URL"),
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
-
-	if err := run(ctx, cfg); err != nil {
-		log.Fatal().Err(err).Msg("user-agent exiting with error")
-	}
-}
-
-func run(ctx context.Context, cfg *AgentConfig) error {
-	// Step 1: Read nkey-seed from /secrets/agent/nkey-seed. Fatal if missing.
-	seedBytes, err := os.ReadFile("/secrets/agent/nkey-seed")
-	if err != nil {
-		return fmt.Errorf("read nkey-seed: %w (controller did not provision correctly)", err)
-	}
-
-	// Step 2: Build auth client.
-	agentAuth, err := NewUserAgentAuth(seedBytes, cfg.ControlPlaneURL, log.Logger)
-	if err != nil {
-		return fmt.Errorf("create user-agent auth: %w", err)
-	}
-
-	// Step 3: Initialize k8s client.
-	k8sClient, err := newK8sClient()
-	if err != nil {
-		return fmt.Errorf("create k8s client: %w", err)
-	}
-
-	// Step 4: Load or generate X25519 keypair (Boot step 2).
-	keypair, err := LoadOrGenerateX25519Keypair(ctx, k8sClient, cfg.Namespace, "user-agent-key")
-	if err != nil {
-		return fmt.Errorf("load/generate X25519 keypair: %w", err)
-	}
-	agentAuth.SetX25519Pub(keypair.Public[:])
-	log.Info().
-		Str("x25519_pub", fmt.Sprintf("%x", keypair.Public)).
-		Msg("X25519 keypair ready")
-
-	// Step 5: Authenticate with CP (Boot step 3) with exponential backoff.
-	_, err = authenticateWithBackoff(ctx, agentAuth)
-	if err != nil {
-		return fmt.Errorf("authenticate with CP: %w", err)
-	}
-	log.Info().Msg("authenticated with CP")
-
-	// Step 6: Create subsystem objects.
-	tokenMgr := NewTokenManager(k8sClient, cfg.Namespace, cfg.UserSlug, keypair, log.Logger)
-	provisioner := NewProvisioner(k8sClient, cfg.Namespace, cfg, log.Logger)
-
-	// Step 7: Start JWT refresh loop. The refresh loop re-authenticates before TTL expiry
-	// so the NATS JWTFunc always returns a valid JWT for reconnects.
-	agentAuth.StartRefreshLoop(ctx, func(newJWT string) {
-		log.Debug().Msg("JWT refreshed — NATS will use new JWT on next reconnect")
-		_ = newJWT
-	})
-
-	// Step 8: NATS connect + subscribe loop.
-	// On activation: drain connection, reconnect with full JWT, re-subscribe.
-	return runNATSLoop(ctx, cfg, agentAuth, tokenMgr, provisioner, connectNATS)
-}
-
-// natsConnectFn is a function that creates a NATS connection. Injected for testing.
-type natsConnectFn func(natsURL string, auth *UserAgentAuth) (*nats.Conn, error)
-
-// runNATSLoop connects to NATS, subscribes to agent subjects, and loops on reconnect
+// RunNATSLoop connects to NATS, subscribes to agent subjects, and loops on reconnect
 // signals (triggered by activate). Each iteration:
 //  1. Connect with current JWT (bootstrap or full).
 //  2. Subscribe based on JWT scope (bootstrap → activate-only; full → all subjects).
 //  3. Wait for ctx done or an activate-triggered reconnect signal.
 //  4. Drain and reconnect with the updated full JWT.
 //
-// The connectFn parameter is injected for testing; production code passes connectNATS.
-func runNATSLoop(
+// The connectFn parameter is injected for testing; production code passes ConnectNATS.
+func RunNATSLoop(
 	ctx context.Context,
-	cfg *AgentConfig,
-	agentAuth *UserAgentAuth,
+	cfg *Config,
+	agentAuth *agentauth.UserAgentAuth,
 	tokenMgr *TokenManager,
 	provisioner *Provisioner,
-	connectFn natsConnectFn,
+	connectFn NATSConnectFn,
 ) error {
 	uslug := cfg.UserSlug
 	hslug := cfg.HostSlug
@@ -169,7 +60,7 @@ func runNATSLoop(
 		// Subscribe to activate — needed in both bootstrap and full mode.
 		_, subErr := nc.Subscribe(activateSubj, func(msg *nats.Msg) {
 			log.Info().Msg("received agent.activate signal — re-authenticating with CP")
-			if _, authErr := authenticateWithBackoff(ctx, agentAuth); authErr != nil {
+			if _, authErr := AuthenticateWithBackoff(ctx, agentAuth); authErr != nil {
 				log.Error().Err(authErr).Msg("re-auth after activate failed")
 				return
 			}
@@ -256,9 +147,9 @@ func runNATSLoop(
 	}
 }
 
-// authenticateWithBackoff runs challenge-response with CP using exponential backoff.
+// AuthenticateWithBackoff runs challenge-response with CP using exponential backoff.
 // Retries until success or context cancellation.
-func authenticateWithBackoff(ctx context.Context, auth *UserAgentAuth) (string, error) {
+func AuthenticateWithBackoff(ctx context.Context, auth *agentauth.UserAgentAuth) (string, error) {
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = 2 * time.Second
 	bo.MaxInterval = 60 * time.Second
@@ -274,8 +165,8 @@ func authenticateWithBackoff(ctx context.Context, auth *UserAgentAuth) (string, 
 	return jwt, err
 }
 
-// connectNATS creates a NATS connection using the user-agent's JWT + NKey signing.
-func connectNATS(natsURL string, auth *UserAgentAuth) (*nats.Conn, error) {
+// ConnectNATS creates a NATS connection using the user-agent's JWT + NKey signing.
+func ConnectNATS(natsURL string, auth *agentauth.UserAgentAuth) (*nats.Conn, error) {
 	nc, err := nats.Connect(
 		natsURL,
 		nats.UserJWT(auth.JWTFunc(), auth.SignFunc()),
@@ -288,19 +179,3 @@ func connectNATS(natsURL string, auth *UserAgentAuth) (*nats.Conn, error) {
 	}
 	return nc, nil
 }
-
-// newK8sClient creates an in-cluster Kubernetes client.
-func newK8sClient() (kubernetes.Interface, error) {
-	restCfg, err := rest.InClusterConfig()
-	if err != nil {
-		return nil, fmt.Errorf("in-cluster config: %w", err)
-	}
-	client, err := kubernetes.NewForConfig(restCfg)
-	if err != nil {
-		return nil, fmt.Errorf("create k8s client: %w", err)
-	}
-	return client, nil
-}
-
-// ensure metav1 is used (imported for Secret patches).
-var _ = metav1.GetOptions{}

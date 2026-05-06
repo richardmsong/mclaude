@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -15,7 +15,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"mclaude-session-agent/internal/drivers"
+	"mclaude-session-agent/drivers"
 )
 
 // startupTimeout is the maximum time to wait for Claude to emit an init event

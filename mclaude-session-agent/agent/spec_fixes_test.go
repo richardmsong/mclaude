@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/rs/zerolog"
-	"mclaude.io/common/pkg/slug"
+	"mclaude-control-plane/slug"
 	testutil "mclaude-session-agent/testutil"
 )
 
@@ -258,8 +258,8 @@ func TestNatsConnectIncludesUnlimitedReconnects(t *testing.T) {
 	// and RetryOnFailedConnect(true). We test the probe variant separately.
 
 	// Just verify the function compiles with the correct signature.
-	_ = natsConnect
-	_ = natsProbeConnect
+	_ = NATSConnect
+	_ = NATSProbeConnect
 }
 
 // ---------------------------------------------------------------------------

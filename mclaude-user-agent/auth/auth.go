@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"bytes"
@@ -16,10 +16,10 @@ import (
 )
 
 const (
-	// agentJWTTTL is the expected TTL for user-agent JWTs (5-minute, per ADR-0091).
-	agentJWTTTL = 5 * time.Minute
-	// agentJWTRefreshBuffer is how early the refresh fires before TTL expiry.
-	agentJWTRefreshBuffer = 60 * time.Second
+	// AgentJWTTTL is the expected TTL for user-agent JWTs (5-minute, per ADR-0091).
+	AgentJWTTTL = 5 * time.Minute
+	// AgentJWTRefreshBuffer is how early the refresh fires before TTL expiry.
+	AgentJWTRefreshBuffer = 60 * time.Second
 )
 
 // UserAgentAuth manages the NKey identity and JWT credential for the user-agent.
@@ -208,11 +208,11 @@ func (a *UserAgentAuth) verifyChallenge(ctx context.Context, pubKey, challenge s
 // before the 5-minute TTL expires. Errors are logged but do not crash the agent.
 // onRefresh is called after each successful refresh (used to reconnect NATS if needed).
 func (a *UserAgentAuth) StartRefreshLoop(ctx context.Context, onRefresh func(jwt string)) {
-	a.startRefreshLoopWithInterval(ctx, agentJWTTTL-agentJWTRefreshBuffer, onRefresh)
+	a.StartRefreshLoopWithInterval(ctx, AgentJWTTTL-AgentJWTRefreshBuffer, onRefresh)
 }
 
-// startRefreshLoopWithInterval is the internal implementation, extracted for unit testing.
-func (a *UserAgentAuth) startRefreshLoopWithInterval(ctx context.Context, interval time.Duration, onRefresh func(jwt string)) {
+// StartRefreshLoopWithInterval is the internal implementation, exported for unit testing.
+func (a *UserAgentAuth) StartRefreshLoopWithInterval(ctx context.Context, interval time.Duration, onRefresh func(jwt string)) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()

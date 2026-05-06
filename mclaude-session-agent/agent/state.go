@@ -1,13 +1,13 @@
-package main
+package agent
 
 import (
 	"encoding/json"
 	"time"
 
-	"mclaude.io/common/pkg/slug"
-	"mclaude.io/common/pkg/subj"
+	"mclaude-control-plane/slug"
+	subj "mclaude-control-plane/subjects"
 
-	"mclaude-session-agent/internal/drivers"
+	"mclaude-session-agent/drivers"
 )
 
 // PermissionPolicy controls how the session agent responds to control_request

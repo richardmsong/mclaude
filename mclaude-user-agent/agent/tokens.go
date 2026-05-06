@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/rs/zerolog"
+	agentcrypto "mclaude-user-agent/crypto"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,13 +32,13 @@ type TokenManager struct {
 	k8s        kubernetes.Interface
 	namespace  string
 	uslug      string
-	keypair    *X25519Keypair
+	keypair    *agentcrypto.X25519Keypair
 	secretName string
 	log        zerolog.Logger
 }
 
 // NewTokenManager creates a TokenManager.
-func NewTokenManager(k8s kubernetes.Interface, namespace, uslug string, keypair *X25519Keypair, log zerolog.Logger) *TokenManager {
+func NewTokenManager(k8s kubernetes.Interface, namespace, uslug string, keypair *agentcrypto.X25519Keypair, log zerolog.Logger) *TokenManager {
 	return &TokenManager{
 		k8s:        k8s,
 		namespace:  namespace,
@@ -72,7 +73,7 @@ func (tm *TokenManager) HandleDelivery(ctx context.Context, payload []byte) []by
 	}
 
 	// Unseal with X25519 private key.
-	plaintext, err := SealedBoxOpen(sealedBytes, &tm.keypair.Public, &tm.keypair.Private)
+	plaintext, err := agentcrypto.SealedBoxOpen(sealedBytes, &tm.keypair.Public, &tm.keypair.Private)
 	if err != nil {
 		tm.log.Warn().Err(err).Msg("token-delivery: unseal failed")
 		return replyJSON(TokenDeliveryReply{OK: false, Error: "decrypt_failed"})

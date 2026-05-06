@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -10,13 +10,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	agentcrypto "mclaude-user-agent/crypto"
 )
 
 // newTestTokenManager builds a TokenManager backed by a fake k8s client.
 // The user-tokens-testuser Secret is pre-created (empty).
-func newTestTokenManager(t *testing.T) (*TokenManager, *X25519Keypair, *fake.Clientset) {
+func newTestTokenManager(t *testing.T) (*TokenManager, *agentcrypto.X25519Keypair, *fake.Clientset) {
 	t.Helper()
-	kp, err := GenerateX25519Keypair()
+	kp, err := agentcrypto.GenerateX25519Keypair()
 	if err != nil {
 		t.Fatalf("GenerateX25519Keypair: %v", err)
 	}
@@ -39,7 +40,7 @@ func TestHandleDelivery_Success(t *testing.T) {
 	mgr, kp, fakeK8s := newTestTokenManager(t)
 
 	token := []byte("sk-ant-api03-mytoken12345")
-	sealed, err := SealedBoxSeal(token, &kp.Public)
+	sealed, err := agentcrypto.SealedBoxSeal(token, &kp.Public)
 	if err != nil {
 		t.Fatalf("SealedBoxSeal: %v", err)
 	}
@@ -78,9 +79,9 @@ func TestHandleDelivery_DecryptFailed(t *testing.T) {
 	mgr, _, fakeK8s := newTestTokenManager(t)
 
 	// Build a payload with garbage ciphertext (wrong key).
-	wrongKP, _ := GenerateX25519Keypair()
+	wrongKP, _ := agentcrypto.GenerateX25519Keypair()
 	token := []byte("secret")
-	sealed, _ := SealedBoxSeal(token, &wrongKP.Public) // sealed for wrong recipient
+	sealed, _ := agentcrypto.SealedBoxSeal(token, &wrongKP.Public) // sealed for wrong recipient
 
 	payload, _ := json.Marshal(TokenDeliveryRequest{
 		Provider:     "anthropic",
@@ -115,7 +116,7 @@ func TestHandleDelivery_DefaultProvider(t *testing.T) {
 	mgr, kp, fakeK8s := newTestTokenManager(t)
 
 	token := []byte("mytoken")
-	sealed, _ := SealedBoxSeal(token, &kp.Public)
+	sealed, _ := agentcrypto.SealedBoxSeal(token, &kp.Public)
 
 	// Omit "provider" in payload.
 	payload, _ := json.Marshal(map[string]string{
@@ -146,7 +147,7 @@ func TestHandleDelivery_MultiProvider(t *testing.T) {
 
 	deliverToken := func(provider, token string) {
 		t.Helper()
-		sealed, _ := SealedBoxSeal([]byte(token), &kp.Public)
+		sealed, _ := agentcrypto.SealedBoxSeal([]byte(token), &kp.Public)
 		payload, _ := json.Marshal(TokenDeliveryRequest{
 			Provider:     provider,
 			TokenWrapped: base64.StdEncoding.EncodeToString(sealed),

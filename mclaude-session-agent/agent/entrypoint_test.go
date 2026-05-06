@@ -1,4 +1,4 @@
-package main
+package agent
 
 // entrypoint_test.go — tests for entrypoint.sh token-read behavior (ADR-0091).
 //
@@ -20,10 +20,12 @@ import (
 )
 
 // entrypointPath returns the absolute path to entrypoint.sh.
+// The file lives at the module root, one level above this test file (agent/).
 func entrypointPath(t *testing.T) string {
 	t.Helper()
 	_, thisFile, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(thisFile), "entrypoint.sh")
+	moduleRoot := filepath.Dir(filepath.Dir(thisFile))
+	return filepath.Join(moduleRoot, "entrypoint.sh")
 }
 
 // runEntrypointTokenSection runs a minimal bash snippet that reproduces only

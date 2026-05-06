@@ -1,4 +1,4 @@
-package main
+package agent
 
 // shell_tracking_test.go — tests for two-phase shell tracking (GAP-SA-K6)
 // and shell-killed notifications on graceful shutdown (GAP-SA-K7).
@@ -29,7 +29,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
 
-	"mclaude.io/common/pkg/slug"
+	"mclaude-control-plane/slug"
 )
 
 // ---------------------------------------------------------------------------

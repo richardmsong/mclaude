@@ -1,4 +1,4 @@
-package main
+package agent
 
 // End-to-end tests run against a real k3d cluster with the session-agent
 // image deployed. They are skipped unless E2E=1 is set in the environment.

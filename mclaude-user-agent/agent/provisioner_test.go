@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -12,9 +12,9 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-// makeProvisionerConfig builds a test AgentConfig.
-func makeProvisionerConfig(uslug, hslug string) *AgentConfig {
-	return &AgentConfig{
+// makeProvisionerConfig builds a test Config.
+func makeProvisionerConfig(uslug, hslug string) *Config {
+	return &Config{
 		UserSlug:        uslug,
 		HostSlug:        hslug,
 		Namespace:       "mclaude-" + uslug,

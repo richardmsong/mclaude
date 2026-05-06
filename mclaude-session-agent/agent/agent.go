@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -16,10 +16,10 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/rs/zerolog"
 
-	"mclaude.io/common/pkg/slug"
-	"mclaude.io/common/pkg/subj"
+	"mclaude-control-plane/slug"
+	subj "mclaude-control-plane/subjects"
 
-	"mclaude-session-agent/internal/drivers"
+	"mclaude-session-agent/drivers"
 )
 
 const (

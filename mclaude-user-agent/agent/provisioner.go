@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -29,17 +29,27 @@ type sessionAgentTpl struct {
 	nixPvcStorageClass            string
 }
 
+// Config holds environment-sourced configuration for the user-agent.
+// Exposed from this package so cmd/ can construct and pass it in.
+type Config struct {
+	UserSlug        string
+	HostSlug        string
+	Namespace       string
+	NATSURL         string
+	ControlPlaneURL string
+}
+
 // Provisioner handles project pod lifecycle for the user-agent.
 type Provisioner struct {
 	k8s          kubernetes.Interface
 	namespace    string
-	config       *AgentConfig
+	config       *Config
 	log          zerolog.Logger
 	tokenBaseDir string // base directory for token files; defaults to "/secrets" in production
 }
 
 // NewProvisioner creates a Provisioner using the production token path /secrets.
-func NewProvisioner(k8s kubernetes.Interface, namespace string, cfg *AgentConfig, log zerolog.Logger) *Provisioner {
+func NewProvisioner(k8s kubernetes.Interface, namespace string, cfg *Config, log zerolog.Logger) *Provisioner {
 	return &Provisioner{
 		k8s:          k8s,
 		namespace:    namespace,
@@ -51,7 +61,7 @@ func NewProvisioner(k8s kubernetes.Interface, namespace string, cfg *AgentConfig
 
 // NewProvisionerWithTokenDir creates a Provisioner with a custom token base directory.
 // Used in tests to redirect token file reads away from /secrets.
-func NewProvisionerWithTokenDir(k8s kubernetes.Interface, namespace string, cfg *AgentConfig, tokenBaseDir string, log zerolog.Logger) *Provisioner {
+func NewProvisionerWithTokenDir(k8s kubernetes.Interface, namespace string, cfg *Config, tokenBaseDir string, log zerolog.Logger) *Provisioner {
 	return &Provisioner{
 		k8s:          k8s,
 		namespace:    namespace,
@@ -323,8 +333,8 @@ func (p *Provisioner) buildDeployment(req ProvisionRequest, tpl *sessionAgentTpl
 			Name:      deployName,
 			Namespace: p.namespace,
 			Labels: map[string]string{
-				"app":           "mclaude-project",
-				"project":       req.ProjectID,
+				"app":             "mclaude-project",
+				"project":         req.ProjectID,
 				"mclaude/managed": "true",
 			},
 		},

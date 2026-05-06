@@ -1,11 +1,11 @@
-package main
+package agent
 
 import (
 	"encoding/json"
 	"testing"
 	"time"
 
-	"mclaude.io/common/pkg/slug"
+	"mclaude-control-plane/slug"
 )
 
 // TestKVKeyConstruction verifies the key format used for NATS KV lookups.

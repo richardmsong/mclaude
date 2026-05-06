@@ -17,7 +17,8 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
-	"mclaude.io/common/pkg/slug"
+	"mclaude-control-plane/slug"
+	"mclaude-session-agent/agent"
 )
 
 func main() {
@@ -41,7 +42,7 @@ func main() {
 				natsURL = nats.DefaultURL
 			}
 			natsCredsFile := os.Getenv("NATS_CREDS_FILE")
-			nc, err := natsProbeConnect(natsURL, natsCredsFile)
+			nc, err := agent.NATSProbeConnect(natsURL, natsCredsFile)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "health: NATS not reachable: %v\n", err)
 				os.Exit(1)
@@ -55,7 +56,7 @@ func main() {
 				natsURL = nats.DefaultURL
 			}
 			natsCredsFile := os.Getenv("NATS_CREDS_FILE")
-			nc, err := natsProbeConnect(natsURL, natsCredsFile)
+			nc, err := agent.NATSProbeConnect(natsURL, natsCredsFile)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "readiness: NATS not reachable: %v\n", err)
 				os.Exit(1)
@@ -76,16 +77,16 @@ func main() {
 
 	// CLI flags.
 	var (
-		flagNATSURL    = flag.String("nats-url", os.Getenv("NATS_URL"), "NATS server URL")
-		flagNATSCreds  = flag.String("nats-creds", os.Getenv("NATS_CREDS_FILE"), "Path to NATS credentials file")
-		flagUserID     = flag.String("user-id", os.Getenv("USER_ID"), "User ID (required)")
-		flagProjectID  = flag.String("project-id", os.Getenv("PROJECT_ID"), "Project ID (required in standalone mode)")
-		flagClaudePath = flag.String("claude-path", os.Getenv("CLAUDE_PATH"), "Path to claude binary")
-		flagDataDir    = flag.String("data-dir", "/data", "Data directory (project PVC mount: repo + worktrees)")
-		flagMode       = flag.String("mode", "standalone", "Run mode: k8s | standalone")
-		flagDaemon     = flag.Bool("daemon", false, "Run as laptop daemon launcher (spawns one child agent per project)")
-		flagHostname   = flag.String("hostname", os.Getenv("HOSTNAME"), "Hostname for laptop collision detection (--daemon only)")
-		flagMachineID  = flag.String("machine-id", os.Getenv("MACHINE_ID"), "Machine ID for laptop collision detection (--daemon only)")
+		flagNATSURL     = flag.String("nats-url", os.Getenv("NATS_URL"), "NATS server URL")
+		flagNATSCreds   = flag.String("nats-creds", os.Getenv("NATS_CREDS_FILE"), "Path to NATS credentials file")
+		flagUserID      = flag.String("user-id", os.Getenv("USER_ID"), "User ID (required)")
+		flagProjectID   = flag.String("project-id", os.Getenv("PROJECT_ID"), "Project ID (required in standalone mode)")
+		flagClaudePath  = flag.String("claude-path", os.Getenv("CLAUDE_PATH"), "Path to claude binary")
+		flagDataDir     = flag.String("data-dir", "/data", "Data directory (project PVC mount: repo + worktrees)")
+		flagMode        = flag.String("mode", "standalone", "Run mode: k8s | standalone")
+		flagDaemon      = flag.Bool("daemon", false, "Run as laptop daemon launcher (spawns one child agent per project)")
+		flagHostname    = flag.String("hostname", os.Getenv("HOSTNAME"), "Hostname for laptop collision detection (--daemon only)")
+		flagMachineID   = flag.String("machine-id", os.Getenv("MACHINE_ID"), "Machine ID for laptop collision detection (--daemon only)")
 		flagRefreshURL  = flag.String("refresh-url", os.Getenv("REFRESH_URL"), "POST /auth/refresh URL for JWT refresh (--daemon only)")
 		flagAuthURL     = flag.String("auth-url", os.Getenv("AUTH_URL"), "Control-plane base URL for HTTP challenge-response auth (ADR-0054); e.g. https://cp.example.com")
 		flagNKeyPubFile = flag.String("nkey-pub-file", os.Getenv("NKEY_PUB_FILE"), "Path to write the agent NKey public key (used by host controller for key registration)")
@@ -149,13 +150,13 @@ func main() {
 	_ = *flagMode
 
 	// Observability.
-	SetupPropagator()
-	m := NewMetrics(prometheus.DefaultRegisterer)
+	agent.SetupPropagator()
+	m := agent.NewMetrics(prometheus.DefaultRegisterer)
 	metricsAddr := os.Getenv("METRICS_ADDR")
 	if metricsAddr == "" {
 		metricsAddr = ":9091"
 	}
-	metricsSrv := StartMetricsServer(metricsAddr, prometheus.DefaultGatherer)
+	metricsSrv := agent.StartMetricsServer(metricsAddr, prometheus.DefaultGatherer)
 	defer metricsSrv.Shutdown(context.Background())
 
 	authURL := *flagAuthURL
@@ -164,9 +165,9 @@ func main() {
 	// If an AUTH_URL is provided, use HTTP challenge-response auth (ADR-0054).
 	// Generate an NKey pair, optionally write the public key to a file for the
 	// host controller to read, then connect with nats.UserJWT() callbacks.
-	var agentAuth *AgentAuth
+	var agentAuth *agent.AgentAuth
 	if authURL != "" {
-		aa, err := NewAgentAuth()
+		aa, err := agent.NewAgentAuth()
 		if err != nil {
 			log.Fatal().Err(err).Msg("failed to generate NKey pair")
 		}
@@ -202,7 +203,7 @@ func main() {
 		log.Info().Msg("agent authenticated with control-plane; connecting to NATS")
 	}
 
-	nc, err := natsConnectWithAuth(natsURL, natsCredsFile, agentAuth)
+	nc, err := agent.NATSConnectWithAuth(natsURL, natsCredsFile, agentAuth)
 	if err != nil {
 		log.Fatal().Err(err).Str("nats_url", natsURL).Msg("failed to connect to NATS")
 	}
@@ -229,7 +230,7 @@ func main() {
 			machineID = hostname
 		}
 
-		cfg := DaemonConfig{
+		cfg := agent.DaemonConfig{
 			NATSCredsFile: natsCredsFile,
 			RefreshURL:    *flagRefreshURL,
 			UserID:        userID,
@@ -251,7 +252,7 @@ func main() {
 			Log: log.Logger,
 		}
 
-		daemon, err := NewDaemon(nc, cfg)
+		daemon, err := agent.NewDaemon(nc, cfg)
 		if err != nil {
 			log.Fatal().Err(err).Msg("failed to create daemon")
 		}
@@ -273,11 +274,11 @@ func main() {
 	// NATS session lifecycle, after NATS connection is established).
 	// Only runs in k8s mode (when --mode k8s) where user-secrets Secret is mounted.
 	// In standalone/laptop mode the Secret mount is not present; skip silently.
-	var credMgr *CredentialManager
+	var credMgr *agent.CredentialManager
 	var gitIdentityID string
 	if *flagMode == "k8s" {
 		homeDir, _ := os.UserHomeDir()
-		credMgr = NewCredentialManager(homeDir, log.Logger)
+		credMgr = agent.NewCredentialManager(homeDir, log.Logger)
 
 		gitURL := os.Getenv("GIT_URL")
 		gitIdentityID = os.Getenv("GIT_IDENTITY_ID")
@@ -290,8 +291,8 @@ func main() {
 			log.Warn().Err(setupErr).Msg("credential helper setup failed (non-fatal)")
 		}
 
-		if repoErr := InitRepo(dataDir, gitURL, gitIdentityID, credMgr, log.Logger); repoErr != nil {
-			if authErr, ok := repoErr.(*GitAuthError); ok {
+		if repoErr := agent.InitRepo(dataDir, gitURL, gitIdentityID, credMgr, log.Logger); repoErr != nil {
+			if authErr, ok := repoErr.(*agent.GitAuthError); ok {
 				// Auth error during clone → publish session_failed with provider_auth_failed.
 				// We don't have a session ID yet (no sessions created), so publish on the
 				// project lifecycle subject with a synthetic session ID.
@@ -310,47 +311,14 @@ func main() {
 		}
 	}
 
-	agent, err := NewAgent(nc, userID, userSlug, hostSlug, projectID, projectSlug, claudePath, dataDir, log.Logger, m, credMgr, gitIdentityID)
+	a, err := agent.NewAgent(nc, userID, userSlug, hostSlug, projectID, projectSlug, claudePath, dataDir, log.Logger, m, credMgr, gitIdentityID)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create agent")
 	}
 
 	log.Info().Str("user_id", userID).Str("project_id", projectID).Msg("session agent started")
-	if err := agent.Run(ctx); err != nil {
+	if err := a.Run(ctx); err != nil {
 		log.Fatal().Err(err).Msg("agent run failed")
 	}
 	log.Info().Msg("session agent stopped")
-}
-
-// natsProbeConnect connects to NATS for one-shot health/readiness probes.
-// Unlike natsConnect, it does NOT retry on failure so probes fail fast.
-func natsProbeConnect(natsURL, credsFile string) (*nats.Conn, error) {
-	opts := []nats.Option{}
-	if credsFile != "" {
-		opts = append(opts, nats.UserCredentials(credsFile))
-	}
-	return nats.Connect(natsURL, opts...)
-}
-
-// natsConnect connects to NATS, using a credentials file if one is provided.
-// Unlimited reconnects and retry-on-failed-connect ensure BYOH daemons never
-// permanently lose the NATS connection (spec: GAP-SA-K15).
-func natsConnect(natsURL, credsFile string) (*nats.Conn, error) {
-	return natsConnectWithAuth(natsURL, credsFile, nil)
-}
-
-// natsConnectWithAuth connects to NATS with optional HTTP challenge-response auth (ADR-0054).
-// If agentAuth is non-nil, uses nats.UserJWT() with the AgentAuth callbacks.
-// Otherwise falls back to nats.UserCredentials(credsFile) if credsFile is non-empty.
-func natsConnectWithAuth(natsURL, credsFile string, agentAuth *AgentAuth) (*nats.Conn, error) {
-	opts := []nats.Option{
-		nats.MaxReconnects(-1),
-		nats.RetryOnFailedConnect(true),
-	}
-	if agentAuth != nil {
-		opts = append(opts, nats.UserJWT(agentAuth.JWTFunc(), agentAuth.SignFunc()))
-	} else if credsFile != "" {
-		opts = append(opts, nats.UserCredentials(credsFile))
-	}
-	return nats.Connect(natsURL, opts...)
 }

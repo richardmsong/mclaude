@@ -1,4 +1,4 @@
-package main
+package agent
 
 // gaps_test.go — tests for the 6 spec gaps implemented in this commit:
 //

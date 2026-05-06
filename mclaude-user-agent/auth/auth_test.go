@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 
 	"github.com/nats-io/nkeys"
 	"github.com/rs/zerolog"
+	agentcrypto "mclaude-user-agent/crypto"
 )
 
 // newTestUserAgentAuth creates a UserAgentAuth for testing using a freshly generated NKey.
@@ -99,7 +100,7 @@ func TestAuthenticate_SendsX25519Pub(t *testing.T) {
 
 	auth, _ := newTestUserAgentAuth(t, srv.URL)
 
-	kp, err := GenerateX25519Keypair()
+	kp, err := agentcrypto.GenerateX25519Keypair()
 	if err != nil {
 		t.Fatalf("GenerateX25519Keypair: %v", err)
 	}
@@ -217,7 +218,7 @@ func TestStartRefreshLoop_Fires(t *testing.T) {
 	defer cancel()
 
 	var callbackJWT string
-	auth.startRefreshLoopWithInterval(ctx, 50*time.Millisecond, func(jwt string) {
+	auth.StartRefreshLoopWithInterval(ctx, 50*time.Millisecond, func(jwt string) {
 		callbackJWT = jwt
 	})
 
@@ -263,7 +264,7 @@ func TestStartRefreshLoop_StopsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Long interval — cancel immediately, should not fire.
-	auth.startRefreshLoopWithInterval(ctx, 10*time.Second, nil)
+	auth.StartRefreshLoopWithInterval(ctx, 10*time.Second, nil)
 	cancel()
 
 	time.Sleep(100 * time.Millisecond)

@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"bufio"
@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"mclaude.io/common/pkg/slug"
+	"mclaude-control-plane/slug"
 )
 
 // kvKeyForJSONLFile extracts the session slug from a JSONL filename and returns

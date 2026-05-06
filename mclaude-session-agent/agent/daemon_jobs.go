@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"context"
@@ -16,8 +16,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"mclaude.io/common/pkg/slug"
-	"mclaude.io/common/pkg/subj"
+	"mclaude-control-plane/slug"
+	subj "mclaude-control-plane/subjects"
 )
 
 // jobQueueKVKey constructs the key for a job entry in the (deprecated) mclaude-job-queue
