@@ -1,9 +1,10 @@
 # ADR: Fix per-user resource provisioning — wire missing user-info KV + sessions stream
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-06: draft
 - 2026-05-06: accepted — paired with docs/mclaude-control-plane/spec-control-plane.md
+- 2026-05-06: implemented — all scope CLEAN
 
 ## Overview
 
