@@ -1,5 +1,5 @@
 // controller_test.go tests the per-user reconciler and NATS subscriber per ADR-0091.
-package main
+package controller
 
 import (
 	"context"
@@ -82,7 +82,7 @@ func newTestUserReconciler(objs ...runtime.Object) *UserReconciler {
 // TestBuild verifies the package compiles — covered by running the tests themselves.
 // (go test will fail to compile if any code is broken.)
 
-// ---- unit tests: hostSlugFromJWT ----
+// ---- unit tests: HostSlugFromJWT ----
 
 func makeJWT(name string) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"typ":"JWT","alg":"ed25519-nkey"}`))
@@ -106,19 +106,19 @@ func TestHostSlugFromJWT(t *testing.T) {
 		{"only.two", "", true},
 	}
 	for _, tt := range tests {
-		got, err := hostSlugFromJWT(tt.token)
+		got, err := HostSlugFromJWT(tt.token)
 		if tt.wantErr {
 			if err == nil {
-				t.Errorf("hostSlugFromJWT(%q): expected error, got %q", tt.token, got)
+				t.Errorf("HostSlugFromJWT(%q): expected error, got %q", tt.token, got)
 			}
 			continue
 		}
 		if err != nil {
-			t.Errorf("hostSlugFromJWT(%q): unexpected error: %v", tt.token, err)
+			t.Errorf("HostSlugFromJWT(%q): unexpected error: %v", tt.token, err)
 			continue
 		}
 		if got != tt.want {
-			t.Errorf("hostSlugFromJWT(%q) = %q, want %q", tt.token, got, tt.want)
+			t.Errorf("HostSlugFromJWT(%q) = %q, want %q", tt.token, got, tt.want)
 		}
 	}
 }
@@ -126,9 +126,9 @@ func TestHostSlugFromJWT(t *testing.T) {
 // ---- unit tests: envOr ----
 
 func TestEnvOrDefault(t *testing.T) {
-	got := envOr("NONEXISTENT_ENV_VAR_FOR_TEST", "mclaude-system")
+	got := EnvOr("NONEXISTENT_ENV_VAR_FOR_TEST", "mclaude-system")
 	if got != "mclaude-system" {
-		t.Errorf("envOr default: got %q, want %q", got, "mclaude-system")
+		t.Errorf("EnvOr default: got %q, want %q", got, "mclaude-system")
 	}
 }
 
@@ -1059,7 +1059,7 @@ func TestSingleNATSSubscription(t *testing.T) {
 
 // ---- unit tests: bootRefresh exponential backoff ----
 
-// fakeRefresher implements the refresher interface for testing bootRefresh.
+// fakeRefresher implements the Refresher interface for testing BootRefresh.
 type fakeRefresher struct {
 	// responses is a queue of (jwt, error) pairs returned in order.
 	responses []fakeRefreshResponse
@@ -1090,7 +1090,7 @@ func TestBootRefresh_SucceedsOnFirstTry(t *testing.T) {
 	}
 	ctx := context.Background()
 	// Use 1ms intervals to avoid real sleeps in tests.
-	got := bootRefreshWithInterval(ctx, fr, zerolog.Nop(), time.Millisecond, time.Millisecond)
+	got := BootRefreshWithInterval(ctx, fr, zerolog.Nop(), time.Millisecond, time.Millisecond)
 	if got != "host-jwt-v1" {
 		t.Errorf("bootRefresh: got %q, want host-jwt-v1", got)
 	}
@@ -1115,7 +1115,7 @@ func TestBootRefresh_RetriesOnErrNotRegistered(t *testing.T) {
 
 	ctx := context.Background()
 	// Use 1ms intervals so the test completes in milliseconds, not seconds.
-	jwt := bootRefreshWithInterval(ctx, fr, zerolog.Nop(), time.Millisecond, time.Millisecond)
+	jwt := BootRefreshWithInterval(ctx, fr, zerolog.Nop(), time.Millisecond, time.Millisecond)
 
 	if jwt != "host-jwt-registered" {
 		t.Errorf("bootRefresh: got %q, want host-jwt-registered", jwt)
@@ -1137,7 +1137,7 @@ func TestBootRefresh_RetriesOnGenericError(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	jwt := bootRefreshWithInterval(ctx, fr, zerolog.Nop(), time.Millisecond, time.Millisecond)
+	jwt := BootRefreshWithInterval(ctx, fr, zerolog.Nop(), time.Millisecond, time.Millisecond)
 
 	if jwt != "host-jwt-ok" {
 		t.Errorf("bootRefresh: got %q, want host-jwt-ok", jwt)
@@ -1161,7 +1161,7 @@ func TestBootRefresh_ExponentialBackoffCapAtMax(t *testing.T) {
 
 	ctx := context.Background()
 	// initialInterval=1ms, maxInterval=2ms — verifies cap logic runs without overflow.
-	jwt := bootRefreshWithInterval(ctx, fr, zerolog.Nop(), time.Millisecond, 2*time.Millisecond)
+	jwt := BootRefreshWithInterval(ctx, fr, zerolog.Nop(), time.Millisecond, 2*time.Millisecond)
 
 	if jwt != "final-jwt" {
 		t.Errorf("bootRefresh: got %q, want final-jwt", jwt)
