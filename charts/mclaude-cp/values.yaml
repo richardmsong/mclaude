@@ -129,9 +129,6 @@ controlPlane:
     jwtExpirySeconds: 28800
     jwtRefreshThresholdSeconds: 900
     natsWsUrl: ""
-  ## Name of existing Secret containing:
-  ##   database-url — Postgres connection string
-  existingSecret: "mclaude-control-plane"
   ## Override container command (e.g. for e2e stubs)
   command: []
   ## Whether to run dbmate schema migrations as an init container
@@ -196,13 +193,6 @@ minio:
   existingSecret: ""
   rootUser: "minioadmin"
   rootPassword: "minioadmin"
-  ## Image for the minio/mc bucket-creation Job (separate from minio server image).
-  ## Configurable so air-gapped deployments can mirror from an internal registry.
-  mcImage:
-    registry: docker.io
-    repository: minio/mc
-    tag: "latest"
-    pullPolicy: IfNotPresent
   ## activeDeadlineSeconds for the minio-bucket hook Job (ADR-0070).
   ## Increased from 120s to allow time for cold image pulls on k3d nodes.
   bucketJobDeadlineSeconds: 300

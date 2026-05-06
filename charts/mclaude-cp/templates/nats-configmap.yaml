@@ -45,6 +45,7 @@ data:
     # 3-tier JWT auth chain: operator → account → user
     # operator-keys Secret is mounted at /etc/nats/operator-keys/
     operator: /etc/nats/operator-keys/operatorJwt
+    system_account: SYS
     resolver: MEMORY
     resolver_preload: {
       include operator-keys/resolverPreload
