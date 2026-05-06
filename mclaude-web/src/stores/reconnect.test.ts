@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { EventStore } from './event-store'
 import { MockNATSClient } from '../testutil/mock-nats'
 
-const SUBJECT = 'mclaude.users.user-1.hosts.local.projects.project-1.sessions.session-1.events'
+const SUBJECT = 'mclaude.users.user-1.hosts.test-host.projects.project-1.sessions.session-1.events'
 
 function makeStore(mockNats: MockNATSClient): EventStore {
   return new EventStore({
@@ -10,6 +10,7 @@ function makeStore(mockNats: MockNATSClient): EventStore {
     userId: 'user-1',
     projectId: 'project-1',
     sessionId: 'session-1',
+    hostSlug: 'test-host',
   })
 }
 

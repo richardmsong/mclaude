@@ -82,7 +82,7 @@ export class EventStore {
 
   start(replayFromSeq?: number): void {
     const uslug = (this.opts.userSlug ?? this.opts.userId) as UserSlug
-    const hslug = (this.opts.hostSlug ?? 'local') as HostSlug
+    const hslug = (this.opts.hostSlug ?? '') as HostSlug
     const pslug = (this.opts.projectSlug ?? this.opts.projectId) as ProjectSlug
     const sslug = (this.opts.sessionSlug ?? this.opts.sessionId) as SessionSlug
     const subject = subjEvents(uslug, hslug, pslug, sslug)

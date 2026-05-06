@@ -434,7 +434,8 @@ function AppInner() {
     if (!uslug) return
     // Check if current hash is already in slug format: s/{uslug}/{pslug}/{sslug}
     const rewriteProject = sessionStore.projects.get(session.projectId)
-    const hslug = session.hostSlug ?? rewriteProject?.hostSlug ?? 'local'
+    const hslug = session.hostSlug ?? rewriteProject?.hostSlug
+    if (!hslug) return
     const expectedPath = `/u/${uslug}/h/${hslug}/p/${session.projectSlug}/s/${session.slug}`
     if (location.pathname !== expectedPath) {
       // Use replace so the slug URL doesn't create an extra history entry
@@ -455,7 +456,7 @@ function AppInner() {
     const session = sessionStore?.resolveSession(route.sessionId!)
     const project = session ? sessionStore?.projects.get(session.projectId) : undefined
     const resolvedUserSlug = authState.userSlug ?? authState.userId
-    const resolvedHostSlug = project?.hostSlug ?? session?.hostSlug ?? route.hostSlug ?? 'local'
+    const resolvedHostSlug = project?.hostSlug ?? session?.hostSlug ?? route.hostSlug ?? ''
     const resolvedProjectSlug = project?.slug ?? resolvedProjectId
     const resolvedSessionSlug = session?.slug ?? route.sessionId!
     const store = new EventStore({
@@ -665,7 +666,7 @@ function AppInner() {
     const session = sessionStore.resolveSession(route.sessionId)
     const project = session ? sessionStore.projects.get(session.projectId) : undefined
     const sessionProjectSlug = project?.slug ?? session?.projectSlug
-    const sessionHostSlug = project?.hostSlug ?? session?.hostSlug ?? route.hostSlug ?? 'local'
+    const sessionHostSlug = project?.hostSlug ?? session?.hostSlug ?? route.hostSlug ?? ''
     return (
       <Fragment>
         <SessionDetailScreen

@@ -45,7 +45,7 @@ export interface ProjectVM {
   status: string
   healthy: boolean
   sessions: SessionVM[]
-  /** Host slug from project KV (ADR-0035). Falls back to 'local'. */
+  /** Host slug from project KV (ADR-0035). Empty string when not yet available. */
   hostSlug: string
 }
 
@@ -83,8 +83,8 @@ export class SessionListVM {
       id: p.id,
       name: p.name,
       status: p.status,
-      healthy: this.heartbeatMonitor.isHealthy(p.hostSlug ?? 'local'),
-      hostSlug: p.hostSlug ?? 'local',
+      healthy: this.heartbeatMonitor.isHealthy(p.hostSlug ?? ''),
+      hostSlug: p.hostSlug ?? '',
       sessions: this.sessionStore.getSessionsForProject(p.id).map(s => ({
         id: s.id,
         name: s.name,
@@ -96,7 +96,7 @@ export class SessionListVM {
         hasPendingPermission: Object.keys(s.pendingControls).length > 0,
         stateSince: s.stateSince,
         extraFlags: s.extraFlags ?? '',
-        hostSlug: s.hostSlug ?? p.hostSlug ?? 'local',
+        hostSlug: s.hostSlug ?? p.hostSlug ?? '',
       })),
     }))
   }
@@ -158,7 +158,8 @@ export class SessionListVM {
   }
 
   async createProject(name: string, gitUrl?: string, gitIdentityId?: string, hostSlug?: string): Promise<string> {
-    const hslug = (hostSlug ?? 'local') as HostSlug
+    if (!hostSlug) throw new Error('createProject: hostSlug is required — register a host first')
+    const hslug = hostSlug as HostSlug
     const subject = subjProjectsCreate(this.userSlug as UserSlug, hslug)
     const payload: Record<string, string> = { name, hostSlug: hslug }
     if (gitUrl) payload['gitUrl'] = gitUrl
@@ -174,7 +175,9 @@ export class SessionListVM {
     // ADR-0035: use host-scoped subject. Resolve hostSlug + pslug from project KV.
     const project = this.sessionStore.projects.get(projectId)
     const pslug = (project?.slug ?? projectId) as ProjectSlug
-    const hslug = (project?.hostSlug ?? 'local') as HostSlug
+    const resolvedHslug = project?.hostSlug
+    if (!resolvedHslug) throw new Error('createSession: project has no hostSlug — register a host first')
+    const hslug = resolvedHslug as HostSlug
     const subject = subjSessionsCreate(this.userSlug as UserSlug, hslug, pslug)
     const payload = {
       projectId,
@@ -235,7 +238,7 @@ export class SessionListVM {
     if (!session) return
     const delProject = this.sessionStore.projects.get(session.projectId)
     const delPslug = (delProject?.slug ?? session.projectId) as ProjectSlug
-    const delHslug = (delProject?.hostSlug ?? session.hostSlug ?? 'local') as HostSlug
+    const delHslug = (delProject?.hostSlug ?? session.hostSlug ?? '') as HostSlug
     const delSslug = (session.slug ?? sessionId) as SessionSlug
     const subject = subjSessionsDelete(this.userSlug as UserSlug, delHslug, delPslug, delSslug)
     const deleteRequestId = crypto.randomUUID()
@@ -247,7 +250,7 @@ export class SessionListVM {
     if (!session) return
     const rstProject = this.sessionStore.projects.get(session.projectId)
     const rstPslug = (rstProject?.slug ?? session.projectId) as ProjectSlug
-    const rstHslug = (rstProject?.hostSlug ?? session.hostSlug ?? 'local') as HostSlug
+    const rstHslug = (rstProject?.hostSlug ?? session.hostSlug ?? '') as HostSlug
     const rstSslug = (session.slug ?? sessionId) as SessionSlug
     const subject = subjSessionsRestart(this.userSlug as UserSlug, rstHslug, rstPslug, rstSslug)
     const restartRequestId = crypto.randomUUID()

@@ -65,6 +65,7 @@ describe('monitoring — structured pino logs', () => {
       userId: 'user-1',
       projectId: 'project-1',
       sessionId: 'session-1',
+      hostSlug: 'local',
     })
     sessionStore = new SessionStore(mockNats, 'user-1')
 
@@ -79,6 +80,8 @@ describe('monitoring — structured pino logs', () => {
       'user-1',
       'project-1',
       'session-1',
+      'user-1',
+      'local',
     )
   })
 
@@ -214,7 +217,7 @@ describe('monitoring — structured pino logs', () => {
   describe('EventStore logging', () => {
     it('logs start/subscribe at debug level', () => {
       const mockNats = new MockNATSClient()
-      const store = new EventStore({ natsClient: mockNats, userId: 'user-1', projectId: 'project-1', sessionId: 'session-1' })
+      const store = new EventStore({ natsClient: mockNats, userId: 'user-1', projectId: 'project-1', sessionId: 'session-1', hostSlug: 'test-host' })
       store.start()
       // Find a debug log line from event-store with sessionId
       const debugLogs = mockLogLines.filter(l =>
@@ -226,13 +229,12 @@ describe('monitoring — structured pino logs', () => {
 
     it('logs warn for malformed event', () => {
       const mockNats = new MockNATSClient()
-      const store = new EventStore({ natsClient: mockNats, userId: 'user-1', projectId: 'project-1', sessionId: 'session-1' })
+      const store = new EventStore({ natsClient: mockNats, userId: 'user-1', projectId: 'project-1', sessionId: 'session-1', hostSlug: 'test-host' })
       store.start()
       mockLogLines.length = 0
       // Simulate malformed JSON — use ADR-0024 subject format (typed slugs)
-      // EventStore subscribes to mclaude.users.{uslug}.projects.{pslug}.events.{sslug}
-      // When no slug opts provided, falls back to userId/projectId/sessionId as slug values
-      mockNats.publish('mclaude.users.user-1.hosts.local.projects.project-1.sessions.session-1.events', new TextEncoder().encode('not-json'))
+      // EventStore subscribes to mclaude.users.{uslug}.hosts.{hslug}.projects.{pslug}.sessions.{sslug}.events
+      mockNats.publish('mclaude.users.user-1.hosts.test-host.projects.project-1.sessions.session-1.events', new TextEncoder().encode('not-json'))
       const warnLogs = mockLogLines.filter(l => l['level'] === 'warn' && l['component'] === 'event-store')
       expect(warnLogs.length).toBeGreaterThan(0)
       store.stop()

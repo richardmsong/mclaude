@@ -14,8 +14,8 @@ export class LifecycleStore {
     projectId: string,
     /** User slug for subject construction (ADR-0024). Falls back to userId when absent. */
     private readonly userSlug: string = userId,
-    /** Host slug for subject construction (ADR-0035). Falls back to 'local' when absent. */
-    private readonly hostSlug: string = 'local',
+    /** Host slug for subject construction (ADR-0035). Must be an explicit value — no 'local' fallback (ADR-0097). */
+    private readonly hostSlug: string,
     /** Project slug for subject construction (ADR-0024). Falls back to projectId when absent. */
     private readonly projectSlug: string = projectId,
   ) {}

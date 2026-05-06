@@ -30,7 +30,7 @@ describe('ConversationVM.sendMessageWithAttachment (ADR-0053)', () => {
   beforeEach(() => {
     mockNats = new MockNATSClient()
     const sessionState = makeSessionKVState()
-    mockNats.kvSet('mclaude-sessions-user-1', 'hosts.local.projects.project-1.sessions.session-1', sessionState)
+    mockNats.kvSet('mclaude-sessions-user-1', 'hosts.test-host.projects.project-1.sessions.session-1', sessionState)
 
     sessionStore = new SessionStore(mockNats, 'user-1')
     sessionStore.startWatching()
@@ -40,6 +40,7 @@ describe('ConversationVM.sendMessageWithAttachment (ADR-0053)', () => {
       userId: 'user-1',
       projectId: 'project-1',
       sessionId: 'session-1',
+      hostSlug: 'test-host',
     })
 
     vm = new ConversationVM(
@@ -49,6 +50,8 @@ describe('ConversationVM.sendMessageWithAttachment (ADR-0053)', () => {
       'user-1',
       'project-1',
       'session-1',
+      'user-1',
+      'test-host',
     )
   })
 
@@ -59,7 +62,7 @@ describe('ConversationVM.sendMessageWithAttachment (ADR-0053)', () => {
     expect(mockNats.published).toHaveLength(1)
     const msg = mockNats.published[0]
     expect(msg.subject).toBe(
-      'mclaude.users.user-1.hosts.local.projects.project-1.sessions.session-1.input',
+      'mclaude.users.user-1.hosts.test-host.projects.project-1.sessions.session-1.input',
     )
 
     const payload = parsePublished(msg.data) as {
