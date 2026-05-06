@@ -2,12 +2,9 @@ go 1.26
 
 use (
 	./mclaude-cli
-	./mclaude-common
 	./mclaude-control-plane
 	./mclaude-controller-k8s
 	./mclaude-relay
 	./mclaude-session-agent
 	./mclaude-user-agent
 )
-
-replace mclaude.io/common v0.0.0 => ./mclaude-common
