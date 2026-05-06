@@ -1,10 +1,11 @@
 ---
 **ADR-0105: Fix user-agent image tag in mclaude-worker Helm chart**
 
-**Status**: accepted
+**Status**: implemented
 
 **Status history**:
 - 2026-05-06: accepted — fixing Class A bug: wrong image tag causes SchedulingGated
+- 2026-05-06: implemented — charts-mclaude evaluator CLEAN (0 GAPs)
 
 ---
 
