@@ -33,10 +33,9 @@ type sysConnectEvent struct {
 }
 
 // StartSysSubscriber subscribes to $SYS.ACCOUNT.*.CONNECT and
-// $SYS.ACCOUNT.*.DISCONNECT on hub NATS. Per ADR-0054/ADR-0063:
-//   - kind="Client" + nkey matches hosts.public_key (no type filter — matches
-//     both type='machine' and type='cluster') → update last_seen_at and set
-//     online=true in KV
+// $SYS.ACCOUNT.*.DISCONNECT on hub NATS. Per ADR-0054/ADR-0063/ADR-0097:
+//   - kind="Client" + nkey matches hosts.public_key → update last_seen_at and
+//     set online=true in KV (ADR-0097: no type column; all hosts are K8s user-agent hosts)
 //   - kind="Leafnode" → log warning and drop (leaf topology removed per ADR-0054)
 //   - No match → ignore (SPA ephemeral NKey, control-plane's own connection)
 //
@@ -80,9 +79,8 @@ func (s *Server) handleSysEvent(msg *nats.Msg, isConnect bool) {
 
 	switch evt.Client.Kind {
 	case "Client":
-		// Look up by public_key only — no type filter. Matches both type='machine'
-		// and type='cluster' (ADR-0063: K8s cluster controllers connect hub-direct
-		// as "Client", not "Leafnode").
+		// Look up by public_key only — no type filter (ADR-0097: type column removed).
+		// ADR-0063: K8s cluster controllers connect hub-direct as "Client", not "Leafnode".
 		if isConnect {
 			now := time.Now().UTC()
 			_, err := s.db.Pool().Exec(ctx, `
