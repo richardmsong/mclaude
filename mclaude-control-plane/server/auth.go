@@ -378,11 +378,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			if urlUSlug != "" && s.db != nil {
 				user, uerr := s.db.GetUserByID(r.Context(), userID)
 				if uerr == nil && user != nil && user.Slug != urlUSlug {
-					// Check if user is admin — admins bypass access boundaries.
-					if !user.IsAdmin {
-						http.Error(w, "forbidden", http.StatusForbidden)
-						return
-					}
+					// ADR-0101: no admin bypass — is_admin=true users are subject to the same
+					// slug-match check as any other user.
+					http.Error(w, "forbidden", http.StatusForbidden)
+					return
 				}
 				// Also inject user slug into context for downstream use.
 				if user != nil {

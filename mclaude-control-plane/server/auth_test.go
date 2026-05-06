@@ -248,29 +248,6 @@ func TestAuthMiddleware_InvalidToken(t *testing.T) {
 	}
 }
 
-// ---- Admin middleware ----
-
-// TestIsAdminMiddleware_RejectsNoToken verifies that isAdminMiddleware returns 401
-// when no Bearer token is present (ADR-0089: 401 if no JWT).
-func TestIsAdminMiddleware_RejectsNoToken(t *testing.T) {
-	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", time.Hour)
-	called := false
-	handler := srv.isAdminMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d; want 401", rec.Code)
-	}
-	if called {
-		t.Error("handler should not be called without token")
-	}
-}
-
 // ---- bearer token extraction ----
 
 func TestBearerToken(t *testing.T) {

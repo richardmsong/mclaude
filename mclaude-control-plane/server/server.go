@@ -9,8 +9,8 @@ import (
 // Public routes (no auth): /auth/login, /auth/refresh, /version, /health
 // Protected routes (NATS JWT auth): /auth/me, /api/*
 // OAuth callback (no auth — redirects): /auth/providers/*/callback
-// Admin routes (isAdminMiddleware — JWT + is_admin=true): /admin/*, /scim/v2/
 // Metrics (unauthenticated): /metrics
+// Note: /admin/* and /scim/v2/* routes are removed per ADR-0101.
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	// Public
 	mux.HandleFunc("/auth/login", s.handleLogin)
@@ -129,44 +129,9 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	// Device-code registration (ADR-0035)
 	mux.HandleFunc("/api/hosts/register", s.handleHostRegister)
 
-	// Admin routes — on main port, behind isAdminMiddleware (JWT + is_admin=true in DB).
-	// Returns 401 if no JWT, 403 if JWT valid but user is not admin.
-	mux.Handle("/admin/", s.isAdminMiddleware(http.HandlerFunc(s.handleAdminRoutes)))
-
-	// SCIM 2.0 endpoints — on main port, behind isAdminMiddleware.
-	mux.Handle("/scim/v2/", s.isAdminMiddleware(http.HandlerFunc(s.handleSCIMRoutes)))
-
 	// Prometheus metrics — unauthenticated on main port.
 	// Acceptable since the port is behind the cluster ingress (not externally reachable without auth).
 	mux.HandleFunc("/metrics", s.handleMetrics)
-}
-
-// isAdminMiddleware enforces admin-only access on protected routes.
-// It calls authMiddleware first (parses + validates JWT, injects userID into context),
-// then fetches the user from Postgres and checks is_admin == true.
-// Returns 401 if no JWT, 403 if JWT valid but user is not admin.
-func (s *Server) isAdminMiddleware(next http.Handler) http.Handler {
-	return s.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		userID, ok := r.Context().Value(contextKeyUserID).(string)
-		if !ok || userID == "" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		if s.db == nil {
-			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		user, err := s.db.GetUserByID(r.Context(), userID)
-		if err != nil || user == nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		if !user.IsAdmin {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-		next.ServeHTTP(w, r)
-	}))
 }
 
 // handleMetrics serves Prometheus metrics from MetricsRegistry.

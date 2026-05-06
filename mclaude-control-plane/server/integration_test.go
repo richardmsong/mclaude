@@ -1208,188 +1208,155 @@ func TestIntegration_BootstrapAdminUser_EmptyPasswordPreservesHash(t *testing.T)
 	}
 }
 
-// ---- ADR-0089 Admin routes (main port, isAdminMiddleware) ----
+// ---- ADR-0101 Admin/SCIM surface removed ----
 
-// TestIntegration_AdminCreateUser verifies POST /admin/users creates a user
-// with {id, email, name, slug} in the response (ADR-0089).
-func TestIntegration_AdminCreateUser(t *testing.T) {
+// TestAdminRoutes_AllReturn404 verifies that GET /admin/users, POST /admin/users,
+// DELETE /admin/users/x, POST /admin/users/x/promote, POST /admin/sessions/stop,
+// and GET /scim/v2/Users all return 404 (routes not registered per ADR-0101).
+func TestAdminRoutes_AllReturn404(t *testing.T) {
 	ctx := context.Background()
 	db := mustConnectDB(t, ctx)
-	srv := newIntegrationServer(t,db, nil)
-	adminJWT := mustAdminJWT(t, db, srv)
-
-	userID := "admin-create-" + uuid.NewString()[:8]
-	email := userID + "@test.example.com"
-	body := fmt.Sprintf(`{"id":%q,"email":%q,"name":"AdminCreateUser"}`, userID, email)
-	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+	srv := newIntegrationServer(t, db, nil)
 
 	mux := http.NewServeMux()
 	srv.RegisterRoutes(mux)
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/admin/users", bytes.NewBufferString(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+adminJWT)
-	mux.ServeHTTP(rec, req)
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/admin/users"},
+		{http.MethodPost, "/admin/users"},
+		{http.MethodDelete, "/admin/users/some-id"},
+		{http.MethodPost, "/admin/users/some-slug/promote"},
+		{http.MethodPost, "/admin/sessions/stop"},
+		{http.MethodGet, "/scim/v2/Users"},
+	}
 
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d; want 201; body: %s", rec.Code, rec.Body.String())
-	}
-	var resp AdminUserResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if resp.ID != userID {
-		t.Errorf("id = %q; want %q", resp.ID, userID)
-	}
-	if resp.Email != email {
-		t.Errorf("email = %q; want %q", resp.Email, email)
-	}
-	if resp.Name == "" {
-		t.Error("name is empty")
-	}
-	if resp.Slug == "" {
-		t.Error("slug is empty")
+	for _, r := range routes {
+		t.Run(r.method+" "+r.path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(r.method, r.path, nil)
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("%s %s: status = %d; want 404 (ADR-0101: routes not registered)",
+					r.method, r.path, rec.Code)
+			}
+		})
 	}
 }
 
-// TestIntegration_AdminListUsers verifies GET /admin/users lists created users (ADR-0089).
-func TestIntegration_AdminListUsers(t *testing.T) {
+// TestAuthMiddleware_AdminBypassRemoved verifies that a user with is_admin=true
+// gets 403 on /api/users/{other-uslug}/..., same as a non-admin user (ADR-0101).
+func TestAuthMiddleware_AdminBypassRemoved(t *testing.T) {
 	ctx := context.Background()
 	db := mustConnectDB(t, ctx)
-	srv := newIntegrationServer(t,db, nil)
-	adminJWT := mustAdminJWT(t, db, srv)
+	srv := newIntegrationServer(t, db, nil)
 
-	// Create a test user.
-	userID := "admin-list-" + uuid.NewString()[:8]
-	_, err := db.CreateUser(ctx, userID, userID+"@test.example.com", "AdminListUser", "")
+	// Create admin user.
+	adminID := "admin-bypass-" + uuid.NewString()[:8]
+	adminEmail := adminID + "@test.example.com"
+	adminHash, _ := HashPassword("pw-" + adminID)
+	adminUser, err := db.CreateUser(ctx, adminID, adminEmail, "AdminBypass", adminHash)
 	if err != nil {
-		t.Fatalf("CreateUser: %v", err)
+		t.Fatalf("create admin user: %v", err)
 	}
-	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
-
-	mux := http.NewServeMux()
-	srv.RegisterRoutes(mux)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
-	req.Header.Set("Authorization", "Bearer "+adminJWT)
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d; want 200; body: %s", rec.Code, rec.Body.String())
+	if err := db.SetUserAdmin(ctx, adminUser.ID, true); err != nil {
+		t.Fatalf("set admin: %v", err)
 	}
-	var users []AdminUserResponse
-	if err := json.NewDecoder(rec.Body).Decode(&users); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
+	t.Cleanup(func() { db.DeleteUser(ctx, adminID) }) //nolint:errcheck
 
-	found := false
-	for _, u := range users {
-		if u.ID == userID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("created user %q not found in list", userID)
-	}
-}
-
-// TestIntegration_AdminDeleteUser verifies DELETE /admin/users/{id} deletes a user (ADR-0089).
-func TestIntegration_AdminDeleteUser(t *testing.T) {
-	ctx := context.Background()
-	db := mustConnectDB(t, ctx)
-	srv := newIntegrationServer(t,db, nil)
-	adminJWT := mustAdminJWT(t, db, srv)
-
-	userID := "admin-del-" + uuid.NewString()[:8]
-	_, err := db.CreateUser(ctx, userID, userID+"@test.example.com", "AdminDelUser", "")
+	// Create second (target) user.
+	otherID := "other-bypass-" + uuid.NewString()[:8]
+	otherEmail := otherID + "@test.example.com"
+	otherUser, err := db.CreateUser(ctx, otherID, otherEmail, "OtherBypass", "")
 	if err != nil {
-		t.Fatalf("CreateUser: %v", err)
+		t.Fatalf("create other user: %v", err)
 	}
+	t.Cleanup(func() { db.DeleteUser(ctx, otherID) }) //nolint:errcheck
 
-	mux := http.NewServeMux()
-	srv.RegisterRoutes(mux)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodDelete, "/admin/users/"+userID, nil)
-	req.Header.Set("Authorization", "Bearer "+adminJWT)
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d; want 204; body: %s", rec.Code, rec.Body.String())
-	}
-
-	// Verify user no longer exists in DB.
-	fetched, err := db.GetUserByID(ctx, userID)
-	if err != nil {
-		t.Fatalf("GetUserByID after delete: %v", err)
-	}
-	if fetched != nil {
-		t.Errorf("user %q still exists after DELETE", userID)
-	}
-}
-
-// TestIntegration_AdminMiddleware_RejectsNoToken verifies 401 on /admin/users without JWT (ADR-0089).
-func TestIntegration_AdminMiddleware_RejectsNoToken(t *testing.T) {
-	ctx := context.Background()
-	db := mustConnectDB(t, ctx)
-	srv := newIntegrationServer(t,db, nil)
-
-	mux := http.NewServeMux()
-	srv.RegisterRoutes(mux)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("status = %d; want 401 (no JWT)", rec.Code)
-	}
-}
-
-// TestIntegration_AdminMiddleware_RejectsNonAdmin verifies 403 when JWT is valid
-// but user is not admin (ADR-0089).
-func TestIntegration_AdminMiddleware_RejectsNonAdmin(t *testing.T) {
-	ctx := context.Background()
-	db := mustConnectDB(t, ctx)
-	srv := newIntegrationServer(t,db, nil)
-
-	// Create a non-admin user and log in.
-	userID := "non-admin-" + uuid.NewString()[:8]
-	email := userID + "@test.example.com"
-	hash, _ := HashPassword("pw-" + userID)
-	_, err := db.CreateUser(ctx, userID, email, "NonAdmin", hash)
-	if err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
-	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
-
-	// ADR-0100: nkey_public is required for login.
-	nonAdminKP, _ := nkeys.CreateUser()
-	nonAdminPub, _ := nonAdminKP.PublicKey()
-	loginBody := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":%q}`, email, "pw-"+userID, nonAdminPub)
+	// Log in as admin.
+	adminKP, _ := nkeys.CreateUser()
+	adminPub, _ := adminKP.PublicKey()
+	loginBody := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":%q}`, adminEmail, "pw-"+adminID, adminPub)
 	loginRec := httptest.NewRecorder()
 	loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(loginBody))
 	loginReq.Header.Set("Content-Type", "application/json")
 	srv.handleLogin(loginRec, loginReq)
 	if loginRec.Code != http.StatusOK {
-		t.Fatalf("login status = %d; body: %s", loginRec.Code, loginRec.Body.String())
+		t.Fatalf("admin login status = %d; body: %s", loginRec.Code, loginRec.Body.String())
 	}
-	var loginResp LoginResponse
-	json.NewDecoder(loginRec.Body).Decode(&loginResp) //nolint:errcheck
+	var lr LoginResponse
+	json.NewDecoder(loginRec.Body).Decode(&lr) //nolint:errcheck
 
 	mux := http.NewServeMux()
 	srv.RegisterRoutes(mux)
 
+	// Admin trying to access /api/users/{other-slug}/projects must get 403.
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/admin/users", nil)
-	req.Header.Set("Authorization", "Bearer "+loginResp.JWT)
+	req := httptest.NewRequest(http.MethodGet, "/api/users/"+otherUser.Slug+"/projects", nil)
+	req.Header.Set("Authorization", "Bearer "+lr.JWT)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusForbidden {
-		t.Errorf("status = %d; want 403 (non-admin JWT)", rec.Code)
+		t.Errorf("status = %d; want 403 (admin bypass removed per ADR-0101)", rec.Code)
+	}
+}
+
+// TestRequireSelfOrAdmin_AdminCannotAccessOtherUserGrants verifies that a user
+// with is_admin=true gets 403 on GET /api/users/{other-uslug}/grants (ADR-0101).
+func TestRequireSelfOrAdmin_AdminCannotAccessOtherUserGrants(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	srv := newIntegrationServer(t, db, nil)
+
+	// Create admin user.
+	adminID := "admin-grants-" + uuid.NewString()[:8]
+	adminEmail := adminID + "@test.example.com"
+	adminHash, _ := HashPassword("pw-" + adminID)
+	adminUser, err := db.CreateUser(ctx, adminID, adminEmail, "AdminGrants", adminHash)
+	if err != nil {
+		t.Fatalf("create admin user: %v", err)
+	}
+	if err := db.SetUserAdmin(ctx, adminUser.ID, true); err != nil {
+		t.Fatalf("set admin: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, adminID) }) //nolint:errcheck
+
+	// Create second (target) user.
+	otherID := "other-grants-" + uuid.NewString()[:8]
+	otherEmail := otherID + "@test.example.com"
+	otherUser, err := db.CreateUser(ctx, otherID, otherEmail, "OtherGrants", "")
+	if err != nil {
+		t.Fatalf("create other user: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, otherID) }) //nolint:errcheck
+
+	// Log in as admin.
+	adminKP, _ := nkeys.CreateUser()
+	adminPub, _ := adminKP.PublicKey()
+	loginBody := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":%q}`, adminEmail, "pw-"+adminID, adminPub)
+	loginRec := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(http.MethodPost, "/auth/login", bytes.NewBufferString(loginBody))
+	loginReq.Header.Set("Content-Type", "application/json")
+	srv.handleLogin(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("admin login status = %d; body: %s", loginRec.Code, loginRec.Body.String())
+	}
+	var lr LoginResponse
+	json.NewDecoder(loginRec.Body).Decode(&lr) //nolint:errcheck
+
+	mux := http.NewServeMux()
+	srv.RegisterRoutes(mux)
+
+	// Admin trying to GET /api/users/{other-slug}/grants must get 403.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/users/"+otherUser.Slug+"/grants", nil)
+	req.Header.Set("Authorization", "Bearer "+lr.JWT)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d; want 403 (requireSelfOrAdmin removed per ADR-0101)", rec.Code)
 	}
 }
 
@@ -2656,37 +2623,6 @@ func TestIntegration_ADR0097_Schema_NoTypeRole(t *testing.T) {
 		if count > 0 {
 			t.Errorf("hosts table still has column %q after ADR-0097 migration; want it absent", col)
 		}
-	}
-}
-
-// TestIntegration_ADR0097_AdminCluster_Returns404 verifies that all /admin/clusters/*
-// endpoints return 404 after ADR-0097 removal. Tests bypass isAdminMiddleware by
-// calling handleAdminRoutes directly.
-func TestIntegration_ADR0097_AdminCluster_Returns404(t *testing.T) {
-	ctx := context.Background()
-	db := mustConnectDB(t, ctx)
-	srv := newIntegrationServer(t, db, nil)
-
-	routes := []struct {
-		method string
-		path   string
-	}{
-		{http.MethodPost, "/admin/clusters"},
-		{http.MethodGet, "/admin/clusters"},
-		{http.MethodPost, "/admin/clusters/k3d-dev/grants"},
-		{http.MethodDelete, "/admin/clusters/k3d-dev"},
-	}
-
-	for _, r := range routes {
-		t.Run(r.method+" "+r.path, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(r.method, r.path, nil)
-			srv.handleAdminRoutes(rec, req)
-			if rec.Code != http.StatusNotFound {
-				t.Errorf("%s %s: status = %d; want 404 (ADR-0097: admin cluster endpoints removed)",
-					r.method, r.path, rec.Code)
-			}
-		})
 	}
 }
 

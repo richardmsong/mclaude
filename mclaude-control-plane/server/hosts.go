@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -475,7 +474,7 @@ type GrantEntry struct {
 
 // handleListGrants handles GET /api/users/{uslug}/grants (ADR-0091).
 // Returns pending and accepted host grants for the user, including x25519 fingerprint.
-// Auth: self (uslug must match JWT subject; admin bypass).
+// Auth: self only — uslug must match JWT subject (ADR-0101: no admin bypass).
 func (s *Server) handleListGrants(w http.ResponseWriter, r *http.Request, uslug string) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -486,8 +485,9 @@ func (s *Server) handleListGrants(w http.ResponseWriter, r *http.Request, uslug 
 		return
 	}
 
-	// Auth: self-only (or admin bypass).
-	if err := s.requireSelfOrAdmin(r, uslug); err != nil {
+	// Auth: self-only. The authMiddleware already enforces slug-match; this is a defence-in-depth check.
+	ctxSlug, _ := r.Context().Value(contextKeyUserSlug).(string)
+	if ctxSlug != uslug {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -531,6 +531,7 @@ type GrantAcceptRequest struct {
 // handleGrantAccept handles POST /api/users/{uslug}/hosts/{hslug}/grant/accept (ADR-0091).
 // Body: {x25519_fingerprint}. CP verifies fingerprint matches user_host_agents.x25519_pub.
 // Match → sets host_grants.status='accepted', publishes activation signal. Mismatch → 409.
+// Auth: self only — uslug must match JWT subject (ADR-0101: no admin bypass).
 func (s *Server) handleGrantAccept(w http.ResponseWriter, r *http.Request, uslug, hslug string) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -541,8 +542,9 @@ func (s *Server) handleGrantAccept(w http.ResponseWriter, r *http.Request, uslug
 		return
 	}
 
-	// Auth: self-only (or admin bypass).
-	if err := s.requireSelfOrAdmin(r, uslug); err != nil {
+	// Auth: self-only. The authMiddleware already enforces slug-match; this is a defence-in-depth check.
+	ctxSlug, _ := r.Context().Value(contextKeyUserSlug).(string)
+	if ctxSlug != uslug {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -604,6 +606,7 @@ type UserAgentPubkeyResponse struct {
 // Returns the user-agent's X25519 public key from user_host_agents.
 // SPA reads this to perform crypto_box_seal(token, x25519_pub) before publishing to .agent.token-delivery.
 // 404 if x25519_pub is NULL (agent not yet registered).
+// Auth: self only — uslug must match JWT subject (ADR-0101: no admin bypass).
 func (s *Server) handleUserAgentPubkey(w http.ResponseWriter, r *http.Request, uslug, hslug string) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -614,8 +617,9 @@ func (s *Server) handleUserAgentPubkey(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 
-	// Auth: self-only (or admin bypass).
-	if err := s.requireSelfOrAdmin(r, uslug); err != nil {
+	// Auth: self-only. The authMiddleware already enforces slug-match; this is a defence-in-depth check.
+	ctxSlug, _ := r.Context().Value(contextKeyUserSlug).(string)
+	if ctxSlug != uslug {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -642,29 +646,6 @@ func (s *Server) handleUserAgentPubkey(w http.ResponseWriter, r *http.Request, u
 func computeX25519Fingerprint(x25519Pub string) string {
 	h := sha256.Sum256([]byte(x25519Pub))
 	return hex.EncodeToString(h[:])
-}
-
-// requireSelfOrAdmin checks that the authenticated user matches uslug (or is admin).
-// Returns nil on success, error on failure.
-func (s *Server) requireSelfOrAdmin(r *http.Request, uslug string) error {
-	userID, ok := r.Context().Value(contextKeyUserID).(string)
-	if !ok || userID == "" {
-		return fmt.Errorf("not authenticated")
-	}
-	if s.db == nil {
-		return fmt.Errorf("db not available")
-	}
-	user, err := s.db.GetUserByID(r.Context(), userID)
-	if err != nil || user == nil {
-		return fmt.Errorf("user not found")
-	}
-	if user.IsAdmin {
-		return nil // admin bypass
-	}
-	if user.Slug == uslug {
-		return nil // self
-	}
-	return fmt.Errorf("forbidden")
 }
 
 // slugify converts a display name to a URL-safe slug.

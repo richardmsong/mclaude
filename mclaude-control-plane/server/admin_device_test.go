@@ -1,6 +1,7 @@
 package server
 
-// Unit tests for the three ADR-0065 prerequisite changes (CP side).
+// Unit tests for ADR-0065 prerequisite changes (CP side).
+// AdminUserResponse tests removed per ADR-0101 (admin.go deleted).
 // All tests run without a database (nil DB) or a real NATS server.
 // Integration tests for the DB-dependent paths are in adr0065_integration_test.go.
 
@@ -13,56 +14,6 @@ import (
 	"testing"
 	"time"
 )
-
-// ---- AdminUserResponse.Slug (ADR-0065 item 5) ----
-
-// TestAdminUserResponse_SlugField verifies that AdminUserResponse includes "slug"
-// in its JSON representation.  ADR-0065: TestMain uses the slug field to
-// construct GET /api/users/{uslug}/... paths after POST /admin/users.
-func TestAdminUserResponse_SlugField(t *testing.T) {
-	resp := AdminUserResponse{
-		ID:    "u1",
-		Email: "alice@example.com",
-		Name:  "Alice",
-		Slug:  "alice-example-com",
-	}
-	b, err := json.Marshal(resp)
-	if err != nil {
-		t.Fatalf("marshal AdminUserResponse: %v", err)
-	}
-	body := string(b)
-
-	// slug field must be present in the JSON output.
-	if !strings.Contains(body, `"slug"`) {
-		t.Errorf("AdminUserResponse JSON missing \"slug\" field; got: %s", body)
-	}
-	// The slug value must match what was set.
-	if !strings.Contains(body, `"alice-example-com"`) {
-		t.Errorf("AdminUserResponse JSON has wrong slug value; got: %s", body)
-	}
-	// Existing fields must still be present.
-	for _, field := range []string{`"id"`, `"email"`, `"name"`} {
-		if !strings.Contains(body, field) {
-			t.Errorf("AdminUserResponse JSON missing field %s; got: %s", field, body)
-		}
-	}
-	// password_hash must NOT appear.
-	if strings.Contains(body, "password") {
-		t.Error("AdminUserResponse must not expose password fields")
-	}
-}
-
-// TestAdminUserResponse_SlugEmpty verifies that an empty slug is still marshalled.
-// This covers the zero-value case without DB.
-func TestAdminUserResponse_SlugEmpty(t *testing.T) {
-	resp := AdminUserResponse{ID: "u1", Email: "a@b.com", Name: "A", Slug: ""}
-	b, _ := json.Marshal(resp)
-	body := string(b)
-	// slug key must appear even when empty.
-	if !strings.Contains(body, `"slug"`) {
-		t.Errorf("AdminUserResponse JSON must include slug key even when empty; got: %s", body)
-	}
-}
 
 // ---- CLIDeviceCodeRequest.PublicKey decode + store path (ADR-0065 items 2, 3) ----
 

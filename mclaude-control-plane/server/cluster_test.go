@@ -444,40 +444,15 @@ func adminJWT(t *testing.T) string {
 	return lr.JWT
 }
 
-// ---- ADR-0089: User project KV test (replaces TestCluster_DevUserProjectInKV) ----
+// ---- ADR-0089/ADR-0101: User project KV test ----
+// Admin HTTP route removed per ADR-0101; user seeded via direct DB access.
 
 func TestCluster_UserProjectInKV(t *testing.T) {
-	jwt := adminJWT(t)
-
-	// Create ephemeral user via POST /admin/users
+	// Seed the test user via direct DB access (ADR-0101: /admin/users route removed).
 	userID := fmt.Sprintf("cluster-test-proj-%d", time.Now().UnixNano())
 	email := fmt.Sprintf("%s@test.mclaude.local", userID)
 	password := "test-password-proj"
 
-	createBody, _ := json.Marshal(AdminUserRequest{
-		ID:       userID,
-		Email:    email,
-		Name:     "Cluster Project Test User",
-		Password: password,
-	})
-	req, _ := http.NewRequest(http.MethodPost, cluster.CPURL+"/admin/users", bytes.NewReader(createBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+jwt)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("admin create user: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("admin create user status: %d", resp.StatusCode)
-	}
-
-	var created AdminUserResponse
-	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
-		t.Fatalf("decode create user response: %v", err)
-	}
-
-	// Cleanup: delete user after test via direct DB access
 	ctx := context.Background()
 	pgPass, err := exec.Command("kubectl", "get", "secret", "mclaude-postgres",
 		"-n", "mclaude-system",
@@ -500,6 +475,14 @@ func TestCluster_UserProjectInKV(t *testing.T) {
 		db.DeleteUser(ctx, userID) //nolint:errcheck
 		db.Close()
 	})
+
+	hash, err := HashPassword(password)
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	if _, err := db.CreateUser(ctx, userID, email, "Cluster Project Test User", hash); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
 
 	// ADR-0100: generate NKey client-side before login.
 	userNKeyKP, err := nkeys.CreateUser()
