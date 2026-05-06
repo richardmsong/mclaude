@@ -341,7 +341,7 @@ func (p *Provisioner) buildDeployment(req ProvisionRequest, tpl *sessionAgentTpl
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
 			Strategy: appsv1.DeploymentStrategy{
-				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				Type: appsv1.RecreateDeploymentStrategyType,
 			},
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
