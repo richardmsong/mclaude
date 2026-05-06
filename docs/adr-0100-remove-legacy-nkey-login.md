@@ -1,8 +1,9 @@
 # ADR: Remove legacy server-generated NKey login path
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-06: accepted
+- 2026-05-06: implemented — all scope CLEAN
 
 ## Overview
 
