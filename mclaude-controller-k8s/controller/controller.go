@@ -28,6 +28,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -70,39 +71,12 @@ func Run() {
 	// completes, but the process is always "alive" (200 on /healthz).
 	var authenticated atomic.Bool
 
-	// Start the health probe HTTP server before the blocking BootRefresh loop.
-	// This prevents the liveness probe from killing the pod while the controller is
-	// waiting for its NKey to be registered with the control plane.
-	//
-	// /healthz — always 200 (process is alive)
-	// /readyz  — 200 once authenticated, 503 before that
-	healthProbeAddr := EnvOr("HEALTH_PROBE_ADDR", ":8081")
-	startEarlyHealthServer(healthProbeAddr, &authenticated, logger)
-
-	// ADR-0063 boot sequence:
-	// 1. Load NKey seed from mounted Secret file.
-	// 2. Refresh() → HTTP challenge-response → receive host JWT. Retry on ErrNotRegistered.
-	// 3. Decode hslug from the JWT name ("host-{hslug}").
-	// 4. Connect to hub NATS with the host JWT.
-	// 5. Start background JWT refresh loop.
+	// ADR-0063 boot sequence: load NKey seed. Fatal if missing — Secret not mounted.
 	auth, err := hostauth.NewHostAuthFromSeed(seedPath, controlPlaneURL, logger)
 	if err != nil {
 		logger.Fatal().Err(err).Str("seedPath", seedPath).Msg("load NKey seed")
 	}
-
-	logger.Info().Str("pubkey", auth.PublicKey()).Msg("NKey loaded — acquiring host JWT via challenge-response")
-
-	ctx := context.Background()
-	hostJWT := BootRefresh(ctx, auth, logger)
-
-	// Authentication succeeded — mark the pod as ready.
-	authenticated.Store(true)
-
-	hslug, err := HostSlugFromJWT(hostJWT)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("decode host slug from JWT")
-	}
-	logger.Info().Str("hslug", hslug).Msg("host slug decoded from JWT")
+	logger.Info().Str("pubkey", auth.PublicKey()).Msg("NKey loaded — will acquire host JWT via challenge-response")
 
 	// Set up controller-runtime scheme (standard Kubernetes types only — no MCProject CRD per ADR-0091).
 	scheme := runtime.NewScheme()
@@ -111,17 +85,16 @@ func Run() {
 	}
 
 	restCfg := ctrl.GetConfigOrDie()
-
 	leaderElectionNs := EnvOr("LEADER_ELECTION_NAMESPACE", "mclaude-system")
 
 	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
-		Scheme: scheme,
+		Scheme:  scheme,
 		Metrics: metricsserver.Options{BindAddress: EnvOr("METRICS_ADDR", ":8082")},
-		// Disable the manager's built-in health probe server — we run our own early
-		// health server (startEarlyHealthServer) so the liveness probe is satisfied
-		// before BootRefresh completes. Setting HealthProbeBindAddress to "" disables
-		// the manager's probe endpoint entirely.
-		HealthProbeBindAddress:  "",
+		// HealthProbeBindAddress uses the manager's built-in health server.
+		// The manager starts this server when mgr.Start() is called, before
+		// our boot runnable executes — so the liveness probe is satisfied
+		// even while BootRefresh (challenge-response auth) is in progress.
+		HealthProbeBindAddress:  EnvOr("HEALTH_PROBE_ADDR", ":8081"),
 		LeaderElection:          EnvOr("LEADER_ELECTION", "false") == "true",
 		LeaderElectionID:        "mclaude-controller-k8s",
 		LeaderElectionNamespace: leaderElectionNs,
@@ -130,50 +103,88 @@ func Run() {
 		logger.Fatal().Err(err).Msg("create controller-runtime manager")
 	}
 
-	// No AddHealthzCheck / AddReadyzCheck needed — the early health server handles
-	// both endpoints for the lifetime of the process.
-	_ = healthz.Ping // imported for use in tests
+	// /healthz — always 200 (process is alive, liveness probe).
+	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
+		logger.Fatal().Err(err).Msg("add healthz check")
+	}
+
+	// /readyz — 200 only after BootRefresh succeeds (readiness probe).
+	if err := mgr.AddReadyzCheck("authenticated", func(_ *http.Request) error {
+		if !authenticated.Load() {
+			return errors.New("not authenticated")
+		}
+		return nil
+	}); err != nil {
+		logger.Fatal().Err(err).Msg("add readyz check")
+	}
 
 	// Determine controller namespace.
 	controlPlaneNs := DetectNamespace()
 
-	// Connect to hub NATS using the host JWT (ADR-0063).
-	nc, err := nats.Connect(hubNATSURL,
-		nats.UserJWT(auth.JWTFunc(), auth.SignFunc()),
-		nats.RetryOnFailedConnect(true),
-		nats.MaxReconnects(-1),
-	)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("connect to nats")
-	}
-	defer nc.Close()
+	// Register the boot runnable. controller-runtime starts all Runnables after
+	// the health server is up, so the liveness probe is already satisfied when
+	// BootRefresh blocks waiting for the operator to register the NKey.
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		// ADR-0063 boot sequence:
+		// 1. Refresh() → HTTP challenge-response → receive host JWT. Retry on ErrNotRegistered.
+		// 2. Decode hslug from the JWT name ("host-{hslug}").
+		// 3. Connect to hub NATS with the host JWT.
+		// 4. Start background JWT refresh loop.
+		hostJWT := BootRefresh(ctx, auth, logger)
 
-	// Start background JWT refresh loop (ADR-0063).
-	auth.StartRefreshLoop(ctx)
+		// Authentication succeeded — mark the pod as ready.
+		authenticated.Store(true)
 
-	// Per-user reconciler (ADR-0091).
-	userReconciler := &UserReconciler{
-		client:          mgr.GetClient(),
-		controlPlaneNs:  controlPlaneNs,
-		releaseName:     helmReleaseName,
-		hslug:           hslug,
-		controlPlaneURL: controlPlaneURL,
-		hubNATSURL:      hubNATSURL,
-		nc:              nc,
-		logger:          logger.With().Str("reconciler", "user").Logger(),
-	}
+		hslug, err := HostSlugFromJWT(hostJWT)
+		if err != nil {
+			return fmt.Errorf("decode host slug from JWT: %w", err)
+		}
+		logger.Info().Str("hslug", hslug).Msg("host slug decoded from JWT")
 
-	// NATS subscriber — grants.create + projects.update.
-	subscriber := &NATSSubscriber{
-		nc:             nc,
-		hslug:          hslug,
-		userReconciler: userReconciler,
-		logger:         logger.With().Str("subscriber", "nats").Logger(),
+		// Connect to hub NATS using the host JWT (ADR-0063).
+		nc, err := nats.Connect(hubNATSURL,
+			nats.UserJWT(auth.JWTFunc(), auth.SignFunc()),
+			nats.RetryOnFailedConnect(true),
+			nats.MaxReconnects(-1),
+		)
+		if err != nil {
+			return fmt.Errorf("connect to nats: %w", err)
+		}
+		defer nc.Close()
+
+		// Start background JWT refresh loop (ADR-0063).
+		auth.StartRefreshLoop(ctx)
+
+		// Per-user reconciler (ADR-0091).
+		userReconciler := &UserReconciler{
+			client:          mgr.GetClient(),
+			controlPlaneNs:  controlPlaneNs,
+			releaseName:     helmReleaseName,
+			hslug:           hslug,
+			controlPlaneURL: controlPlaneURL,
+			hubNATSURL:      hubNATSURL,
+			nc:              nc,
+			logger:          logger.With().Str("reconciler", "user").Logger(),
+		}
+
+		// NATS subscriber — grants.create + projects.update.
+		subscriber := &NATSSubscriber{
+			nc:             nc,
+			hslug:          hslug,
+			userReconciler: userReconciler,
+			logger:         logger.With().Str("subscriber", "nats").Logger(),
+		}
+		if err := subscriber.StartNATSSubscriber(); err != nil {
+			return fmt.Errorf("start NATS subscriber: %w", err)
+		}
+		logger.Info().Str("hslug", hslug).Msg("NATS subscriber started")
+
+		// Block until context is cancelled (manager shutdown).
+		<-ctx.Done()
+		return nil
+	})); err != nil {
+		logger.Fatal().Err(err).Msg("add boot runnable")
 	}
-	if err := subscriber.StartNATSSubscriber(); err != nil {
-		logger.Fatal().Err(err).Msg("start NATS subscriber")
-	}
-	logger.Info().Str("hslug", hslug).Msg("NATS subscriber started")
 
 	logger.Info().Msg("starting controller-runtime manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
@@ -261,41 +272,3 @@ func EnvOr(key, def string) string {
 	return def
 }
 
-// startEarlyHealthServer starts a minimal HTTP server on addr before the blocking
-// BootRefresh loop. This prevents the Kubernetes liveness probe from killing the pod
-// while the controller is waiting for its NKey to be registered.
-//
-//   - GET /healthz — always returns 200 OK (process is alive)
-//   - GET /readyz  — returns 200 OK once authenticated is true, 503 otherwise
-//
-// The server runs in a background goroutine for the lifetime of the process.
-func startEarlyHealthServer(addr string, authenticated *atomic.Bool, log zerolog.Logger) {
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		if authenticated.Load() {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok"))
-		} else {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte("not authenticated"))
-		}
-	})
-
-	srv := &http.Server{
-		Addr:    addr,
-		Handler: mux,
-	}
-
-	go func() {
-		log.Info().Str("addr", addr).Msg("early health server listening")
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Error().Err(err).Msg("early health server error")
-		}
-	}()
-}
