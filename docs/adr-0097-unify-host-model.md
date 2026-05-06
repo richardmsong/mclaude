@@ -104,7 +104,7 @@ No local files are written except `~/.mclaude/hosts/{hslug}/config.json` (for `h
 - `--default-platform` — optional flag, included in NATS registration payload.
 - `--name <name>` — required display name.
 - CLI publishes to `mclaude.users.{uslug}.hosts._.register` via the user's NATS JWT (obtained during `mclaude login`). No HTTP endpoint involved.
-- On success, writes `~/.mclaude/hosts/{hslug}/config.json` with `hubUrl`. No `nkey.seed`, no `nats.creds`, no `active-host` symlink.
+- On success, writes `~/.mclaude/hosts/{hslug}/config.json` with `hubUrl` (read from `auth.json.natsUrl` — the NATS WebSocket URL obtained during `mclaude login`). No `nkey.seed`, no `nats.creds`, no `active-host` symlink.
 
 ### `mclaude-web` (SPA)
 
