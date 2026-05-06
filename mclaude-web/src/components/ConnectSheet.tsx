@@ -147,6 +147,7 @@ export function ConnectSheet({ firstRun = false, onTokenObtained, onDismiss, aut
     authUrl.searchParams.set('code_challenge', codeChallenge)
     authUrl.searchParams.set('code_challenge_method', 'S256')
     authUrl.searchParams.set('state', state)
+    authUrl.searchParams.set('scope', 'user:inference')
 
     const popup = window.open(authUrl.toString(), '_blank', 'width=500,height=700,menubar=no,toolbar=no,status=no')
 

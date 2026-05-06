@@ -232,4 +232,24 @@ describe('ConnectSheet', () => {
       expect(screen.getByText(/state mismatch/i)).toBeTruthy()
     })
   })
+
+  it('authorize URL includes scope=user:inference (ADR-0103)', async () => {
+    let capturedUrl: string | undefined
+    vi.spyOn(window, 'open').mockImplementation((url) => {
+      capturedUrl = url as string
+      return { closed: false } as Window
+    })
+
+    render(
+      <ConnectSheet onTokenObtained={() => {}} authClient={makeAuthClient()} />
+    )
+    const oauthBtn = screen.getByText(/sign in with claude/i)
+    await act(async () => {
+      fireEvent.click(oauthBtn)
+    })
+
+    expect(capturedUrl).toBeDefined()
+    const params = new URL(capturedUrl!).searchParams
+    expect(params.get('scope')).toBe('user:inference')
+  })
 })
