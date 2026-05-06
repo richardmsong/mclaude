@@ -34,6 +34,8 @@ describe('PermissionPromptVM', () => {
       'user-1',
       'project-1',
       'session-1',
+      'user-1',
+      'test-host',
     )
 
     vm = new PermissionPromptVM(conversationVM)

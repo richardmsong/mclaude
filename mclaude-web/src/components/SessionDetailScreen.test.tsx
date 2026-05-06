@@ -34,7 +34,7 @@ function makeVM(mockNats: MockNATSClient) {
     projectId: 'proj-1',
     sessionId: 'sess-1',
   })
-  const vm = new ConversationVM(eventStore, sessionStore, mockNats, 'user-1', 'proj-1', 'sess-1')
+  const vm = new ConversationVM(eventStore, sessionStore, mockNats, 'user-1', 'proj-1', 'sess-1', 'user-1', 'test-host')
   return vm
 }
 

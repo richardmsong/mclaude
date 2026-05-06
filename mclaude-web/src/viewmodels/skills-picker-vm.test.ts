@@ -37,6 +37,8 @@ describe('SkillsPickerVM', () => {
       'user-1',
       'project-1',
       'session-1',
+      'user-1',
+      'test-host',
     )
 
     vm = new SkillsPickerVM(sessionStore, conversationVM, 'session-1')
