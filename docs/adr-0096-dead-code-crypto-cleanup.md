@@ -1,9 +1,10 @@
 # ADR: Dead code removal, crypto stdlib migration, and control-plane package restructure
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-05: draft
 - 2026-05-05: accepted — no spec changes (class D refactor)
+- 2026-05-06: implemented — all scope CLEAN
 
 ## Overview
 
