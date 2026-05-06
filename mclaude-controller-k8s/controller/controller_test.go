@@ -7,7 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1453,5 +1457,87 @@ func TestCaBundleHash(t *testing.T) {
 	// Empty CM should return empty string.
 	if caBundleHash(&corev1.ConfigMap{}) != "" {
 		t.Error("empty CM should return empty hash")
+	}
+}
+
+// ---- unit tests: early health server ----
+
+// freeAddr returns a localhost address with an unused port.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("freeAddr: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+	return addr
+}
+
+// TestEarlyHealthServer_HealthzAlwaysOK verifies that /healthz returns 200
+// both before and after authentication, ensuring the liveness probe never
+// kills the pod during the BootRefresh waiting period.
+func TestEarlyHealthServer_HealthzAlwaysOK(t *testing.T) {
+	var authenticated atomic.Bool
+	addr := freeAddr(t)
+	startEarlyHealthServer(addr, &authenticated, zerolog.Nop())
+
+	// Give the goroutine a moment to bind.
+	time.Sleep(20 * time.Millisecond)
+
+	// Before auth — /healthz must be 200.
+	resp, err := http.Get("http://" + addr + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz (pre-auth): %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("/healthz pre-auth: got %d, want 200", resp.StatusCode)
+	}
+
+	// After auth — /healthz must still be 200.
+	authenticated.Store(true)
+	resp2, err := http.Get("http://" + addr + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz (post-auth): %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("/healthz post-auth: got %d, want 200", resp2.StatusCode)
+	}
+}
+
+// TestEarlyHealthServer_ReadyzGatedOnAuth verifies that /readyz returns 503
+// before authentication and 200 after authentication.
+func TestEarlyHealthServer_ReadyzGatedOnAuth(t *testing.T) {
+	var authenticated atomic.Bool
+	addr := freeAddr(t)
+	startEarlyHealthServer(addr, &authenticated, zerolog.Nop())
+
+	time.Sleep(20 * time.Millisecond)
+
+	// Before auth — /readyz must be 503.
+	resp, err := http.Get("http://" + addr + "/readyz")
+	if err != nil {
+		t.Fatalf("GET /readyz (pre-auth): %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("/readyz pre-auth: got %d, want 503 — body: %s", resp.StatusCode, body)
+	}
+
+	// Simulate successful authentication.
+	authenticated.Store(true)
+
+	// After auth — /readyz must be 200.
+	resp2, err := http.Get("http://" + addr + "/readyz")
+	if err != nil {
+		t.Fatalf("GET /readyz (post-auth): %v", err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	_ = resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("/readyz post-auth: got %d, want 200 — body: %s", resp2.StatusCode, body2)
 	}
 }

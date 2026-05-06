@@ -19,8 +19,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -63,6 +65,20 @@ func Run() {
 	seedPath := EnvOr("HOST_NKEY_SEED_PATH", "/etc/mclaude/host-creds/nkey_seed")
 	helmReleaseName := EnvOr("HELM_RELEASE_NAME", "mclaude-worker")
 
+	// authenticated is set to true after the challenge-response boot sequence succeeds.
+	// It gates the /readyz probe — the pod stays "not ready" (503) until authentication
+	// completes, but the process is always "alive" (200 on /healthz).
+	var authenticated atomic.Bool
+
+	// Start the health probe HTTP server before the blocking BootRefresh loop.
+	// This prevents the liveness probe from killing the pod while the controller is
+	// waiting for its NKey to be registered with the control plane.
+	//
+	// /healthz — always 200 (process is alive)
+	// /readyz  — 200 once authenticated, 503 before that
+	healthProbeAddr := EnvOr("HEALTH_PROBE_ADDR", ":8081")
+	startEarlyHealthServer(healthProbeAddr, &authenticated, logger)
+
 	// ADR-0063 boot sequence:
 	// 1. Load NKey seed from mounted Secret file.
 	// 2. Refresh() → HTTP challenge-response → receive host JWT. Retry on ErrNotRegistered.
@@ -78,6 +94,9 @@ func Run() {
 
 	ctx := context.Background()
 	hostJWT := BootRefresh(ctx, auth, logger)
+
+	// Authentication succeeded — mark the pod as ready.
+	authenticated.Store(true)
 
 	hslug, err := HostSlugFromJWT(hostJWT)
 	if err != nil {
@@ -96,9 +115,13 @@ func Run() {
 	leaderElectionNs := EnvOr("LEADER_ELECTION_NAMESPACE", "mclaude-system")
 
 	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
-		Scheme:                  scheme,
-		Metrics:                 metricsserver.Options{BindAddress: EnvOr("METRICS_ADDR", ":8082")},
-		HealthProbeBindAddress:  EnvOr("HEALTH_PROBE_ADDR", ":8081"),
+		Scheme: scheme,
+		Metrics: metricsserver.Options{BindAddress: EnvOr("METRICS_ADDR", ":8082")},
+		// Disable the manager's built-in health probe server — we run our own early
+		// health server (startEarlyHealthServer) so the liveness probe is satisfied
+		// before BootRefresh completes. Setting HealthProbeBindAddress to "" disables
+		// the manager's probe endpoint entirely.
+		HealthProbeBindAddress:  "",
 		LeaderElection:          EnvOr("LEADER_ELECTION", "false") == "true",
 		LeaderElectionID:        "mclaude-controller-k8s",
 		LeaderElectionNamespace: leaderElectionNs,
@@ -107,12 +130,9 @@ func Run() {
 		logger.Fatal().Err(err).Msg("create controller-runtime manager")
 	}
 
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		logger.Fatal().Err(err).Msg("setup health check")
-	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		logger.Fatal().Err(err).Msg("setup ready check")
-	}
+	// No AddHealthzCheck / AddReadyzCheck needed — the early health server handles
+	// both endpoints for the lifetime of the process.
+	_ = healthz.Ping // imported for use in tests
 
 	// Determine controller namespace.
 	controlPlaneNs := DetectNamespace()
@@ -239,4 +259,43 @@ func EnvOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// startEarlyHealthServer starts a minimal HTTP server on addr before the blocking
+// BootRefresh loop. This prevents the Kubernetes liveness probe from killing the pod
+// while the controller is waiting for its NKey to be registered.
+//
+//   - GET /healthz — always returns 200 OK (process is alive)
+//   - GET /readyz  — returns 200 OK once authenticated is true, 503 otherwise
+//
+// The server runs in a background goroutine for the lifetime of the process.
+func startEarlyHealthServer(addr string, authenticated *atomic.Bool, log zerolog.Logger) {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if authenticated.Load() {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("ok"))
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("not authenticated"))
+		}
+	})
+
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	go func() {
+		log.Info().Str("addr", addr).Msg("early health server listening")
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error().Err(err).Msg("early health server error")
+		}
+	}()
 }
