@@ -1,2 +1,4 @@
-mclaude-user-agent
-user-agent
+# Binary artifacts (not the cmd/ directory)
+/mclaude-user-agent
+/user-agent
+/dist/

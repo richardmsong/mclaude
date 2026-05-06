@@ -1,3 +1,1 @@
-cmd/control-plane/control-plane-arm64
-cmd/control-plane/control-plane-amd64
-cmd/control-plane/control-plane
+/dist/
