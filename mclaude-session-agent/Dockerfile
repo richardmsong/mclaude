@@ -52,7 +52,7 @@ RUN chmod +x /usr/local/bin/pkg && \
     ln -sf /usr/local/bin/pkg /usr/local/bin/apt && \
     ln -sf /usr/local/bin/pkg /usr/local/bin/brew
 
-COPY --chmod=0755 session-agent-${TARGETARCH} /usr/local/bin/session-agent
+COPY --chmod=0755 cmd/session-agent/session-agent-${TARGETARCH} /usr/local/bin/session-agent
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 ENV LOG_LEVEL=info

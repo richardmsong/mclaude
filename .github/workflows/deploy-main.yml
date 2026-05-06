@@ -192,14 +192,14 @@ jobs:
       - name: Build binaries
         working-directory: mclaude-session-agent
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o session-agent-arm64 .
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o session-agent-amd64 .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o cmd/session-agent/session-agent-arm64 ./cmd/session-agent/
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o cmd/session-agent/session-agent-amd64 ./cmd/session-agent/
       - uses: actions/upload-artifact@v4
         with:
           name: session-agent-binaries
           path: |
-            mclaude-session-agent/session-agent-arm64
-            mclaude-session-agent/session-agent-amd64
+            mclaude-session-agent/cmd/session-agent/session-agent-arm64
+            mclaude-session-agent/cmd/session-agent/session-agent-amd64
 
   build-session-agent-image:
     name: Docker session-agent (${{ matrix.arch }})
@@ -280,14 +280,14 @@ jobs:
       - name: Build binaries
         working-directory: mclaude-controller-k8s
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o controller-k8s-arm64 .
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o controller-k8s-amd64 .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o cmd/controller-k8s/controller-k8s-arm64 ./cmd/controller-k8s/
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o cmd/controller-k8s/controller-k8s-amd64 ./cmd/controller-k8s/
       - uses: actions/upload-artifact@v4
         with:
           name: controller-k8s-binaries
           path: |
-            mclaude-controller-k8s/controller-k8s-arm64
-            mclaude-controller-k8s/controller-k8s-amd64
+            mclaude-controller-k8s/cmd/controller-k8s/controller-k8s-arm64
+            mclaude-controller-k8s/cmd/controller-k8s/controller-k8s-amd64
 
   build-controller-k8s-image:
     name: Docker controller-k8s (${{ matrix.arch }})
@@ -349,6 +349,94 @@ jobs:
             -t ${{ env.GHCR }}/mclaude-controller-k8s:main \
             ${{ env.GHCR }}/mclaude-controller-k8s:${TAG}-amd64 \
             ${{ env.GHCR }}/mclaude-controller-k8s:${TAG}-arm64
+
+  # ---------------------------------------------------------------------------
+  # User-agent
+  # ---------------------------------------------------------------------------
+  build-user-agent-binaries:
+    name: Build user-agent binaries
+    needs: tag
+    runs-on: self-hosted
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mclaude-user-agent/go.mod
+          cache: false
+      - name: Build binaries
+        working-directory: mclaude-user-agent
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o cmd/user-agent/user-agent-arm64 ./cmd/user-agent/
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o cmd/user-agent/user-agent-amd64 ./cmd/user-agent/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: user-agent-binaries
+          path: |
+            mclaude-user-agent/cmd/user-agent/user-agent-arm64
+            mclaude-user-agent/cmd/user-agent/user-agent-amd64
+
+  build-user-agent-image:
+    name: Docker user-agent (${{ matrix.arch }})
+    needs: [tag, build-user-agent-binaries]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: self-hosted
+          - arch: amd64
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: user-agent-binaries
+          path: mclaude-user-agent
+      - name: Authenticate to GHCR
+        run: |
+          mkdir -p "$RUNNER_TEMP/docker"
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
+            "$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64)" \
+            > "$RUNNER_TEMP/docker/config.json"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./mclaude-user-agent
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: ${{ env.GHCR }}/mclaude-user-agent:${{ needs.tag.outputs.image_tag }}-${{ matrix.arch }}
+
+  merge-user-agent:
+    name: Merge user-agent manifest
+    needs: [tag, build-user-agent-image]
+    runs-on: self-hosted
+    permissions:
+      packages: write
+    steps:
+      - name: Authenticate to GHCR
+        run: |
+          mkdir -p "$RUNNER_TEMP/docker"
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' \
+            "$(printf '%s:%s' '${{ github.actor }}' '${{ secrets.GITHUB_TOKEN }}' | base64)" \
+            > "$RUNNER_TEMP/docker/config.json"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - name: Create multi-arch manifest
+        env:
+          TAG: ${{ needs.tag.outputs.image_tag }}
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.GHCR }}/mclaude-user-agent:${TAG} \
+            -t ${{ env.GHCR }}/mclaude-user-agent:main \
+            ${{ env.GHCR }}/mclaude-user-agent:${TAG}-amd64 \
+            ${{ env.GHCR }}/mclaude-user-agent:${TAG}-arm64
 
   # ---------------------------------------------------------------------------
   # Deploy
