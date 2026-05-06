@@ -1,8 +1,9 @@
 # ADR: Fix missing scope parameter in OAuth PKCE authorize URL
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-06: accepted
+- 2026-05-06: implemented — all scope CLEAN
 
 ## Overview
 
