@@ -20,16 +20,35 @@ spec:
         app.kubernetes.io/component: minio-bucket-job
     spec:
       restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       {{- include "mclaude-cp.imagePullSecrets" . | nindent 6 }}
       initContainers:
         - name: wait-ready
-          image: {{ include "mclaude-cp.image" (dict "imageValues" .Values.minio.mcImage "global" .Values.global) }}
-          imagePullPolicy: {{ .Values.minio.mcImage.pullPolicy }}
+          image: {{ include "mclaude-cp.image" (dict "imageValues" .Values.minio.image "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.minio.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
           command:
-            - sh
+            - /usr/bin/sh
             - -c
-            - {{ printf "mc alias set local http://%s-minio:9000 $ACCESS_KEY $SECRET_KEY && i=0; while [ $i -lt 60 ]; do mc ready local && break; i=$((i+1)); sleep 1; done" (include "mclaude-cp.fullname" .) | quote }}
+            - {{ printf "/usr/bin/mc alias set local http://%s-minio:9000 $ACCESS_KEY $SECRET_KEY && i=0; while [ $i -lt 60 ]; do /usr/bin/mc ready local && break; i=$((i+1)); sleep 1; done" (include "mclaude-cp.fullname" .) | quote }}
           env:
+            - name: MC_CONFIG_DIR
+              value: /tmp/.mc
             - name: ACCESS_KEY
               valueFrom:
                 secretKeyRef:
@@ -42,16 +61,27 @@ spec:
                   key: secret-key
           volumeMounts:
             - name: mc-config
-              mountPath: /root/.mc
+              mountPath: /tmp/.mc
       containers:
         - name: create-bucket
-          image: {{ include "mclaude-cp.image" (dict "imageValues" .Values.minio.mcImage "global" .Values.global) }}
-          imagePullPolicy: {{ .Values.minio.mcImage.pullPolicy }}
+          image: {{ include "mclaude-cp.image" (dict "imageValues" .Values.minio.image "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.minio.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
           command:
-            - sh
+            - /usr/bin/sh
             - -c
-            - "mc mb --ignore-existing local/{{ .Values.minio.bucket }}"
+            - "/usr/bin/mc mb --ignore-existing local/{{ .Values.minio.bucket }}"
           env:
+            - name: MC_CONFIG_DIR
+              value: /tmp/.mc
             - name: ACCESS_KEY
               valueFrom:
                 secretKeyRef:
@@ -64,7 +94,7 @@ spec:
                   key: secret-key
           volumeMounts:
             - name: mc-config
-              mountPath: /root/.mc
+              mountPath: /tmp/.mc
       volumes:
         - name: mc-config
           emptyDir: {}
