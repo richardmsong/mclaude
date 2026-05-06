@@ -54,21 +54,12 @@ export interface AuthTokens {
 
 // ─── Host / project info from login response (ADR-0035) ──────────────────────
 
-export type HostType = 'machine' | 'cluster'
-export type HostRole = 'owner' | 'user'
-
-/** Host entry from the login response (ADR-0035). */
+/** Host entry from the login response (ADR-0035). Per ADR-0097: no type or role field — all hosts are uniform. */
 export interface HostInfo {
   slug: string
   name: string
-  type: HostType
-  role: HostRole
   online: boolean
   lastSeenAt?: string
-  /** JetStream domain — present only for cluster-type hosts. */
-  jsDomain?: string
-  /** Direct NATS URL — present only for cluster-type hosts with direct access. */
-  directNatsUrl?: string
 }
 
 /** Project entry from the login response (ADR-0035). */
@@ -76,11 +67,6 @@ export interface LoginProject {
   slug: string
   name: string
   hostSlug: string
-  hostType: HostType
-  /** JetStream domain — present only when the project's host is a cluster. */
-  jsDomain?: string
-  /** Direct NATS URL — present only when the project's host is a cluster. */
-  directNatsUrl?: string
 }
 
 export interface IAuthClient {

@@ -40,11 +40,6 @@ export class AuthStore {
     return this._tokens?.projects ?? []
   }
 
-  /** Cluster-type hosts derived from hosts (ADR-0035). No separate clusters array. */
-  getClusters(): HostInfo[] {
-    return this.getHosts().filter(h => h.type === 'cluster')
-  }
-
   /** Current JWT (ADR-0035). Null if not yet logged in. */
   getJwt(): string | null {
     return this._tokens?.jwt ?? null
