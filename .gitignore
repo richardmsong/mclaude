@@ -33,7 +33,7 @@ node_modules/
 bun.lock
 
 # Build output
-dist/
+**/dist/
 
 # Logs
 *.log
@@ -43,12 +43,15 @@ sidestore-vpn/
 .google-token.json
 .mclaude-env
 
-# Binary artifacts
+# Binary artifacts (legacy root-level names)
 mclaude-connector/mclaude-connector
 mclaude-relay/relay-linux
 mclaude-relay/mclaude-relay
 mclaude-relay/mclaude-connector
 mclaude-controller-local/mclaude-controller-local
+mclaude-session-agent/session-agent
+mclaude-user-agent/user-agent
+mclaude-controller-k8s/controller-k8s
 
 # Playwright test results
 mclaude-web/test-results/
@@ -76,7 +79,13 @@ mclaude-cli/cmd/cli-integration/.test-creds.json
 *.db-shm
 *.db-wal
 
-# Compiled binaries
+# Compiled binaries — cmd/ build output
+**/cmd/*/control-plane*
+**/cmd/*/session-agent*
+**/cmd/*/controller-k8s*
+**/cmd/*/user-agent*
+**/cmd/*/relay
+# Legacy module-root binary names
 mclaude-control-plane/mclaude-control-plane
 mclaude-session-agent/mclaude-session-agent
 mclaude-cli/mclaude-cli
