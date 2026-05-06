@@ -217,9 +217,9 @@ func TestStartRefreshLoop_Fires(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var callbackJWT string
+	var callbackJWT atomic.Value
 	auth.StartRefreshLoopWithInterval(ctx, 50*time.Millisecond, func(jwt string) {
-		callbackJWT = jwt
+		callbackJWT.Store(jwt)
 	})
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -233,8 +233,9 @@ func TestStartRefreshLoop_Fires(t *testing.T) {
 	if refreshCount.Load() < 1 {
 		t.Fatal("refresh loop did not fire within 2 seconds")
 	}
-	if callbackJWT != refreshedJWT {
-		t.Errorf("callback JWT = %q, want %q", callbackJWT, refreshedJWT)
+	got, _ := callbackJWT.Load().(string)
+	if got != refreshedJWT {
+		t.Errorf("callback JWT = %q, want %q", got, refreshedJWT)
 	}
 }
 

@@ -15,7 +15,7 @@ env:
 jobs:
   tag:
     name: Compute image tag
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.tag.outputs.value }}
     steps:
@@ -32,7 +32,7 @@ jobs:
   build-control-plane-binaries:
     name: Build control-plane binaries
     needs: tag
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -91,7 +91,7 @@ jobs:
   merge-control-plane:
     name: Merge control-plane manifest
     needs: [tag, build-control-plane-image]
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       packages: write
     steps:
@@ -151,7 +151,7 @@ jobs:
   merge-spa:
     name: Merge spa manifest
     needs: [tag, build-spa-image]
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       packages: write
     steps:
@@ -179,7 +179,7 @@ jobs:
   build-session-agent-binaries:
     name: Build session-agent binaries
     needs: tag
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -238,7 +238,7 @@ jobs:
   merge-session-agent:
     name: Merge session-agent manifest
     needs: [tag, build-session-agent-image]
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       packages: write
     steps:
@@ -266,7 +266,7 @@ jobs:
   build-controller-k8s-binaries:
     name: Build controller-k8s binaries
     needs: tag
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -325,7 +325,7 @@ jobs:
   merge-controller-k8s:
     name: Merge controller-k8s manifest
     needs: [tag, build-controller-k8s-image]
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       packages: write
     steps:
@@ -353,7 +353,7 @@ jobs:
   build-user-agent-binaries:
     name: Build user-agent binaries
     needs: tag
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -412,7 +412,7 @@ jobs:
   merge-user-agent:
     name: Merge user-agent manifest
     needs: [tag, build-user-agent-image]
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       packages: write
     steps:
