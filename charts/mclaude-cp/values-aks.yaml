@@ -25,7 +25,7 @@ database:
   sslmode: require
 
 controlPlane:
-  replicas: 2
+  replicas: 1
   resources:
     requests:
       cpu: 250m
