@@ -290,7 +290,7 @@ _(none — all resolved)_
 ### mclaude-session-agent
 
 - Report `status: "token_expired"` to session KV when the mounted token fails (Anthropic API returns 401/403). This is a new session status value surfaced to the SPA.
-- **Recovery**: session-agent watches the mounted Secret directory (`/secrets/tokens/`) via `fsnotify` (or polls every 30s). When the token file is updated (user-agent writes new token after re-delivery), session-agent reads the new token, retries the failed Anthropic API call, and transitions back to `running` status. No user action or session restart required — the Secret mount update propagates automatically via kubelet.
+- **Recovery**: session-agent watches the mounted Secret directory (`/secrets/tokens/`) via `fsnotify` (or polls every 30s). When the token file is updated (user-agent writes new token after re-delivery), session-agent restarts the session process via `driver.Resume` with the new token injected as an env override. The session transitions to `idle` on the init event (then `running` on the next user message). This is a process restart (not an in-process retry) — the running process has the old token baked into its environment. No user action required.
 
 ### mclaude-user-agent
 
