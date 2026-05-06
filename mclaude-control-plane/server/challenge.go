@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
 	cpauth "mclaude-control-plane/auth"
 )
 
@@ -245,10 +247,13 @@ func (s *Server) issueJWTForNKey(ctx context.Context, nkeyPublic string, x25519P
 		if err != nil {
 			return "", &authError{"failed to issue user jwt", "INTERNAL_ERROR"}
 		}
-		// ADR-0054: ensure per-user JetStream resources exist on first auth.
+		// ADR-0054/ADR-0098: ensure per-user JetStream resources exist on every auth verify.
 		// ADR-0091: also creates mclaude-user-info-{uslug} KV bucket.
+		// ADR-0098: log at WARN on error but continue — provisioning is best-effort.
 		if s.nc != nil {
-			_ = ensureUserResources(s.nc, user.Slug)
+			if resErr := ensureUserResources(s.nc, user.Slug); resErr != nil {
+				log.Warn().Err(resErr).Str("uslug", user.Slug).Msg("issueJWTForNKey: ensureUserResources partial failure")
+			}
 			// ADR-0091: auto-grant + auto-accept for default platform on user creation.
 			// On first login (or any login), check if a default platform exists.
 			// If so, ensure host_grants row is accepted and publish grants.create so the

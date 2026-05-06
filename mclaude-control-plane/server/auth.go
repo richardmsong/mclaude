@@ -10,6 +10,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
+	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/bcrypt"
 
 	cpauth "mclaude-control-plane/auth"
@@ -177,14 +178,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// No seed returned — client already has its NKey seed.
-
-		// ADR-0054: ensure per-user JetStream resources exist on login.
-		if s.nc != nil {
-			if resErr := ensureUserResources(s.nc, user.Slug); resErr != nil {
-				// Non-fatal: log and continue; resources are created on demand.
-				_ = resErr
-			}
-		}
 	} else {
 		// ADR-0054: CP never generates NKey pairs for clients.
 		// Backward compatibility: if a client does not provide nkey_public, use the
@@ -195,6 +188,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		if legacyErr != nil {
 			http.Error(w, "failed to issue jwt", http.StatusInternalServerError)
 			return
+		}
+	}
+
+	// ADR-0098: ensure per-user JetStream resources exist on every successful login,
+	// regardless of whether NKey or legacy path was used. The call is idempotent —
+	// resources that already exist are no-ops. This backfills users who previously
+	// logged in via the legacy path (no NKey), which did not call ensureUserResources.
+	if s.nc != nil {
+		if resErr := ensureUserResources(s.nc, user.Slug); resErr != nil {
+			// Non-fatal: log at WARN and continue. Missing resources retry on next login.
+			log.Warn().Err(resErr).Str("uslug", user.Slug).Msg("handleLogin: ensureUserResources partial failure")
 		}
 	}
 

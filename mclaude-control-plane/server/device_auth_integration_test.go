@@ -40,7 +40,7 @@ func TestIntegration_HandleGetProjectHTTP_ImportRefNull(t *testing.T) {
 
 	// ADR-0095: insert a test host row before creating a project.
 	hostID := "adr0065-proj-h1"
-	if _, herr := db.pool.Exec(ctx,
+	if _, herr := db.Pool().Exec(ctx,
 		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'test-host-p1', 'Test Host P1', 'machine', 'owner', NOW())
 		 ON CONFLICT (user_id, slug) DO NOTHING`,
 		hostID, userID); herr != nil {
@@ -107,7 +107,7 @@ func TestIntegration_HandleGetProjectHTTP_ImportRefNonNull(t *testing.T) {
 
 	// ADR-0095: insert a test host row before creating a project.
 	hostID := "adr0065-proj-h2"
-	if _, herr := db.pool.Exec(ctx,
+	if _, herr := db.Pool().Exec(ctx,
 		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'test-host-p2', 'Test Host P2', 'machine', 'owner', NOW())
 		 ON CONFLICT (user_id, slug) DO NOTHING`,
 		hostID, userID); herr != nil {

@@ -454,29 +454,70 @@ func ensurePerUserInfoKV(js nats.JetStreamContext, uslug string) (nats.KeyValue,
 	})
 }
 
+// ensurePerUserInfoKVFn is a package-level variable holding the function used to ensure
+// the user-info KV bucket. Tests may override this to inject failures at step 3 of
+// ensureUserResources while verifying step 4 still runs (ADR-0098 error-continues test).
+var ensurePerUserInfoKVFn = ensurePerUserInfoKV
+
 // ensureUserResources creates all per-user JetStream resources on user registration.
 // Per ADR-0054: creates mclaude-sessions-{uslug}, mclaude-projects-{uslug},
 // and MCLAUDE_SESSIONS_{uslug} stream.
 // Per ADR-0091: also creates mclaude-user-info-{uslug} KV bucket.
+//
+// Per ADR-0098: each ensure-step is attempted even if a prior step errors.
+// Individual step errors are logged at WARN with the resource name and error string.
+// The function returns the first observed error after all four steps have been attempted.
 func ensureUserResources(nc *nats.Conn, uslug string) error {
 	js, err := nc.JetStream()
 	if err != nil {
 		return err
 	}
+
+	var firstErr error
+
 	if _, err := ensurePerUserSessionsKV(js, uslug); err != nil {
-		return err
+		log.Warn().Err(err).
+			Str("bucket", "mclaude-sessions-"+uslug).
+			Str("uslug", uslug).
+			Msg("ensureUserResources: failed to ensure sessions KV bucket")
+		if firstErr == nil {
+			firstErr = err
+		}
 	}
+
 	if _, err := ensurePerUserProjectsKV(js, uslug); err != nil {
-		return err
+		log.Warn().Err(err).
+			Str("bucket", "mclaude-projects-"+uslug).
+			Str("uslug", uslug).
+			Msg("ensureUserResources: failed to ensure projects KV bucket")
+		if firstErr == nil {
+			firstErr = err
+		}
 	}
+
 	// ADR-0091: create the client-only user-info KV bucket for tokens/preferences.
-	if _, err := ensurePerUserInfoKV(js, uslug); err != nil {
-		return err
+	// Uses ensurePerUserInfoKVFn so tests can inject a failure at this step (ADR-0098).
+	if _, err := ensurePerUserInfoKVFn(js, uslug); err != nil {
+		log.Warn().Err(err).
+			Str("bucket", "mclaude-user-info-"+uslug).
+			Str("uslug", uslug).
+			Msg("ensureUserResources: failed to ensure user-info KV bucket")
+		if firstErr == nil {
+			firstErr = err
+		}
 	}
+
 	if err := ensurePerUserSessionsStream(js, uslug); err != nil {
-		return err
+		log.Warn().Err(err).
+			Str("stream", "MCLAUDE_SESSIONS_"+uslug).
+			Str("uslug", uslug).
+			Msg("ensureUserResources: failed to ensure sessions stream")
+		if firstErr == nil {
+			firstErr = err
+		}
 	}
-	return nil
+
+	return firstErr
 }
 
 // replyError sends a JSON error reply if the message has a reply subject.
