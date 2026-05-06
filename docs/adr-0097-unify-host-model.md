@@ -76,6 +76,8 @@ No local files are written except `~/.mclaude/hosts/{hslug}/config.json` (for `h
 - All INSERT INTO hosts (`lifecycle.go`, `hosts.go`, `admin.go`): remove `type` and `role` from column lists and VALUES. `POST /api/users/{uslug}/hosts` HTTP endpoint (`server/hosts.go:270-274`): remove entirely — BYOH is dead, all registration goes through NATS. Remove the route from `handleHostRoutes`.
 - `HostKVState` struct (`sys_subscriber.go:16-22`): remove `Type` field. Remove `h.type` from the SQL query in the `$SYS CONNECT` handler (`sys_subscriber.go:100-104`). The DISCONNECT read-modify-write path (`sys_subscriber.go:133-148`) will silently strip `type` from existing KV entries on first DISCONNECT — this is the intended migration path (prerelease, no KV data preservation needed).
 - `ManageUpdateRequest` (`lifecycle.go:713-716`): remove `Type` field. Update validation at `lifecycle.go:736` — check `req.Name == ""` only (remove `req.Type` from the condition).
+- `LoginHostEntry` (`server/auth.go:28-34`): remove `Type` and `Role` fields. Update `getLoginHosts` (`server/auth.go:480-481`) to stop assigning `h.Type` and `h.Role`.
+- `project_http.go:285`: raw SQL selects `COALESCE(h.type, '')` — remove `h.type` from the query.
 
 **Update NATS registration handler:**
 - `NATSHostRegisterRequest` (`lifecycle.go:253-257`): add `DefaultPlatform bool` field, remove `Type string` field. Remove the type defaulting logic at `lifecycle.go:285-287`.
@@ -182,7 +184,7 @@ _(none — all resolved)_
 
 | Component | New/changed lines (est.) | Dev-harness tokens (est.) | Notes |
 |-----------|--------------------------|---------------------------|-------|
-| `mclaude-control-plane` (remove admin clusters + migration + routing + registration) | ~-300 / +50 lines | 100k | Delete admin handlers, update NATS handler, migration DO block, remove routing branch, update all queries |
+| `mclaude-control-plane` (remove admin clusters + DDL + routing + registration) | ~-300 / +50 lines | 100k | Delete admin handlers, update NATS handler, update DDL (no migration — prerelease wipe), remove routing branch, update all queries |
 | `mclaude-cli` (remove cluster/daemon commands + update host register) | ~-150 / +30 lines | 50k | Delete cluster/daemon subcommands, add NATS publish, make --nkey-public required |
 | `mclaude-web` (remove type badge + TS types) | ~-30 lines | 20k | Remove badge, type fields |
 
