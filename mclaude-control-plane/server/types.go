@@ -6,6 +6,10 @@ import cpdb "mclaude-control-plane/db"
 // without the cpdb. prefix. This preserves the existing code style while
 // keeping the DB package separate.
 
+// ConnectDB is a package-level alias for db.ConnectDB, allowing server package
+// code (including tests) to call ConnectDB without the cpdb. prefix.
+var ConnectDB = cpdb.ConnectDB
+
 // DB is an alias for db.DB (the database connection pool).
 type DB = cpdb.DB
 

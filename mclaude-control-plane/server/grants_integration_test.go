@@ -311,7 +311,7 @@ func TestIntegration_ADR0091_ListGrants(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	// Overwrite slug to match our test slug (slug is derived from email, but we need a specific one).
-	_, err = db.pool.Exec(ctx, `UPDATE users SET slug = $1 WHERE id = $2`, uslug, userID)
+	_, err = db.Pool().Exec(ctx, `UPDATE users SET slug = $1 WHERE id = $2`, uslug, userID)
 	if err != nil {
 		t.Fatalf("update user slug: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestIntegration_ADR0091_GrantAccept(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	_, err = db.pool.Exec(ctx, `UPDATE users SET slug = $1 WHERE id = $2`, uslug, userID)
+	_, err = db.Pool().Exec(ctx, `UPDATE users SET slug = $1 WHERE id = $2`, uslug, userID)
 	if err != nil {
 		t.Fatalf("update user slug: %v", err)
 	}
@@ -484,7 +484,7 @@ func TestIntegration_ADR0091_GrantAccept_FingerprintMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	_, err = db.pool.Exec(ctx, `UPDATE users SET slug = $1 WHERE id = $2`, uslug, userID)
+	_, err = db.Pool().Exec(ctx, `UPDATE users SET slug = $1 WHERE id = $2`, uslug, userID)
 	if err != nil {
 		t.Fatalf("update user slug: %v", err)
 	}
@@ -551,7 +551,7 @@ func TestIntegration_ADR0091_UserAgentPubkey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	_, err = db.pool.Exec(ctx, `UPDATE users SET slug = $1 WHERE id = $2`, uslug, userID)
+	_, err = db.Pool().Exec(ctx, `UPDATE users SET slug = $1 WHERE id = $2`, uslug, userID)
 	if err != nil {
 		t.Fatalf("update user slug: %v", err)
 	}
@@ -796,7 +796,7 @@ func TestIntegration_ADR0091_AdminCluster_DefaultPlatform(t *testing.T) {
 
 	// Verify is_default_platform=true in the DB.
 	var isDefault bool
-	err := db.pool.QueryRow(ctx,
+	err := db.Pool().QueryRow(ctx,
 		`SELECT is_default_platform FROM hosts WHERE slug = $1 AND role = 'owner' LIMIT 1`,
 		clusterSlug).Scan(&isDefault)
 	if err != nil {
@@ -808,7 +808,7 @@ func TestIntegration_ADR0091_AdminCluster_DefaultPlatform(t *testing.T) {
 
 	// Cleanup.
 	t.Cleanup(func() {
-		db.pool.Exec(ctx, `DELETE FROM hosts WHERE slug = $1`, clusterSlug) //nolint:errcheck
+		db.Pool().Exec(ctx, `DELETE FROM hosts WHERE slug = $1`, clusterSlug) //nolint:errcheck
 	})
 }
 
@@ -848,7 +848,7 @@ func TestIntegration_ADR0091_AdminCluster_DefaultPlatform_Conflict(t *testing.T)
 		t.Fatalf("first defaultPlatform cluster: got %d; want 201", code)
 	}
 	t.Cleanup(func() {
-		db.pool.Exec(ctx, `DELETE FROM hosts WHERE slug = $1`, slug1) //nolint:errcheck
+		db.Pool().Exec(ctx, `DELETE FROM hosts WHERE slug = $1`, slug1) //nolint:errcheck
 	})
 
 	// Second should return 409.
@@ -896,7 +896,7 @@ func TestIntegration_ADR0091_DefaultPlatform_AutoGrant(t *testing.T) {
 
 	// Insert a default platform host row directly.
 	hostID := uuid.NewString()
-	_, err = db.pool.Exec(ctx, `
+	_, err = db.Pool().Exec(ctx, `
 		INSERT INTO hosts (id, user_id, slug, name, type, role, is_default_platform)
 		VALUES ($1, $2, $3, $4, 'cluster', 'owner', TRUE)`,
 		hostID, ownerID, defaultHostSlug, defaultHostSlug)
@@ -904,7 +904,7 @@ func TestIntegration_ADR0091_DefaultPlatform_AutoGrant(t *testing.T) {
 		t.Fatalf("insert default platform host: %v", err)
 	}
 	t.Cleanup(func() {
-		db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) //nolint:errcheck
+		db.Pool().Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) //nolint:errcheck
 	})
 
 	// Create a user and register their NKey.
@@ -990,6 +990,277 @@ func TestIntegration_ADR0091_UserInfoKVBucket(t *testing.T) {
 	}
 	if kv == nil {
 		t.Fatalf("KeyValue(%q) returned nil", bucketName)
+	}
+}
+
+// ----- ADR-0098: ensureUserResources all-four + backfill + error-continues tests -----
+
+// TestIntegration_EnsureUserResources_AllFour verifies that calling ensureUserResources
+// on a fresh NATS creates all four per-user JetStream resources:
+// KV mclaude-sessions-{uslug}, KV mclaude-projects-{uslug},
+// KV mclaude-user-info-{uslug}, and stream MCLAUDE_SESSIONS_{uslug}.
+func TestIntegration_EnsureUserResources_AllFour(t *testing.T) {
+	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
+	if err != nil {
+		t.Fatalf("NATS connect: %v", err)
+	}
+	defer nc.Close()
+
+	uslug := "allfour-" + uuid.NewString()[:8]
+
+	if err := ensureUserResources(nc, uslug); err != nil {
+		t.Fatalf("ensureUserResources: %v", err)
+	}
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+
+	// Assert all four resources exist.
+	for _, bucket := range []string{
+		"mclaude-sessions-" + uslug,
+		"mclaude-projects-" + uslug,
+		"mclaude-user-info-" + uslug,
+	} {
+		if _, err := js.KeyValue(bucket); err != nil {
+			t.Errorf("KV bucket %q not created by ensureUserResources: %v", bucket, err)
+		}
+	}
+
+	streamName := "MCLAUDE_SESSIONS_" + uslug
+	if _, err := js.StreamInfo(streamName); err != nil {
+		t.Errorf("stream %q not created by ensureUserResources: %v", streamName, err)
+	}
+}
+
+// TestIntegration_EnsureUserResources_Backfill verifies that calling ensureUserResources
+// when sessions and projects KVs already exist (simulating the dev-mclaude-local state
+// before ADR-0098 fix) creates the missing user-info KV and sessions stream without
+// disturbing the existing buckets (ADR-0098 idempotency requirement).
+func TestIntegration_EnsureUserResources_Backfill(t *testing.T) {
+	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
+	if err != nil {
+		t.Fatalf("NATS connect: %v", err)
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+
+	uslug := "backfill-" + uuid.NewString()[:8]
+
+	// Pre-create only sessions + projects KVs (the state before ADR-0098 fix).
+	for _, bucket := range []string{
+		"mclaude-sessions-" + uslug,
+		"mclaude-projects-" + uslug,
+	} {
+		if _, err := js.CreateKeyValue(&nats.KeyValueConfig{Bucket: bucket, History: 1}); err != nil {
+			t.Fatalf("pre-create KV %q: %v", bucket, err)
+		}
+	}
+
+	// Capture the revision of the pre-created sessions bucket to verify it is unchanged.
+	sessionsBucket := "mclaude-sessions-" + uslug
+	sessKV, err := js.KeyValue(sessionsBucket)
+	if err != nil {
+		t.Fatalf("KeyValue sessions pre: %v", err)
+	}
+	sessStatus, err := sessKV.Status()
+	if err != nil {
+		t.Fatalf("sessions KV Status pre: %v", err)
+	}
+	preCallSeqID := sessStatus.Values()
+
+	// Call ensureUserResources — must be a no-op for existing buckets and create the missing two.
+	if err := ensureUserResources(nc, uslug); err != nil {
+		t.Fatalf("ensureUserResources: %v", err)
+	}
+
+	// All four must exist.
+	for _, bucket := range []string{
+		"mclaude-sessions-" + uslug,
+		"mclaude-projects-" + uslug,
+		"mclaude-user-info-" + uslug,
+	} {
+		if _, err := js.KeyValue(bucket); err != nil {
+			t.Errorf("KV bucket %q missing after backfill: %v", bucket, err)
+		}
+	}
+
+	streamName := "MCLAUDE_SESSIONS_" + uslug
+	if _, err := js.StreamInfo(streamName); err != nil {
+		t.Errorf("stream %q missing after backfill: %v", streamName, err)
+	}
+
+	// The pre-existing sessions KV must be unchanged (same sequence ID — no entries added).
+	sessKVPost, err := js.KeyValue(sessionsBucket)
+	if err != nil {
+		t.Fatalf("KeyValue sessions post: %v", err)
+	}
+	sessStatusPost, err := sessKVPost.Status()
+	if err != nil {
+		t.Fatalf("sessions KV Status post: %v", err)
+	}
+	if sessStatusPost.Values() != preCallSeqID {
+		t.Errorf("sessions KV was modified by ensureUserResources: pre=%d post=%d",
+			preCallSeqID, sessStatusPost.Values())
+	}
+}
+
+// TestIntegration_HandleLogin_ProvisionsAllFour verifies that POST /auth/login
+// provisions all four per-user JetStream resources for both the legacy path
+// (no nkey_public) and the NKey path — the root cause of ADR-0098.
+func TestIntegration_HandleLogin_ProvisionsAllFour(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	nc := mustNATSConn(t)
+	srv := newIntegrationServer(t, db, nc)
+
+	t.Run("legacy path (no nkey_public)", func(t *testing.T) {
+		uslug := "login-legacy-" + uuid.NewString()[:8]
+		userID := uslug
+		email := userID + "@test.example.com"
+		hash, err := HashPassword("pw-" + userID)
+		if err != nil {
+			t.Fatalf("HashPassword: %v", err)
+		}
+		_, err = db.CreateUser(ctx, userID, email, "LegacyUser", hash)
+		if err != nil {
+			t.Fatalf("CreateUser: %v", err)
+		}
+		// Override slug to match our test slug (email slug differs from our uslug).
+		if _, err := db.Pool().Exec(ctx, `UPDATE users SET slug = $1 WHERE id = $2`, uslug, userID); err != nil {
+			t.Fatalf("update slug: %v", err)
+		}
+		t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+		body := fmt.Sprintf(`{"email":%q,"password":%q}`, email, "pw-"+userID)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		srv.handleLogin(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("login status = %d; body: %s", rec.Code, rec.Body.String())
+		}
+
+		assertAllFourResourcesExist(t, nc, uslug)
+	})
+
+	t.Run("NKey path (nkey_public provided)", func(t *testing.T) {
+		uslug := "login-nkey-" + uuid.NewString()[:8]
+		userID := uslug
+		email := userID + "@test.example.com"
+		hash, err := HashPassword("pw-" + userID)
+		if err != nil {
+			t.Fatalf("HashPassword: %v", err)
+		}
+		_, err = db.CreateUser(ctx, userID, email, "NKeyUser", hash)
+		if err != nil {
+			t.Fatalf("CreateUser: %v", err)
+		}
+		if _, err := db.Pool().Exec(ctx, `UPDATE users SET slug = $1 WHERE id = $2`, uslug, userID); err != nil {
+			t.Fatalf("update slug: %v", err)
+		}
+		t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+		userKP, err := nkeys.CreateUser()
+		if err != nil {
+			t.Fatalf("CreateUser NKey: %v", err)
+		}
+		userPub, _ := userKP.PublicKey()
+
+		body := fmt.Sprintf(`{"email":%q,"password":%q,"nkey_public":%q}`, email, "pw-"+userID, userPub)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		srv.handleLogin(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("login status = %d; body: %s", rec.Code, rec.Body.String())
+		}
+
+		assertAllFourResourcesExist(t, nc, uslug)
+	})
+}
+
+// assertAllFourResourcesExist checks that all four per-user JetStream resources exist.
+// Helper shared by ADR-0098 integration tests.
+func assertAllFourResourcesExist(t *testing.T, nc *nats.Conn, uslug string) {
+	t.Helper()
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+	for _, bucket := range []string{
+		"mclaude-sessions-" + uslug,
+		"mclaude-projects-" + uslug,
+		"mclaude-user-info-" + uslug,
+	} {
+		if _, err := js.KeyValue(bucket); err != nil {
+			t.Errorf("KV bucket %q missing: %v", bucket, err)
+		}
+	}
+	streamName := "MCLAUDE_SESSIONS_" + uslug
+	if _, err := js.StreamInfo(streamName); err != nil {
+		t.Errorf("stream %q missing: %v", streamName, err)
+	}
+}
+
+// TestIntegration_EnsureUserResources_StepErrorContinues verifies that a failure in
+// step 3 (user-info KV ensure) does not short-circuit step 4 (sessions stream ensure).
+// The function must return the first error AND have attempted all four steps (ADR-0098).
+func TestIntegration_EnsureUserResources_StepErrorContinues(t *testing.T) {
+	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
+	if err != nil {
+		t.Fatalf("NATS connect: %v", err)
+	}
+	defer nc.Close()
+
+	uslug := "step-error-" + uuid.NewString()[:8]
+
+	// Override step 3 to always return an error.
+	injectedErr := fmt.Errorf("injected step-3 error for testing")
+	origFn := ensurePerUserInfoKVFn
+	ensurePerUserInfoKVFn = func(js nats.JetStreamContext, slug string) (nats.KeyValue, error) {
+		return nil, injectedErr
+	}
+	t.Cleanup(func() { ensurePerUserInfoKVFn = origFn })
+
+	// Call ensureUserResources — must return the injected error AND still attempt step 4.
+	retErr := ensureUserResources(nc, uslug)
+	if retErr == nil {
+		t.Error("ensureUserResources returned nil; expected error from step 3")
+	}
+	if retErr != injectedErr {
+		t.Errorf("ensureUserResources returned %v; want injected step-3 error", retErr)
+	}
+
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream: %v", err)
+	}
+
+	// Steps 1+2 (sessions KV, projects KV) must have succeeded.
+	for _, bucket := range []string{
+		"mclaude-sessions-" + uslug,
+		"mclaude-projects-" + uslug,
+	} {
+		if _, err := js.KeyValue(bucket); err != nil {
+			t.Errorf("KV bucket %q (step 1/2) missing after step-3 error: %v", bucket, err)
+		}
+	}
+
+	// Step 3 (user-info KV) should NOT exist — it was injected to error.
+	if _, err := js.KeyValue("mclaude-user-info-" + uslug); err == nil {
+		t.Error("user-info KV bucket exists; expected absent (step 3 was injected to fail)")
+	}
+
+	// Step 4 (sessions stream) MUST exist — the chain must not short-circuit on step 3 error.
+	streamName := "MCLAUDE_SESSIONS_" + uslug
+	if _, err := js.StreamInfo(streamName); err != nil {
+		t.Errorf("stream %q (step 4) missing after step-3 error: %v — chain short-circuited!", streamName, err)
 	}
 }
 

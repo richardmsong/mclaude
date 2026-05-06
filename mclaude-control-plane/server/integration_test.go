@@ -435,7 +435,7 @@ func TestIntegration_HandleSysEvent_MachineConnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	_, err = db.pool.Exec(ctx, `
+	_, err = db.Pool().Exec(ctx, `
 		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key)
 		VALUES ('sys-evt-h1', 'sys-evt-u1', 'myhost', 'My Host', 'machine', 'owner', 'UTEST_PUBKEY_SYSEVT')`,
 	)
@@ -443,8 +443,8 @@ func TestIntegration_HandleSysEvent_MachineConnect(t *testing.T) {
 		t.Fatalf("insert host: %v", err)
 	}
 	t.Cleanup(func() {
-		db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = 'sys-evt-h1'`)  //nolint:errcheck
-		db.pool.Exec(ctx, `DELETE FROM users WHERE id = 'sys-evt-u1'`)  //nolint:errcheck
+		db.Pool().Exec(ctx, `DELETE FROM hosts WHERE id = 'sys-evt-h1'`)  //nolint:errcheck
+		db.Pool().Exec(ctx, `DELETE FROM users WHERE id = 'sys-evt-u1'`)  //nolint:errcheck
 	})
 
 	// Set up hostsKV via a fresh NATS connection.
@@ -503,7 +503,7 @@ func TestIntegration_HandleSysEvent_MachineDisconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
-	_, err = db.pool.Exec(ctx, `
+	_, err = db.Pool().Exec(ctx, `
 		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key)
 		VALUES ('sys-disc-h1', 'sys-disc-u1', 'dischost', 'Disc Host', 'machine', 'owner', 'UTEST_PUBKEY_SYSDISC')`,
 	)
@@ -511,8 +511,8 @@ func TestIntegration_HandleSysEvent_MachineDisconnect(t *testing.T) {
 		t.Fatalf("insert host: %v", err)
 	}
 	t.Cleanup(func() {
-		db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = 'sys-disc-h1'`)  //nolint:errcheck
-		db.pool.Exec(ctx, `DELETE FROM users WHERE id = 'sys-disc-u1'`)  //nolint:errcheck
+		db.Pool().Exec(ctx, `DELETE FROM hosts WHERE id = 'sys-disc-h1'`)  //nolint:errcheck
+		db.Pool().Exec(ctx, `DELETE FROM users WHERE id = 'sys-disc-u1'`)  //nolint:errcheck
 	})
 
 	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
@@ -585,7 +585,7 @@ func TestIntegration_HandleSysEvent_ClusterConnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser u1: %v", err)
 	}
-	_, err = db.pool.Exec(ctx, `
+	_, err = db.Pool().Exec(ctx, `
 		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key)
 		VALUES ('clconn-h1', 'clconn-u1', 'mycluster', 'My Cluster', 'cluster', 'owner', 'UTEST_CL_CONNECT_KEY')`,
 	)
@@ -593,8 +593,8 @@ func TestIntegration_HandleSysEvent_ClusterConnect(t *testing.T) {
 		t.Fatalf("insert cluster host: %v", err)
 	}
 	t.Cleanup(func() {
-		db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = 'clconn-h1'`)  //nolint:errcheck
-		db.pool.Exec(ctx, `DELETE FROM users WHERE id = 'clconn-u1'`)  //nolint:errcheck
+		db.Pool().Exec(ctx, `DELETE FROM hosts WHERE id = 'clconn-h1'`)  //nolint:errcheck
+		db.Pool().Exec(ctx, `DELETE FROM users WHERE id = 'clconn-u1'`)  //nolint:errcheck
 	})
 
 	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
@@ -656,7 +656,7 @@ func TestIntegration_HandleSysEvent_ClusterDisconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateUser u1: %v", err)
 	}
-	_, err = db.pool.Exec(ctx, `
+	_, err = db.Pool().Exec(ctx, `
 		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key)
 		VALUES ('cldisc-h1', 'cldisc-u1', 'disccluster', 'Disc Cluster', 'cluster', 'owner', 'UTEST_CL_DISC_KEY')`,
 	)
@@ -664,8 +664,8 @@ func TestIntegration_HandleSysEvent_ClusterDisconnect(t *testing.T) {
 		t.Fatalf("insert cluster host: %v", err)
 	}
 	t.Cleanup(func() {
-		db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = 'cldisc-h1'`)  //nolint:errcheck
-		db.pool.Exec(ctx, `DELETE FROM users WHERE id = 'cldisc-u1'`)  //nolint:errcheck
+		db.Pool().Exec(ctx, `DELETE FROM hosts WHERE id = 'cldisc-h1'`)  //nolint:errcheck
+		db.Pool().Exec(ctx, `DELETE FROM users WHERE id = 'cldisc-u1'`)  //nolint:errcheck
 	})
 
 	nc, err := nats.Connect(integDeps.NATSAddr, nats.MaxReconnects(0))
@@ -827,13 +827,13 @@ func TestIntegration_Schema_NoSeedRows(t *testing.T) {
 	db := mustConnectDB(t, ctx)
 
 	var userCount, hostCount, projectCount int
-	if err := db.pool.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&userCount); err != nil {
+	if err := db.Pool().QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&userCount); err != nil {
 		t.Fatalf("count users: %v", err)
 	}
-	if err := db.pool.QueryRow(ctx, `SELECT COUNT(*) FROM hosts`).Scan(&hostCount); err != nil {
+	if err := db.Pool().QueryRow(ctx, `SELECT COUNT(*) FROM hosts`).Scan(&hostCount); err != nil {
 		t.Fatalf("count hosts: %v", err)
 	}
-	if err := db.pool.QueryRow(ctx, `SELECT COUNT(*) FROM projects`).Scan(&projectCount); err != nil {
+	if err := db.Pool().QueryRow(ctx, `SELECT COUNT(*) FROM projects`).Scan(&projectCount); err != nil {
 		t.Fatalf("count projects: %v", err)
 	}
 
@@ -849,13 +849,13 @@ func TestIntegration_Schema_NoSeedRows(t *testing.T) {
 		t.Fatalf("re-Migrate: %v", err)
 	}
 	var afterUser, afterHost, afterProject int
-	if err := db.pool.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&afterUser); err != nil {
+	if err := db.Pool().QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&afterUser); err != nil {
 		t.Fatalf("count users after: %v", err)
 	}
-	if err := db.pool.QueryRow(ctx, `SELECT COUNT(*) FROM hosts`).Scan(&afterHost); err != nil {
+	if err := db.Pool().QueryRow(ctx, `SELECT COUNT(*) FROM hosts`).Scan(&afterHost); err != nil {
 		t.Fatalf("count hosts after: %v", err)
 	}
-	if err := db.pool.QueryRow(ctx, `SELECT COUNT(*) FROM projects`).Scan(&afterProject); err != nil {
+	if err := db.Pool().QueryRow(ctx, `SELECT COUNT(*) FROM projects`).Scan(&afterProject); err != nil {
 		t.Fatalf("count projects after: %v", err)
 	}
 	if afterUser != beforeUser {
@@ -883,7 +883,7 @@ func TestIntegration_CreateUser_NoLocalHost(t *testing.T) {
 	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
 
 	var count int
-	if err := db.pool.QueryRow(ctx,
+	if err := db.Pool().QueryRow(ctx,
 		`SELECT COUNT(*) FROM hosts WHERE user_id = $1 AND slug = 'local'`,
 		user.ID).Scan(&count); err != nil {
 		t.Fatalf("count local hosts: %v", err)
@@ -1494,7 +1494,7 @@ func TestIntegration_HostRegister_HTTP(t *testing.T) {
 	// Verify host row exists in DB with public_key set.
 	slug, _ := resp["slug"].(string)
 	var pubKey string
-	if err := db.pool.QueryRow(ctx,
+	if err := db.Pool().QueryRow(ctx,
 		`SELECT public_key FROM hosts WHERE user_id = $1 AND slug = $2`,
 		userID, slug).Scan(&pubKey); err != nil {
 		t.Fatalf("query host: %v", err)
@@ -1690,7 +1690,7 @@ func TestIntegration_ManageGrant(t *testing.T) {
 	t.Cleanup(func() { db.DeleteUser(ctx, ownerID) }) //nolint:errcheck
 
 	hostID := uuid.NewString()
-	_, err = db.pool.Exec(ctx,
+	_, err = db.Pool().Exec(ctx,
 		`INSERT INTO hosts (id, user_id, slug, name, type, role) VALUES ($1, $2, $3, 'Test Host', 'machine', 'owner')`,
 		hostID, owner.ID, "grant-host-"+ownerID[:8])
 	if err != nil {
@@ -1698,7 +1698,7 @@ func TestIntegration_ManageGrant(t *testing.T) {
 	}
 	hostSlug := "grant-host-" + ownerID[:8]
 	t.Cleanup(func() {
-		db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) //nolint:errcheck
+		db.Pool().Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) //nolint:errcheck
 	})
 
 	// Create grantee.
@@ -1725,7 +1725,7 @@ func TestIntegration_ManageGrant(t *testing.T) {
 
 	// Verify grantee appears in host_access.
 	var count int
-	if err := db.pool.QueryRow(ctx,
+	if err := db.Pool().QueryRow(ctx,
 		`SELECT COUNT(*) FROM host_access WHERE host_id = $1 AND user_id = $2`,
 		hostID, grantee.ID).Scan(&count); err != nil {
 		t.Fatalf("count host_access: %v", err)
@@ -1757,13 +1757,13 @@ func TestIntegration_ManageRevokeAccess(t *testing.T) {
 
 	hostID := uuid.NewString()
 	hostSlug := "revoke-host-" + ownerID[:8]
-	_, err = db.pool.Exec(ctx,
+	_, err = db.Pool().Exec(ctx,
 		`INSERT INTO hosts (id, user_id, slug, name, type, role) VALUES ($1, $2, $3, 'Test Host', 'machine', 'owner')`,
 		hostID, owner.ID, hostSlug)
 	if err != nil {
 		t.Fatalf("insert host: %v", err)
 	}
-	t.Cleanup(func() { db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) }) //nolint:errcheck
+	t.Cleanup(func() { db.Pool().Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) }) //nolint:errcheck
 
 	// Create grantee and grant access.
 	granteeID := "revoke-grantee-" + uuid.NewString()[:8]
@@ -1793,7 +1793,7 @@ func TestIntegration_ManageRevokeAccess(t *testing.T) {
 
 	// Verify grant removed from host_access.
 	var count int
-	if err := db.pool.QueryRow(ctx,
+	if err := db.Pool().QueryRow(ctx,
 		`SELECT COUNT(*) FROM host_access WHERE host_id = $1 AND user_id = $2`,
 		hostID, grantee.ID).Scan(&count); err != nil {
 		t.Fatalf("count host_access: %v", err)
@@ -1824,7 +1824,7 @@ func TestIntegration_ManageDeregister(t *testing.T) {
 
 	hostID := uuid.NewString()
 	hostSlug := "dereg-host-" + ownerID[:8]
-	_, err = db.pool.Exec(ctx,
+	_, err = db.Pool().Exec(ctx,
 		`INSERT INTO hosts (id, user_id, slug, name, type, role) VALUES ($1, $2, $3, 'Test Host', 'machine', 'owner')`,
 		hostID, owner.ID, hostSlug)
 	if err != nil {
@@ -1845,7 +1845,7 @@ func TestIntegration_ManageDeregister(t *testing.T) {
 
 	// Verify host row deleted from DB.
 	var count int
-	if err := db.pool.QueryRow(ctx,
+	if err := db.Pool().QueryRow(ctx,
 		`SELECT COUNT(*) FROM hosts WHERE id = $1`,
 		hostID).Scan(&count); err != nil {
 		t.Fatalf("count hosts: %v", err)
@@ -1876,13 +1876,13 @@ func TestIntegration_ManageUpdate(t *testing.T) {
 
 	hostID := uuid.NewString()
 	hostSlug := "update-host-" + ownerID[:8]
-	_, err = db.pool.Exec(ctx,
+	_, err = db.Pool().Exec(ctx,
 		`INSERT INTO hosts (id, user_id, slug, name, type, role) VALUES ($1, $2, $3, 'Old Name', 'machine', 'owner')`,
 		hostID, owner.ID, hostSlug)
 	if err != nil {
 		t.Fatalf("insert host: %v", err)
 	}
-	t.Cleanup(func() { db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) }) //nolint:errcheck
+	t.Cleanup(func() { db.Pool().Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) }) //nolint:errcheck
 
 	// Publish manage.update with new name.
 	subject := fmt.Sprintf("mclaude.users.%s.hosts.%s.manage.update", owner.Slug, hostSlug)
@@ -1900,7 +1900,7 @@ func TestIntegration_ManageUpdate(t *testing.T) {
 
 	// Verify host name updated in DB.
 	var name string
-	if err := db.pool.QueryRow(ctx,
+	if err := db.Pool().QueryRow(ctx,
 		`SELECT name FROM hosts WHERE id = $1`, hostID).Scan(&name); err != nil {
 		t.Fatalf("query host name: %v", err)
 	}
@@ -1932,12 +1932,12 @@ func TestIntegration_ProjectCreate_NATS(t *testing.T) {
 
 	// ADR-0095: insert a host row so the project creation is not blocked by the no_hosts guard.
 	hostID := uuid.NewString()
-	if _, herr := db.pool.Exec(ctx,
+	if _, herr := db.Pool().Exec(ctx,
 		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'proj-nats-host', 'ProjNats Host', 'machine', 'owner', NOW())`,
 		hostID, user.ID); herr != nil {
 		t.Fatalf("insert test host: %v", herr)
 	}
-	t.Cleanup(func() { db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) }) //nolint:errcheck
+	t.Cleanup(func() { db.Pool().Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) }) //nolint:errcheck
 
 	// Ensure per-user JetStream resources exist (needed for KV write).
 	if err := ensureUserResources(nc, user.Slug); err != nil {
@@ -1960,7 +1960,7 @@ func TestIntegration_ProjectCreate_NATS(t *testing.T) {
 	// What we verify is that a project row was created in DB.
 
 	var projCount int
-	if err := db.pool.QueryRow(ctx,
+	if err := db.Pool().QueryRow(ctx,
 		`SELECT COUNT(*) FROM projects WHERE user_id = $1`, user.ID).Scan(&projCount); err != nil {
 		t.Fatalf("count projects: %v", err)
 	}
@@ -2026,24 +2026,24 @@ func TestIntegration_CheckSlug_Taken(t *testing.T) {
 
 	// Create a machine host for the user so host_id can be set on the project.
 	hostID := uuid.NewString()
-	_, err = db.pool.Exec(ctx,
+	_, err = db.Pool().Exec(ctx,
 		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'checkslug-host', 'Check Host', 'machine', 'owner', NOW())`,
 		hostID, user.ID)
 	if err != nil {
 		t.Fatalf("insert host: %v", err)
 	}
-	t.Cleanup(func() { db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) }) //nolint:errcheck
+	t.Cleanup(func() { db.Pool().Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) }) //nolint:errcheck
 
 	// Create a project with a known slug and a valid host_id (required by schema).
 	projID := uuid.NewString()
 	takenSlug := "taken-" + uuid.NewString()[:6]
-	_, err = db.pool.Exec(ctx,
+	_, err = db.Pool().Exec(ctx,
 		`INSERT INTO projects (id, user_id, host_id, name, slug, git_url, status, created_at) VALUES ($1, $2, $3, $4, $5, '', 'active', NOW())`,
 		projID, user.ID, hostID, "Taken Project", takenSlug)
 	if err != nil {
 		t.Fatalf("insert project: %v", err)
 	}
-	t.Cleanup(func() { db.pool.Exec(ctx, `DELETE FROM projects WHERE id = $1`, projID) }) //nolint:errcheck
+	t.Cleanup(func() { db.Pool().Exec(ctx, `DELETE FROM projects WHERE id = $1`, projID) }) //nolint:errcheck
 
 	subject := fmt.Sprintf("mclaude.users.%s.hosts.myhost.projects.check-slug", user.Slug)
 	payload, _ := json.Marshal(CheckSlugRequest{Slug: takenSlug})
@@ -2127,12 +2127,12 @@ func TestIntegration_CreateProject_SucceedsWithHost(t *testing.T) {
 
 	// Insert a test host row (ADR-0095: same pattern as TestIntegration_CheckSlug_Taken).
 	hostID := uuid.NewString()
-	if _, herr := db.pool.Exec(ctx,
+	if _, herr := db.Pool().Exec(ctx,
 		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'test-host', 'Test Host', 'machine', 'owner', NOW())`,
 		hostID, user.ID); herr != nil {
 		t.Fatalf("insert test host: %v", herr)
 	}
-	t.Cleanup(func() { db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) }) //nolint:errcheck
+	t.Cleanup(func() { db.Pool().Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) }) //nolint:errcheck
 
 	accountKP, _ := nkeys.CreateAccount()
 	srv := NewServer(db, accountKP, integDeps.NATSAddr, "", 8*time.Hour)
@@ -2158,7 +2158,7 @@ func TestIntegration_CreateProject_SucceedsWithHost(t *testing.T) {
 	// The provisioning request will time out since no host controller is running in the test.
 	// We verify the project row exists in DB regardless.
 	var projCount int
-	if err := db.pool.QueryRow(ctx,
+	if err := db.Pool().QueryRow(ctx,
 		`SELECT COUNT(*) FROM projects WHERE user_id = $1`, user.ID).Scan(&projCount); err != nil {
 		t.Fatalf("count projects: %v", err)
 	}
@@ -2188,7 +2188,7 @@ func TestIntegration_Migration_PreservesLocalHosts(t *testing.T) {
 	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
 
 	localHostID := uuid.NewString()
-	if _, herr := db.pool.Exec(ctx,
+	if _, herr := db.Pool().Exec(ctx,
 		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'local', 'Local Machine', 'machine', 'owner', NOW())`,
 		localHostID, user.ID); herr != nil {
 		t.Fatalf("insert local host: %v", herr)
@@ -2199,7 +2199,7 @@ func TestIntegration_Migration_PreservesLocalHosts(t *testing.T) {
 	}
 
 	var count int
-	if err := db.pool.QueryRow(ctx,
+	if err := db.Pool().QueryRow(ctx,
 		`SELECT COUNT(*) FROM hosts WHERE id = $1`, localHostID).Scan(&count); err != nil {
 		t.Fatalf("count local host: %v", err)
 	}
@@ -2263,12 +2263,12 @@ func TestIntegration_HTTP_ProjectCreate_HostRequired(t *testing.T) {
 	// Insert two host rows so the handler reaches the "multiple hosts, no hostSlug" branch.
 	for _, slug := range []string{"host-alpha", "host-beta"} {
 		hid := uuid.NewString()
-		if _, herr := db.pool.Exec(ctx,
+		if _, herr := db.Pool().Exec(ctx,
 			`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, $3, $4, 'machine', 'owner', NOW())`,
 			hid, user.ID, slug, slug); herr != nil {
 			t.Fatalf("insert host %s: %v", slug, herr)
 		}
-		t.Cleanup(func() { db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hid) }) //nolint:errcheck
+		t.Cleanup(func() { db.Pool().Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hid) }) //nolint:errcheck
 	}
 
 	accountKP, _ := nkeys.CreateAccount()
@@ -2327,12 +2327,12 @@ func TestIntegration_NATS_ProjectCreate_HostRequired(t *testing.T) {
 	// Insert two host rows.
 	for _, slug := range []string{"nats-host-one", "nats-host-two"} {
 		hid := uuid.NewString()
-		if _, herr := db.pool.Exec(ctx,
+		if _, herr := db.Pool().Exec(ctx,
 			`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, $3, $4, 'machine', 'owner', NOW())`,
 			hid, user.ID, slug, slug); herr != nil {
 			t.Fatalf("insert host %s: %v", slug, herr)
 		}
-		t.Cleanup(func() { db.pool.Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hid) }) //nolint:errcheck
+		t.Cleanup(func() { db.Pool().Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hid) }) //nolint:errcheck
 	}
 
 	subject := fmt.Sprintf("mclaude.users.%s.api.projects.create", user.Slug)
