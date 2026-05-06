@@ -1557,6 +1557,52 @@ func TestIntegration_HostRegister_HTTP(t *testing.T) {
 	}
 }
 
+// TestIntegration_ADR0101_HostRegister_NoPublicKey_Returns400 verifies that
+// POST /api/hosts/register returns 400 when the device-code entry has no publicKey
+// (ADR-0101: publicKey is required; server never generates NKey pairs for hosts).
+func TestIntegration_ADR0101_HostRegister_NoPublicKey_Returns400(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	srv := newIntegrationServer(t, db, nil)
+
+	// Create a user to own the host.
+	userID := "nopk-" + uuid.NewString()[:8]
+	_, err := db.CreateUser(ctx, userID, userID+"@test.example.com", "NoPK", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	// Inject a device code entry with no PublicKey.
+	code := "NOPK01"
+	globalDeviceCodeStore.mu.Lock()
+	globalDeviceCodeStore.codes[code] = &deviceCodeEntry{
+		UserID:    userID,
+		PublicKey: "", // intentionally empty
+		ExpiresAt: time.Now().Add(10 * time.Minute),
+	}
+	globalDeviceCodeStore.mu.Unlock()
+	t.Cleanup(func() {
+		globalDeviceCodeStore.mu.Lock()
+		delete(globalDeviceCodeStore.codes, code)
+		globalDeviceCodeStore.mu.Unlock()
+	})
+
+	body := fmt.Sprintf(`{"code":%q,"name":"No PK Host"}`, code)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/hosts/register", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	srv.handleHostRegister(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d; want 400; body: %s", rec.Code, rec.Body.String())
+	}
+	body400 := rec.Body.String()
+	if !strings.Contains(body400, "public_key is required") {
+		t.Errorf("body = %q; want it to contain %q", body400, "public_key is required")
+	}
+}
+
 // TestIntegration_NKeyChallenge_AndVerify verifies the full challenge-response
 // round-trip returning a scoped JWT (ADR-0089).
 func TestIntegration_NKeyChallenge_AndVerify(t *testing.T) {

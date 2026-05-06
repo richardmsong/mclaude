@@ -29,8 +29,7 @@ type HostResponse struct {
 	DirectNATSURL *string    `json:"directNatsUrl,omitempty"`
 	LastSeenAt    *time.Time `json:"lastSeenAt,omitempty"`
 	CreatedAt     time.Time  `json:"createdAt"`
-	JWT           string     `json:"jwt,omitempty"`      // GAP-CP-09: minted JWT for host auth
-	NKeySeed      string     `json:"nkeySeed,omitempty"` // GAP-CP-09: NKey seed for NATS connection
+	JWT           string     `json:"jwt,omitempty"` // GAP-CP-09: minted JWT for host auth
 }
 
 // HostUpdateRequest is the body for PUT /api/users/{uslug}/hosts/{hslug}.
@@ -421,31 +420,18 @@ func (s *Server) handleHostRegister(w http.ResponseWriter, r *http.Request) {
 		hostSlug = "host-" + req.Code[:4]
 	}
 
-	// KNOWN-04: Look up user slug for cpauth.IssueHostJWT (must pass slug, not UUID).
-	regUser, userErr := s.db.GetUserByID(context.Background(), entry.UserID)
-	if userErr != nil || regUser == nil {
-		http.Error(w, "user not found", http.StatusInternalServerError)
+	// ADR-0101: publicKey is required. All hosts generate their own NKey pair
+	// (via gen-host-nkey Helm Job) and provide it during device-code registration.
+	if entry.PublicKey == "" {
+		http.Error(w, `{"error":"public_key is required"}`, http.StatusBadRequest)
 		return
 	}
 
-	// Issue a per-host JWT. Per ADR-0054, if the host provided its NKey public key
-	// (stored in the device code entry), use the new scoped JWT (no seed returned).
-	var hostJWT string
-	if entry.PublicKey != "" {
-		var issueErr error
-		hostJWT, issueErr = cpauth.IssueHostJWT(entry.PublicKey, hostSlug, s.accountKP)
-		if issueErr != nil {
-			http.Error(w, "failed to issue host jwt", http.StatusInternalServerError)
-			return
-		}
-	} else {
-		// Legacy mode: no public key provided — use legacy function.
-		var legacyErr error
-		hostJWT, _, legacyErr = cpauth.IssueHostJWTLegacy(regUser.Slug, hostSlug, s.accountKP)
-		if legacyErr != nil {
-			http.Error(w, "failed to issue host jwt", http.StatusInternalServerError)
-			return
-		}
+	// Issue a per-host JWT using the host-provided public key (ADR-0054, ADR-0101).
+	hostJWT, err := cpauth.IssueHostJWT(entry.PublicKey, hostSlug, s.accountKP)
+	if err != nil {
+		http.Error(w, "failed to issue host jwt", http.StatusInternalServerError)
+		return
 	}
 
 	// ADR-0097: type and role columns removed from hosts table.

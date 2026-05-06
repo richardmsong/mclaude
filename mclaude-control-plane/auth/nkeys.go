@@ -372,32 +372,6 @@ func IssueUserAgentJWT(publicKey string, uslug, hslug string, accountKP nkeys.Ke
 	return issueJWT(publicKey, "user-agent-"+uslug+"-"+hslug, accountKP, agentTTLSecs, perms)
 }
 
-// IssueHostJWTLegacy is a backward-compatible wrapper that generates an NKey pair
-// and issues a host JWT. DEPRECATED: Use IssueHostJWT with a client-provided public key.
-func IssueHostJWTLegacy(uslug, hslug string, accountKP nkeys.KeyPair) (jwt string, seed []byte, err error) {
-	userKP, userSeed, err := GenerateUserNKey()
-	if err != nil {
-		return "", nil, fmt.Errorf("generate host nkey: %w", err)
-	}
-
-	perms := HostSubjectPermissions(hslug)
-
-	claims := natsjwt.NewUserClaims(userKP.PublicKey)
-	claims.Name = fmt.Sprintf("host-%s-%s", uslug, hslug)
-	// 5-minute TTL for host JWTs (ADR-0054)
-	claims.Expires = time.Now().Unix() + 5*60
-	claims.IssuerAccount, _ = accountKP.PublicKey()
-	claims.Permissions.Pub.Allow = perms.PubAllow
-	claims.Permissions.Sub.Allow = perms.SubAllow
-
-	encoded, err := claims.Encode(accountKP)
-	if err != nil {
-		return "", nil, fmt.Errorf("encode host jwt: %w", err)
-	}
-
-	return encoded, userSeed, nil
-}
-
 // DecodeUserJWT decodes and validates a NATS user JWT.
 // Returns the claims if the JWT was issued by accountPubKey and is not expired.
 func DecodeUserJWT(token string, accountPubKey string) (*natsjwt.UserClaims, error) {
