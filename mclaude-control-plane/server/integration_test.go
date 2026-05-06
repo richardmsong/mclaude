@@ -436,8 +436,8 @@ func TestIntegration_HandleSysEvent_MachineConnect(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	_, err = db.Pool().Exec(ctx, `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key)
-		VALUES ('sys-evt-h1', 'sys-evt-u1', 'myhost', 'My Host', 'machine', 'owner', 'UTEST_PUBKEY_SYSEVT')`,
+		INSERT INTO hosts (id, user_id, slug, name, public_key)
+		VALUES ('sys-evt-h1', 'sys-evt-u1', 'myhost', 'My Host', 'UTEST_PUBKEY_SYSEVT')`,
 	)
 	if err != nil {
 		t.Fatalf("insert host: %v", err)
@@ -504,8 +504,8 @@ func TestIntegration_HandleSysEvent_MachineDisconnect(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 	_, err = db.Pool().Exec(ctx, `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key)
-		VALUES ('sys-disc-h1', 'sys-disc-u1', 'dischost', 'Disc Host', 'machine', 'owner', 'UTEST_PUBKEY_SYSDISC')`,
+		INSERT INTO hosts (id, user_id, slug, name, public_key)
+		VALUES ('sys-disc-h1', 'sys-disc-u1', 'dischost', 'Disc Host', 'UTEST_PUBKEY_SYSDISC')`,
 	)
 	if err != nil {
 		t.Fatalf("insert host: %v", err)
@@ -571,23 +571,22 @@ func TestIntegration_HandleSysEvent_MachineDisconnect(t *testing.T) {
 }
 
 // TestIntegration_HandleSysEvent_ClusterConnect verifies that a Client CONNECT
-// event for a cluster host writes online=true to mclaude-hosts KV (ADR-0063:
-// K8s cluster controllers connect hub-direct as "Client", not "Leafnode").
-// The "Client" branch looks up by public_key with no type filter, so it matches
-// both type='machine' and type='cluster' rows.
+// event for a K8s user-agent host writes online=true to mclaude-hosts KV (ADR-0063:
+// controllers connect hub-direct as "Client", not "Leafnode"; ADR-0097: no type column).
 func TestIntegration_HandleSysEvent_ClusterConnect(t *testing.T) {
 	ctx := context.Background()
 	db := mustConnectDB(t, ctx)
 
-	// Create a user with a cluster host using a unique public_key.
+	// Create a user with a host using a unique public_key.
 	// ADR-0063: no js_domain/leaf_url/account_jwt columns needed (constraint dropped).
+	// ADR-0097: no type/role columns.
 	_, err := db.CreateUser(ctx, "clconn-u1", "clconn1@example.com", "ClConn1", "")
 	if err != nil {
 		t.Fatalf("CreateUser u1: %v", err)
 	}
 	_, err = db.Pool().Exec(ctx, `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key)
-		VALUES ('clconn-h1', 'clconn-u1', 'mycluster', 'My Cluster', 'cluster', 'owner', 'UTEST_CL_CONNECT_KEY')`,
+		INSERT INTO hosts (id, user_id, slug, name, public_key)
+		VALUES ('clconn-h1', 'clconn-u1', 'mycluster', 'My Cluster', 'UTEST_CL_CONNECT_KEY')`,
 	)
 	if err != nil {
 		t.Fatalf("insert cluster host: %v", err)
@@ -636,9 +635,6 @@ func TestIntegration_HandleSysEvent_ClusterConnect(t *testing.T) {
 	if state.Slug != "mycluster" {
 		t.Errorf("key %q: slug = %q; want mycluster", key, state.Slug)
 	}
-	if state.Type != "cluster" {
-		t.Errorf("key %q: type = %q; want cluster", key, state.Type)
-	}
 	if state.LastSeenAt == nil {
 		t.Errorf("key %q: lastSeenAt should be set after cluster CONNECT", key)
 	}
@@ -657,8 +653,8 @@ func TestIntegration_HandleSysEvent_ClusterDisconnect(t *testing.T) {
 		t.Fatalf("CreateUser u1: %v", err)
 	}
 	_, err = db.Pool().Exec(ctx, `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key)
-		VALUES ('cldisc-h1', 'cldisc-u1', 'disccluster', 'Disc Cluster', 'cluster', 'owner', 'UTEST_CL_DISC_KEY')`,
+		INSERT INTO hosts (id, user_id, slug, name, public_key)
+		VALUES ('cldisc-h1', 'cldisc-u1', 'disccluster', 'Disc Cluster', 'UTEST_CL_DISC_KEY')`,
 	)
 	if err != nil {
 		t.Fatalf("insert cluster host: %v", err)
@@ -1691,7 +1687,7 @@ func TestIntegration_ManageGrant(t *testing.T) {
 
 	hostID := uuid.NewString()
 	_, err = db.Pool().Exec(ctx,
-		`INSERT INTO hosts (id, user_id, slug, name, type, role) VALUES ($1, $2, $3, 'Test Host', 'machine', 'owner')`,
+		`INSERT INTO hosts (id, user_id, slug, name) VALUES ($1, $2, $3, 'Test Host')`,
 		hostID, owner.ID, "grant-host-"+ownerID[:8])
 	if err != nil {
 		t.Fatalf("insert host: %v", err)
@@ -1758,7 +1754,7 @@ func TestIntegration_ManageRevokeAccess(t *testing.T) {
 	hostID := uuid.NewString()
 	hostSlug := "revoke-host-" + ownerID[:8]
 	_, err = db.Pool().Exec(ctx,
-		`INSERT INTO hosts (id, user_id, slug, name, type, role) VALUES ($1, $2, $3, 'Test Host', 'machine', 'owner')`,
+		`INSERT INTO hosts (id, user_id, slug, name) VALUES ($1, $2, $3, 'Test Host')`,
 		hostID, owner.ID, hostSlug)
 	if err != nil {
 		t.Fatalf("insert host: %v", err)
@@ -1825,7 +1821,7 @@ func TestIntegration_ManageDeregister(t *testing.T) {
 	hostID := uuid.NewString()
 	hostSlug := "dereg-host-" + ownerID[:8]
 	_, err = db.Pool().Exec(ctx,
-		`INSERT INTO hosts (id, user_id, slug, name, type, role) VALUES ($1, $2, $3, 'Test Host', 'machine', 'owner')`,
+		`INSERT INTO hosts (id, user_id, slug, name) VALUES ($1, $2, $3, 'Test Host')`,
 		hostID, owner.ID, hostSlug)
 	if err != nil {
 		t.Fatalf("insert host: %v", err)
@@ -1877,7 +1873,7 @@ func TestIntegration_ManageUpdate(t *testing.T) {
 	hostID := uuid.NewString()
 	hostSlug := "update-host-" + ownerID[:8]
 	_, err = db.Pool().Exec(ctx,
-		`INSERT INTO hosts (id, user_id, slug, name, type, role) VALUES ($1, $2, $3, 'Old Name', 'machine', 'owner')`,
+		`INSERT INTO hosts (id, user_id, slug, name) VALUES ($1, $2, $3, 'Old Name')`,
 		hostID, owner.ID, hostSlug)
 	if err != nil {
 		t.Fatalf("insert host: %v", err)
@@ -1933,7 +1929,7 @@ func TestIntegration_ProjectCreate_NATS(t *testing.T) {
 	// ADR-0095: insert a host row so the project creation is not blocked by the no_hosts guard.
 	hostID := uuid.NewString()
 	if _, herr := db.Pool().Exec(ctx,
-		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'proj-nats-host', 'ProjNats Host', 'machine', 'owner', NOW())`,
+		`INSERT INTO hosts (id, user_id, slug, name, created_at) VALUES ($1, $2, 'proj-nats-host', 'ProjNats Host', NOW())`,
 		hostID, user.ID); herr != nil {
 		t.Fatalf("insert test host: %v", herr)
 	}
@@ -2027,7 +2023,7 @@ func TestIntegration_CheckSlug_Taken(t *testing.T) {
 	// Create a machine host for the user so host_id can be set on the project.
 	hostID := uuid.NewString()
 	_, err = db.Pool().Exec(ctx,
-		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'checkslug-host', 'Check Host', 'machine', 'owner', NOW())`,
+		`INSERT INTO hosts (id, user_id, slug, name, created_at) VALUES ($1, $2, 'checkslug-host', 'Check Host', NOW())`,
 		hostID, user.ID)
 	if err != nil {
 		t.Fatalf("insert host: %v", err)
@@ -2128,7 +2124,7 @@ func TestIntegration_CreateProject_SucceedsWithHost(t *testing.T) {
 	// Insert a test host row (ADR-0095: same pattern as TestIntegration_CheckSlug_Taken).
 	hostID := uuid.NewString()
 	if _, herr := db.Pool().Exec(ctx,
-		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'test-host', 'Test Host', 'machine', 'owner', NOW())`,
+		`INSERT INTO hosts (id, user_id, slug, name, created_at) VALUES ($1, $2, 'test-host', 'Test Host', NOW())`,
 		hostID, user.ID); herr != nil {
 		t.Fatalf("insert test host: %v", herr)
 	}
@@ -2189,7 +2185,7 @@ func TestIntegration_Migration_PreservesLocalHosts(t *testing.T) {
 
 	localHostID := uuid.NewString()
 	if _, herr := db.Pool().Exec(ctx,
-		`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, 'local', 'Local Machine', 'machine', 'owner', NOW())`,
+		`INSERT INTO hosts (id, user_id, slug, name, created_at) VALUES ($1, $2, 'local', 'Local Machine', NOW())`,
 		localHostID, user.ID); herr != nil {
 		t.Fatalf("insert local host: %v", herr)
 	}
@@ -2264,7 +2260,7 @@ func TestIntegration_HTTP_ProjectCreate_HostRequired(t *testing.T) {
 	for _, slug := range []string{"host-alpha", "host-beta"} {
 		hid := uuid.NewString()
 		if _, herr := db.Pool().Exec(ctx,
-			`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, $3, $4, 'machine', 'owner', NOW())`,
+			`INSERT INTO hosts (id, user_id, slug, name, created_at) VALUES ($1, $2, $3, $4, NOW())`,
 			hid, user.ID, slug, slug); herr != nil {
 			t.Fatalf("insert host %s: %v", slug, herr)
 		}
@@ -2328,7 +2324,7 @@ func TestIntegration_NATS_ProjectCreate_HostRequired(t *testing.T) {
 	for _, slug := range []string{"nats-host-one", "nats-host-two"} {
 		hid := uuid.NewString()
 		if _, herr := db.Pool().Exec(ctx,
-			`INSERT INTO hosts (id, user_id, slug, name, type, role, created_at) VALUES ($1, $2, $3, $4, 'machine', 'owner', NOW())`,
+			`INSERT INTO hosts (id, user_id, slug, name, created_at) VALUES ($1, $2, $3, $4, NOW())`,
 			hid, user.ID, slug, slug); herr != nil {
 			t.Fatalf("insert host %s: %v", slug, herr)
 		}
@@ -2350,5 +2346,320 @@ func TestIntegration_NATS_ProjectCreate_HostRequired(t *testing.T) {
 	}
 	if resp["error"] != "host_required" {
 		t.Errorf("error = %q; want %q; full reply: %s", resp["error"], "host_required", reply.Data)
+	}
+}
+
+// ----- ADR-0097 integration tests -----
+
+// TestIntegration_ADR0097_RegisterHost_NATS verifies that publishing to
+// mclaude.users.{uslug}.hosts._.register with {name, nkey_public} creates
+// a host row and returns {ok: true, slug}.
+func TestIntegration_ADR0097_RegisterHost_NATS(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	nc := mustNATSConn(t)
+	srv := newIntegrationServer(t, db, nc)
+
+	if err := srv.StartLifecycleSubscribers(nc); err != nil {
+		t.Fatalf("StartLifecycleSubscribers: %v", err)
+	}
+
+	suffix := uuid.NewString()[:8]
+	userID := "adr97-reg-" + suffix
+	user, err := db.CreateUser(ctx, userID, userID+"@test.example.com", "ADR97Reg", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	hostKP, _ := nkeys.CreateUser()
+	hostPub, _ := hostKP.PublicKey()
+
+	payload, _ := json.Marshal(NATSHostRegisterRequest{
+		Name:       "My Test Host " + suffix,
+		NKeyPublic: hostPub,
+	})
+	subject := "mclaude.users." + user.Slug + ".hosts._.register"
+	reply, err := nc.Request(subject, payload, 5*time.Second)
+	if err != nil {
+		t.Fatalf("nc.Request %s: %v", subject, err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(reply.Data, &resp); err != nil {
+		t.Fatalf("unmarshal reply: %v", err)
+	}
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("register response not ok: %s", reply.Data)
+	}
+	hostSlug, _ := resp["slug"].(string)
+	if hostSlug == "" {
+		t.Fatal("register response missing slug")
+	}
+
+	// Verify host row in DB with public_key set and no type/role columns.
+	var pubKey string
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT public_key FROM hosts WHERE user_id = $1 AND slug = $2`,
+		user.ID, hostSlug).Scan(&pubKey); err != nil {
+		t.Fatalf("query host: %v", err)
+	}
+	if pubKey != hostPub {
+		t.Errorf("public_key = %q; want %q", pubKey, hostPub)
+	}
+}
+
+// TestIntegration_ADR0097_RegisterHost_DefaultPlatform_Admin verifies that an admin
+// user can register a host with defaultPlatform=true, setting is_default_platform=true.
+// A second attempt with defaultPlatform=true returns {error: "default_platform_exists"}.
+func TestIntegration_ADR0097_RegisterHost_DefaultPlatform_Admin(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	nc := mustNATSConn(t)
+	srv := newIntegrationServer(t, db, nc)
+
+	if err := srv.StartLifecycleSubscribers(nc); err != nil {
+		t.Fatalf("StartLifecycleSubscribers: %v", err)
+	}
+
+	suffix := uuid.NewString()[:8]
+	adminID := "adr97-dp-admin-" + suffix
+	adminUser, err := db.CreateUser(ctx, adminID, adminID+"@test.example.com", "ADR97DPAdmin", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if err := db.SetUserAdmin(ctx, adminUser.ID, true); err != nil {
+		t.Fatalf("SetUserAdmin: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, adminID) }) //nolint:errcheck
+
+	kp1, _ := nkeys.CreateUser()
+	pub1, _ := kp1.PublicKey()
+	subject := "mclaude.users." + adminUser.Slug + ".hosts._.register"
+
+	// First registration with defaultPlatform=true.
+	pl1, _ := json.Marshal(NATSHostRegisterRequest{
+		Name:            "Default Platform Host " + suffix,
+		NKeyPublic:      pub1,
+		DefaultPlatform: true,
+	})
+	rep1, err := nc.Request(subject, pl1, 5*time.Second)
+	if err != nil {
+		t.Fatalf("nc.Request first: %v", err)
+	}
+	var r1 map[string]any
+	_ = json.Unmarshal(rep1.Data, &r1)
+	if ok, _ := r1["ok"].(bool); !ok {
+		t.Fatalf("first register response not ok: %s", rep1.Data)
+	}
+	slug1, _ := r1["slug"].(string)
+
+	// Verify is_default_platform=true.
+	var isDefault bool
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT is_default_platform FROM hosts WHERE user_id = $1 AND slug = $2`,
+		adminUser.ID, slug1).Scan(&isDefault); err != nil {
+		t.Fatalf("query is_default_platform: %v", err)
+	}
+	if !isDefault {
+		t.Error("is_default_platform = false; want true after admin defaultPlatform registration")
+	}
+
+	// Second registration by same admin with a different name but defaultPlatform=true — conflict.
+	kp2, _ := nkeys.CreateUser()
+	pub2, _ := kp2.PublicKey()
+	pl2, _ := json.Marshal(NATSHostRegisterRequest{
+		Name:            "Second Default Platform " + suffix,
+		NKeyPublic:      pub2,
+		DefaultPlatform: true,
+	})
+	rep2, err := nc.Request(subject, pl2, 5*time.Second)
+	if err != nil {
+		t.Fatalf("nc.Request second: %v", err)
+	}
+	var r2 map[string]string
+	_ = json.Unmarshal(rep2.Data, &r2)
+	if r2["error"] != "default_platform_exists" {
+		t.Errorf("second registration error = %q; want 'default_platform_exists'", r2["error"])
+	}
+}
+
+// TestIntegration_ADR0097_RegisterHost_DefaultPlatform_NonAdmin verifies that
+// a non-admin user attempting defaultPlatform=true receives {error: "admin_required"}.
+func TestIntegration_ADR0097_RegisterHost_DefaultPlatform_NonAdmin(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	nc := mustNATSConn(t)
+	srv := newIntegrationServer(t, db, nc)
+
+	if err := srv.StartLifecycleSubscribers(nc); err != nil {
+		t.Fatalf("StartLifecycleSubscribers: %v", err)
+	}
+
+	suffix := uuid.NewString()[:8]
+	userID := "adr97-nonadmin-" + suffix
+	user, err := db.CreateUser(ctx, userID, userID+"@test.example.com", "ADR97NonAdmin", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	kp, _ := nkeys.CreateUser()
+	pub, _ := kp.PublicKey()
+
+	payload, _ := json.Marshal(NATSHostRegisterRequest{
+		Name:            "Non-Admin DP Host " + suffix,
+		NKeyPublic:      pub,
+		DefaultPlatform: true,
+	})
+	subject := "mclaude.users." + user.Slug + ".hosts._.register"
+	reply, err := nc.Request(subject, payload, 5*time.Second)
+	if err != nil {
+		t.Fatalf("nc.Request %s: %v", subject, err)
+	}
+
+	var resp map[string]string
+	_ = json.Unmarshal(reply.Data, &resp)
+	if resp["error"] != "admin_required" {
+		t.Errorf("error = %q; want 'admin_required'", resp["error"])
+	}
+}
+
+// TestIntegration_ADR0097_Schema_NoTypeRole verifies that after a fresh Migrate()
+// the hosts table has no type or role columns (ADR-0097: columns dropped).
+func TestIntegration_ADR0097_Schema_NoTypeRole(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+
+	// Run Migrate again (idempotent) to ensure migration DO block was executed.
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	// Query information_schema to verify type and role columns do not exist.
+	for _, col := range []string{"type", "role"} {
+		var count int
+		if err := db.Pool().QueryRow(ctx, `
+			SELECT COUNT(*) FROM information_schema.columns
+			WHERE table_name = 'hosts' AND column_name = $1`, col).Scan(&count); err != nil {
+			t.Fatalf("query column %q existence: %v", col, err)
+		}
+		if count > 0 {
+			t.Errorf("hosts table still has column %q after ADR-0097 migration; want it absent", col)
+		}
+	}
+}
+
+// TestIntegration_ADR0097_AdminCluster_Returns404 verifies that all /admin/clusters/*
+// endpoints return 404 after ADR-0097 removal. Tests bypass isAdminMiddleware by
+// calling handleAdminRoutes directly.
+func TestIntegration_ADR0097_AdminCluster_Returns404(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	srv := newIntegrationServer(t, db, nil)
+
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/admin/clusters"},
+		{http.MethodGet, "/admin/clusters"},
+		{http.MethodPost, "/admin/clusters/k3d-dev/grants"},
+		{http.MethodDelete, "/admin/clusters/k3d-dev"},
+	}
+
+	for _, r := range routes {
+		t.Run(r.method+" "+r.path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(r.method, r.path, nil)
+			srv.handleAdminRoutes(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("%s %s: status = %d; want 404 (ADR-0097: admin cluster endpoints removed)",
+					r.method, r.path, rec.Code)
+			}
+		})
+	}
+}
+
+// TestIntegration_ADR0097_ProjectProvisioning_UserAgentPath verifies that creating a
+// project via the NATS handler publishes the provisioning request to the user-agent
+// subject unconditionally (no type-based routing branch, ADR-0097).
+func TestIntegration_ADR0097_ProjectProvisioning_UserAgentPath(t *testing.T) {
+	ctx := context.Background()
+	db := mustConnectDB(t, ctx)
+	nc := mustNATSConn(t)
+	srv := newIntegrationServer(t, db, nc)
+
+	if err := srv.StartProjectsSubscriber(nc); err != nil {
+		t.Fatalf("StartProjectsSubscriber: %v", err)
+	}
+
+	suffix := uuid.NewString()[:8]
+	userID := "adr97-prov-" + suffix
+	user, err := db.CreateUser(ctx, userID, userID+"@test.example.com", "ADR97Prov", "")
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, userID) }) //nolint:errcheck
+
+	hostID := uuid.NewString()
+	hostSlug := "prov-host-" + suffix
+	if _, herr := db.Pool().Exec(ctx,
+		`INSERT INTO hosts (id, user_id, slug, name, created_at) VALUES ($1, $2, $3, $4, NOW())`,
+		hostID, user.ID, hostSlug, "Prov Host "+suffix); herr != nil {
+		t.Fatalf("insert host: %v", herr)
+	}
+	t.Cleanup(func() { db.Pool().Exec(ctx, `DELETE FROM hosts WHERE id = $1`, hostID) }) //nolint:errcheck
+
+	if err := ensureUserResources(nc, user.Slug); err != nil {
+		t.Logf("ensureUserResources (non-fatal): %v", err)
+	}
+
+	// Subscribe to the user-agent provisioning subject to capture the publish.
+	provSubject := "mclaude.users." + user.Slug + ".hosts." + hostSlug + ".agent.projects.provision"
+	provCh := make(chan *nats.Msg, 1)
+	sub, err := nc.Subscribe(provSubject, func(msg *nats.Msg) {
+		provCh <- msg
+		// Reply with ok so the handler doesn't log a timeout.
+		if msg.Reply != "" {
+			pl, _ := json.Marshal(map[string]any{"ok": true})
+			_ = nc.Publish(msg.Reply, pl)
+		}
+	})
+	if err != nil {
+		t.Fatalf("subscribe provisioning subject: %v", err)
+	}
+	defer sub.Unsubscribe() //nolint:errcheck
+
+	// Trigger project creation via NATS.
+	createSubject := fmt.Sprintf("mclaude.users.%s.api.projects.create", user.Slug)
+	payload, _ := json.Marshal(map[string]string{
+		"name":     "ADR97 Provision Test",
+		"hostSlug": hostSlug,
+	})
+	reply, err := nc.Request(createSubject, payload, 5*time.Second)
+	if err != nil {
+		t.Fatalf("nc.Request create: %v", err)
+	}
+	var createResp map[string]any
+	_ = json.Unmarshal(reply.Data, &createResp)
+	// Don't check createResp.ok — the provisioning request may time out if the
+	// controller isn't running; we only care that the right subject was published.
+
+	// Verify provisioning was published to user-agent subject.
+	select {
+	case msg := <-provCh:
+		var provReq ProvisionRequest
+		if err := json.Unmarshal(msg.Data, &provReq); err != nil {
+			t.Fatalf("unmarshal ProvisionRequest: %v", err)
+		}
+		if provReq.UserSlug != user.Slug {
+			t.Errorf("ProvisionRequest.UserSlug = %q; want %q", provReq.UserSlug, user.Slug)
+		}
+		if provReq.HostSlug != hostSlug {
+			t.Errorf("ProvisionRequest.HostSlug = %q; want %q", provReq.HostSlug, hostSlug)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("provisioning request not published to user-agent subject within 5s")
 	}
 }

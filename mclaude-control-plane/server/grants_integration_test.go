@@ -761,115 +761,135 @@ func TestIntegration_ADR0091_AuthVerify_UserAgent_FullJWT(t *testing.T) {
 	}
 }
 
-// ----- Admin cluster default platform tests -----
+// ----- Admin cluster default platform tests (ADR-0097 rewrites) -----
 
-// TestIntegration_ADR0091_AdminCluster_DefaultPlatform verifies that POST /admin/clusters
-// with defaultPlatform=true sets is_default_platform=true on the hosts row.
+// TestIntegration_ADR0091_AdminCluster_DefaultPlatform verifies that a NATS
+// registration with defaultPlatform=true (by an admin user) sets
+// is_default_platform=true on the hosts row. Rewritten for ADR-0097: uses
+// mclaude.users.{uslug}.hosts._.register instead of deleted POST /admin/clusters.
 func TestIntegration_ADR0091_AdminCluster_DefaultPlatform(t *testing.T) {
 	ctx := context.Background()
 	db := mustConnectDB(t, ctx)
 	nc := mustNATSConn(t)
 	srv := newIntegrationServer(t, db, nc)
 
-	adminJWT := mustAdminJWT(t, db, srv)
-
-	suffix := uuid.NewString()[:8]
-	clusterSlug := "default-platform-" + suffix
-
-	mux := http.NewServeMux()
-	srv.RegisterRoutes(mux)
-
-	body, _ := json.Marshal(map[string]any{
-		"slug":            clusterSlug,
-		"name":            "Default Platform Test",
-		"defaultPlatform": true,
-	})
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/admin/clusters", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+adminJWT)
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("register cluster status = %d; body: %s", rec.Code, rec.Body.String())
+	if err := srv.StartLifecycleSubscribers(nc); err != nil {
+		t.Fatalf("StartLifecycleSubscribers: %v", err)
 	}
+
+	// Create an admin user to own the host.
+	suffix := uuid.NewString()[:8]
+	adminID := "dp-admin-" + suffix
+	adminUser, err := db.CreateUser(ctx, adminID, adminID+"@test.example.com", "DPAdmin", "")
+	if err != nil {
+		t.Fatalf("CreateUser admin: %v", err)
+	}
+	if err := db.SetUserAdmin(ctx, adminUser.ID, true); err != nil {
+		t.Fatalf("SetUserAdmin: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, adminID) }) //nolint:errcheck
+
+	hostName := "Default Platform Test " + suffix
+	hostKP, _ := nkeys.CreateUser()
+	hostPub, _ := hostKP.PublicKey()
+
+	payload, _ := json.Marshal(NATSHostRegisterRequest{
+		Name:            hostName,
+		NKeyPublic:      hostPub,
+		DefaultPlatform: true,
+	})
+	subject := "mclaude.users." + adminUser.Slug + ".hosts._.register"
+	reply, err := nc.Request(subject, payload, 5*time.Second)
+	if err != nil {
+		t.Fatalf("nc.Request %s: %v", subject, err)
+	}
+
+	var resp map[string]any
+	_ = json.Unmarshal(reply.Data, &resp)
+	if ok, _ := resp["ok"].(bool); !ok {
+		t.Fatalf("register response not ok: %s", reply.Data)
+	}
+	hostSlug, _ := resp["slug"].(string)
+	if hostSlug == "" {
+		t.Fatal("register response missing slug")
+	}
+	t.Cleanup(func() {
+		db.Pool().Exec(ctx, `DELETE FROM hosts WHERE user_id = $1 AND slug = $2`, adminUser.ID, hostSlug) //nolint:errcheck
+	})
 
 	// Verify is_default_platform=true in the DB.
 	var isDefault bool
-	err := db.Pool().QueryRow(ctx,
-		`SELECT is_default_platform FROM hosts WHERE slug = $1 AND role = 'owner' LIMIT 1`,
-		clusterSlug).Scan(&isDefault)
-	if err != nil {
+	if err := db.Pool().QueryRow(ctx,
+		`SELECT is_default_platform FROM hosts WHERE user_id = $1 AND slug = $2`,
+		adminUser.ID, hostSlug).Scan(&isDefault); err != nil {
 		t.Fatalf("query is_default_platform: %v", err)
 	}
 	if !isDefault {
 		t.Error("is_default_platform = false; want true")
 	}
-
-	// Cleanup.
-	t.Cleanup(func() {
-		db.Pool().Exec(ctx, `DELETE FROM hosts WHERE slug = $1`, clusterSlug) //nolint:errcheck
-	})
 }
 
 // TestIntegration_ADR0091_AdminCluster_DefaultPlatform_Conflict verifies that a second
-// cluster with defaultPlatform=true returns 409 with error="default_platform_exists".
+// NATS registration with defaultPlatform=true returns {error: "default_platform_exists"}.
+// Rewritten for ADR-0097: uses NATS registration instead of deleted POST /admin/clusters.
 func TestIntegration_ADR0091_AdminCluster_DefaultPlatform_Conflict(t *testing.T) {
 	ctx := context.Background()
 	db := mustConnectDB(t, ctx)
 	nc := mustNATSConn(t)
 	srv := newIntegrationServer(t, db, nc)
 
-	adminJWT := mustAdminJWT(t, db, srv)
+	if err := srv.StartLifecycleSubscribers(nc); err != nil {
+		t.Fatalf("StartLifecycleSubscribers: %v", err)
+	}
 
 	suffix := uuid.NewString()[:8]
-	slug1 := "default-conflict-1-" + suffix
-	slug2 := "default-conflict-2-" + suffix
+	adminID := "dp-conflict-" + suffix
+	adminUser, err := db.CreateUser(ctx, adminID, adminID+"@test.example.com", "DPConflict", "")
+	if err != nil {
+		t.Fatalf("CreateUser admin: %v", err)
+	}
+	if err := db.SetUserAdmin(ctx, adminUser.ID, true); err != nil {
+		t.Fatalf("SetUserAdmin: %v", err)
+	}
+	t.Cleanup(func() { db.DeleteUser(ctx, adminID) }) //nolint:errcheck
 
-	mux := http.NewServeMux()
-	srv.RegisterRoutes(mux)
+	subject := "mclaude.users." + adminUser.Slug + ".hosts._.register"
 
-	registerCluster := func(slug string) int {
-		body, _ := json.Marshal(map[string]any{
-			"slug":            slug,
-			"name":            slug,
-			"defaultPlatform": true,
+	registerDefaultPlatform := func(name string) (int, string) {
+		kp, _ := nkeys.CreateUser()
+		pub, _ := kp.PublicKey()
+		pl, _ := json.Marshal(NATSHostRegisterRequest{
+			Name:            name,
+			NKeyPublic:      pub,
+			DefaultPlatform: true,
 		})
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/admin/clusters", bytes.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+adminJWT)
-		mux.ServeHTTP(rec, req)
-		return rec.Code
+		rep, err := nc.Request(subject, pl, 5*time.Second)
+		if err != nil {
+			return 0, err.Error()
+		}
+		var r map[string]any
+		_ = json.Unmarshal(rep.Data, &r)
+		errVal, _ := r["error"].(string)
+		ok, _ := r["ok"].(bool)
+		if ok {
+			return 201, ""
+		}
+		return 409, errVal
 	}
 
-	// First one should succeed.
-	if code := registerCluster(slug1); code != http.StatusCreated {
-		t.Fatalf("first defaultPlatform cluster: got %d; want 201", code)
+	// First registration should succeed.
+	code1, _ := registerDefaultPlatform("Default Host 1 " + suffix)
+	if code1 != 201 {
+		t.Fatalf("first defaultPlatform host: code = %d; want 201", code1)
 	}
-	t.Cleanup(func() {
-		db.Pool().Exec(ctx, `DELETE FROM hosts WHERE slug = $1`, slug1) //nolint:errcheck
-	})
 
-	// Second should return 409.
-	rec2 := httptest.NewRecorder()
-	body2, _ := json.Marshal(map[string]any{
-		"slug":            slug2,
-		"name":            slug2,
-		"defaultPlatform": true,
-	})
-	req2 := httptest.NewRequest(http.MethodPost, "/admin/clusters", bytes.NewReader(body2))
-	req2.Header.Set("Content-Type", "application/json")
-	req2.Header.Set("Authorization", "Bearer "+adminJWT)
-	mux.ServeHTTP(rec2, req2)
-
-	if rec2.Code != http.StatusConflict {
-		t.Fatalf("second defaultPlatform cluster: got %d; want 409; body: %s", rec2.Code, rec2.Body.String())
+	// Second should return conflict.
+	code2, errVal := registerDefaultPlatform("Default Host 2 " + suffix)
+	if code2 != 409 {
+		t.Fatalf("second defaultPlatform host: code = %d; want 409", code2)
 	}
-	var errResp map[string]string
-	_ = json.NewDecoder(rec2.Body).Decode(&errResp)
-	if errResp["error"] != "default_platform_exists" {
-		t.Errorf("error = %q; want 'default_platform_exists'", errResp["error"])
+	if errVal != "default_platform_exists" {
+		t.Errorf("error = %q; want 'default_platform_exists'", errVal)
 	}
 }
 
@@ -895,10 +915,11 @@ func TestIntegration_ADR0091_DefaultPlatform_AutoGrant(t *testing.T) {
 	t.Cleanup(func() { db.DeleteUser(ctx, ownerID) }) //nolint:errcheck
 
 	// Insert a default platform host row directly.
+	// ADR-0097: no type/role columns.
 	hostID := uuid.NewString()
 	_, err = db.Pool().Exec(ctx, `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, is_default_platform)
-		VALUES ($1, $2, $3, $4, 'cluster', 'owner', TRUE)`,
+		INSERT INTO hosts (id, user_id, slug, name, is_default_platform)
+		VALUES ($1, $2, $3, $4, TRUE)`,
 		hostID, ownerID, defaultHostSlug, defaultHostSlug)
 	if err != nil {
 		t.Fatalf("insert default platform host: %v", err)
