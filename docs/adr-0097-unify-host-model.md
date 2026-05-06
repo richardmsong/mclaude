@@ -68,11 +68,13 @@ No local files are written except `~/.mclaude/hosts/{hslug}/config.json` (for `h
 
 **Remove type/role from all queries (exhaustive):**
 - `scanHost` helper (`db/db.go:414`): remove `type` and `role` from the scan list. Update `Host` struct to remove `Type` and `Role` fields.
-- `GetHostBySlug` (`db/db.go:466`): remove `AND role = 'owner'` filter. The `UNIQUE (user_id, slug)` constraint ensures uniqueness per user — no disambiguation needed. Old per-user grant rows from `adminGrantCluster` used `role = 'grant'`; these rows should be cleaned up by the migration (they reference the removed admin flow): `DELETE FROM hosts WHERE role = 'grant'` in the migration DO block, before dropping the column.
+- `GetHostBySlug` (`db/db.go:464-466`): remove `type, role` from SELECT and remove `AND role = 'owner'` filter.
+- `GetHostByPublicKey` (`db/db.go:479`): remove `type, role` from SELECT.
+- `GetHostsByUser` (`db/db.go:429`): remove `type, role` from SELECT.
 - `GetHostsByUser` / `ListHosts` (`hosts.go:201-212`): remove `type` and `role` from SELECT and scan.
 - `HostResponse` struct (`server/hosts.go:24-35`): remove `Type string json:"type"` and `Role string json:"role"` fields. This is the HTTP response serialization struct — separate from the `Host` DB struct. Without removal, `GET /api/users/{uslug}/hosts` would serialize empty `type`/`role` fields.
 - All INSERT INTO hosts (`lifecycle.go`, `hosts.go`, `admin.go`): remove `type` and `role` from column lists and VALUES. `POST /api/users/{uslug}/hosts` HTTP endpoint (`server/hosts.go:270-274`): remove entirely — BYOH is dead, all registration goes through NATS. Remove the route from `handleHostRoutes`.
-- `HostKVState` struct (`sys_subscriber.go:16-22`): remove `Type` field. Remove `h.type` from the SQL query in the `$SYS CONNECT` handler (`sys_subscriber.go:100-104`).
+- `HostKVState` struct (`sys_subscriber.go:16-22`): remove `Type` field. Remove `h.type` from the SQL query in the `$SYS CONNECT` handler (`sys_subscriber.go:100-104`). The DISCONNECT read-modify-write path (`sys_subscriber.go:133-148`) will silently strip `type` from existing KV entries on first DISCONNECT — this is the intended migration path (prerelease, no KV data preservation needed).
 - `ManageUpdateRequest` (`lifecycle.go:713-716`): remove `Type` field. Update validation at `lifecycle.go:736` — check `req.Name == ""` only (remove `req.Type` from the condition).
 
 **Update NATS registration handler:**
@@ -95,7 +97,7 @@ No local files are written except `~/.mclaude/hosts/{hslug}/config.json` (for `h
 - `host register` local NKey generation path — `--nkey-public` is now required, not optional.
 
 **Update `host register`:**
-- `--nkey-public <key>` — required flag. CLI validates NKey format (56-char base32 starting with U or N).
+- `--nkey-public <key>` — required flag. CLI validates NKey format (56-char base32 starting with `U` — user-level NKey only; `N`-prefix server keys are rejected).
 - `--default-platform` — optional flag, included in NATS registration payload.
 - `--name <name>` — required display name.
 - CLI publishes to `mclaude.users.{uslug}.hosts._.register` via the user's NATS JWT (obtained during `mclaude login`). No HTTP endpoint involved.
@@ -117,7 +119,7 @@ No local files are written except `~/.mclaude/hosts/{hslug}/config.json` (for `h
 - `hosts.type` (TEXT) — was `machine` or `cluster`
 - `hosts.role` (TEXT) — was always `owner`
 
-**No migration needed** — prerelease, wipe and reinstall.
+**No migration needed** — prerelease, wipe and reinstall. No cleanup of `role = 'user'` grant rows.
 
 **Added to NATS registration payload:**
 - `defaultPlatform` (bool, optional, default false) — CP enforces admin-only
@@ -144,8 +146,7 @@ No security impact. Admin-only `defaultPlatform` enforcement moves from HTTP `is
 ## Scope
 
 **In v1:**
-- Drop `type` and `role` columns (DDL + migration)
-- Clean up `role = 'grant'` rows
+- Drop `type` and `role` columns (DDL only — prerelease wipe)
 - Remove all admin cluster endpoints
 - Remove `cluster register`, `cluster grant`, `daemon` CLI commands
 - Make `--nkey-public` required on `host register`
@@ -153,6 +154,7 @@ No security impact. Admin-only `defaultPlatform` enforcement moves from HTTP `is
 - CLI registers via NATS publish
 - Unify project routing to user-agent only
 - Remove `ManageUpdateRequest.Type`
+- Remove `POST /api/users/{uslug}/hosts` HTTP endpoint (BYOH dead)
 - Remove SPA type badge + TypeScript type fields
 
 **Deferred:**
