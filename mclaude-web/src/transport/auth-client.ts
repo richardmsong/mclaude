@@ -1,3 +1,4 @@
+import { createUser } from 'nkeys.js'
 import type { IAuthClient, AuthTokens, AdminProvider, ConnectedProvider, RepoListResponse } from '@/types'
 
 export class AuthClient implements IAuthClient {
@@ -7,16 +8,27 @@ export class AuthClient implements IAuthClient {
   constructor(private readonly baseUrl: string) {}
 
   async login(email: string, password: string): Promise<AuthTokens> {
+    // ADR-0100: Generate NKey pair client-side before login.
+    // The server never generates or returns NKey seeds.
+    const kp = createUser()
+    const nkeyPublic = kp.getPublicKey()
+    const nkeySeedBytes = kp.getSeed()
+    const nkeySeed = new TextDecoder().decode(nkeySeedBytes)
+    kp.clear()
+
     const res = await fetch(`${this.baseUrl}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, nkey_public: nkeyPublic }),
     })
     if (!res.ok) {
       const body = await res.text().catch(() => '')
       throw new Error(body || `Login failed: ${res.status}`)
     }
-    const tokens: AuthTokens = await res.json()
+    // Server response no longer includes nkeySeed (ADR-0100).
+    // Inject the locally-generated seed and public key into the tokens object.
+    const serverTokens = await res.json() as Omit<AuthTokens, 'nkeySeed' | 'nkeyPublic'>
+    const tokens: AuthTokens = { ...serverTokens, nkeySeed, nkeyPublic }
     this._tokens = tokens
     this._persist(tokens)
     return tokens

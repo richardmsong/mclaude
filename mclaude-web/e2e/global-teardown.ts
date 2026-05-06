@@ -2,6 +2,7 @@ import { FullConfig } from '@playwright/test'
 import * as fs from 'fs'
 import * as path from 'path'
 import { fileURLToPath } from 'url'
+import { createUser } from 'nkeys.js'
 
 const TEST_USER_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '.test-user.json')
 
@@ -24,15 +25,21 @@ export default async function globalTeardown(_config: FullConfig) {
     return
   }
 
-  // Step 3: Login as bootstrap admin to obtain adminJWT
+  // Step 3: Login as bootstrap admin to obtain adminJWT.
+  // ADR-0100: generate NKey pair and send nkey_public in login request body.
   let adminJWT: string
   try {
+    const adminKp = createUser()
+    const adminNkeyPublic = adminKp.getPublicKey()
+    adminKp.clear()
+
     const loginRes = await fetch(`${adminURL}/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         email: process.env['BOOTSTRAP_ADMIN_EMAIL'],
         password: process.env['BOOTSTRAP_ADMIN_PASSWORD'],
+        nkey_public: adminNkeyPublic,
       }),
     })
     if (!loginRes.ok) {

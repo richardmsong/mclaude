@@ -4,6 +4,7 @@ import * as path from 'path'
 import * as crypto from 'crypto'
 import { fileURLToPath } from 'url'
 import { connect, jwtAuthenticator } from 'nats.ws'
+import { createUser } from 'nkeys.js'
 
 function slugifyEmail(email: string): string {
   return email
@@ -38,12 +39,18 @@ export default async function globalSetup(_config: FullConfig) {
   const token = crypto.randomBytes(8).toString('hex')
 
   // Step 4: Login as bootstrap admin to obtain adminJWT
+  // ADR-0100: generate NKey pair and send nkey_public in login request body.
+  const adminKp = createUser()
+  const adminNkeyPublic = adminKp.getPublicKey()
+  adminKp.clear()
+
   const adminLoginRes = await fetch(`${adminURL}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       email: process.env['BOOTSTRAP_ADMIN_EMAIL'],
       password: process.env['BOOTSTRAP_ADMIN_PASSWORD'],
+      nkey_public: adminNkeyPublic,
     }),
   })
   if (!adminLoginRes.ok) {
@@ -74,26 +81,32 @@ export default async function globalSetup(_config: FullConfig) {
   const uslug = slugifyEmail(email)
   process.env['DEV_USER_SLUG'] = uslug
 
-  // Step 7: Login to obtain JWT/nkeySeed for NATS authentication
+  // Step 7: Login to obtain JWT for NATS authentication.
+  // ADR-0100: generate NKey pair client-side; send nkey_public in request body.
+  // Server does not return nkeySeed — use the locally-generated seed.
+  const kp = createUser()
+  const nkeyPublic = kp.getPublicKey()
+  const nkeySeedBytes = kp.getSeed()
+  kp.clear()
+
   const loginRes = await fetch(`${baseURL}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: token }),
+    body: JSON.stringify({ email, password: token, nkey_public: nkeyPublic }),
   })
   if (!loginRes.ok) {
     const body = await loginRes.text()
     throw new Error(`global-setup: login failed ${loginRes.status}: ${body}`)
   }
-  const loginBody = await loginRes.json() as { jwt: string; nkeySeed: string; natsUrl: string; userSlug: string }
-  const { jwt, nkeySeed } = loginBody
+  const loginBody = await loginRes.json() as { jwt: string; natsUrl: string; userSlug: string }
+  const { jwt } = loginBody
 
   // Derive NATS WebSocket URL: use natsUrl from response if non-empty, otherwise derive from BASE_URL
   const natsWsUrl = loginBody.natsUrl
     ? loginBody.natsUrl
     : baseURL.replace(/^https:\/\//, 'wss://') + '/nats'
 
-  const seed = new TextEncoder().encode(nkeySeed)
-  const nc = await connect({ servers: [natsWsUrl], authenticator: jwtAuthenticator(jwt, seed) })
+  const nc = await connect({ servers: [natsWsUrl], authenticator: jwtAuthenticator(jwt, nkeySeedBytes) })
 
   try {
     // Step 8: Seed project via NATS request

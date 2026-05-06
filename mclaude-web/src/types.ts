@@ -39,7 +39,10 @@ export interface INATSClient {
 
 export interface AuthTokens {
   jwt: string
+  /** NKey seed — generated client-side before login (ADR-0100). Never returned by the server. */
   nkeySeed: string
+  /** NKey public key — generated client-side alongside nkeySeed and sent in the login request body (ADR-0100). */
+  nkeyPublic: string
   userId: string
   /** User slug derived from the `slug` JWT claim (ADR-0024). Defaults to userId if absent. */
   userSlug?: string

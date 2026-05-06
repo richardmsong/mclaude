@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { createUser } from 'nkeys.js'
 
 // ── Attachment / File Upload Tests ──────────────────────────────────────────
 // All attachment operations require S3 to be configured in the control plane.
@@ -15,11 +16,16 @@ const S3_CONFIGURED = !!process.env['E2E_S3']
 
 // ── Auth helper ───────────────────────────────────────────────────────────────
 
+/** Get a JWT for the dev user.
+ * ADR-0100: generate NKey pair client-side and include nkey_public in request body. */
 async function getJWT(): Promise<string> {
+  const kp = createUser()
+  const nkeyPublic = kp.getPublicKey()
+  kp.clear()
   const resp = await fetch(`${BASE_URL}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: DEV_EMAIL, password: DEV_TOKEN }),
+    body: JSON.stringify({ email: DEV_EMAIL, password: DEV_TOKEN, nkey_public: nkeyPublic }),
   })
   if (!resp.ok) return ''
   const body = await resp.json() as { jwt?: string }

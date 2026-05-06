@@ -1,4 +1,5 @@
 import { test, expect, APIRequestContext } from '@playwright/test'
+import { createUser } from 'nkeys.js'
 
 const BASE_URL = process.env['BASE_URL'] || 'https://dev.mclaude.richardmcsong.com'
 const DEV_EMAIL = process.env['DEV_EMAIL'] || 'dev@mclaude.local'
@@ -10,10 +11,14 @@ const FAKE_NKEY = ['UA', 'PLACEHOLDER', 'TEST', 'KEY'].join('_')
 // ADMIN_URL should point to the control-plane base URL (same as BASE_URL in most deployments).
 const ADMIN_URL = process.env['ADMIN_URL'] || ''
 
-/** Authenticate with the dev user and return the JWT token and user slug. */
+/** Authenticate with the dev user and return the JWT token and user slug.
+ * ADR-0100: generate NKey pair client-side and include nkey_public in request body. */
 async function getAuthToken(request: APIRequestContext): Promise<{ jwt: string; userSlug: string }> {
+  const kp = createUser()
+  const nkeyPublic = kp.getPublicKey()
+  kp.clear()
   const res = await request.post(`${BASE_URL}/auth/login`, {
-    data: { email: DEV_EMAIL, password: DEV_PASSWORD },
+    data: { email: DEV_EMAIL, password: DEV_PASSWORD, nkey_public: nkeyPublic },
   })
   expect(res.status()).toBe(200)
   const body = await res.json()
@@ -60,9 +65,13 @@ test.describe('Public API endpoints', () => {
     expect(body).toHaveProperty('serverVersion')
   })
 
-  test('API-PUB-06: Login valid → POST /auth/login → 200 with jwt, userId, userSlug, natsUrl', async ({ request }) => {
+  test('API-PUB-06: Login valid → POST /auth/login → 200 with jwt, userId, userSlug, natsUrl; no nkeySeed', async ({ request }) => {
+    // ADR-0100: nkey_public is required in login request body.
+    const kp = createUser()
+    const nkeyPublic = kp.getPublicKey()
+    kp.clear()
     const res = await request.post(`${BASE_URL}/auth/login`, {
-      data: { email: DEV_EMAIL, password: DEV_PASSWORD },
+      data: { email: DEV_EMAIL, password: DEV_PASSWORD, nkey_public: nkeyPublic },
     })
     expect(res.status()).toBe(200)
     const body = await res.json()
@@ -70,11 +79,26 @@ test.describe('Public API endpoints', () => {
     expect(body).toHaveProperty('userId')
     expect(body).toHaveProperty('userSlug')
     expect(body).toHaveProperty('natsUrl')
+    // ADR-0100: server must NOT return nkeySeed
+    expect(body).not.toHaveProperty('nkeySeed')
+  })
+
+  test('API-PUB-06b: Login without nkey_public → POST /auth/login → 400', async ({ request }) => {
+    // ADR-0100: nkey_public is required — server returns 400 if absent.
+    const res = await request.post(`${BASE_URL}/auth/login`, {
+      data: { email: DEV_EMAIL, password: DEV_PASSWORD },
+    })
+    expect(res.status()).toBe(400)
+    const body = await res.json()
+    expect(body).toHaveProperty('error')
   })
 
   test('API-PUB-07: Login invalid → POST /auth/login with wrong password → 401', async ({ request }) => {
+    const kp = createUser()
+    const nkeyPublic = kp.getPublicKey()
+    kp.clear()
     const res = await request.post(`${BASE_URL}/auth/login`, {
-      data: { email: DEV_EMAIL, password: 'wrong-password' },
+      data: { email: DEV_EMAIL, password: 'wrong-password', nkey_public: nkeyPublic },
     })
     expect(res.status()).toBe(401)
   })
@@ -564,12 +588,16 @@ test.describe('Host Management API endpoints', () => {
 })
 
 // ── Admin Endpoints ─────────────────────────────────────────────────────────
-/** Authenticate as the bootstrap admin and return the admin JWT. */
+/** Authenticate as the bootstrap admin and return the admin JWT.
+ * ADR-0100: generate NKey pair client-side and include nkey_public in request body. */
 async function loginAsAdmin(baseURL: string, email: string, password: string): Promise<string> {
+  const kp = createUser()
+  const nkeyPublic = kp.getPublicKey()
+  kp.clear()
   const resp = await fetch(`${baseURL}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password })
+    body: JSON.stringify({ email, password, nkey_public: nkeyPublic })
   })
   if (!resp.ok) throw new Error(`admin login failed ${resp.status}`)
   const data = await resp.json() as { jwt: string }

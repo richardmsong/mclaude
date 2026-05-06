@@ -4,9 +4,11 @@ export class MockAuthClient implements IAuthClient {
   private _tokens: AuthTokens | null = null
 
   // Configurable responses for tests
+  // nkeySeed and nkeyPublic are client-generated (ADR-0100) — mock values here for unit tests.
   loginResponse: AuthTokens = {
     jwt: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyLTEiLCJ1c2VySWQiOiJ1c2VyLTEiLCJleHAiOjk5OTk5OTk5OTl9.mock',
     nkeySeed: 'SUAMK4YJBQIXAQCVBKC7NHVLKIXJKFHHMF5E5KJQHIKFPBCPHHG7VMJGY',
+    nkeyPublic: 'UAMK4YJBQIXAQCVBKC7NHVLKIXJKFHHMF5E5KJQHIKFPBCPHHG7VMJGY',
     userId: 'user-1',
   }
   refreshResponse: { jwt: string } = {
