@@ -108,8 +108,8 @@ userAgent:
   image:
     ## Container image for the user-agent Deployment.
     repository: ghcr.io/richardmcsong/mclaude-user-agent
-    ## Image tag. Empty string uses the chart appVersion.
-    tag: ""
+    ## Image tag. CI publishes "main"; update when semver releases are adopted.
+    tag: "main"
   ## Resource requests/limits for user-agent pods.
   resources: {}
   templateConfigMap:
