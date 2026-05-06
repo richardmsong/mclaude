@@ -1,9 +1,10 @@
 # ADR: Anthropic Token UX — Connect, Authorize, Revoke
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-04: draft
 - 2026-05-06: accepted — paired with spec-first-run-flow.md, spec-settings-web.md, spec-host-picker.md, spec-web.md, spec-state-schema.md, spec-nats-data-taxonomy.md, spec-session-agent.md, spec-user-agent.md, spec-cli.md, spec-control-plane.md
+- 2026-05-06: implemented — all scope CLEAN (mclaude-web, mclaude-session-agent, mclaude-user-agent, mclaude-cli, mclaude-control-plane)
 
 ## Overview
 
