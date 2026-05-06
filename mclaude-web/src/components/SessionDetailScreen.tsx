@@ -376,10 +376,15 @@ export function SessionDetailScreen({
     setAttachmentUploading(true)
     setFileError(null)
     try {
+      if (!hostSlug) {
+        setFileError('Cannot upload attachment: no host registered')
+        setTimeout(() => setFileError(null), 5000)
+        return
+      }
       const ref = await attachmentClient.upload(
         file,
         projectSlug ?? 'default-project',
-        hostSlug ?? 'local',
+        hostSlug,
       )
       setStagedAttachment(ref)
     } catch (err) {
