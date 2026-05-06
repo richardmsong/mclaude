@@ -1,4 +1,4 @@
-// mclaude-cli: debug attach tool, session manager, host/cluster management,
+// mclaude-cli: debug attach tool, session manager, host management,
 // and session import for mclaude.
 //
 // Usage:
@@ -8,13 +8,10 @@
 //	mclaude-cli login [--server <url>]
 //	mclaude-cli import [--host <hslug>] [--server <url>]
 //	mclaude-cli auth anthropic [--token <v>] [--status] [--revoke]
-//	mclaude-cli host register [--name <name>]
+//	mclaude-cli host register --name <name> --nkey-public <key> [--default-platform]
 //	mclaude-cli host list
 //	mclaude-cli host use <hslug>
 //	mclaude-cli host rm <hslug>
-//	mclaude-cli cluster register --slug <cslug> [--name <display>] --jetstream-domain <jsd> --leaf-url <url> [--direct-nats-url <wss>]
-//	mclaude-cli cluster grant <cluster-slug> <uslug>
-//	mclaude-cli daemon [--host <hslug>]
 //
 // Subcommands:
 //
@@ -23,13 +20,10 @@
 //	login            Authenticate via device-code flow; stores credentials in ~/.mclaude/auth.json.
 //	import           Import existing Claude Code session data into mclaude.
 //	auth anthropic   Connect Anthropic OAuth token; deliver to trusted hosts (ADR-0091).
-//	host register    Register this machine as a BYOH host (device-code flow).
+//	host register    Register a host via NATS (--nkey-public required).
 //	host list        List all hosts the user owns or has access to.
 //	host use         Set the active host.
 //	host rm          Remove a host registration.
-//	cluster register Register a new K8s worker cluster (admin-only).
-//	cluster grant    Grant a user access to a cluster (admin-only).
-//	daemon           Start the BYOH local controller daemon.
 package main
 
 import (
@@ -76,10 +70,6 @@ func run(args []string) int {
 		return runAuth(args)
 	case "host":
 		return runHost(args)
-	case "cluster":
-		return runCluster(args)
-	case "daemon":
-		return runDaemon(args)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", args[1])
 		printUsage()
@@ -108,20 +98,13 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "    --token <v>              manual token paste (skip OAuth)")
 	fmt.Fprintln(os.Stderr, "    --status                 print connected/not-set + per-host pubkey status")
 	fmt.Fprintln(os.Stderr, "    --revoke                 delete tokens.anthropic from KV (client-side only)")
-	fmt.Fprintln(os.Stderr, "  host register               register this machine as a BYOH host")
-	fmt.Fprintln(os.Stderr, "    --name <name>             display name (default: hostname)")
+	fmt.Fprintln(os.Stderr, "  host register               register a host with the control-plane via NATS")
+	fmt.Fprintln(os.Stderr, "    --name <name>             display name (required)")
+	fmt.Fprintln(os.Stderr, "    --nkey-public <key>       NKey public key (required, U-prefix, 56-char base32)")
+	fmt.Fprintln(os.Stderr, "    --default-platform        set this host as default platform (admin-only)")
 	fmt.Fprintln(os.Stderr, "  host list                   list all hosts")
 	fmt.Fprintln(os.Stderr, "  host use <hslug>            set the active host")
 	fmt.Fprintln(os.Stderr, "  host rm <hslug>             remove a host registration")
-	fmt.Fprintln(os.Stderr, "  cluster register            register a K8s worker cluster (admin)")
-	fmt.Fprintln(os.Stderr, "    --slug <cslug>            cluster slug (required)")
-	fmt.Fprintln(os.Stderr, "    --name <display>          display name (default: slug)")
-	fmt.Fprintln(os.Stderr, "    --jetstream-domain <jsd>  JetStream domain (required)")
-	fmt.Fprintln(os.Stderr, "    --leaf-url <url>          leaf-node URL (required)")
-	fmt.Fprintln(os.Stderr, "    --direct-nats-url <wss>   direct NATS WebSocket URL (optional)")
-	fmt.Fprintln(os.Stderr, "  cluster grant <cslug> <u>   grant user access to a cluster (admin)")
-	fmt.Fprintln(os.Stderr, "  daemon                      start BYOH local controller daemon")
-	fmt.Fprintln(os.Stderr, "    --host <hslug>            host slug (default: ~/.mclaude/active-host)")
 }
 
 // runAttach handles the "attach" subcommand.
@@ -364,7 +347,7 @@ func runSessionList(args []string) int {
 func runHost(args []string) int {
 	if len(args) < 3 {
 		fmt.Fprintln(os.Stderr, "Usage: mclaude-cli host <subcommand>")
-		fmt.Fprintln(os.Stderr, "  register   register this machine as a BYOH host")
+		fmt.Fprintln(os.Stderr, "  register   register a host with the control-plane via NATS")
 		fmt.Fprintln(os.Stderr, "  list       list all hosts")
 		fmt.Fprintln(os.Stderr, "  use        set the active host")
 		fmt.Fprintln(os.Stderr, "  rm         remove a host registration")
@@ -396,6 +379,13 @@ func runHostRegister(args []string) int {
 			if i < len(args) {
 				flags.Name = args[i]
 			}
+		case "--nkey-public":
+			i++
+			if i < len(args) {
+				flags.NKeyPublic = args[i]
+			}
+		case "--default-platform":
+			flags.DefaultPlatform = true
 		}
 	}
 
@@ -447,116 +437,3 @@ func runHostRm(args []string) int {
 	return 0
 }
 
-// --------------------------------------------------------------------------
-// cluster subcommand
-// --------------------------------------------------------------------------
-
-func runCluster(args []string) int {
-	if len(args) < 3 {
-		fmt.Fprintln(os.Stderr, "Usage: mclaude-cli cluster <subcommand>")
-		fmt.Fprintln(os.Stderr, "  register   register a K8s worker cluster (admin-only)")
-		fmt.Fprintln(os.Stderr, "  grant      grant user access to a cluster (admin-only)")
-		return 1
-	}
-
-	switch args[2] {
-	case "register":
-		return runClusterRegister(args[3:])
-	case "grant":
-		return runClusterGrant(args[3:])
-	default:
-		fmt.Fprintf(os.Stderr, "unknown cluster subcommand: %s\n", args[2])
-		return 1
-	}
-}
-
-func runClusterRegister(args []string) int {
-	flags := cmd.ClusterRegisterFlags{}
-
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--slug":
-			i++
-			if i < len(args) {
-				flags.Slug = args[i]
-			}
-		case "--name":
-			i++
-			if i < len(args) {
-				flags.Name = args[i]
-			}
-		case "--jetstream-domain":
-			i++
-			if i < len(args) {
-				flags.JetStreamDomain = args[i]
-			}
-		case "--leaf-url":
-			i++
-			if i < len(args) {
-				flags.LeafURL = args[i]
-			}
-		case "--direct-nats-url":
-			i++
-			if i < len(args) {
-				flags.DirectNatsURL = args[i]
-			}
-		}
-	}
-
-	if _, err := cmd.RunClusterRegister(flags, os.Stdout); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return 1
-	}
-	return 0
-}
-
-func runClusterGrant(args []string) int {
-	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "Usage: mclaude-cli cluster grant <cluster-slug> <uslug>")
-		return 1
-	}
-	clusterSlug := args[0]
-	userSlug := args[1]
-
-	flags := cmd.ClusterGrantFlags{}
-
-	if err := cmd.RunClusterGrant(clusterSlug, userSlug, flags, os.Stdout); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return 1
-	}
-	return 0
-}
-
-// --------------------------------------------------------------------------
-// daemon subcommand
-// --------------------------------------------------------------------------
-
-func runDaemon(args []string) int {
-	flags := cmd.DaemonFlags{}
-
-	for i := 2; i < len(args); i++ {
-		switch args[i] {
-		case "--host":
-			i++
-			if i < len(args) {
-				flags.HostSlug = args[i]
-			}
-		}
-	}
-
-	cfg, err := cmd.ResolveDaemonConfig(flags, os.Stdout)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return 1
-	}
-
-	// TODO(stage7): Start the actual daemon loop:
-	// 1. Connect to hub NATS using cfg.CredsPath
-	// 2. Subscribe to mclaude.users.{uslug}.hosts.{hslug}.api.projects.>
-	// 3. Start session-agent subprocesses for each provisioned project
-	fmt.Fprintf(os.Stdout, "\nDaemon for %s/%s would start here.\n", cfg.UserSlug, cfg.HostSlug)
-	fmt.Fprintln(os.Stdout, "The actual NATS connection and process supervision loop")
-	fmt.Fprintln(os.Stdout, "is not yet implemented.")
-
-	return 0
-}

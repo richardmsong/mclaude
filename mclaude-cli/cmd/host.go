@@ -9,10 +9,10 @@ import (
 	"time"
 
 	clicontext "mclaude-cli/context"
-	mcnats "mclaude-control-plane/nkeys"
-	"mclaude-control-plane/slug"
 
 	"github.com/nats-io/nkeys"
+
+	"mclaude-control-plane/slug"
 )
 
 // --------------------------------------------------------------------------
@@ -60,114 +60,195 @@ type HostConfig struct {
 }
 
 // --------------------------------------------------------------------------
-// mclaude host register [--name <name>]
+// NKey validation
+// --------------------------------------------------------------------------
+
+// ValidateNKeyPublic validates that key is a valid NKey public key for a
+// user identity (U-prefix, 56-character base32-encoded Ed25519 public key).
+// Returns nil if valid, an error with the message "invalid NKey public key
+// format" if the key fails format validation.
+//
+// Spec (ADR-0097, spec-cli.md §host register):
+//   - 56 characters long
+//   - Base32 alphabet (uppercase A-Z, 2-7)
+//   - First character is 'U' (user-level NKey only; N-prefix server keys rejected)
+func ValidateNKeyPublic(key string) error {
+	if !nkeys.IsValidPublicUserKey(key) {
+		return fmt.Errorf("invalid NKey public key format")
+	}
+	return nil
+}
+
+// --------------------------------------------------------------------------
+// mclaude host register --name <name> --nkey-public <key> [--default-platform]
 // --------------------------------------------------------------------------
 
 // HostRegisterFlags holds parsed flags for "mclaude host register".
 type HostRegisterFlags struct {
-	// Name is the display name (default: hostname output, slugified).
+	// Name is the display name for the host (required).
 	Name string
+	// NKeyPublic is the NKey public key of the host (required, U-prefix, 56-char base32).
+	NKeyPublic string
+	// DefaultPlatform sets this host as the default platform (admin-only).
+	DefaultPlatform bool
 	// ContextPath overrides ~/.mclaude/context.json (for tests).
 	ContextPath string
-	// ServerURL is the control-plane base URL (read from context/env).
-	ServerURL string
+	// AuthPath overrides ~/.mclaude/auth.json (for tests).
+	AuthPath string
+	// NATSConn allows injecting a pre-connected NATS connection for tests.
+	// If nil, RunHostRegister connects to NATS using the JWT + NKeySeed from auth.
+	NATSConn NATSConn
 }
 
-// HostRegisterResult is returned by RunHostRegister.
+// HostRegisterResult is returned by RunHostRegister on success.
 type HostRegisterResult struct {
-	// Slug is the assigned host slug.
+	// Slug is the assigned host slug returned by the control-plane.
 	Slug string
-	// PublicKey is the NKey public key.
-	PublicKey string
-	// DeviceCode is the 6-char code the user must enter in the dashboard.
-	DeviceCode string
-	// SeedPath is the path where the NKey seed was stored.
-	SeedPath string
 }
 
-// RunHostRegister performs the device-code registration flow for a BYOH machine:
-//  1. Resolve user slug from context.
-//  2. Generate NKey pair; write seed to ~/.mclaude/hosts/{hslug}/nkey.seed (0600).
-//  3. POST /api/users/{uslug}/hosts/code with {publicKey} to get a device code.
-//  4. Print the device code and poll until completion.
-//  5. On completion, write nats.creds and config.json; symlink active-host.
+// hostRegisterRequest is the NATS request payload for host registration.
+// Subject: mclaude.users.{uslug}.hosts._.register
+// Spec: spec-nats-payload-schema.md §mclaude.users.{uslug}.hosts._.register
+type hostRegisterRequest struct {
+	ID              string `json:"id"`
+	Ts              int64  `json:"ts"`
+	Name            string `json:"name"`
+	NKeyPublic      string `json:"nkey_public"`
+	DefaultPlatform bool   `json:"defaultPlatform,omitempty"`
+}
+
+// hostRegisterResponse is the NATS response from host registration.
+type hostRegisterResponse struct {
+	OK    bool   `json:"ok"`
+	Slug  string `json:"slug,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// RunHostRegister registers a host with the control-plane via NATS.
 //
-// Network calls are stubbed out in this stage — the function performs local
-// setup (NKey generation, directory creation) and prints the instructions.
-// Actual HTTP calls will be wired when the control-plane endpoints are ready.
+// Validates --nkey-public (required, U-prefix, 56-char base32), then
+// publishes to mclaude.users.{uslug}.hosts._.register with {name, nkey_public,
+// defaultPlatform?}. On success, writes ~/.mclaude/hosts/{hslug}/config.json
+// with hubUrl (from auth.json.natsUrl) and prints the host slug.
+//
+// Errors:
+//   - "--nkey-public is required" if --nkey-public is omitted
+//   - "invalid NKey public key format" if key fails format validation
 func RunHostRegister(flags HostRegisterFlags, out io.Writer) (*HostRegisterResult, error) {
-	// Resolve context for user slug.
+	// Validate --nkey-public: required.
+	if flags.NKeyPublic == "" {
+		return nil, fmt.Errorf("--nkey-public is required")
+	}
+	// Validate NKey format.
+	if err := ValidateNKeyPublic(flags.NKeyPublic); err != nil {
+		return nil, err
+	}
+	// Validate --name: required.
+	if flags.Name == "" {
+		return nil, fmt.Errorf("--name is required")
+	}
+
+	// Resolve context.
 	ctxPath := flags.ContextPath
 	if ctxPath == "" {
 		ctxPath = clicontext.DefaultPath()
 	}
 	ctx, err := clicontext.Load(ctxPath)
 	if err != nil {
-		return nil, fmt.Errorf("load context: %w", err)
+		ctx = &clicontext.Context{}
 	}
-	uslug := ctx.UserSlug
+
+	// Load auth credentials (required for NATS connection and userSlug).
+	authPath := flags.AuthPath
+	if authPath == "" {
+		authPath = DefaultAuthPath()
+	}
+	creds, err := LoadAuth(authPath)
+	if err != nil {
+		return nil, err
+	}
+
+	uslug := creds.UserSlug
 	if uslug == "" {
-		return nil, fmt.Errorf("user slug required: run 'mclaude login' first")
+		uslug = ctx.UserSlug
+	}
+	if uslug == "" {
+		return nil, fmt.Errorf("user slug not found: run 'mclaude login' first")
 	}
 
-	// Determine host name.
-	name := flags.Name
-	if name == "" {
-		hostname, err := os.Hostname()
+	// Connect to NATS (or use injected connection for tests).
+	var serverURL string
+	if ctx != nil {
+		serverURL = clicontext.ResolveServerURL("", ctx)
+	}
+	natsURL := creds.NATSUrl
+	if natsURL == "" {
+		natsURL = clicontext.DeriveNATSURL(serverURL)
+	}
+
+	nc := flags.NATSConn
+	if nc == nil {
+		fmt.Fprintf(out, "Connecting to NATS at %s...\n", natsURL)
+		realNC, err := connectNATS(natsURL, creds.JWT, creds.NKeySeed)
 		if err != nil {
-			return nil, fmt.Errorf("get hostname: %w", err)
+			return nil, err
 		}
-		name = hostname
-	}
-	hslug := slug.Slugify(name)
-	if hslug == "" {
-		return nil, fmt.Errorf("could not derive a valid slug from name %q", name)
-	}
-	if err := slug.Validate(hslug); err != nil {
-		return nil, fmt.Errorf("invalid host slug %q: %w", hslug, err)
+		defer realNC.Close()
+		nc = realNC
 	}
 
-	// Generate NKey pair.
-	kp, err := nkeys.CreateUser()
-	if err != nil {
-		return nil, fmt.Errorf("generate nkey pair: %w", err)
+	// Publish to mclaude.users.{uslug}.hosts._.register
+	subject := fmt.Sprintf("mclaude.users.%s.hosts._.register", uslug)
+	payload := hostRegisterRequest{
+		ID:              generateID(),
+		Ts:              time.Now().UnixMilli(),
+		Name:            flags.Name,
+		NKeyPublic:      flags.NKeyPublic,
+		DefaultPlatform: flags.DefaultPlatform,
 	}
-	pubKey, err := kp.PublicKey()
+	reqData, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("nkey public key: %w", err)
-	}
-	seed, err := kp.Seed()
-	if err != nil {
-		return nil, fmt.Errorf("nkey seed: %w", err)
+		return nil, fmt.Errorf("marshal register request: %w", err)
 	}
 
-	// Create host directory and write seed.
+	fmt.Fprintf(out, "Registering host %q...\n", flags.Name)
+	msg, err := nc.Request(subject, reqData, natsRequestTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("host register request to %s: %w", subject, err)
+	}
+
+	var resp hostRegisterResponse
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		return nil, fmt.Errorf("parse register response: %w", err)
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("host registration failed: %s", resp.Error)
+	}
+	if resp.Slug == "" {
+		return nil, fmt.Errorf("host registration: server returned empty slug")
+	}
+	hslug := resp.Slug
+
+	// Write ~/.mclaude/hosts/{hslug}/config.json with hubUrl from auth.json.natsUrl.
 	hdir := hostDir(hslug)
 	if err := os.MkdirAll(hdir, 0700); err != nil {
 		return nil, fmt.Errorf("create host dir %s: %w", hdir, err)
 	}
-	seedPath := filepath.Join(hdir, "nkey.seed")
-	if err := os.WriteFile(seedPath, seed, 0600); err != nil {
-		return nil, fmt.Errorf("write nkey seed: %w", err)
+
+	cfg := HostConfig{Slug: hslug, HubURL: creds.NATSUrl}
+	cfgData, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal host config: %w", err)
+	}
+	cfgPath := filepath.Join(hdir, "config.json")
+	if err := os.WriteFile(cfgPath, append(cfgData, '\n'), 0600); err != nil {
+		return nil, fmt.Errorf("write config.json: %w", err)
 	}
 
-	// TODO(stage7): POST /api/users/{uslug}/hosts/code with {publicKey, name}
-	// For now, print the setup instructions.
-	fmt.Fprintf(out, "Host registration started for user %s\n", uslug)
-	fmt.Fprintf(out, "  Host slug:  %s\n", hslug)
-	fmt.Fprintf(out, "  Public key: %s\n", pubKey)
-	fmt.Fprintf(out, "  Seed saved: %s\n", seedPath)
-	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "Next: when control-plane endpoints are available,")
-	fmt.Fprintf(out, "  POST /api/users/%s/hosts/code will return a device code.\n", uslug)
-	fmt.Fprintln(out, "  Open the dashboard and enter the code to complete registration.")
+	fmt.Fprintf(out, "Host registered: %s\n", hslug)
+	fmt.Fprintf(out, "Config written:  %s\n", cfgPath)
 
-	return &HostRegisterResult{
-		Slug:       hslug,
-		PublicKey:  pubKey,
-		DeviceCode: "", // populated when HTTP call is wired
-		SeedPath:   seedPath,
-	}, nil
+	return &HostRegisterResult{Slug: hslug}, nil
 }
 
 // --------------------------------------------------------------------------
@@ -186,8 +267,6 @@ type HostListFlags struct {
 type HostInfo struct {
 	Slug       string     `json:"slug"`
 	Name       string     `json:"name"`
-	Type       string     `json:"type"`
-	Role       string     `json:"role"`
 	Online     bool       `json:"online"`
 	LastSeenAt *time.Time `json:"lastSeenAt,omitempty"`
 }
@@ -224,7 +303,7 @@ func RunHostList(flags HostListFlags, out io.Writer) error {
 	activeHost := ResolveActiveHost()
 
 	fmt.Fprintf(out, "Hosts for %s:\n", uslug)
-	fmt.Fprintf(out, "  %-20s %-10s %s\n", "SLUG", "TYPE", "ACTIVE")
+	fmt.Fprintf(out, "  %-20s %s\n", "SLUG", "ACTIVE")
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -233,17 +312,7 @@ func RunHostList(flags HostListFlags, out io.Writer) error {
 		if e.Name() == activeHost {
 			active = "*"
 		}
-		// Read config if available to get type.
-		hostType := "machine"
-		cfgPath := filepath.Join(hostsDir, e.Name(), "config.json")
-		if data, err := os.ReadFile(cfgPath); err == nil {
-			var cfg HostConfig
-			if json.Unmarshal(data, &cfg) == nil && cfg.Slug != "" {
-				// Future: cfg could include type info.
-				_ = cfg
-			}
-		}
-		fmt.Fprintf(out, "  %-20s %-10s %s\n", e.Name(), hostType, active)
+		fmt.Fprintf(out, "  %-20s %s\n", e.Name(), active)
 	}
 
 	return nil
@@ -348,41 +417,3 @@ func RunHostRm(hslug string, flags HostRmFlags, out io.Writer) error {
 	return nil
 }
 
-// --------------------------------------------------------------------------
-// WriteHostCredentials writes nats.creds and config.json for a completed
-// registration. Called when the device-code poll returns success.
-// --------------------------------------------------------------------------
-
-// WriteHostCredentials writes the NATS credentials file and host config
-// after a successful registration. The seed is read from the previously
-// stored nkey.seed file.
-func WriteHostCredentials(hslug, jwt, hubURL string) error {
-	hdir := hostDir(hslug)
-
-	// Read seed from the previously stored file.
-	seedPath := filepath.Join(hdir, "nkey.seed")
-	seed, err := os.ReadFile(seedPath)
-	if err != nil {
-		return fmt.Errorf("read nkey seed: %w", err)
-	}
-
-	// Write nats.creds.
-	credsData := mcnats.FormatNATSCredentials(jwt, seed)
-	credsPath := filepath.Join(hdir, "nats.creds")
-	if err := os.WriteFile(credsPath, credsData, 0600); err != nil {
-		return fmt.Errorf("write nats.creds: %w", err)
-	}
-
-	// Write config.json.
-	cfg := HostConfig{Slug: hslug, HubURL: hubURL}
-	cfgData, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal host config: %w", err)
-	}
-	cfgPath := filepath.Join(hdir, "config.json")
-	if err := os.WriteFile(cfgPath, append(cfgData, '\n'), 0600); err != nil {
-		return fmt.Errorf("write config.json: %w", err)
-	}
-
-	return nil
-}
