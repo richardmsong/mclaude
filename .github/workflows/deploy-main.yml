@@ -44,14 +44,13 @@ jobs:
       - name: Build binaries
         working-directory: mclaude-control-plane
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o cmd/control-plane/control-plane-arm64 ./cmd/control-plane/
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o cmd/control-plane/control-plane-amd64 ./cmd/control-plane/
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o dist/control-plane-arm64 ./cmd/control-plane/
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/control-plane-amd64 ./cmd/control-plane/
       - uses: actions/upload-artifact@v4
         with:
           name: control-plane-binaries
-          path: |
-            mclaude-control-plane/cmd/control-plane/control-plane-arm64
-            mclaude-control-plane/cmd/control-plane/control-plane-amd64
+          path: mclaude-control-plane/dist/
 
   build-control-plane-image:
     name: Docker control-plane (${{ matrix.arch }})
@@ -73,7 +72,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: control-plane-binaries
-          path: .
+          path: mclaude-control-plane/dist
       - name: Authenticate to GHCR
         run: |
           mkdir -p "$RUNNER_TEMP/docker"
@@ -192,14 +191,13 @@ jobs:
       - name: Build binaries
         working-directory: mclaude-session-agent
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o cmd/session-agent/session-agent-arm64 ./cmd/session-agent/
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o cmd/session-agent/session-agent-amd64 ./cmd/session-agent/
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o dist/session-agent-arm64 ./cmd/session-agent/
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/session-agent-amd64 ./cmd/session-agent/
       - uses: actions/upload-artifact@v4
         with:
           name: session-agent-binaries
-          path: |
-            mclaude-session-agent/cmd/session-agent/session-agent-arm64
-            mclaude-session-agent/cmd/session-agent/session-agent-amd64
+          path: mclaude-session-agent/dist/
 
   build-session-agent-image:
     name: Docker session-agent (${{ matrix.arch }})
@@ -221,7 +219,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: session-agent-binaries
-          path: .
+          path: mclaude-session-agent/dist
       - name: Authenticate to GHCR
         run: |
           mkdir -p "$RUNNER_TEMP/docker"
@@ -280,14 +278,13 @@ jobs:
       - name: Build binaries
         working-directory: mclaude-controller-k8s
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o cmd/controller-k8s/controller-k8s-arm64 ./cmd/controller-k8s/
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o cmd/controller-k8s/controller-k8s-amd64 ./cmd/controller-k8s/
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o dist/controller-k8s-arm64 ./cmd/controller-k8s/
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/controller-k8s-amd64 ./cmd/controller-k8s/
       - uses: actions/upload-artifact@v4
         with:
           name: controller-k8s-binaries
-          path: |
-            mclaude-controller-k8s/cmd/controller-k8s/controller-k8s-arm64
-            mclaude-controller-k8s/cmd/controller-k8s/controller-k8s-amd64
+          path: mclaude-controller-k8s/dist/
 
   build-controller-k8s-image:
     name: Docker controller-k8s (${{ matrix.arch }})
@@ -309,7 +306,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: controller-k8s-binaries
-          path: .
+          path: mclaude-controller-k8s/dist
       - name: Authenticate to GHCR
         run: |
           mkdir -p "$RUNNER_TEMP/docker"
@@ -368,14 +365,13 @@ jobs:
       - name: Build binaries
         working-directory: mclaude-user-agent
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o cmd/user-agent/user-agent-arm64 ./cmd/user-agent/
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o cmd/user-agent/user-agent-amd64 ./cmd/user-agent/
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o dist/user-agent-arm64 ./cmd/user-agent/
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dist/user-agent-amd64 ./cmd/user-agent/
       - uses: actions/upload-artifact@v4
         with:
           name: user-agent-binaries
-          path: |
-            mclaude-user-agent/cmd/user-agent/user-agent-arm64
-            mclaude-user-agent/cmd/user-agent/user-agent-amd64
+          path: mclaude-user-agent/dist/
 
   build-user-agent-image:
     name: Docker user-agent (${{ matrix.arch }})
@@ -397,7 +393,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: user-agent-binaries
-          path: .
+          path: mclaude-user-agent/dist
       - name: Authenticate to GHCR
         run: |
           mkdir -p "$RUNNER_TEMP/docker"

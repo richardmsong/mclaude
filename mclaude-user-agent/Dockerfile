@@ -2,7 +2,7 @@
 FROM gcr.io/distroless/static:nonroot
 
 ARG TARGETARCH
-COPY --chmod=0755 cmd/user-agent/user-agent-${TARGETARCH} /usr/local/bin/user-agent
+COPY --chmod=0755 dist/user-agent-${TARGETARCH} /usr/local/bin/user-agent
 
 ENV LOG_LEVEL=info
 
