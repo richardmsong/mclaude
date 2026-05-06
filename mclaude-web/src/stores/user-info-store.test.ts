@@ -39,7 +39,7 @@ describe('UserInfoStore', () => {
     expect(store.token).toBe('sk-ant-oat01-abc123')
   })
 
-  it('notifies callbacks with null on KV DEL', () => {
+  it('notifies callbacks with null on KV DEL', async () => {
     const cb = vi.fn()
     store.onTokenChanged(cb)
     store.startWatching()
@@ -47,7 +47,7 @@ describe('UserInfoStore', () => {
     nc.simulateKvPut('mclaude-user-info-alice', 'tokens.anthropic', 'sk-ant-oat01-abc123')
     cb.mockClear()
 
-    nc.kvDelete('mclaude-user-info-alice', 'tokens.anthropic')
+    await nc.kvDelete('mclaude-user-info-alice', 'tokens.anthropic')
 
     expect(cb).toHaveBeenCalledWith(null)
     expect(store.token).toBeNull()
@@ -78,22 +78,46 @@ describe('UserInfoStore', () => {
     expect(cb).not.toHaveBeenCalled()
   })
 
-  it('writeToken publishes to $KV bucket subject and updates local state', () => {
-    store.writeToken('sk-ant-oat01-newtoken')
+  it('writeToken writes to KV bucket via kvPut and updates local state', async () => {
+    await store.writeToken('sk-ant-oat01-newtoken')
     expect(store.token).toBe('sk-ant-oat01-newtoken')
-    // Should have published to $KV.mclaude-user-info-alice.tokens.anthropic
-    expect(nc.published.some(m => m.subject === '$KV.mclaude-user-info-alice.tokens.anthropic')).toBe(true)
+    // KV store should contain the encoded token
+    const entry = await nc.kvGet('mclaude-user-info-alice', 'tokens.anthropic')
+    expect(entry).not.toBeNull()
+    expect(new TextDecoder().decode(entry!.value)).toBe('sk-ant-oat01-newtoken')
   })
 
-  it('deleteToken publishes with KV-Operation DEL header and clears token', () => {
-    store.writeToken('sk-ant-oat01-toremove')
-    store.deleteToken()
+  it('deleteToken removes entry via kvDelete and clears local state', async () => {
+    await store.writeToken('sk-ant-oat01-toremove')
+    await store.deleteToken()
     expect(store.token).toBeNull()
-    const msg = nc.published.find(m =>
-      m.subject === '$KV.mclaude-user-info-alice.tokens.anthropic' &&
-      m.headers?.['KV-Operation'] === 'DEL'
-    )
-    expect(msg).toBeDefined()
+    // KV store entry should be gone
+    const entry = await nc.kvGet('mclaude-user-info-alice', 'tokens.anthropic')
+    expect(entry).toBeNull()
+  })
+
+  it('writeToken triggers KV watcher callbacks when startWatching is active', async () => {
+    const cb = vi.fn()
+    store.onTokenChanged(cb)
+    store.startWatching()
+    cb.mockClear()
+
+    await store.writeToken('sk-ant-oat01-watchtest')
+
+    expect(cb).toHaveBeenCalledWith('sk-ant-oat01-watchtest')
+  })
+
+  it('deleteToken triggers KV watcher callbacks with null when startWatching is active', async () => {
+    const cb = vi.fn()
+    store.onTokenChanged(cb)
+    store.startWatching()
+
+    await store.writeToken('sk-ant-oat01-watchtest')
+    cb.mockClear()
+
+    await store.deleteToken()
+
+    expect(cb).toHaveBeenCalledWith(null)
   })
 
   it('stopWatching stops the KV watch', () => {

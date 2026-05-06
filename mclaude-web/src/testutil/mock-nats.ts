@@ -116,6 +116,38 @@ export class MockNATSClient implements INATSClient {
     return { key, value: entry.value, revision: entry.revision }
   }
 
+  async kvPut(bucket: string, key: string, value: Uint8Array): Promise<void> {
+    if (!this._kvStore.has(bucket)) this._kvStore.set(bucket, new Map())
+    const bucketStore = this._kvStore.get(bucket)!
+    const existing = bucketStore.get(key)
+    const revision = (existing?.revision ?? 0) + 1
+    bucketStore.set(key, { value, revision })
+
+    const watchers = this._kvWatchers.get(bucket) ?? []
+    const entry: KVEntry = { key, value, revision, operation: 'PUT' }
+    for (const w of watchers) {
+      if (this._matchKVKey(w.pattern, key)) {
+        w.callback(entry)
+      }
+    }
+  }
+
+  async kvDelete(bucket: string, key: string): Promise<void> {
+    if (!this._kvStore.has(bucket)) this._kvStore.set(bucket, new Map())
+    const bucketStore = this._kvStore.get(bucket)!
+    const existing = bucketStore.get(key)
+    const revision = (existing?.revision ?? 0) + 1
+    bucketStore.delete(key)
+
+    const watchers = this._kvWatchers.get(bucket) ?? []
+    const entry: KVEntry = { key, value: new Uint8Array(0), revision, operation: 'DEL' }
+    for (const w of watchers) {
+      if (this._matchKVKey(w.pattern, key)) {
+        w.callback(entry)
+      }
+    }
+  }
+
   // Test helper: set a KV value (JSON-encoded) and notify watchers
   kvSet(bucket: string, key: string, value: unknown): void {
     if (!this._kvStore.has(bucket)) this._kvStore.set(bucket, new Map())
@@ -146,23 +178,6 @@ export class MockNATSClient implements INATSClient {
 
     const watchers = this._kvWatchers.get(bucket) ?? []
     const entry: KVEntry = { key, value: encoded, revision }
-    for (const w of watchers) {
-      if (this._matchKVKey(w.pattern, key)) {
-        w.callback(entry)
-      }
-    }
-  }
-
-  // Test helper: delete a KV entry and notify watchers with DEL operation
-  kvDelete(bucket: string, key: string): void {
-    if (!this._kvStore.has(bucket)) this._kvStore.set(bucket, new Map())
-    const bucketStore = this._kvStore.get(bucket)!
-    const existing = bucketStore.get(key)
-    const revision = (existing?.revision ?? 0) + 1
-    bucketStore.delete(key)
-
-    const watchers = this._kvWatchers.get(bucket) ?? []
-    const entry: KVEntry = { key, value: new Uint8Array(0), revision, operation: 'DEL' }
     for (const w of watchers) {
       if (this._matchKVKey(w.pattern, key)) {
         w.callback(entry)

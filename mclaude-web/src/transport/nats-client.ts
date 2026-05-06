@@ -189,6 +189,22 @@ export class NATSClient implements INATSClient {
     }
   }
 
+  async kvPut(bucket: string, key: string, value: Uint8Array): Promise<void> {
+    const nc = this._nc
+    if (!nc) throw new Error('NATSClient: not connected')
+    const js = nc.jetstream()
+    const kv = await js.views.kv(bucket)
+    await kv.put(key, value)
+  }
+
+  async kvDelete(bucket: string, key: string): Promise<void> {
+    const nc = this._nc
+    if (!nc) throw new Error('NATSClient: not connected')
+    const js = nc.jetstream()
+    const kv = await js.views.kv(bucket)
+    await kv.delete(key)
+  }
+
   onDisconnect(callback: () => void): () => void {
     this._disconnectListeners.push(callback)
     return () => {

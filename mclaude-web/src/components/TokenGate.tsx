@@ -73,7 +73,7 @@ export function TokenGate({ nc, userInfoStore, authClient, uslug, defaultHostSlu
 
   const handleTokenObtained = async (token: string) => {
     // Write token to KV
-    userInfoStore.writeToken(token)
+    await userInfoStore.writeToken(token)
     // Start delivery to default platform
     await startDelivery(token)
   }

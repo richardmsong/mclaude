@@ -365,7 +365,7 @@ function ClaudeAccountSection({ userInfoStore, authClient, nc, userSlug, session
 
   const handleTokenObtained = async (newToken: string) => {
     setShowConnectSheet(false)
-    userInfoStore.writeToken(newToken)
+    await userInfoStore.writeToken(newToken)
     await onTokenReconnected?.(newToken)
   }
 
@@ -385,7 +385,7 @@ function ClaudeAccountSection({ userInfoStore, authClient, nc, userSlug, session
     setDisconnecting(true)
     setActionError(null)
     try {
-      userInfoStore.deleteToken()
+      await userInfoStore.deleteToken()
       await revokeTokenOnAllHosts(nc, authClient, userSlug)
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Disconnect failed')

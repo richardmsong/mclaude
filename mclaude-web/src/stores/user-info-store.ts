@@ -59,19 +59,15 @@ export class UserInfoStore {
 
   /** Write the Anthropic token to KV (used by ConnectSheet after OAuth/paste). */
   async writeToken(token: string): Promise<void> {
-    // KV put: publish to $KV.{bucket}.{key}
-    const subject = `$KV.${this.bucketName}.tokens.anthropic`
     const encoded = new TextEncoder().encode(token)
-    this.nc.publish(subject, encoded)
+    await this.nc.kvPut(this.bucketName, 'tokens.anthropic', encoded)
     // Optimistically update local state — the KV watch will confirm
     this._setToken(token)
   }
 
   /** Delete the Anthropic token from KV (used by Disconnect). */
-  deleteToken(): void {
-    // KV delete: publish empty to $KV.{bucket}.{key} with KV-Operation: DEL header
-    const subject = `$KV.${this.bucketName}.tokens.anthropic`
-    this.nc.publish(subject, new Uint8Array(0), { 'KV-Operation': 'DEL' })
+  async deleteToken(): Promise<void> {
+    await this.nc.kvDelete(this.bucketName, 'tokens.anthropic')
     this._setToken(null)
   }
 

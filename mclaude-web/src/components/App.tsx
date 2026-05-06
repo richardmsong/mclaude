@@ -798,7 +798,7 @@ function AppInner() {
           <ConnectSheet
             firstRun={false}
             onTokenObtained={async (token) => {
-              userInfoStore.writeToken(token)
+              await userInfoStore.writeToken(token)
               setShowConnectSheet(false)
               await handleTokenReconnected(token)
             }}

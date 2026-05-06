@@ -31,6 +31,8 @@ export interface INATSClient {
   request(subject: string, data: Uint8Array, timeoutMs?: number): Promise<NATSMessage>
   kvWatch(bucket: string, key: string, callback: (entry: KVEntry) => void): () => void
   kvGet(bucket: string, key: string): Promise<KVEntry | null>
+  kvPut(bucket: string, key: string, value: Uint8Array): Promise<void>
+  kvDelete(bucket: string, key: string): Promise<void>
   onDisconnect(callback: () => void): () => void
   onReconnect(callback: () => void): () => void
   isConnected(): boolean
