@@ -187,6 +187,8 @@ function AppInner() {
   const [userInfoStore, setUserInfoStore] = useState<UserInfoStore | null>(null)
   // ADR-0092: Token gate — true while awaiting first token + delivery
   const [tokenGateActive, setTokenGateActive] = useState(false)
+  // ADR-0092: Default platform host slug for TokenGate delivery (first accepted grant)
+  const [defaultHostSlug, setDefaultHostSlug] = useState<string | undefined>(undefined)
   // ADR-0092: Connect sheet state (for session banner reconnect)
   const [showConnectSheet, setShowConnectSheet] = useState(false)
   // ADR-0092: Re-delivery progress message
@@ -373,6 +375,18 @@ function AppInner() {
       // ADR-0092: Check token gate after brief settle time (KV watch delivers initial state)
       const gateTimer = setTimeout(() => {
         if (!uis.token) {
+          // Fetch grants to resolve the default platform host slug (first accepted grant).
+          // For a first-run user, the only accepted grant is the default platform grant
+          // (auto-accepted by CP). TokenGate delivers K_wrapped to this host.
+          authClient.getGrants(uslug)
+            .then(grants => {
+              const firstAccepted = grants.find(g => g.status === 'accepted')
+              setDefaultHostSlug(firstAccepted?.hostSlug)
+            })
+            .catch(() => {
+              // Grants fetch failed — TokenGate will skip delivery (no defaultHostSlug)
+              setDefaultHostSlug(undefined)
+            })
           setTokenGateActive(true)
         } else {
           // Token exists — check stale tokens on login hydration (ADR-0092)
@@ -700,6 +714,7 @@ function AppInner() {
           userInfoStore={userInfoStore}
           authClient={authClient}
           uslug={uslug}
+          defaultHostSlug={defaultHostSlug}
           onReady={() => setTokenGateActive(false)}
         />
         {updateAvailable && <UpdateBanner />}

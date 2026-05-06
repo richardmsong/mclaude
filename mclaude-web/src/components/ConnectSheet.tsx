@@ -115,6 +115,8 @@ export function ConnectSheet({ firstRun = false, onTokenObtained, onDismiss, aut
         })
         setState('success')
         onTokenObtained(token)
+        // Spec (ADR-0092, spec-web.md): auto-dismiss after 1 second on success.
+        setTimeout(() => onDismiss?.(), 1000)
       } catch (err) {
         setState('error')
         setError('Sign-in failed — try again or enter a token manually')
@@ -175,6 +177,9 @@ export function ConnectSheet({ firstRun = false, onTokenObtained, onDismiss, aut
     setPasteToken('') // clear immediately
     try {
       onTokenObtained(trimmed)
+      setState('success')
+      // Spec (ADR-0092, spec-web.md): auto-dismiss after 1 second on success.
+      setTimeout(() => onDismiss?.(), 1000)
     } catch (err) {
       setPasteError(err instanceof Error ? err.message : 'Failed to save token')
       setPasteSubmitting(false)
