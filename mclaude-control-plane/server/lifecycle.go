@@ -250,15 +250,18 @@ func (s *Server) handleAgentRegister(msg *nats.Msg) {
 // ----- Host Registration via NATS -----
 
 // NATSHostRegisterRequest is the payload for mclaude.users.*.hosts._.register.
+// ADR-0097: Type field removed (all hosts are K8s user-agent hosts).
+// DefaultPlatform is admin-only; CP checks is_admin before setting is_default_platform.
 type NATSHostRegisterRequest struct {
-	Name       string `json:"name"`
-	Type       string `json:"type"`        // "machine" or "cluster"
-	NKeyPublic string `json:"nkey_public"` // host controller's NKey public key
+	Name            string `json:"name"`
+	NKeyPublic      string `json:"nkey_public"`      // host controller's NKey public key
+	DefaultPlatform bool   `json:"defaultPlatform"`  // admin-only: set is_default_platform=true
 }
 
 // handleNATSHostRegister processes mclaude.users.*.hosts._.register.
 // CLI publishes this to register a new host. CP creates the host record and
 // returns {ok, slug} — no JWT (host authenticates via HTTP challenge-response).
+// ADR-0097: type field removed; defaultPlatform requires is_admin.
 func (s *Server) handleNATSHostRegister(msg *nats.Msg) {
 	if s.db == nil {
 		replyNATSError(msg, "service unavailable")
@@ -282,9 +285,6 @@ func (s *Server) handleNATSHostRegister(msg *nats.Msg) {
 		replyNATSError(msg, "name and nkey_public are required")
 		return
 	}
-	if req.Type == "" {
-		req.Type = "machine"
-	}
 
 	ctx := context.Background()
 
@@ -295,22 +295,53 @@ func (s *Server) handleNATSHostRegister(msg *nats.Msg) {
 		return
 	}
 
+	// defaultPlatform is admin-only (ADR-0097).
+	if req.DefaultPlatform && !user.IsAdmin {
+		reply, _ := json.Marshal(map[string]string{
+			"error":   "admin_required",
+			"message": "Only admins can set default platform",
+		})
+		if msg.Reply != "" {
+			_ = msg.Respond(reply)
+		}
+		return
+	}
+
 	// Slugify the name for the host slug.
 	hslug := slugify(req.Name)
 	if hslug == "" {
 		hslug = "host-" + uuid.NewString()[:8]
 	}
 
-	// Insert host row.
+	// Insert host row. ADR-0097: type and role columns removed.
 	hostID := uuid.NewString()
-	_, execErr := s.db.Pool().Exec(ctx, `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key, created_at)
-		VALUES ($1, $2, $3, $4, $5, 'owner', $6, $7)
-		ON CONFLICT (user_id, slug) DO UPDATE SET
-			name = EXCLUDED.name,
-			public_key = EXCLUDED.public_key`,
-		hostID, user.ID, hslug, req.Name, req.Type, req.NKeyPublic, time.Now().UTC())
+	var execErr error
+	if req.DefaultPlatform {
+		_, execErr = s.db.Pool().Exec(ctx, `
+			INSERT INTO hosts (id, user_id, slug, name, public_key, is_default_platform, created_at)
+			VALUES ($1, $2, $3, $4, $5, true, $6)
+			ON CONFLICT (user_id, slug) DO UPDATE SET
+				name = EXCLUDED.name,
+				public_key = EXCLUDED.public_key,
+				is_default_platform = true`,
+			hostID, user.ID, hslug, req.Name, req.NKeyPublic, time.Now().UTC())
+	} else {
+		_, execErr = s.db.Pool().Exec(ctx, `
+			INSERT INTO hosts (id, user_id, slug, name, public_key, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (user_id, slug) DO UPDATE SET
+				name = EXCLUDED.name,
+				public_key = EXCLUDED.public_key`,
+			hostID, user.ID, hslug, req.Name, req.NKeyPublic, time.Now().UTC())
+	}
 	if execErr != nil {
+		if strings.Contains(execErr.Error(), "idx_hosts_default_platform") {
+			reply, _ := json.Marshal(map[string]string{"error": "default_platform_exists"})
+			if msg.Reply != "" {
+				_ = msg.Respond(reply)
+			}
+			return
+		}
 		replyNATSError(msg, "failed to create host")
 		return
 	}
@@ -318,7 +349,7 @@ func (s *Server) handleNATSHostRegister(msg *nats.Msg) {
 	log.Info().
 		Str("userSlug", uslug).
 		Str("hostSlug", hslug).
-		Str("type", req.Type).
+		Bool("defaultPlatform", req.DefaultPlatform).
 		Msg("host registered via NATS")
 
 	// Reply with {ok, slug} — no JWT. Host authenticates via HTTP challenge-response.
@@ -528,8 +559,8 @@ func (s *Server) handleManageDeregister(msg *nats.Msg) {
 			nc := s.nc
 			for _, p := range projects {
 				if nc != nil {
-					// ADR-0091: route cluster hosts through user-agent.
-					publishProjectsDeleteToHost(nc, owner.Slug, hslug, p.Slug, p.ID, host.Type)
+					// ADR-0097: all hosts route through user-agent unconditionally (no type branching).
+					publishProjectsDeleteToHost(nc, owner.Slug, hslug, p.Slug, p.ID)
 				}
 				// ADR-0053: Delete S3 prefix for this project (best-effort).
 				if s.s3 != nil && p.Slug != "" {
@@ -710,9 +741,9 @@ func (s *Server) handleManageRekey(msg *nats.Msg) {
 // ----- Host Update -----
 
 // ManageUpdateRequest is the payload for manage.update.
+// ADR-0097: Type field removed — only name is updatable.
 type ManageUpdateRequest struct {
 	Name string `json:"name,omitempty"`
-	Type string `json:"type,omitempty"`
 }
 
 // handleManageUpdate processes mclaude.users.*.hosts.*.manage.update.
@@ -733,8 +764,8 @@ func (s *Server) handleManageUpdate(msg *nats.Msg) {
 		replyNATSError(msg, "invalid request body")
 		return
 	}
-	if req.Name == "" && req.Type == "" {
-		replyNATSError(msg, "name or type is required")
+	if req.Name == "" {
+		replyNATSError(msg, "name is required")
 		return
 	}
 

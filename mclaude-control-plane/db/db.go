@@ -69,15 +69,14 @@ func (db *DB) UpsertBootstrapAdmin(ctx context.Context, userID, email, passwordH
 }
 
 // Host is a row from the hosts table. Per ADR-0035, this is the single source
-// of truth for both BYOH machines and K8s clusters.
+// of truth for all hosts (K8s cluster hosts running the user-agent).
 // ADR-0063: columns js_domain, leaf_url, account_jwt dropped (leaf topology removed per ADR-0054).
+// ADR-0097: columns type and role dropped (BYOH removed, all hosts are K8s user-agent hosts).
 type Host struct {
 	ID            string
 	UserID        string  // OwnerID in spec (ADR-0054); keeps user_id column name for DB compat
 	Slug          string
 	Name          string
-	Type          string  // 'machine' or 'cluster'
-	Role          string  // 'owner' or 'user'
 	DirectNATSURL *string // Optional
 	PublicKey     *string // NKey public key (nkey_public in spec, public_key in DB)
 	UserJWT       *string // Legacy JWT column
@@ -409,9 +408,10 @@ func (db *DB) DeleteProject(ctx context.Context, projectID string) error {
 }
 
 // scanHost scans a full host row. ADR-0063: js_domain, leaf_url, account_jwt columns dropped.
+// ADR-0097: type and role columns dropped.
 func scanHost(row interface{ Scan(...any) error }) (*Host, error) {
 	h := &Host{}
-	err := row.Scan(&h.ID, &h.UserID, &h.Slug, &h.Name, &h.Type, &h.Role,
+	err := row.Scan(&h.ID, &h.UserID, &h.Slug, &h.Name,
 		&h.DirectNATSURL, &h.PublicKey, &h.UserJWT, &h.NatsJWT, &h.CreatedAt, &h.LastSeenAt)
 	if err != nil {
 		if err.Error() == "no rows in result set" {
@@ -423,10 +423,11 @@ func scanHost(row interface{ Scan(...any) error }) (*Host, error) {
 }
 
 // GetHostsByUser returns all hosts for a user (owned or granted via host_access).
-// Per ADR-0054: owned hosts (role='owner') + granted hosts via host_access table.
+// Per ADR-0054: owned hosts + granted hosts via host_access table.
+// ADR-0097: type and role columns removed.
 func (db *DB) GetHostsByUser(ctx context.Context, userID string) ([]*Host, error) {
 	rows, err := db.pool.Query(ctx,
-		`SELECT id, user_id, slug, name, type, role,
+		`SELECT id, user_id, slug, name,
 		        direct_nats_url, public_key, user_jwt, nats_jwt, created_at, last_seen_at
 		 FROM hosts WHERE user_id = $1 ORDER BY created_at`, userID)
 	if err != nil {
@@ -458,12 +459,12 @@ func (db *DB) HasHosts(ctx context.Context, userID string) (bool, error) {
 
 // GetHostBySlug looks up a host by slug. Returns the first match across all users.
 // Per ADR-0054, hosts are globally unique by slug (one row per host, not per user).
-// During migration, returns the 'owner' row if multiple rows exist for the same slug.
+// ADR-0097: type and role columns removed; role='owner' filter removed (all hosts are owners).
 func (db *DB) GetHostBySlug(ctx context.Context, hslug string) (*Host, error) {
 	row := db.pool.QueryRow(ctx,
-		`SELECT id, user_id, slug, name, type, role,
+		`SELECT id, user_id, slug, name,
 		        direct_nats_url, public_key, user_jwt, nats_jwt, created_at, last_seen_at
-		 FROM hosts WHERE slug = $1 AND role = 'owner' LIMIT 1`,
+		 FROM hosts WHERE slug = $1 LIMIT 1`,
 		hslug)
 	h, err := scanHost(row)
 	if err != nil {
@@ -474,9 +475,10 @@ func (db *DB) GetHostBySlug(ctx context.Context, hslug string) (*Host, error) {
 
 // GetHostByPublicKey looks up a host by its NKey public key.
 // Used for HTTP challenge-response auth and $SYS presence tracking (ADR-0054).
+// ADR-0097: type and role columns removed.
 func (db *DB) GetHostByPublicKey(ctx context.Context, publicKey string) (*Host, error) {
 	row := db.pool.QueryRow(ctx,
-		`SELECT id, user_id, slug, name, type, role,
+		`SELECT id, user_id, slug, name,
 		        direct_nats_url, public_key, user_jwt, nats_jwt, created_at, last_seen_at
 		 FROM hosts WHERE public_key = $1 LIMIT 1`,
 		publicKey)
@@ -1046,19 +1048,13 @@ CREATE TABLE IF NOT EXISTS hosts (
     user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     slug            TEXT NOT NULL,
     name            TEXT NOT NULL,
-    type            TEXT NOT NULL CHECK (type IN ('machine', 'cluster')),
-    role            TEXT NOT NULL DEFAULT 'owner' CHECK (role IN ('owner', 'user')),
-    js_domain       TEXT,
-    leaf_url        TEXT,
-    account_jwt     TEXT,
     direct_nats_url TEXT,
     public_key      TEXT,
     user_jwt        TEXT,
     nats_jwt        TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_seen_at    TIMESTAMPTZ,
-    UNIQUE (user_id, slug),
-    CHECK (type = 'machine' OR (js_domain IS NOT NULL AND leaf_url IS NOT NULL AND account_jwt IS NOT NULL))
+    UNIQUE (user_id, slug)
 );
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -1186,9 +1182,8 @@ CREATE INDEX IF NOT EXISTS idx_attachments_unconfirmed ON attachments (confirmed
 -- ADR-0063: drop legacy leaf-NATS CHECK constraint and deprecated columns from hosts.
 -- The constraint blocked inserting type='cluster' rows without js_domain/leaf_url/account_jwt.
 -- Columns js_domain, leaf_url, account_jwt are deprecated per ADR-0054 (hub-direct topology).
--- PostgreSQL CHECK constraints are named by the server; find and drop it by scanning
--- pg_constraint. Uses DO block to be idempotent across fresh installs (where the
--- columns and constraint were never created) and upgrades (where they exist).
+-- ADR-0097: drop type, role columns and related CHECK constraints (BYOH removed; prerelease wipe).
+-- All DO blocks are idempotent — safe for fresh installs where columns never existed.
 DO $$
 DECLARE
     cname TEXT;
@@ -1204,6 +1199,18 @@ BEGIN
         EXECUTE 'ALTER TABLE hosts DROP CONSTRAINT ' || quote_ident(cname);
     END IF;
 
+    -- Drop type/role CHECK constraints if they exist (ADR-0097).
+    FOR cname IN
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = 'hosts'::regclass
+          AND contype = 'c'
+          AND (pg_get_constraintdef(oid) LIKE '%machine%' OR pg_get_constraintdef(oid) LIKE '%cluster%'
+               OR pg_get_constraintdef(oid) LIKE '%owner%' OR pg_get_constraintdef(oid) LIKE '%role%')
+    LOOP
+        EXECUTE 'ALTER TABLE hosts DROP CONSTRAINT ' || quote_ident(cname);
+    END LOOP;
+
     -- Drop deprecated columns if they exist.
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'hosts' AND column_name = 'js_domain') THEN
         ALTER TABLE hosts DROP COLUMN js_domain;
@@ -1213,6 +1220,13 @@ BEGIN
     END IF;
     IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'hosts' AND column_name = 'account_jwt') THEN
         ALTER TABLE hosts DROP COLUMN account_jwt;
+    END IF;
+    -- ADR-0097: drop type and role columns if they exist (upgrade path).
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'hosts' AND column_name = 'type') THEN
+        ALTER TABLE hosts DROP COLUMN type;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'hosts' AND column_name = 'role') THEN
+        ALTER TABLE hosts DROP COLUMN role;
     END IF;
 END
 $$;

@@ -7,8 +7,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
-	"mclaude-control-plane/slug"
-	subj "mclaude-control-plane/subjects"
 )
 
 // ProjectResponse is the HTTP response for a single project.
@@ -208,8 +206,8 @@ func (s *Server) handleCreateProjectHTTP(w http.ResponseWriter, r *http.Request,
 			GitIdentityID: gitIdentityIDStr,
 		}
 		provData, _ := json.Marshal(provReq)
-		// ADR-0054: publish to host-scoped fan-out subject.
-		provSubject := subj.HostUserProjectsCreate(slug.HostSlug(hostSlug), slug.UserSlug(userSlug), slug.ProjectSlug(proj.Slug))
+		// ADR-0097: all hosts route through user-agent unconditionally (no type branching).
+		provSubject := "mclaude.users." + userSlug + ".hosts." + hostSlug + ".agent.projects.provision"
 		provReply, provErr := s.nc.Request(provSubject, provData, provisionTimeoutSeconds())
 		if provErr != nil {
 			log.Error().Err(provErr).
@@ -278,14 +276,15 @@ func (s *Server) handleDeleteProjectHTTP(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// CP-04: Before deleting, look up the project to get its ID, host slug, and host type
+	// CP-04: Before deleting, look up the project to get its ID and host slug
 	// for NATS notifications (same pattern as handleDeleteHost in hosts.go).
-	var projectID, hostSlug, hostType string
+	// ADR-0097: type column removed — no type branching needed.
+	var projectID, hostSlug string
 	err := s.db.Pool().QueryRow(r.Context(), `
-		SELECT p.id, COALESCE(h.slug, ''), COALESCE(h.type, '')
+		SELECT p.id, COALESCE(h.slug, '')
 		FROM projects p
 		LEFT JOIN hosts h ON h.id = p.host_id
-		WHERE p.user_id = $1 AND p.slug = $2`, userID, pslug).Scan(&projectID, &hostSlug, &hostType)
+		WHERE p.user_id = $1 AND p.slug = $2`, userID, pslug).Scan(&projectID, &hostSlug)
 	if err != nil {
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
@@ -299,10 +298,9 @@ func (s *Server) handleDeleteProjectHTTP(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	// CP-04 + ADR-0091: Publish delete notification to the appropriate subject.
-	// Cluster hosts route through user-agent; machine hosts use the existing host-scoped subject.
+	// CP-04 + ADR-0097: Publish delete notification — routes to user-agent unconditionally.
 	if s.nc != nil && userSlug != "" && hostSlug != "" {
-		publishProjectsDeleteToHost(s.nc, userSlug, hostSlug, pslug, projectID, hostType)
+		publishProjectsDeleteToHost(s.nc, userSlug, hostSlug, pslug, projectID)
 	}
 
 	tag, err := s.db.Pool().Exec(r.Context(),

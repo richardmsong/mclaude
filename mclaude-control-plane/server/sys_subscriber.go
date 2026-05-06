@@ -12,10 +12,9 @@ import (
 // HostKVState is the value written to the mclaude-hosts JetStream KV bucket (ADR-0054).
 // Key format: {hslug} (flat — hosts are globally unique).
 // Must match the TypeScript HostKVState in mclaude-web.
-// Per spec-state-schema.md: {slug, type, name, online, lastSeenAt} — no Role field.
+// Per spec-state-schema.md: {slug, name, online, lastSeenAt} — no Type or Role field (ADR-0097).
 type HostKVState struct {
 	Slug       string  `json:"slug"`
-	Type       string  `json:"type"`
 	Name       string  `json:"name"`
 	Online     bool    `json:"online"`
 	LastSeenAt *string `json:"lastSeenAt,omitempty"`
@@ -95,18 +94,18 @@ func (s *Server) handleSysEvent(msg *nats.Msg, isConnect bool) {
 			}
 
 			// KV write: {hslug} → online=true (ADR-0054: flat key, no user prefix).
+			// ADR-0097: type column removed — query only slug and name.
 			if s.hostsKV != nil {
-				var hslug, hname, htype string
+				var hslug, hname string
 				qerr := s.db.Pool().QueryRow(ctx, `
-					SELECT h.slug AS hslug, h.name, h.type
+					SELECT h.slug AS hslug, h.name
 					FROM hosts h
 					WHERE h.public_key = $1`,
-					nkeyPub).Scan(&hslug, &hname, &htype)
+					nkeyPub).Scan(&hslug, &hname)
 				if qerr == nil {
 					nowStr := now.Format(time.RFC3339)
 					state := HostKVState{
 						Slug:       hslug,
-						Type:       htype,
 						Name:       hname,
 						Online:     true,
 						LastSeenAt: &nowStr,
@@ -121,13 +120,14 @@ func (s *Server) handleSysEvent(msg *nats.Msg, isConnect bool) {
 			}
 		} else {
 			// DISCONNECT: no last_seen_at update per ADR-0035; set online=false in KV.
+			// ADR-0097: type column removed — query only slug and name.
 			if s.hostsKV != nil {
-				var hslug, hname, htype string
+				var hslug, hname string
 				qerr := s.db.Pool().QueryRow(ctx, `
-					SELECT h.slug AS hslug, h.name, h.type
+					SELECT h.slug AS hslug, h.name
 					FROM hosts h
 					WHERE h.public_key = $1`,
-					nkeyPub).Scan(&hslug, &hname, &htype)
+					nkeyPub).Scan(&hslug, &hname)
 				if qerr == nil {
 					key := hslug
 					// Read-modify-write: preserve lastSeenAt from existing entry.
@@ -136,7 +136,8 @@ func (s *Server) handleSysEvent(msg *nats.Msg, isConnect bool) {
 					if gerr == nil {
 						var state HostKVState
 						if jerr := json.Unmarshal(existing.Value(), &state); jerr != nil {
-							state = HostKVState{Slug: hslug, Type: htype, Name: hname}
+							// Fallback: initialize from DB values (type/role intentionally omitted per ADR-0097).
+							state = HostKVState{Slug: hslug, Name: hname}
 						}
 						state.Online = false
 						if val, merr := json.Marshal(state); merr == nil {

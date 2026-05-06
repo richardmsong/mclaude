@@ -77,11 +77,11 @@ func TestSchema_HasUniqueEmailConstraint(t *testing.T) {
 }
 
 func TestSchema_HostsTableColumns(t *testing.T) {
+	// ADR-0097: type and role columns removed from hosts table.
+	// Verify they are NOT present in the CREATE TABLE definition.
 	hostCols := []string{
 		"user_id",
 		"slug",
-		"type",
-		"role",
 		"direct_nats_url",
 		"public_key",
 		"user_jwt",
@@ -95,9 +95,7 @@ func TestSchema_HostsTableColumns(t *testing.T) {
 }
 
 func TestSchema_ADR0063_DropLegacyColumns(t *testing.T) {
-	if !strings.Contains(schema, "js_domain IS NOT NULL") {
-		t.Error("ADR-0063 migration missing: expected original CHECK constraint referencing js_domain")
-	}
+	// ADR-0063: verify DROP COLUMN statements for legacy leaf-NATS columns.
 	if !strings.Contains(schema, "DROP COLUMN js_domain") {
 		t.Error("ADR-0063 migration missing: DROP COLUMN js_domain")
 	}
@@ -109,9 +107,27 @@ func TestSchema_ADR0063_DropLegacyColumns(t *testing.T) {
 	}
 }
 
-func TestSchema_HostsTypeCheck(t *testing.T) {
-	if !strings.Contains(schema, "CHECK (type IN ('machine', 'cluster'))") {
-		t.Error("schema hosts table missing type CHECK constraint")
+// TestSchema_ADR0097_NoTypeRoleColumns verifies that the hosts DDL does NOT contain
+// type or role columns (ADR-0097: BYOH removed; all hosts are K8s user-agent hosts).
+func TestSchema_ADR0097_NoTypeRoleColumns(t *testing.T) {
+	// The CREATE TABLE block should not have type or role column definitions.
+	// We check by looking for the CHECK constraints that guarded these columns.
+	if strings.Contains(schema, "CHECK (type IN ('machine', 'cluster'))") {
+		t.Error("ADR-0097: schema hosts table still has type CHECK constraint — type column must be removed")
+	}
+	if strings.Contains(schema, "CHECK (role IN ('owner', 'user'))") {
+		t.Error("ADR-0097: schema hosts table still has role CHECK constraint — role column must be removed")
+	}
+}
+
+// TestSchema_ADR0097_DropTypeRoleMigration verifies that the migration DO block drops
+// type and role columns for upgrade path (ADR-0097).
+func TestSchema_ADR0097_DropTypeRoleMigration(t *testing.T) {
+	if !strings.Contains(schema, "DROP COLUMN type") {
+		t.Error("ADR-0097 migration missing: DROP COLUMN type (upgrade path)")
+	}
+	if !strings.Contains(schema, "DROP COLUMN role") {
+		t.Error("ADR-0097 migration missing: DROP COLUMN role (upgrade path)")
 	}
 }
 

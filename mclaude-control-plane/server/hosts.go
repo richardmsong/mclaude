@@ -21,24 +21,16 @@ import (
 
 // HostResponse is a single host entry in list/CRUD responses.
 // ADR-0063: JsDomain field removed (leaf topology dropped per ADR-0054).
+// ADR-0097: Type and Role fields removed (BYOH removed; all hosts are K8s user-agent hosts).
 type HostResponse struct {
 	ID            string     `json:"id"`
 	Slug          string     `json:"slug"`
 	Name          string     `json:"name"`
-	Type          string     `json:"type"`
-	Role          string     `json:"role"`
 	DirectNATSURL *string    `json:"directNatsUrl,omitempty"`
 	LastSeenAt    *time.Time `json:"lastSeenAt,omitempty"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	JWT           string     `json:"jwt,omitempty"`      // GAP-CP-09: minted JWT for host auth
 	NKeySeed      string     `json:"nkeySeed,omitempty"` // GAP-CP-09: NKey seed for NATS connection
-}
-
-// HostCreateRequest is the body for POST /api/users/{uslug}/hosts.
-type HostCreateRequest struct {
-	Slug      string `json:"slug"`
-	Name      string `json:"name"`
-	PublicKey string `json:"publicKey,omitempty"`
 }
 
 // HostUpdateRequest is the body for PUT /api/users/{uslug}/hosts/{hslug}.
@@ -172,13 +164,12 @@ func (s *Server) handleHostRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ADR-0097: POST /api/users/{uslug}/hosts removed — BYOH dead.
+	// All host registration goes through NATS (mclaude.users.*.hosts._.register).
 	switch {
 	case r.Method == http.MethodGet && len(parts) == 2:
 		// GET /api/users/{uslug}/hosts
 		s.handleListHosts(w, r, userID)
-	case r.Method == http.MethodPost && len(parts) == 2:
-		// POST /api/users/{uslug}/hosts
-		s.handleCreateHost(w, r, userID)
 	case r.Method == http.MethodPut && len(parts) >= 3:
 		// PUT /api/users/{uslug}/hosts/{hslug}
 		s.handleUpdateHost(w, r, userID, parts[2])
@@ -191,6 +182,7 @@ func (s *Server) handleHostRoutes(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListHosts handles GET /api/users/{uslug}/hosts.
+// ADR-0097: type and role columns removed from query and scan.
 func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request, userID string) {
 	if s.db == nil {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
@@ -198,7 +190,7 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request, userID 
 	}
 
 	rows, err := s.db.Pool().Query(r.Context(), `
-		SELECT id, slug, name, type, role, direct_nats_url, last_seen_at, created_at
+		SELECT id, slug, name, direct_nats_url, last_seen_at, created_at
 		FROM hosts WHERE user_id = $1 ORDER BY created_at`, userID)
 	if err != nil {
 		http.Error(w, "query error", http.StatusInternalServerError)
@@ -209,7 +201,7 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request, userID 
 	var hosts []HostResponse
 	for rows.Next() {
 		var h HostResponse
-		if err := rows.Scan(&h.ID, &h.Slug, &h.Name, &h.Type, &h.Role, &h.DirectNATSURL, &h.LastSeenAt, &h.CreatedAt); err != nil {
+		if err := rows.Scan(&h.ID, &h.Slug, &h.Name, &h.DirectNATSURL, &h.LastSeenAt, &h.CreatedAt); err != nil {
 			http.Error(w, "scan error", http.StatusInternalServerError)
 			return
 		}
@@ -221,79 +213,6 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request, userID 
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(hosts) //nolint:errcheck
-}
-
-// handleCreateHost handles POST /api/users/{uslug}/hosts.
-func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request, userID string) {
-	if s.db == nil {
-		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	var req HostCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-	if req.Slug == "" || req.Name == "" {
-		http.Error(w, "slug and name are required", http.StatusBadRequest)
-		return
-	}
-
-	// KNOWN-04: Look up user slug for cpauth.IssueHostJWT (must pass slug, not UUID).
-	user, err := s.db.GetUserByID(r.Context(), userID)
-	if err != nil || user == nil {
-		http.Error(w, "user not found", http.StatusNotFound)
-		return
-	}
-
-	// Issue a per-host JWT. Per ADR-0054, if the host provided its NKey public key,
-	// use the new scoped JWT (no seed returned). Otherwise, use legacy mode.
-	var hostJWT string
-	var hostSeed []byte
-	if req.PublicKey != "" {
-		var issueErr error
-		hostJWT, issueErr = cpauth.IssueHostJWT(req.PublicKey, req.Slug, s.accountKP)
-		if issueErr != nil {
-			http.Error(w, "failed to issue host jwt", http.StatusInternalServerError)
-			return
-		}
-	} else {
-		var legacyErr error
-		hostJWT, hostSeed, legacyErr = cpauth.IssueHostJWTLegacy(user.Slug, req.Slug, s.accountKP)
-		if legacyErr != nil {
-			http.Error(w, "failed to issue host jwt", http.StatusInternalServerError)
-			return
-		}
-	}
-
-	hostID := uuid.NewString()
-	_, err = s.db.Pool().Exec(r.Context(), `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key, user_jwt)
-		VALUES ($1, $2, $3, $4, 'machine', 'owner', $5, $6)`,
-		hostID, userID, req.Slug, req.Name, req.PublicKey, hostJWT)
-	if err != nil {
-		if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
-			http.Error(w, "host slug already exists", http.StatusConflict)
-			return
-		}
-		http.Error(w, "failed to create host", http.StatusInternalServerError)
-		return
-	}
-
-	// GAP-CP-09: Return JWT and NKey seed so caller can connect to NATS.
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(HostResponse{ //nolint:errcheck
-		ID:        hostID,
-		Slug:      req.Slug,
-		Name:      req.Name,
-		Type:      "machine",
-		Role:      "owner",
-		CreatedAt: time.Now().UTC(),
-		JWT:       hostJWT,
-		NKeySeed:  string(hostSeed),
-	})
 }
 
 // handleUpdateHost handles PUT /api/users/{uslug}/hosts/{hslug}.
@@ -340,20 +259,15 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request, userID
 	// publish delete notifications for each project on this host so controllers
 	// can tear down per-project resources (namespaces, Deployments, PVCs, RBAC).
 	// ADR-0053: Also delete S3 prefixes for each project (best-effort).
-	// ADR-0091: route cluster hosts through user-agent.
+	// ADR-0097: all hosts route through user-agent unconditionally (no type branching).
 	if s.nc != nil || s.s3 != nil {
 		user, userErr := s.db.GetUserByID(r.Context(), userID)
 		if userErr == nil && user != nil {
-			// Look up host type so we can route delete through user-agent for cluster hosts.
-			var hostTypeForDelete string
-			if h, herr := s.db.GetHostBySlug(r.Context(), hslug); herr == nil && h != nil {
-				hostTypeForDelete = h.Type
-			}
 			projects, projErr := s.db.GetProjectsByHostSlug(r.Context(), userID, hslug)
 			if projErr == nil {
 				for _, p := range projects {
 					if s.nc != nil {
-						publishProjectsDeleteToHost(s.nc, user.Slug, hslug, p.Slug, p.ID, hostTypeForDelete)
+						publishProjectsDeleteToHost(s.nc, user.Slug, hslug, p.Slug, p.ID)
 					}
 					// ADR-0053: Delete S3 prefix for this project (best-effort).
 					if s.s3 != nil && p.Slug != "" {
@@ -534,10 +448,11 @@ func (s *Server) handleHostRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// ADR-0097: type and role columns removed from hosts table.
 	hostID := uuid.NewString()
 	if _, execErr := s.db.Pool().Exec(context.Background(), `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, public_key, user_jwt)
-		VALUES ($1, $2, $3, $4, 'machine', 'owner', $5, $6)
+		INSERT INTO hosts (id, user_id, slug, name, public_key, user_jwt)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (user_id, slug) DO UPDATE SET name = EXCLUDED.name, public_key = EXCLUDED.public_key, user_jwt = EXCLUDED.user_jwt`,
 		hostID, entry.UserID, hostSlug, req.Name, entry.PublicKey, hostJWT); execErr != nil {
 		log.Error().Err(execErr).Msg("create host from device code")

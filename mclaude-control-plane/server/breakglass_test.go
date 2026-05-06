@@ -139,34 +139,37 @@ func TestAdminRoutes_UnknownRoute(t *testing.T) {
 	}
 }
 
-// ---- Grant cluster ----
+// ---- Admin cluster endpoints removed (ADR-0097) ----
 
-// TestAdminGrantCluster_NilDB verifies that the grant endpoint returns 503
-// when the database is not configured (nil DB guard, same pattern as other admin endpoints).
-func TestAdminGrantCluster_NilDB(t *testing.T) {
+// TestAdminClusterEndpoints_Removed verifies that all /admin/clusters/* paths
+// are not handled — handleAdminRoutes returns 404 for them per ADR-0097
+// (BYOH and admin cluster registration removed; all hosts are K8s user-agent
+// hosts registered via NATS).
+// Tests call handleAdminRoutes directly, bypassing isAdminMiddleware, to isolate
+// routing logic from auth (same pattern as other tests in this file).
+func TestAdminClusterEndpoints_Removed(t *testing.T) {
 	srv := NewServer(nil, mustAccountKP(t), "nats://test", "", 0)
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/admin/clusters/k3d-dev/grants",
-		bytes.NewBufferString(`{"userSlug":"test-user"}`))
-	req.Header.Set("Content-Type", "application/json")
-	srv.adminGrantCluster(rec, req, "k3d-dev")
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Errorf("status = %d; want 503 (nil DB)", rec.Code)
-	}
-}
 
-// TestAdminGrantCluster_MissingUserSlug verifies input validation.
-// Uses a mock server with nil DB — the nil-DB check fires first (503),
-// so validation tests use the AdminClusterGrantRequest struct directly.
-func TestAdminGrantCluster_RequestValidation(t *testing.T) {
-	var req AdminClusterGrantRequest
-	if req.UserSlug != "" {
-		t.Error("zero-value AdminClusterGrantRequest should have empty UserSlug")
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/admin/clusters"},
+		{http.MethodGet, "/admin/clusters"},
+		{http.MethodPost, "/admin/clusters/k3d-dev/grants"},
+		{http.MethodDelete, "/admin/clusters/k3d-dev"},
 	}
-	// Confirm the struct JSON tag matches the field the handler reads.
-	b, _ := json.Marshal(AdminClusterGrantRequest{UserSlug: "alice"})
-	if !strings.Contains(string(b), `"userSlug"`) {
-		t.Errorf("AdminClusterGrantRequest JSON missing userSlug field: %s", b)
+
+	for _, r := range routes {
+		t.Run(r.method+" "+r.path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(r.method, r.path, nil)
+			srv.handleAdminRoutes(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("%s %s: status = %d; want 404 (ADR-0097: admin cluster endpoints removed)",
+					r.method, r.path, rec.Code)
+			}
+		})
 	}
 }
 

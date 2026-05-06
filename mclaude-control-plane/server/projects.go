@@ -281,16 +281,8 @@ func (s *Server) handleProjectCreate(nc *nats.Conn, msg *nats.Msg, userSlug, sub
 		}
 		provData, _ := json.Marshal(provReq)
 
-		// Determine whether this is a cluster host (routes via user-agent) or machine
-		// host (routes via host controller directly). Look up the owner row for this host.
-		var provSubject string
-		if host, herr := s.db.GetHostBySlug(ctx, hostSlug); herr == nil && host != nil && host.Type == "cluster" {
-			// ADR-0091: cluster host — publish to user-agent provisioning subject.
-			provSubject = "mclaude.users." + userSlug + ".hosts." + hostSlug + ".agent.projects.provision"
-		} else {
-			// Machine host (or unknown) — publish to host controller directly (existing path).
-			provSubject = subj.HostUserProjectsCreate(slug.HostSlug(hostSlug), slug.UserSlug(userSlug), slug.ProjectSlug(proj.Slug))
-		}
+		// ADR-0097: all hosts route through user-agent unconditionally (no type branching).
+		provSubject := "mclaude.users." + userSlug + ".hosts." + hostSlug + ".agent.projects.provision"
 
 		provReply, err := nc.Request(provSubject, provData, provisionTimeoutSeconds())
 		if err != nil {
@@ -558,30 +550,16 @@ func publishProjectsUpdateToHost(nc *nats.Conn, userSlug, hostSlug string) {
 	}
 }
 
-// publishProjectsDeleteToHost publishes a NATS message to the appropriate subject
-// so the controller or user-agent tears down per-project resources (GAP-CP-04, ADR-0091).
-// ADR-0091: cluster hosts route through user-agent (mclaude.users.{uslug}.hosts.{hslug}.agent.projects.delete).
-// Machine hosts use the existing host-scoped fan-out subject (mclaude.hosts.{hslug}.users.{uslug}.projects.{pslug}.delete).
-//
-// hostType is optional: pass "cluster" for cluster hosts, "" or "machine" for machine hosts.
-// When hostType is "", the function falls back to the existing machine-host subject (backward compat).
-func publishProjectsDeleteToHost(nc *nats.Conn, userSlug, hostSlug, projectSlug, projectID string, hostType ...string) {
+// publishProjectsDeleteToHost publishes a NATS message to the user-agent's project
+// delete subject so the user-agent tears down per-project resources (GAP-CP-04).
+// ADR-0097: all hosts route through user-agent unconditionally — no type branching.
+// Best-effort publish — no reply expected.
+func publishProjectsDeleteToHost(nc *nats.Conn, userSlug, hostSlug, projectSlug, projectID string) {
 	if nc == nil || userSlug == "" || hostSlug == "" {
 		return
 	}
 
-	// ADR-0091: route cluster hosts through user-agent.
-	isCluster := len(hostType) > 0 && hostType[0] == "cluster"
-	var subject string
-	if isCluster {
-		// Best-effort publish — no reply expected. User-agent deletes the pod.
-		subject = "mclaude.users." + userSlug + ".hosts." + hostSlug + ".agent.projects.delete"
-	} else if projectSlug != "" {
-		subject = subj.HostUserProjectsDelete(slug.HostSlug(hostSlug), slug.UserSlug(userSlug), slug.ProjectSlug(projectSlug))
-	} else {
-		// Fallback for callers without project slug: use legacy user-scoped subject.
-		subject = "mclaude.users." + userSlug + ".hosts." + hostSlug + ".api.projects.delete"
-	}
+	subject := "mclaude.users." + userSlug + ".hosts." + hostSlug + ".agent.projects.delete"
 	payload, _ := json.Marshal(map[string]string{"projectId": projectID, "projectSlug": projectSlug, "event": "deleted"})
 	if err := nc.Publish(subject, payload); err != nil {
 		log.Warn().Err(err).Str("subject", subject).Str("projectId", projectID).Msg("publish projects.delete failed (non-fatal)")

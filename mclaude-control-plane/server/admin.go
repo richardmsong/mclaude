@@ -8,7 +8,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 
-	cpauth "mclaude-control-plane/auth"
 	"mclaude-control-plane/slug"
 	subj "mclaude-control-plane/subjects"
 )
@@ -25,9 +24,10 @@ import (
 //	DELETE /admin/users/{id}     — delete user
 //	GET    /admin/users          — list all users
 //	POST   /admin/sessions/stop  — stop a session (stub — real stop via NATS)
-//	POST   /admin/clusters       — register a cluster (ADR-0035)
-//	GET    /admin/clusters       — list clusters (ADR-0035)
-//	POST   /admin/clusters/{cslug}/grants — grant user access to cluster (ADR-0035)
+//
+// Removed (ADR-0097): POST/GET /admin/clusters, POST /admin/clusters/{cslug}/grants,
+// DELETE /admin/clusters/{cslug} — these duplicated the NATS registration path and
+// used stale fields from the pre-hub-direct architecture.
 
 // AdminUserRequest is the body for POST /admin/users.
 type AdminUserRequest struct {
@@ -53,35 +53,8 @@ type AdminSessionStopRequest struct {
 	SessionID string `json:"sessionId"`
 }
 
-// AdminClusterRegisterRequest is the body for POST /admin/clusters (ADR-0035).
-// ADR-0063: jsDomain and leafUrl fields removed (leaf topology dropped per ADR-0054).
-// ADR-0091: DefaultPlatform field added. If true, sets hosts.is_default_platform=true
-// (partial unique index ensures at most one default platform — collision returns 409).
-type AdminClusterRegisterRequest struct {
-	Slug            string `json:"slug"`
-	Name            string `json:"name,omitempty"`
-	DirectNATSURL   string `json:"directNatsUrl,omitempty"`
-	UserSlug        string `json:"userSlug,omitempty"` // owner user slug; if empty, first admin user is used
-	DefaultPlatform bool   `json:"defaultPlatform,omitempty"` // ADR-0091: set hosts.is_default_platform=true
-}
-
-// AdminClusterRegisterResponse is returned on successful cluster registration.
-// ADR-0063: jsDomain field removed (leaf topology dropped per ADR-0054).
-type AdminClusterRegisterResponse struct {
-	Slug         string `json:"slug"`
-	LeafJWT      string `json:"leafJwt,omitempty"`
-	LeafSeed     string `json:"leafSeed,omitempty"`
-	AccountJWT   string `json:"accountJwt,omitempty"`
-	OperatorJWT  string `json:"operatorJwt,omitempty"`
-	DirectNATSURL string `json:"directNatsUrl,omitempty"`
-}
-
-// AdminClusterGrantRequest is the body for POST /admin/clusters/{cslug}/grants.
-type AdminClusterGrantRequest struct {
-	UserSlug string `json:"userSlug"`
-}
-
 // handleAdminRoutes routes all /admin/* requests.
+// ADR-0097: cluster endpoints removed. All host registration goes through NATS.
 func (s *Server) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/admin/users":
@@ -93,20 +66,7 @@ func (s *Server) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 		s.adminDeleteUser(w, r, id)
 	case r.Method == http.MethodPost && r.URL.Path == "/admin/sessions/stop":
 		s.adminStopSession(w, r)
-	// ADR-0035 cluster endpoints
-	case r.Method == http.MethodPost && r.URL.Path == "/admin/clusters":
-		s.adminRegisterCluster(w, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/admin/clusters":
-		s.adminListClusters(w, r)
-	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/admin/clusters/") && strings.HasSuffix(r.URL.Path, "/grants"):
-		cslug := strings.TrimPrefix(r.URL.Path, "/admin/clusters/")
-		cslug = strings.TrimSuffix(cslug, "/grants")
-		s.adminGrantCluster(w, r, cslug)
-	// KNOWN-21: DELETE /admin/clusters/{cslug}
-	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/admin/clusters/"):
-		cslug := strings.TrimPrefix(r.URL.Path, "/admin/clusters/")
-		s.adminDeleteCluster(w, r, cslug)
-	// KNOWN-10: POST /admin/users/{uslug}/promote
+	// POST /admin/users/{uslug}/promote
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/admin/users/") && strings.HasSuffix(r.URL.Path, "/promote"):
 		uslug := strings.TrimPrefix(r.URL.Path, "/admin/users/")
 		uslug = strings.TrimSuffix(uslug, "/promote")
@@ -210,6 +170,7 @@ func (s *Server) adminDeleteUser(w http.ResponseWriter, r *http.Request, userID 
 	// KNOWN-11 / GAP-CP-04: Before deleting the user (which cascades to hosts and
 	// projects), publish delete notifications for each project on each host so
 	// controllers can tear down per-project resources.
+	// ADR-0097: all hosts route through user-agent unconditionally (no type branching).
 	if s.nc != nil {
 		user, userErr := s.db.GetUserByID(r.Context(), userID)
 		if userErr == nil && user != nil {
@@ -219,8 +180,7 @@ func (s *Server) adminDeleteUser(w http.ResponseWriter, r *http.Request, userID 
 					projects, projErr := s.db.GetProjectsByHostSlug(r.Context(), userID, h.Slug)
 					if projErr == nil {
 						for _, p := range projects {
-							// ADR-0091: route cluster hosts through user-agent.
-							publishProjectsDeleteToHost(s.nc, user.Slug, h.Slug, p.Slug, p.ID, h.Type)
+							publishProjectsDeleteToHost(s.nc, user.Slug, h.Slug, p.Slug, p.ID)
 						}
 					}
 				}
@@ -340,231 +300,6 @@ func (s *Server) adminStopSession(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{"status": "accepted"}) //nolint:errcheck
-}
-
-// adminRegisterCluster handles POST /admin/clusters (ADR-0035).
-// Creates a cluster host row for the admin user and returns credentials.
-func (s *Server) adminRegisterCluster(w http.ResponseWriter, r *http.Request) {
-	if s.db == nil {
-		http.Error(w, "database not configured", http.StatusServiceUnavailable)
-		return
-	}
-
-	var req AdminClusterRegisterRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-	if req.Slug == "" {
-		http.Error(w, "slug is required", http.StatusBadRequest)
-		return
-	}
-	if req.Name == "" {
-		req.Name = req.Slug
-	}
-
-	// Generate a per-cluster NKey pair for the controller/leaf-node.
-	clusterNKey, _, err := cpauth.GenerateUserNKey()
-	if err != nil {
-		http.Error(w, "failed to generate cluster nkey", http.StatusInternalServerError)
-		return
-	}
-
-	// Issue a cluster controller JWT scoped to mclaude.hosts.{cslug}.> (ADR-0054).
-	// Use the generated cluster NKey public key.
-	clusterJWT, clusterSeed, err := cpauth.IssueHostJWTLegacy("*", req.Slug, s.accountKP)
-	if err != nil {
-		http.Error(w, "failed to issue cluster jwt", http.StatusInternalServerError)
-		return
-	}
-	_ = clusterNKey // The generated NKey public key is embedded in clusterJWT; use the seed to reconnect.
-
-	// KNOWN-06: Look up owner user properly instead of arbitrary (SELECT id FROM users LIMIT 1).
-	var ownerUserID string
-	if req.UserSlug != "" {
-		ownerUser, uerr := s.db.GetUserBySlug(r.Context(), req.UserSlug)
-		if uerr != nil || ownerUser == nil {
-			http.Error(w, "owner user not found", http.StatusNotFound)
-			return
-		}
-		ownerUserID = ownerUser.ID
-	} else {
-		// Fallback: use first admin user, or first user if no admin exists.
-		err = s.db.Pool().QueryRow(r.Context(),
-			`SELECT id FROM users WHERE is_admin = TRUE ORDER BY created_at LIMIT 1`).Scan(&ownerUserID)
-		if err != nil {
-			// No admin user — fall back to first user.
-			err = s.db.Pool().QueryRow(r.Context(),
-				`SELECT id FROM users ORDER BY created_at LIMIT 1`).Scan(&ownerUserID)
-			if err != nil {
-				http.Error(w, "no users exist to own the cluster", http.StatusBadRequest)
-				return
-			}
-		}
-	}
-
-	hostID := uuid.NewString()
-	_, err = s.db.Pool().Exec(r.Context(), `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, direct_nats_url, public_key, user_jwt, is_default_platform)
-		VALUES ($1, $2, $3, $4, 'cluster', 'owner', $5, $6, $7, $8)`,
-		hostID, ownerUserID, req.Slug, req.Name, req.DirectNATSURL, clusterNKey.PublicKey, clusterJWT, req.DefaultPlatform)
-	if err != nil {
-		if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
-			// Distinguish between cluster slug conflict and default_platform conflict.
-			if strings.Contains(err.Error(), "idx_hosts_default_platform") {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusConflict)
-				json.NewEncoder(w).Encode(map[string]string{"error": "default_platform_exists"}) //nolint:errcheck
-				return
-			}
-			http.Error(w, "cluster slug already exists", http.StatusConflict)
-			return
-		}
-		log.Error().Err(err).Msg("create cluster host row")
-		http.Error(w, "failed to create cluster", http.StatusInternalServerError)
-		return
-	}
-
-	// KNOWN-07: Populate accountJwt and operatorJwt in the response.
-	accountJWTStr := ""
-	if pub, kerr := s.accountKP.PublicKey(); kerr == nil {
-		accountJWTStr = pub
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(AdminClusterRegisterResponse{ //nolint:errcheck
-		Slug:         req.Slug,
-		LeafJWT:      clusterJWT,
-		LeafSeed:     string(clusterSeed),
-		AccountJWT:   accountJWTStr,
-		DirectNATSURL: req.DirectNATSURL,
-	})
-}
-
-// adminListClusters handles GET /admin/clusters (ADR-0035).
-func (s *Server) adminListClusters(w http.ResponseWriter, r *http.Request) {
-	if s.db == nil {
-		http.Error(w, "database not configured", http.StatusServiceUnavailable)
-		return
-	}
-
-	rows, err := s.db.Pool().Query(r.Context(),
-		`SELECT DISTINCT slug, name, direct_nats_url
-		 FROM hosts WHERE type = 'cluster' ORDER BY slug`)
-	if err != nil {
-		http.Error(w, "query error", http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
-
-	// ADR-0063: jsDomain and leafUrl removed (leaf topology dropped per ADR-0054).
-	type clusterEntry struct {
-		Slug         string  `json:"slug"`
-		Name         string  `json:"name"`
-		DirectNATSURL *string `json:"directNatsUrl"`
-	}
-	var clusters []clusterEntry
-	for rows.Next() {
-		var c clusterEntry
-		if err := rows.Scan(&c.Slug, &c.Name, &c.DirectNATSURL); err != nil {
-			http.Error(w, "scan error", http.StatusInternalServerError)
-			return
-		}
-		clusters = append(clusters, c)
-	}
-	if clusters == nil {
-		clusters = []clusterEntry{}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(clusters) //nolint:errcheck
-}
-
-// adminGrantCluster handles POST /admin/clusters/{cslug}/grants (ADR-0035).
-// Creates a hosts row for the granted user with the cluster's shared fields.
-func (s *Server) adminGrantCluster(w http.ResponseWriter, r *http.Request, cslug string) {
-	if s.db == nil {
-		http.Error(w, "database not configured", http.StatusServiceUnavailable)
-		return
-	}
-
-	var req AdminClusterGrantRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-	if req.UserSlug == "" {
-		http.Error(w, "userSlug is required", http.StatusBadRequest)
-		return
-	}
-
-	// Look up the cluster's shared fields from an existing host row.
-	// ADR-0063: js_domain, leaf_url, account_jwt columns dropped.
-	// ADR-0086: public_key is the cluster controller's NKey identity — do not copy to per-user rows.
-	var directNATSURL *string
-	err := s.db.Pool().QueryRow(r.Context(), `
-		SELECT direct_nats_url
-		FROM hosts WHERE slug = $1 AND type = 'cluster' LIMIT 1`, cslug).
-		Scan(&directNATSURL)
-	if err != nil {
-		http.Error(w, "cluster not found", http.StatusNotFound)
-		return
-	}
-
-	// KNOWN-05: Look up user by slug, not email.
-	user, err := s.db.GetUserBySlug(r.Context(), req.UserSlug)
-	if err != nil || user == nil {
-		http.Error(w, "user not found", http.StatusNotFound)
-		return
-	}
-
-	// KNOWN-04: Issue per-user host JWT. Use legacy function since this path
-	// doesn't have a client-provided public key (admin grant operation).
-	userJWT, _, err := cpauth.IssueHostJWTLegacy(user.Slug, cslug, s.accountKP)
-	if err != nil {
-		http.Error(w, "failed to issue user jwt", http.StatusInternalServerError)
-		return
-	}
-
-	hostID := uuid.NewString()
-	_, err = s.db.Pool().Exec(r.Context(), `
-		INSERT INTO hosts (id, user_id, slug, name, type, role, direct_nats_url, user_jwt)
-		VALUES ($1, $2, $3, $4, 'cluster', 'user', $5, $6)
-		ON CONFLICT (user_id, slug) DO NOTHING`,
-		hostID, user.ID, cslug, cslug, directNATSURL, userJWT)
-	if err != nil {
-		http.Error(w, "failed to grant cluster access", http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]string{"status": "granted"}) //nolint:errcheck
-}
-
-// adminDeleteCluster handles DELETE /admin/clusters/{cslug} (KNOWN-21).
-func (s *Server) adminDeleteCluster(w http.ResponseWriter, r *http.Request, cslug string) {
-	if s.db == nil {
-		http.Error(w, "database not configured", http.StatusServiceUnavailable)
-		return
-	}
-	if cslug == "" {
-		http.Error(w, "cluster slug required", http.StatusBadRequest)
-		return
-	}
-
-	tag, err := s.db.Pool().Exec(r.Context(),
-		`DELETE FROM hosts WHERE slug = $1 AND type = 'cluster'`, cslug)
-	if err != nil {
-		http.Error(w, "delete error", http.StatusInternalServerError)
-		return
-	}
-	if tag.RowsAffected() == 0 {
-		http.Error(w, "cluster not found", http.StatusNotFound)
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // adminPromoteUser handles POST /admin/users/{uslug}/promote (KNOWN-10).

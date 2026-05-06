@@ -25,12 +25,11 @@ type LoginRequest struct {
 }
 
 // LoginHostEntry is a host in the login response hosts[] array.
+// ADR-0097: Type and Role fields removed — all hosts are K8s user-agent hosts.
 type LoginHostEntry struct {
 	ID   string `json:"id"`
 	Slug string `json:"slug"`
 	Name string `json:"name"`
-	Type string `json:"type"`
-	Role string `json:"role"`
 }
 
 // LoginProjectEntry is a project in the login response projects[] array.
@@ -463,6 +462,7 @@ func (s *Server) getUserHostSlugs(ctx context.Context, userID string) []string {
 }
 
 // getLoginHosts returns the hosts[] array for LoginResponse (KNOWN-17).
+// ADR-0097: Type and Role fields removed from LoginHostEntry.
 func (s *Server) getLoginHosts(ctx context.Context, userID string) []LoginHostEntry {
 	hosts := []LoginHostEntry{}
 	if s.db == nil {
@@ -477,8 +477,6 @@ func (s *Server) getLoginHosts(ctx context.Context, userID string) []LoginHostEn
 			ID:   h.ID,
 			Slug: h.Slug,
 			Name: h.Name,
-			Type: h.Type,
-			Role: h.Role,
 		})
 	}
 	return hosts
