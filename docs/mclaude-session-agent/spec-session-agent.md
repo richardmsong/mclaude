@@ -26,6 +26,8 @@ export CLAUDE_CODE_OAUTH_TOKEN=$(cat /secrets/tokens/${TOKEN_PROVIDER})
 
 `TOKEN_PROVIDER` is supplied by the user-agent at pod-creation time (`anthropic` for v1; future providers use the same key pattern). No HTTP call, no NATS round-trip — the token is on disk before the agent starts. If `/secrets/tokens/${TOKEN_PROVIDER}` is missing or empty, `entrypoint.sh` exits with a clear error (the user-agent should not have created the pod without a token; this represents a control-plane bug). The legacy `oauth-token` field on `user-secrets` is removed (ADR-0091); session-agent must not read it.
 
+**Token failure detection (ADR-0092):** If the Anthropic API returns 401/403 during a session, the session-agent sets `status: "token_expired"` in session KV. The SPA watches for this status and renders a reconnect banner. Recovery: session-agent watches the mounted Secret directory (`/secrets/tokens/`) via `fsnotify` (or polls every 30s). When the token file is updated (user-agent writes new token after re-delivery), session-agent reads the new token, retries the failed API call, and transitions back to `running`.
+
 The `--nats-creds` flag is **not** passed to the `session-agent` binary — the per-project `nats-creds` Secret key was removed by ADR-0063, and the session-agent self-bootstraps NATS credentials via HTTP challenge-response with CP using its own NKey. `entrypoint.sh` passes `--auth-url "${CONTROL_PLANE_URL}"` to activate this path:
 
 ```sh

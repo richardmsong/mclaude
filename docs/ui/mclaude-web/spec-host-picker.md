@@ -70,7 +70,7 @@ A new screen reachable from the existing Settings overview (after the existing A
 ```
 
 - Two sections: "Your hosts" (`role === 'owner'`) and "Shared with you" (`role === 'user'`).
-- Each row tappable → host detail screen with name, slug, type, online state, last seen, list of projects, and (for owned machine hosts) a "Remove host" destructive action.
+- Each row tappable → host detail screen with name, slug, type, online state, last seen, CLAUDE ACCESS sub-section (see `spec-settings-web.md` § Host Detail: CLAUDE ACCESS), list of projects, and (for owned machine hosts) a "Remove host" destructive action.
 - "+ Register a new host" launches the device-code flow:
   1. SPA calls `POST /api/users/{uslug}/hosts/code` to obtain `{code, expiresAt}`.
   2. Renders a modal with the 6-character code, a copy button, and the CLI hint: "Open a terminal on the new machine and run `mclaude host register` then enter this code." Reading the dashboard URL in the CLI is also supported.

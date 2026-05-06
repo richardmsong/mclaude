@@ -152,7 +152,7 @@ Behavior:
 3. Write the token to `mclaude-user-info-{uslug}` at key `tokens.anthropic` via NATS KV PUT.
 4. For each host in `GET /api/users/{uslug}/grants` with `status='accepted'`: read `GET /api/users/{uslug}/hosts/{hslug}/user-agent/pubkey` → `crypto_box_seal(token, x25519_pub)` (libsodium) → publish via NATS request/reply to `mclaude.users.{uslug}.hosts.{hslug}.agent.token-delivery` with `{provider: "anthropic", token_wrapped: "<base64>"}`. Reports per-host result (delivered / agent-offline / error).
 
-`--revoke` only deletes the KV key. Host-side cleanup (Secret deletion, JWT revocation, namespace teardown) is part of the deferred revocation flow (separate ADR per ADR-0091); the CLI does not attempt it in v1.
+`--revoke` deletes the KV key and publishes `token-revoke` to all accepted-grant hosts (ADR-0092). Behavior: delete token from KV first (always succeeds), then iterate accepted-grant hosts and send `token-revoke` request/reply to each (10s timeout per host). Continue on per-host failure — print `"Warning: could not revoke on {hslug}: {error}"` to stderr per host. Exit code: `ExitAuthSuccess` (0) if KV delete succeeded (even if some hosts failed). Summary messages: all hosts succeeded → `"Token removed. Revoked on N/N hosts."`. Partial failure → `"Token removed. Revoked on N/M hosts."`. All hosts failed → `"Token removed from account. Warning: N hosts could not be reached — token may still be cached on those hosts."`. Full host-side cleanup (JWT revocation, namespace teardown) is part of the deferred revocation flow (separate ADR per ADR-0091).
 
 `--status` prints `Connected` or `Not set` based on KV read; for each accepted host, prints whether the user-agent has registered an X25519 pubkey (i.e. is reachable for delivery).
 

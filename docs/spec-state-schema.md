@@ -232,7 +232,7 @@ Value: `SessionState`
   "worktree": "string",
   "cwd": "string",
   "name": "string",
-  "status": "pending | running | paused | requires_action | completed | stopped | cancelled | needs_spec_fix | failed | error",
+  "status": "pending | running | paused | requires_action | completed | stopped | cancelled | needs_spec_fix | failed | error | token_expired",
   "stateSince": "RFC3339",
   "createdAt": "RFC3339",
   "model": "string",
@@ -286,6 +286,7 @@ Value: `SessionState`
 - `needs_spec_fix` — permission-denied, spec fix needed
 - `failed` — unrecoverable error
 - `error` — transient error, may recover
+- `token_expired` — model-provider token invalid (401/403 from Anthropic); session-agent sets this, SPA renders reconnect banner (ADR-0092)
 
 **Backend field** (ADR-0005): Identifies the CLI backend driver. Defaults to `claude_code`. The SPA uses this to toggle per-backend UI features.
 
@@ -911,6 +912,15 @@ The SPA derives host and project data from KV watches (`mclaude-hosts`, `mclaude
 ```
 
 When implemented, the `hosts` array will be the single source of truth for host inventory. SPA will derive the cluster list with `hosts.filter(h => h.type === 'cluster')`. `jsDomain` and `directNatsUrl` will be present only on cluster-type entries — the SPA includes JetStream domain qualification only when these fields are present, so single-host BYOH deployments work unchanged.
+
+## Client-Side State (localStorage)
+
+| Key | Value | Written by | Purpose |
+|-----|-------|-----------|---------|
+| `mclaude.pendingDeliveries` | JSON array of `{ "hslug": "string", "provider": "string" }` | SPA | Pending K_wrapped deliveries that failed (user-agent offline). Retried on login/NATS reconnect. Entry removed on success. Entire key cleared on logout. (ADR-0092) |
+| `mclaude.filterProjectId` | Project ID string | SPA | Dashboard project filter (see spec-dashboard.md). |
+| `mclaude.lastProjectId` | Project ID string | SPA | Last-used project for New Session pre-selection. |
+| `mclaude.defaultHostSlug` | Host slug string | SPA | Default host for New Project pre-selection (see spec-host-picker.md). |
 
 ## Lifecycle Event Payloads
 
