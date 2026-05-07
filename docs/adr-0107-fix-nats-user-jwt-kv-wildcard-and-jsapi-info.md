@@ -1,8 +1,9 @@
 # ADR: Fix NATS User JWT — KV Wildcard and $JS.API.INFO
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-07: accepted
+- 2026-05-07: implemented — mclaude-control-plane CLEAN
 
 ## Overview
 
