@@ -1286,11 +1286,13 @@ func TestIntegration_ADR0091_UserJWT_HasUserInfoPermissions(t *testing.T) {
 	infoBucket := "mclaude-user-info-" + uslug
 
 	// Check that Pub includes user-info KV subjects.
+	// ADR-0107: wildcard changed from .* to .> (dotted keys); $JS.API.INFO added for NATS.js.
 	expectedPubSubjects := []string{
 		"$JS.API.DIRECT.GET." + infoStream + ".>",
 		"$JS.API.CONSUMER.CREATE." + infoStream + ".>",
 		"$JS.API.STREAM.INFO." + infoStream,
-		"$KV." + infoBucket + ".*",
+		"$KV." + infoBucket + ".>",
+		"$JS.API.INFO",
 	}
 	for _, want := range expectedPubSubjects {
 		found := false
@@ -1306,8 +1308,9 @@ func TestIntegration_ADR0091_UserJWT_HasUserInfoPermissions(t *testing.T) {
 	}
 
 	// Check that Sub includes user-info KV push delivery.
+	// ADR-0107: wildcard changed from .* to .> (dotted keys).
 	expectedSubSubjects := []string{
-		"$KV." + infoBucket + ".*",
+		"$KV." + infoBucket + ".>",
 		"$JS.FC." + infoStream + ".>",
 	}
 	for _, want := range expectedSubSubjects {

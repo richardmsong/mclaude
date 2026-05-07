@@ -67,7 +67,8 @@ func UserSubjectPermissions(uslug string, hostSlugs []string) NATSPermissions {
 		"$JS.API.CONSUMER.INFO." + infoStreamName + ".*",
 		"$JS.ACK." + infoStreamName + ".>",
 		"$JS.FC." + infoStreamName + ".>",
-		"$KV." + infoBucket + ".*", // KV put on user-info bucket
+		"$JS.API.INFO",              // NATS.js JetStream bootstrap (ADR-0107)
+		"$KV." + infoBucket + ".>", // KV put on user-info bucket (ADR-0107: > not * for dotted keys)
 		// KV watch (consumer create) on own buckets
 		"$JS.API.CONSUMER.CREATE." + sessStreamName + ".>",
 		"$JS.API.CONSUMER.CREATE." + projStreamName + ".>",
@@ -101,8 +102,8 @@ func UserSubjectPermissions(uslug string, hostSlugs []string) NATSPermissions {
 		// KV watch push delivery
 		"$KV." + sessBucket + ".hosts.>",
 		"$KV." + projBucket + ".hosts.>",
-		// ADR-0091: user-info KV watch push delivery
-		"$KV." + infoBucket + ".*",
+		// ADR-0091: user-info KV watch push delivery (ADR-0107: > not * for dotted keys)
+		"$KV." + infoBucket + ".>",
 		"$JS.FC." + infoStreamName + ".>",
 		// Flow control
 		"$JS.FC." + sessStreamName + ".>",
