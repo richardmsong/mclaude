@@ -201,7 +201,7 @@ Each identity type sees a specific slice of the taxonomy, enforced by JWT Pub/Su
 | `mclaude.hosts.{hslug}.*` | Publish to own hosts | None | None | Own hslug only (incl. `grants.create`, `api.agents.user-agent.register`) | Publish to all hosts; subscribe to `grants.create` and `api.agents.*` |
 | `$KV.mclaude-sessions-{uslug}.*` | Read all (own uslug) | Read/write one project | None | None | Write via agents |
 | `$KV.mclaude-projects-{uslug}.*` | Read all (own uslug) | Read/write one project | None | None | Write on provisioning |
-| `$KV.mclaude-user-info-{uslug}.*` | Read/write all (own uslug) | None | None | None | None (full NATS access — accepted, see ADR-0091 security) |
+| `$KV.mclaude-user-info-{uslug}.>` | Read/write all (own uslug) | None | None | None | None (full NATS access — accepted, see ADR-0091 security) |
 
 | `$KV.mclaude-hosts.*` | Per-host entries (JWT-scoped) | Own host only | None | None | Write ($SYS events) |
 | Binary data (S3) | Upload via pre-signed URL | Download via pre-signed URL | None | None | Signs URLs, validates ownership |
@@ -280,7 +280,8 @@ User JWTs (SPA/CLI) gain full read/write on the new bucket. Permission entries:
 
 ```
 Pub:
-  $KV.mclaude-user-info-{uslug}.*
+  $JS.API.INFO                                                 # JetStream discovery (NATS.js browser client init)
+  $KV.mclaude-user-info-{uslug}.>                             # KV put (any key, incl. dotted keys like tokens.anthropic)
   $JS.API.DIRECT.GET.KV_mclaude-user-info-{uslug}.>
   $JS.API.CONSUMER.CREATE.KV_mclaude-user-info-{uslug}.>
   $JS.API.STREAM.INFO.KV_mclaude-user-info-{uslug}
@@ -290,7 +291,7 @@ Pub:
   mclaude.users.{uslug}.hosts.{hslug}.agent.token-delivery   # request/reply for delivery
 
 Sub:
-  $KV.mclaude-user-info-{uslug}.*                             # KV watch push delivery
+  $KV.mclaude-user-info-{uslug}.>                             # KV watch push delivery (any key, incl. dotted)
   $JS.FC.KV_mclaude-user-info-{uslug}.>
 ```
 
