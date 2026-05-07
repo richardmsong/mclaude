@@ -293,21 +293,49 @@ func TestEnsureRBAC_UserAgentRoleHasCorrectVerbs(t *testing.T) {
 		t.Fatalf("get user-agent role: %v", err)
 	}
 
-	// Find the Secret rule — must be scoped to user-tokens-{uslug} only.
+	// Find the Secret rules — must have one for user-tokens-{uslug} and one for user-agent-key.
 	userTokensSecretName := "user-tokens-" + uslug
-	foundSecretRule := false
+	foundUserTokensRule := false
+	foundUserAgentKeyRule := false
 	for _, rule := range role.Rules {
-		for _, r := range rule.Resources {
-			if r == "secrets" {
-				foundSecretRule = true
-				if len(rule.ResourceNames) != 1 || rule.ResourceNames[0] != userTokensSecretName {
-					t.Errorf("secrets rule ResourceNames: got %v, want [%q]", rule.ResourceNames, userTokensSecretName)
+		for _, res := range rule.Resources {
+			if res == "secrets" {
+				if len(rule.ResourceNames) == 1 && rule.ResourceNames[0] == userTokensSecretName {
+					foundUserTokensRule = true
+					for _, v := range []string{"get", "update", "patch"} {
+						found := false
+						for _, rv := range rule.Verbs {
+							if rv == v {
+								found = true
+							}
+						}
+						if !found {
+							t.Errorf("user-tokens secrets rule missing verb %q, got: %v", v, rule.Verbs)
+						}
+					}
+				}
+				if len(rule.ResourceNames) == 1 && rule.ResourceNames[0] == "user-agent-key" {
+					foundUserAgentKeyRule = true
+					for _, v := range []string{"get", "update", "patch"} {
+						found := false
+						for _, rv := range rule.Verbs {
+							if rv == v {
+								found = true
+							}
+						}
+						if !found {
+							t.Errorf("user-agent-key secrets rule missing verb %q, got: %v", v, rule.Verbs)
+						}
+					}
 				}
 			}
 		}
 	}
-	if !foundSecretRule {
-		t.Error("user-agent role missing secrets rule")
+	if !foundUserTokensRule {
+		t.Error("user-agent role missing secrets rule for user-tokens-{uslug}")
+	}
+	if !foundUserAgentKeyRule {
+		t.Error("user-agent role missing secrets rule for user-agent-key")
 	}
 
 	// ConfigMap rule must be scoped to session-agent-template only.

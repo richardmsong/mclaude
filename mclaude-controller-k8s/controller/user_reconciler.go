@@ -285,6 +285,12 @@ func (r *UserReconciler) ensureRBAC(ctx context.Context, userNs, uslug string) e
 			},
 			{
 				APIGroups:     []string{""},
+				Resources:     []string{"secrets"},
+				ResourceNames: []string{"user-agent-key"},
+				Verbs:         []string{"get", "update", "patch"},
+			},
+			{
+				APIGroups:     []string{""},
 				Resources:     []string{"configmaps"},
 				ResourceNames: []string{"session-agent-template"},
 				Verbs:         []string{"get"},
