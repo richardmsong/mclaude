@@ -313,7 +313,7 @@ The `mcprojects.mclaude.io` CustomResourceDefinition is **removed** by ADR-0091 
 | `sessionAgent.corporateCA.bundleName` | `""` | trust-manager Bundle CR name. Consumed directly by the controller binary at runtime (not stored in the session-agent-template ConfigMap) — used for Bundle CR lookup when labeling user namespaces. |
 | `sessionAgent.corporateCA.configMapName` | `""` | ConfigMap name synced by trust-manager. Rendered as `corporateCAConfigMapName` in the session-agent-template ConfigMap. |
 | `sessionAgent.corporateCA.configMapKey` | `ca-certificates.crt` | PEM certs key in ConfigMap. Rendered as `corporateCAConfigMapKey` in the session-agent-template ConfigMap. |
-| `userAgent.image.repository` | `ghcr.io/richardmcsong/mclaude-user-agent` | ADR-0091. User-agent container image. |
+| `userAgent.image.repository` | `ghcr.io/richardmsong/mclaude-user-agent` | ADR-0091, ADR-0106. User-agent container image. |
 | `userAgent.image.tag` | `"main"` | Image tag. CI publishes `main`; update when semver releases are adopted (ADR-0105). |
 | `userAgent.resources` | `{}` | User-agent pod resource requests/limits. |
 | `userAgent.templateConfigMap.name` | `""` | Override `{release}-user-agent-template` ConfigMap name (rendered into the chart by default). |
