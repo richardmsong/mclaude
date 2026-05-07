@@ -1,8 +1,9 @@
 # ADR: Fix User-Agent Image Repository Typo
 
-**Status**: accepted
+**Status**: implemented
 **Status history**:
 - 2026-05-07: accepted
+- 2026-05-07: implemented — charts-mclaude CLEAN
 
 ## Overview
 
