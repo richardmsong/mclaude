@@ -107,7 +107,7 @@ sessionAgent:
 userAgent:
   image:
     ## Container image for the user-agent Deployment.
-    repository: ghcr.io/richardmcsong/mclaude-user-agent
+    repository: ghcr.io/richardmsong/mclaude-user-agent
     ## Image tag. CI publishes "main"; update when semver releases are adopted.
     tag: "main"
   ## Resource requests/limits for user-agent pods.
