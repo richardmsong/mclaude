@@ -51,6 +51,8 @@ enum Theme {
     static let success = Color(light: 0x3F8F1F, dark: 0x65BB30)
     /// Muted warm yellow for warnings (e.g. permission needed).
     static let warning = Color(light: 0xA8741A, dark: 0xD9A441)
+    /// The Ops session (observability agent): drawer row and header (docs/design-claude-uplift.md → Drawer).
+    static let ops = Color(light: 0x6E56CF, dark: 0x9E8CFC)
 
     // MARK: Diff tints (muted, not saturated)
     static let diffAddBg = Color(light: 0x3F8F1F, dark: 0x65BB30, lightAlpha: 0.10, darkAlpha: 0.14)

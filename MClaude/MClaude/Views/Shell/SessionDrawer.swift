@@ -145,8 +145,10 @@ struct SessionDrawer: View {
 
     private var sessionList: some View {
         let rows = visible
-        let active = rows.filter(Self.isActive)
-        let recent = rows.filter { !Self.isActive($0) }
+        // The Ops session is pinned in its own section at the bottom (docs/design-claude-uplift.md → Drawer)
+        let ops = rows.filter(\.isOps)
+        let active = rows.filter { !$0.isOps && Self.isActive($0) }
+        let recent = rows.filter { !$0.isOps && !Self.isActive($0) }
         return ScrollViewReader { proxy in
             List {
                 DrawerSearchField(text: $searchText, prompt: "Search sessions")
@@ -162,6 +164,10 @@ struct SessionDrawer: View {
                 if !recent.isEmpty {
                     sectionHeader("Recent")
                     ForEach(recent) { sessionRow($0) }
+                }
+                if !ops.isEmpty {
+                    sectionHeader("Ops")
+                    ForEach(ops) { sessionRow($0) }
                 }
                 if rows.isEmpty {
                     Text(emptyText)
@@ -372,10 +378,13 @@ private struct DrawerSessionRow: View {
     var body: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.displayName)
-                    .font(.claudeUI)
-                    .foregroundStyle(Theme.textPrimary)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    if session.isOps { OpsMark() }
+                    Text(session.displayName)
+                        .font(.claudeUI)
+                        .foregroundStyle(session.isOps ? Theme.ops : Theme.textPrimary)
+                        .lineLimit(1)
+                }
                 TimelineView(.periodic(from: .now, by: 30)) { context in
                     Text([relativeTimeLabel(session.lastActivity, now: context.date),
                           session.projectName,

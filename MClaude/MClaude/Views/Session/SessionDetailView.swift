@@ -200,10 +200,13 @@ struct SessionDetailView: View {
                     }
                     // Tap the name for the Info screen (full title, rename, usage)
                     Button { showInfo = true } label: {
-                        Text(session?.displayName ?? "Session \(sessionId)")
-                            .font(.claudeUISemibold)
-                            .foregroundStyle(Theme.textPrimary)
-                            .lineLimit(1)
+                        HStack(spacing: 5) {
+                            if session?.isOps == true { OpsMark() }   // the Ops session (design-claude-uplift → Drawer)
+                            Text(session?.displayName ?? "Session \(sessionId)")
+                                .font(.claudeUISemibold)
+                                .foregroundStyle(session?.isOps == true ? Theme.ops : Theme.textPrimary)
+                                .lineLimit(1)
+                        }
                     }
                     .buttonStyle(.plain)
                     .accessibilityHint("Shows the full title and session info")
