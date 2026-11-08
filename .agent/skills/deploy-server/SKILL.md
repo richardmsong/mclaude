@@ -81,6 +81,8 @@ them. Swift `Codable` fails the whole decode on one missing non-optional field.
 
 ### 4. Restart (last action of the turn)
 
+Before restarting, commit your own server changes and tag the deploy: `git tag server-$(date +%Y-%m-%d)` (add `-2`, `-3` and so on for further deploys the same day). Local only, no push.
+
 On SIGTERM the server drains, waiting up to 300 s for running turns (the plist sets `ExitTimeOut=330`). A plain
 `kickstart -k` from inside a session would therefore kill your own turn mid-message. Schedule it detached, with a
 delay, and end your turn:

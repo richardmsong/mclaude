@@ -70,7 +70,15 @@ Claude Code's spans don't share our trace IDs (2.1.317 ignores the parent we sen
 4. **Hypothesis:** state it, then check that **every layer agrees** (phone, server, Claude, Mac). A layer that disagrees means the hypothesis is wrong or a signal is missing; say which.
 5. **Reproduce:** in the simulator against a :8399 test server, or as a test or harness that feeds the recorded inputs into the code. Note what you did, and whether the reproduction's telemetry matches the original.
 6. **Record:** POST `root_cause`, `code_pointer`, `reasoning`, `reproduction`, a phone-length `summary`, and status `root_cause`.
-7. **Fix:** write the fix plan in `proposed_fix`. *Where the fix gets built and tested is still being decided* (git worktrees vs a copy of the tree). Until then, stop at `root_cause` with a precise written plan: files, change, and how to validate. Don't edit the shared tree.
+7. **Fix**, in a throwaway git worktree. The Ops session itself always stays in `~/work/mclaude-v1`. Never start a session in a worktree, because projects are keyed by folder.
+   ```bash
+   git -C ~/work/mclaude-v1 worktree add /tmp/ops/<id> -b ops/<id> main
+   ```
+   The worktree has only *committed* code. If the shared tree has uncommitted changes to the files you need, check `git -C ~/work/mclaude-v1 status`, and say in the finding that the fix is against `main` as committed.
+   - Make the fix in `/tmp/ops/<id>`, including the signal or detector that would have caught it. Build and test there: iOS with its own `SYMROOT` and the simulator against a :8399 test server, the server with `swift build` and `swift test` in the worktree. Commit it on `ops/<id>`.
+   - Record `proposed_fix` (the branch, a short diff summary, and what you validated) and set `fix_proposed`.
+   - When Richard says "ship it", merge `ops/<id>` into `main` from `~/work/mclaude-v1`, coordinating with other sessions first as the shared-tree rule says. Then follow the normal `/feature-change` shipping lane. Remove the worktree afterwards: `git worktree remove /tmp/ops/<id>`.
+   - Don't edit the shared tree outside a "ship it".
 8. **Can't prove it?** Set `needs_you` with a `question`, or with the missing signal that would settle it, proposed as the fix: "add X to the composer probe".
 9. **Not a bug** (expected behavior, test data, or an instrumentation glitch): set `not_a_bug` with the reason. A broken or noisy detector is itself worth a fix plan.
 
