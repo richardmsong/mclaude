@@ -1,6 +1,6 @@
 ---
 name: feature-change
-description: Universal entry point for any change to the mclaude app — new features, bug fixes, refactors, config changes, anything. Reads design docs as the spec. Runs dev-harness → spec-evaluator loop until CLEAN. Handles spec backpressure via /plan-feature rules.
+description: Universal entry point for any change to the mclaude app — new features, bug fixes, refactors, config changes, anything. Reads design docs as the spec, updates the spec first (writing a new design doc for new features), then implements directly and validates.
 user_invocable: true
 ---
 
@@ -35,8 +35,12 @@ Design docs (`docs/plan-*.md`) are the canonical spec for mclaude. There is no s
 | SPA / client (screens, stores, viewmodels, NATS pub/sub) | `docs/ui-spec.md`, `docs/plan-client-architecture.md` |
 | Cross-cutting (new NATS subject, new KV bucket, new shared API) | `docs/plan-k8s-integration.md` + `docs/plan-client-architecture.md` |
 | Feature-specific subsystem | `docs/plan-<feature>.md` |
+| **iOS app** (`MClaude/`, SwiftUI) | `docs/design-claude-uplift.md` first: theme, fonts, drawer nav, and the Components section. It **overrides** `docs/ui-spec.md` where they conflict (e.g. follow-system light/dark, not enforced dark). Use `docs/ui-spec.md` only for cross-platform behavior the uplift doc doesn't cover. → **iOS/server lane** |
+| **mclaude-server** (`mclaude-server/`, headless Swift runner on the Mac, launchd `com.mclaude.server`) | No dedicated design doc. Record app-facing behavior in `docs/design-claude-uplift.md`, or in the `docs/plan-*.md` for that feature. → **iOS/server lane** |
 
 Also check `docs/feature-list.md` for feature IDs and platform support matrix.
+
+**Which app?** The iOS app and the web SPA both have a transcript and a composer. Most recent work (Nov 2026) has been on the iOS app. Find the code that matches the reported symptom (for example, `.autocorrectionDisabled()` on the iOS composer). If the code doesn't settle it, ask the user.
 
 ---
 
@@ -46,13 +50,15 @@ Also check `docs/feature-list.md` for feature IDs and platform support matrix.
 1. Read the relevant design docs
 2. Classify the change:
    A. Design doc correct, code wrong (bug)         → skip to step 4
-   B. No design doc covers this (new feature)       → run /plan-feature first
+   B. No design doc covers this (new feature)       → write the design doc (step 3)
    C. Design doc needs updating (change or gap)     → update design doc (step 3)
    D. Refactor (behavior unchanged)                 → skip to step 4
 3. Update the design doc, commit spec separately
-4. dev-harness → spec-evaluator loop per component (until CLEAN)
-5. Validate (SPA changes only)
+4. Implement directly, then review your own diff against the spec
+5. Validate in the running app
 ```
+
+**For iOS app (`MClaude/`) or `mclaude-server/` changes:** steps 3–5 follow the **iOS / mclaude-server lane** below. The main differences: nothing gets committed, and validation is in the simulator against a :8399 test server.
 
 This order is mandatory. The design doc always reflects intended behavior. If the code doesn't match the design doc, the code is wrong — fix the code. If the design doc doesn't describe the desired behavior, fix the design doc first, then fix the code.
 
@@ -74,10 +80,10 @@ The design doc describes the desired behavior *in enough detail that someone rea
 "Spec says X should work" is not the same as "spec describes how X works." If the spec says `gh auth setup-git` registers credential helpers but doesn't describe the config prerequisites that make it succeed in headless containers, and the fix is to add those prerequisites — that's a spec gap (C), not a bug (A).
 
 **B — New feature (no design doc):**
-No design doc covers this feature. The user must run `/plan-feature` first to create the design doc. Do not write code without a spec. Tell the user:
-```
-No design doc covers this feature. Run /plan-feature <description> to create one, then re-run /feature-change.
-```
+No design doc covers this feature. Write one in step 3 before any code. Do not write code without a spec.
+- Research what exists first (related docs, code, patterns), so questions are informed.
+- Resolve every real design decision with the user via AskUserQuestion: batch by theme, concrete options with trade-offs, recommended option first. Don't ask what the code can answer.
+- Put it in the right home: a new `docs/plan-<slug>.md` for a standalone feature (Overview, Decisions, User Flow, Component Changes, Data Model, Error Handling, Scope), or a section in the existing doc for a small addition (see the table above).
 
 **C — Behavior change or spec gap (design doc needs updating):**
 Either the design doc describes old behavior you're changing, OR the design doc is silent on behavior that should be specified. In both cases: update the design doc first to describe the intended behavior, commit separately, then proceed to step 4. For non-trivial changes, ask the user to confirm before committing.
@@ -93,12 +99,14 @@ The design doc already describes the correct behavior. The code is restructured 
 
 ## Step 3 — Update the design doc
 
-Follow the design doc editing rules defined in `/plan-feature`:
+Design doc editing rules:
 
 - Add to the right section with full payload/schema/behavior
 - Remove entirely — no stale text
 - Change in place — old text out, new text in
 - Never leave design doc and code out of sync
+- Describe only what will be built now — no future/intended behavior, no function names or file paths
+- UI: wireframes match what renders; every interactive element gets a behavior bullet
 
 Commit spec changes separately from code:
 ```bash
@@ -108,47 +116,55 @@ git commit -m "spec(<area>): <what changed and why>"
 
 ---
 
-## Step 4 — dev-harness → spec-evaluator loop (exhaustive)
+## iOS / mclaude-server lane
 
-For each affected component, invoke the dev-harness agent **and keep re-invoking until all gaps are closed**:
+The iOS app and mclaude-server are built and run **locally**, not by CI. Steps 1–2 work the same as for the other components. Steps 3–5 change as follows.
 
-```
-Loop:
-  1. Agent(subagent_type="dev-harness", prompt="<component> — <description>. Fix ALL spec gaps.")
-  2. When the agent returns, run /spec-evaluator <component>
-  3. If gaps remain:
-     a. CODE gap (spec says X, code doesn't do X):
-        → Agent(subagent_type="dev-harness", prompt="<component> — fix these gaps: <list>")
-        → go to step 2
-     b. SPEC gap (design doc is ambiguous/incomplete/wrong):
-        → Handle backpressure (see below)
-        → go to step 1
-  4. If CLEAN: proceed to Step 5
-```
+**No commits, ever, in this lane.** `MClaude/`, `mclaude-server/` and `docs/design-claude-uplift.md` hold long-running uncommitted work by the user. Don't commit the spec or the code. Don't stash, revert, or reformat anything you weren't asked to change. Leave all changes in the working tree, and say so in the final report. Only commit if the user explicitly asks; their files are mixed into the same files.
 
-The dev-harness agent has maxTurns=500 and is instructed to keep going until all gaps are closed. But if it hits context limits and returns with gaps remaining, **you must re-invoke it immediately** with the remaining gap list. Each re-invocation picks up from the last commit and continues.
+**Step 3 (spec):** edit the design doc in place, then skip the commit.
 
-### Handling backpressure
+**Step 4 (implement):** see Step 4 below. Build details for this lane:
+- iOS: Xcode project `MClaude/MClaude.xcodeproj`, scheme `MClaude`, generated by xcodegen from `MClaude/project.yml`, deployment target iOS 17. Run `xcodegen generate` after adding files. Then build for the simulator with the command in `/deploy-ios` step 2: `-target MClaude -sdk iphonesimulator SUPPORTED_PLATFORMS="iphoneos iphonesimulator" CODE_SIGNING_ALLOWED=NO`. `project.yml` pins `iphoneos`, so `-destination 'generic/platform=iOS Simulator'` fails.
+- Server: `swift build` and `swift test` in `mclaude-server/`.
+- Editor errors on single files (SourceKit checking a file in isolation) don't count; only the build result does.
+- spec-evaluator is built for the k8s and SPA components and isn't used here. Your own review of the diff against the spec is the check.
 
-When dev-harness or spec-evaluator reports a gap that is actually a spec problem (ambiguity, missing detail, contradiction in the design doc), follow the backpressure rules from `/plan-feature`:
+**Step 5 (validate):** a successful build doesn't validate anything. Before reporting, smoke-test in the simulator (`/deploy-ios` step 2). If the change touches the server, point the simulator at a throwaway test server on port 8399 (`/deploy-server` step 2). **Never test against the live server** on :8377; you're probably running inside it. For visual changes, take screenshots in light **and** dark. Report what was verified: build only, simulator, or device.
 
-1. **Classify**: factual error → fix directly. Missing detail with obvious answer → fill in. Design decision needed → ask the user via AskUserQuestion.
-2. **Edit** the design doc following `/plan-feature` editing rules.
-3. **Commit** spec change separately from code.
-4. **Re-invoke** dev-harness with the updated spec.
+**Ship automatically (user guidance, 2026-11-04):** TestFlight is how the user sees changes, so every iOS app change ends with `/deploy-ios`. Run it right after simulator validation passes, without asking first. `/deploy-ios` bumps the build number, uploads to TestFlight, polls App Store Connect until the build is `VALID`, and appends to the release log. Keep polling until `VALID`; don't hand back mid-flight. If the server changed too, run `/deploy-server` after the TestFlight upload, and restart it **last**, after your final message, with the delayed detached restart. Restarting it earlier kills the current session. Only skip shipping if validation failed or the user says not to.
 
-### Rules
-
-- **Never report a task complete until the spec-evaluator returns CLEAN**
-- One failing evaluator gap = one more dev-harness pass (or one spec update)
-- Evaluator runs after EVERY dev-harness pass, not just the first
-- **Never deprioritize any gap** — every gap gets handled immediately
-- If a gap cannot be implemented due to environment constraints, update the design doc to reflect reality, then re-evaluate
-- Running the dev-harness agent once and summarizing results is NOT acceptable — the loop must close
+Keep the final report short: what changed, what was verified, the TestFlight build number, and that nothing is committed.
 
 ---
 
-## Step 5 — Validate (SPA changes only)
+## Step 4 — Implement and review
+
+**Implement directly in this session.** The dev-harness agent was removed on 2026-11-04 at the user's request. Edit only the files the change needs.
+
+**Subagents only for independent, parallel chunks.** Example: the server queue and the app's queue UI were built at the same time. Use `general-purpose` agents with a complete brief: paths, spec section, exact behavior, constraints (no commits in the iOS/server lane), and the build command. Each agent reports its build result and diff. Small or sequential changes stay in this session.
+
+**Review the whole diff against the spec** before validating: required behavior, edge cases, accessibility, and regressions in nearby behavior. Example: a long-press handler that swallowed the next normal tap. Fix what you find and rebuild until it's clean.
+
+**k8s / SPA components** (`mclaude-control-plane/`, `mclaude-web/`, `mclaude-session-agent/`, `mclaude-cli/`, `charts/mclaude/`): for non-trivial changes, also run `/spec-evaluator <component>` as a fresh-context check. Fix code gaps yourself and re-run until CLEAN. CI still owns builds and deploys for these components (see CLAUDE.md).
+
+### Handling backpressure
+
+When you or spec-evaluator find a spec problem (ambiguity, missing detail, contradiction), handle it as backpressure:
+
+1. **Classify**: factual error → fix directly. Missing detail with obvious answer → fill in. Design decision needed → ask the user via AskUserQuestion.
+2. **Edit** the design doc following the step 3 editing rules.
+3. **Commit** the spec change separately from code (not in the iOS/server lane).
+4. Continue implementing against the updated spec.
+
+### Rules
+
+- Never report a change complete while a known spec gap or bug remains. Fix it, or update the spec to reflect reality and say so.
+- If a gap can't be implemented because of environment constraints, update the design doc to match reality.
+
+---
+
+## Step 5 — Validate (SPA changes; iOS/server: see lane above)
 
 After CI deploys the preview, use the **Playwright MCP** to validate the golden path directly in the browser. Do not stop at "build passes" — drive the browser through the actual user flow.
 
@@ -177,24 +193,6 @@ Do not report the task complete until Playwright confirms the acceptance criteri
 
 ---
 
-## Master session write restrictions
-
-The master session (where `/feature-change` runs) may only write to:
-- **Design docs** (`docs/plan-*.md`, `docs/ui-spec.md`, `docs/feature-list.md`) — spec updates in step 3
-- **Skill files** (`.agent/skills/`) — process improvements
-- **Memory files** — feedback, project context
-
-The master session must **never** directly edit:
-- `mclaude-control-plane/` — use dev-harness
-- `mclaude-web/` — use dev-harness
-- `mclaude-session-agent/` — use dev-harness
-- `mclaude-cli/` — use dev-harness
-- `charts/mclaude/` — use dev-harness
-
-All implementation changes go through dev-harness subagents. The master session classifies, updates specs, orchestrates agents, and evaluates results — it does not write code, templates, or config.
-
----
-
 ## Reference
 
 - `docs/plan-k8s-integration.md` — backend architecture, NATS subjects, KV
@@ -202,4 +200,6 @@ All implementation changes go through dev-harness subagents. The master session 
 - `docs/ui-spec.md` — UI wireframes and behavior
 - `docs/plan-*.md` — feature-specific design docs (each is a spec)
 - `docs/feature-list.md` — feature IDs
-- Component roots: `mclaude-control-plane/`, `mclaude-web/`, `mclaude-session-agent/`, `mclaude-cli/`, `charts/mclaude/`
+- `docs/design-claude-uplift.md` — iOS app visual/interaction spec (overrides ui-spec.md for iOS)
+- `/deploy-ios` (TestFlight), `/deploy-server` (local server + :8399 test server)
+- Component roots: `mclaude-control-plane/`, `mclaude-web/`, `mclaude-session-agent/`, `mclaude-cli/`, `charts/mclaude/`, `MClaude/`, `mclaude-server/`

@@ -64,4 +64,4 @@ See .agent/audits/ for full per-component reports.
 
 If CLEAN: the component is spec-complete. Report to the calling skill.
 
-If gaps found: the caller (typically `/feature-change`) passes gaps to `dev-harness`, then re-runs this evaluator. Loop until CLEAN.
+If gaps found: the caller (typically `/feature-change`) fixes the gaps, then re-runs this evaluator. Loop until CLEAN.

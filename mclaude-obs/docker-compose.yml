@@ -1,0 +1,71 @@
+# MClaude observability stack (MVP): OTel Collector -> ClickHouse.
+# Start with ./up.sh.
+name: mclaude-obs
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: otel
+      CLICKHOUSE_USER: otel
+      CLICKHOUSE_PASSWORD: otel
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "127.0.0.1:8123:8123"   # HTTP, localhost only
+      - "127.0.0.1:9000:9000"   # native, localhost only
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "otel", "--password", "otel", "-q", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.152.1
+    restart: unless-stopped
+    user: "0:0"   # the named queue volume is root-owned; the image's default user can't write to it
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - collector-queue:/var/lib/otelcol/queue
+    ports:
+      # OrbStack can't bind a single host IP (containers live in its VM), so these listen on all
+      # interfaces, like mclaude-server's :8377. The phone reaches them over Tailscale.
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  obs-api:
+    # Read-only JSON over ClickHouse for the iOS system map (docs/plan-observability.md, "Obs API"),
+    # plus the Ops dispatcher and the findings API ("Ops session (phase 3)").
+    build: ./api
+    image: mclaude-obs-api:local
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: otel
+      CLICKHOUSE_PASSWORD: otel
+      CLICKHOUSE_DB: otel
+      # Ops dispatcher (README → Ops dispatcher). Off by default: set OPS_DISPATCH_ENABLED=true in
+      # mclaude-obs/.env once the live server runs a build with "automated" input and /push/notify.
+      OPS_DISPATCH_ENABLED: "${OPS_DISPATCH_ENABLED:-false}"
+      OPS_SERVER_URL: "${OPS_SERVER_URL:-https://home-server.taild44daa.ts.net:8377}"
+    volumes:
+      - obs-api-data:/data                     # findings store (SQLite)
+      - ${HOME}/.mclaude/obs:/secrets:ro       # ops-token, server-token (written by write-server-token.sh)
+    ports:
+      - "4320:4320"   # all interfaces, like the collector; the phone reaches it over Tailscale
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+volumes:
+  clickhouse-data:
+  collector-queue:
+  obs-api-data:

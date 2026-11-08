@@ -31,7 +31,7 @@ server.tool("list_sessions", "List all active Claude Code sessions with their st
 server.tool(
   "get_session",
   "Get details for a specific session including its current status and detected prompt",
-  { id: z.string().describe("Session ID (tmux window index)") },
+  { id: z.string().describe("Session ID, e.g. \"s2\"") },
   async ({ id }) => {
     const session = await api(`/sessions/${id}`);
     return { content: [{ type: "text", text: JSON.stringify(session, null, 2) }] };
@@ -41,8 +41,8 @@ server.tool(
 // Get terminal output from a session
 server.tool(
   "get_session_output",
-  "Get the current terminal output from a Claude Code session",
-  { id: z.string().describe("Session ID (tmux window index)") },
+  "Get a plain-text rendering of the session's recent conversation output",
+  { id: z.string().describe("Session ID, e.g. \"s2\"") },
   async ({ id }) => {
     const result = await api(`/sessions/${id}/output`) as { output: string };
     return { content: [{ type: "text", text: result.output }] };
@@ -52,9 +52,9 @@ server.tool(
 // Get structured events from a session
 server.tool(
   "get_session_events",
-  "Get recent structured events (tool use, text, thinking) from a session's JSONL log",
+  "Get recent structured events (tool use, text, thinking) from a session's conversation",
   {
-    id: z.string().describe("Session ID (tmux window index)"),
+    id: z.string().describe("Session ID, e.g. \"s2\""),
   },
   async ({ id }) => {
     const events = await api(`/sessions/${id}/events`);
@@ -71,7 +71,7 @@ server.tool("list_projects", "List available project directories in ~/work/", {}
 // Create a new Claude Code session
 server.tool(
   "create_session",
-  "Create a new Claude Code session in a tmux window with a specified working directory. Optionally send an initial prompt.",
+  "Create a new headless Claude Code session (run by mclaude-server on the host) in the given working directory. Optionally send an initial prompt.",
   {
     cwd: z.string().describe("Working directory for the new session (absolute path)"),
     prompt: z.string().optional().describe("Initial prompt to send to the session after creation"),
@@ -127,7 +127,7 @@ server.tool(
   "send_input",
   "Send text input to an active Claude Code session",
   {
-    id: z.string().describe("Session ID (tmux window index)"),
+    id: z.string().describe("Session ID, e.g. \"s2\""),
     text: z.string().describe("Text to send to the session"),
   },
   async ({ id, text }) => {
@@ -143,8 +143,8 @@ server.tool(
 // Approve a permission prompt
 server.tool(
   "approve_session",
-  "Approve a pending permission prompt in a Claude Code session (sends Enter)",
-  { id: z.string().describe("Session ID (tmux window index)") },
+  "Approve a pending permission prompt in a Claude Code session (allows the pending tool call or plan)",
+  { id: z.string().describe("Session ID, e.g. \"s2\"") },
   async ({ id }) => {
     await api(`/sessions/${id}/approve`, { method: "POST" });
     return { content: [{ type: "text", text: `Approved permission in session ${id}.` }] };
@@ -154,8 +154,8 @@ server.tool(
 // Cancel an operation
 server.tool(
   "cancel_session",
-  "Cancel the current operation in a Claude Code session (sends Escape)",
-  { id: z.string().describe("Session ID (tmux window index)") },
+  "Cancel the current operation in a Claude Code session: interrupts the running turn or declines a pending prompt",
+  { id: z.string().describe("Session ID, e.g. \"s2\"") },
   async ({ id }) => {
     await api(`/sessions/${id}/cancel`, { method: "POST" });
     return { content: [{ type: "text", text: `Cancelled operation in session ${id}.` }] };

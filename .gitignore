@@ -57,3 +57,6 @@ worktrees/
 
 # Claude project settings (local)
 .claude/projects/
+
+# mclaude-obs runtime switch (OPS_DISPATCH_ENABLED)
+mclaude-obs/.env

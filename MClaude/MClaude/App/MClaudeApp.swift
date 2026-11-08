@@ -19,10 +19,12 @@ extension UINavigationController: @retroactive UIGestureRecognizerDelegate {
 
 @main
 struct MClaudeApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var appState = AppState()
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
+        CrashReporter.shared.start()
         appState.registerBackgroundTask()
     }
 
@@ -30,12 +32,21 @@ struct MClaudeApp: App {
         WindowGroup {
             ContentView()
                 .environment(appState)
+                .onAppear {
+                    appDelegate.appState = appState
+                    if appState.isSignedIn { AppDelegate.requestPermissionAndRegister() }
+                }
+                .onChange(of: appState.isSignedIn) { _, signedIn in
+                    if signedIn { AppDelegate.requestPermissionAndRegister() }
+                }
                 .onChange(of: scenePhase) { _, newPhase in
                     switch newPhase {
                     case .active:
+                        if let id = appState.visibleSessionId { SeenStore.shared.markSeen(id) }
                         guard appState.isSignedIn else { break }
                         appState.connectWebSocket()
                     case .background:
+                        if let id = appState.visibleSessionId { SeenStore.shared.markSeen(id) }
                         appState.scheduleBackgroundRefresh()
                     default:
                         break
@@ -49,21 +60,14 @@ struct ContentView: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        if appState.isSignedIn {
-            TabView {
-                DashboardView()
-                    .tabItem {
-                        Label("Sessions", systemImage: "terminal")
-                    }
-
-                SettingsView()
-                    .tabItem {
-                        Label("Settings", systemImage: "gear")
-                    }
+        Group {
+            if appState.isSignedIn {
+                RootView()
+            } else {
+                SignInView()
             }
-        } else {
-            SignInView()
         }
+        .tint(Theme.clay)
     }
 }
 
@@ -76,16 +80,15 @@ struct SignInView: View {
         VStack(spacing: 32) {
             Spacer()
 
-            Image(systemName: "terminal.fill")
-                .font(.system(size: 64))
-                .foregroundStyle(.tint)
+            MClaudeMark(size: 64)
 
             Text("MClaude")
-                .font(.largeTitle.bold())
+                .font(.system(size: 34, weight: .semibold, design: .serif))
+                .foregroundStyle(Theme.textPrimary)
 
             Text("Sign in with your Google account to continue.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .font(.claudeUI)
+                .foregroundStyle(Theme.textMuted)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
 
@@ -106,9 +109,9 @@ struct SignInView: View {
                     Text("Sign in with Google")
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 12)
+                .padding(.vertical, 4)
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(ClayCapsuleButtonStyle(enabled: !isSigningIn))
             .disabled(isSigningIn)
             .padding(.horizontal, 40)
 
@@ -118,12 +121,14 @@ struct SignInView: View {
 
             if let error = signInError {
                 Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
+                    .font(.claudeCaption)
+                    .foregroundStyle(Theme.danger)
                     .padding(.horizontal, 40)
             }
 
             Spacer()
         }
+        .frame(maxWidth: .infinity)
+        .background(Theme.bgPage.ignoresSafeArea())
     }
 }

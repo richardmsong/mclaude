@@ -30,7 +30,7 @@ actor SignalNotifier {
         default: return // Don't notify for working/unknown
         }
 
-        let message = "\(emoji) [\(session.projectName)] \(newStatus.rawValue)\nWindow \(session.tmuxWindow) | \(session.cwd)"
+        let message = "\(emoji) [\(session.projectName)] \(newStatus.rawValue)\n\(session.id) | \(session.cwd)"
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: signalCliPath)

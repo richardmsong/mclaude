@@ -413,7 +413,10 @@ Switching to Terminal tab: hides input bar, shows PTY.
 Left to right:
 1. **✕ Stop button** (only when `working`): round, `--red` tint — sends Escape to halt Claude
 2. **📷 Attach**: camera icon, opens image file picker; paste from clipboard also works
-3. **Textarea**: auto-grows up to ~120px, placeholder "Message… or / for skills", Enter sends (Shift+Enter newline)
+3. **Textarea**: multi-line; auto-grows with content up to ~120px (≈5 lines), then scrolls internally. Placeholder "Message… or / for skills".
+   - **Text input traits**: autocorrect, spell-check, and sentence-case autocapitalization are **enabled** (platform defaults). Never disable them on the composer.
+   - **Newlines / send**: with a hardware keyboard, Enter sends and Shift+Enter inserts a newline. On a touch software keyboard (iOS, mobile web) Return inserts a newline; sending is via the ↑ Send button only.
+   - Pasted multi-line text is preserved verbatim (newlines are sent as-is).
 4. **🎙 PTT button**: hold to record (Web Speech API), releases to submit transcription; grayed if unsupported
 5. **↑ Send button**: round, `--blue` background
 
@@ -433,6 +436,18 @@ Each row tappable; fills the input field with `/skill-name `.
 ## Conversation Events
 
 Events render in a vertically scrolling list, newest at bottom. Each event type has a distinct visual treatment.
+
+### Text Selection
+
+Conversation text is selectable and copyable with **range selection**, not just whole-message copy. Long-press (touch) or click-drag (pointer) places a selection with draggable handles. The user can extend it across words and lines within a text block, then copy with the system Copy menu (or ⌘C / Ctrl+C).
+
+- **Range-selectable in the list:** user message text, assistant text (prose, headings, lists, inline code), code blocks, and expanded thinking text.
+- **Table cells:** each cell can be copied (long-press → Copy).
+- **Tool cards and tool results** in the list are compact, truncated summaries. They stay tap-to-open, and their full text is range-selectable in the Event Detail Modal.
+- **Event Detail Modal:** all text content is range-selectable, including message text, tool input, and tool output. Exception: unified diff views (Edit) copy one line at a time.
+- Selection must not be blocked by tap handlers, `user-select: none`, or row gesture recognizers. Non-content chrome (gutters, line numbers, icons, badges, buttons) may stay non-selectable.
+- **Tap vs. select:** a plain tap still opens the Event Detail Modal where specified. A tap while a selection is active only dismisses the selection. Long-press never opens the modal. Tapping a link opens the link.
+- Selecting text doesn't change auto-scroll-to-bottom beyond the normal user-scroll rules.
 
 ### User Message (`.ev-user`)
 

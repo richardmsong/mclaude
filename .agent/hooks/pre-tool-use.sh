@@ -61,7 +61,7 @@ fi
 
 # Block: git apply (bypasses /feature-change workflow)
 if echo "$COMMAND" | grep -qE '(^|[;&|])\s*git\s+apply\b'; then
-  deny "BLOCKED: 'git apply' bypasses the spec→dev-harness→evaluator loop. Use /feature-change to make code changes."
+  deny "BLOCKED: 'git apply' bypasses the spec-first /feature-change loop. Use /feature-change to make code changes."
 fi
 
 exit 0

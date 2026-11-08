@@ -39,7 +39,7 @@ struct TerminalOutputView: View {
                 }
             }
             .defaultScrollAnchor(.bottom)
-            .background(.black)
+            .background(ANSIParser.surface)
             .onChange(of: output) {
                 parseOutput()
             }

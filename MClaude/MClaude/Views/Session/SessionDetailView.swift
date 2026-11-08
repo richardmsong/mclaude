@@ -2,6 +2,9 @@ import SwiftUI
 
 struct SessionDetailView: View {
     let sessionId: String
+    var onOpenDrawer: () -> Void = {}
+    var onNewSession: () -> Void = {}
+    var onNewSessionInProject: ((String) -> Void)? = nil
 
     @Environment(AppState.self) private var appState
     @Environment(\.scenePhase) private var scenePhase
@@ -10,6 +13,11 @@ struct SessionDetailView: View {
     @State private var planExpanded = false
     @State private var planContent: String?
     @State private var planFileName: String?
+    @State private var showInfo = false
+    @State private var showMcp = false
+    @State private var exporting = false
+    @State private var exportedFile: ExportedFile?
+    @Environment(\.colorScheme) private var colorScheme
 
     private var session: ClaudeSession? {
         appState.sessions.first { $0.id == sessionId }
@@ -35,7 +43,45 @@ struct SessionDetailView: View {
                     },
                     onSendKey: { key in
                         Task { await viewModel.sendKey(client: appState.client, id: sessionId, key: key) }
-                    }
+                    },
+                    onAnswer: { answers in
+                        await viewModel.answerQuestion(client: appState.client, id: sessionId, answers: answers)
+                    },
+                    hasPendingPrompt: session?.prompt != nil,
+                    sessionWorking: session?.status == .working,
+                    sessionCompacting: session?.compacting == true,
+                    queue: session?.queue ?? [],
+                    onEditQueued: { item, text in
+                        Task {
+                            do {
+                                try await appState.client.editQueued(sessionId: sessionId, queueId: item.id, text: text)
+                            } catch {
+                                viewModel.actionError = (error as? APIError)?.isNotFound == true
+                                    ? "Couldn't edit — it was already sent" : "Couldn't edit the queued message"
+                            }
+                        }
+                    },
+                    onDeleteQueued: { item in
+                        Task {
+                            do {
+                                try await appState.client.deleteQueued(sessionId: sessionId, queueId: item.id)
+                            } catch {
+                                viewModel.actionError = (error as? APIError)?.isNotFound == true
+                                    ? "Couldn't delete — it was already sent" : "Couldn't delete the queued message"
+                            }
+                        }
+                    },
+                    onFlushQueue: {
+                        Task {
+                            do {
+                                try await appState.client.flushQueue(sessionId: sessionId)
+                            } catch {
+                                viewModel.actionError = "Couldn't send the queue now"
+                            }
+                        }
+                    },
+                    onLoadOlder: { await appState.loadOlderEvents(sessionId: sessionId) },
+                    historyComplete: appState.historyComplete.contains(sessionId)
                 )
             } else {
                 TerminalOutputView(
@@ -45,37 +91,24 @@ struct SessionDetailView: View {
                 )
             }
 
-            Divider()
-
-            // Detected prompt UI (AskUserQuestion)
-            if let prompt = session?.prompt, let options = prompt.options, !options.isEmpty {
-                let questions = [AskQuestion(
-                    header: "",
-                    question: prompt.question,
-                    options: options.map { ($0, "") }
-                )]
-                AskUserQuestionView(questions: questions) { key in
-                    Task { await viewModel.sendKey(client: appState.client, id: sessionId, key: key) }
-                }
-                .padding(.horizontal)
-                .padding(.vertical, 8)
-                Divider()
-            }
-
             // Action error banner
             if let error = viewModel.actionError {
-                HStack {
-                    Image(systemName: "xmark.circle.fill")
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.circle")
+                        .foregroundStyle(Theme.danger)
                     Text(error)
+                        .foregroundStyle(Theme.textPrimary)
                     Spacer()
                     Button("Dismiss") { viewModel.actionError = nil }
-                        .font(.caption)
+                        .font(.claudeCaptionSemibold)
+                        .foregroundStyle(Theme.textSecondary)
                 }
-                .font(.caption)
-                .foregroundStyle(.white)
-                .padding(.horizontal)
-                .padding(.vertical, 4)
-                .background(.red)
+                .font(.claudeCaption)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background(Theme.danger.opacity(0.10), in: RoundedRectangle(cornerRadius: Theme.radiusCard, style: .continuous))
+                .padding(.horizontal, 10)
+                .padding(.top, 4)
             }
 
             // Plan summary (when awaiting approval)
@@ -86,19 +119,23 @@ struct SessionDetailView: View {
             // Quick actions
             if let session, session.status.needsAttention {
                 quickActions
-                Divider()
             }
 
-            // Input bar
-            InputBarView(
-                text: $viewModel.inputText,
+            // Input bar. The draft is bound inside ComposerHost so a keystroke only redraws the
+            // composer: bound from here, every keystroke redrew this screen and rebuilt the whole
+            // transcript (docs/design-claude-uplift.md → Implementation notes).
+            ComposerHost(model: viewModel) { draft in InputBarView(
+                text: draft,
                 isSending: viewModel.isSending,
                 skills: appState.skills.filter { $0.source == "builtin" || $0.source == "global" || $0.source == session?.projectName },
-                onSend: {
-                    Task { await viewModel.send(client: appState.client, id: sessionId) }
+                onSend: { text in
+                    Task { await viewModel.send(client: appState.client, id: sessionId, text: text) }
                 },
-                onPhoto: { data in
-                    Task { await viewModel.sendScreenshot(client: appState.client, id: sessionId, laptop: session?.laptop, imageData: data) }
+                onPhotos: { photos, caption in
+                    Task {
+                        await viewModel.sendPhotos(client: appState.client, id: sessionId, laptop: session?.laptop,
+                                                   attachments: photos, caption: caption)
+                    }
                 },
                 onFile: { data, filename in
                     Task { await viewModel.sendFile(client: appState.client, id: sessionId, laptop: session?.laptop, data: data, filename: filename) }
@@ -111,15 +148,38 @@ struct SessionDetailView: View {
                 },
                 onHistoryBack: { viewModel.historyBack() },
                 onHistoryForward: { viewModel.historyForward() }
-            )
+            ) }
         }
-        .navigationTitle(session?.projectName ?? "Session \(sessionId)")
+        .background(Theme.bgPage)
+        .navigationTitle(session?.displayName ?? "Session \(sessionId)")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .sheet(isPresented: $showInfo) {
+            SessionInfoView(sessionId: sessionId)
+        }
+        .sheet(isPresented: $showMcp) {
+            SessionMcpSheet(sessionId: sessionId)
+        }
+        .sheet(item: $exportedFile) { file in
+            ShareSheet(url: file.url)
+                .presentationDetents([.medium, .large])
+        }
         .task {
             await appState.loadEvents(sessionId: sessionId)
         }
+        .onAppear {
+            appState.visibleSessionId = sessionId
+            installFullPageScreenshot()
+        }
+        .onDisappear {
+            if appState.visibleSessionId == sessionId { appState.visibleSessionId = nil }
+            FullPageScreenshot.shared.deactivate(for: sessionId)
+        }
         .onChange(of: events.count) {
             viewModel.clearMatchedPending(events: events)
+        }
+        .onChange(of: session?.status, initial: true) { _, status in
+            viewModel.sessionBusy = status == .working
         }
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
             viewModel.clearMatchedPending(events: events)
@@ -130,20 +190,142 @@ struct SessionDetailView: View {
             }
         }
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                HStack(spacing: 12) {
-                    Button {
-                        showStructured.toggle()
-                    } label: {
-                        Image(systemName: showStructured ? "text.bubble" : "terminal")
-                            .font(.subheadline)
+            ToolbarItem(placement: .topBarLeading) {
+                DrawerButton(action: onOpenDrawer)
+            }
+            ToolbarItem(placement: .principal) {
+                HStack(spacing: 6) {
+                    if session?.processDown != true, let dot = session?.status.themeDot {
+                        Circle().fill(dot).frame(width: 7, height: 7)
                     }
+                    // Tap the name for the Info screen (full title, rename, usage)
+                    Button { showInfo = true } label: {
+                        Text(session?.displayName ?? "Session \(sessionId)")
+                            .font(.claudeUISemibold)
+                            .foregroundStyle(Theme.textPrimary)
+                            .lineLimit(1)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Shows the full title and session info")
+                    if let fraction = session?.contextFraction {
+                        // Context used vs. the model's limit; tap for the Info screen
+                        Button { showInfo = true } label: {
+                            ContextGauge(fraction: fraction, size: 13, showLabel: true)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Context \(Int((fraction * 100).rounded())) percent used")
+                    }
+                }
+                .accessibilityElement(children: .contain)
+            }
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                NewSessionButton(action: onNewSession, currentProject: session?.cwd, onNewInProject: onNewSessionInProject)
+                Menu {
+                    // Same toggle as the old header button: conversation vs. plain-text output
+                    Picker("View", selection: $showStructured) {
+                        Label("Conversation", systemImage: "text.bubble").tag(true)
+                        Label("Terminal output", systemImage: "terminal").tag(false)
+                    }
+                    Button {
+                        showInfo = true
+                    } label: {
+                        Label("Info", systemImage: "info.circle")
+                    }
+                    Button {
+                        showMcp = true
+                    } label: {
+                        Label("MCP servers", systemImage: "puzzlepiece.extension")
+                    }
+                    Menu {
+                        Button("Markdown") { Task { await export(.markdown) } }
+                        Button("Plain text") { Task { await export(.plainText) } }
+                        Button("PDF") { Task { await export(.pdf) } }
+                    } label: {
+                        Label("Export", systemImage: "square.and.arrow.up")
+                    }
+                    .disabled(exporting)
                     if let session {
-                        Image(systemName: session.status.icon)
-                            .foregroundStyle(session.status.color)
+                        Section {
+                            Label(session.statusLabel, systemImage: session.processDown ? "arrow.clockwise.circle" : session.status.icon)
+                            Label(session.cwd, systemImage: "folder")
+                        }
+                    }
+                } label: {
+                    if exporting {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 17, weight: .regular))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                }
+                .accessibilityLabel(exporting ? "Exporting" : "More")
+            }
+        }
+    }
+
+    // MARK: - Export (docs/design-claude-uplift.md → Export)
+
+    private enum ExportFormat { case markdown, plainText, pdf }
+
+    private func export(_ format: ExportFormat) async {
+        guard !exporting else { return }
+        exporting = true
+        defer { exporting = false }
+        await appState.loadFullHistory(sessionId: sessionId)
+        let all = appState.eventsCache[sessionId] ?? []
+        let title = session?.displayName ?? "Session \(sessionId)"
+        let cwd = session?.cwd ?? ""
+        let data: Data?
+        let ext: String
+        switch format {
+        case .markdown:
+            data = Data(TranscriptExport.markdown(events: all, title: title, cwd: cwd).utf8); ext = "md"
+        case .plainText:
+            data = Data(TranscriptExport.plainText(events: all, title: title, cwd: cwd).utf8); ext = "txt"
+        case .pdf:
+            let screen = currentScreenBounds
+            data = TranscriptPDF.paged(events: all, session: session, sessionId: sessionId, width: screen.width,
+                                       screenHeight: screen.height, scheme: colorScheme, appState: appState)
+            ext = "pdf"
+        }
+        guard let data, let url = try? TranscriptExport.writeTempFile(data, title: title, ext: ext) else {
+            viewModel.actionError = "Couldn't export the conversation"
+            return
+        }
+        exportedFile = ExportedFile(url: url)
+    }
+
+    private var currentScreenBounds: CGRect {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        return scene?.screen.bounds ?? CGRect(x: 0, y: 0, width: 393, height: 852)
+    }
+
+    /// Offer "Full Page" in the system screenshot editor while this session is on screen.
+    private func installFullPageScreenshot() {
+        defer {
+            #if DEBUG
+            // Simulator check (the screenshot editor can't be driven there): launch with
+            // `-MClaudeDumpFullPage YES` to write the Full Page PDF to tmp/exports/fullpage.pdf.
+            if UserDefaults.standard.bool(forKey: "MClaudeDumpFullPage") {
+                Task {
+                    try? await Task.sleep(for: .seconds(4))
+                    if let page = await FullPageScreenshot.shared.provider?() {
+                        _ = try? TranscriptExport.writeTempFile(page.data, title: "fullpage", ext: "pdf")
                     }
                 }
             }
+            #endif
+        }
+        FullPageScreenshot.shared.activate(for: sessionId) { [appState, sessionId] in
+            // The whole conversation, like an export (older pages load first if needed)
+            await appState.loadFullHistory(sessionId: sessionId)
+            let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+            let width = scene?.screen.bounds.width ?? 393
+            let scheme: ColorScheme = scene?.traitCollection.userInterfaceStyle == .dark ? .dark : .light
+            let session = appState.sessions.first { $0.id == sessionId }
+            return TranscriptPDF.fullPage(events: appState.eventsCache[sessionId] ?? [], session: session, sessionId: sessionId,
+                                          width: width, scheme: scheme, appState: appState)
         }
     }
 
@@ -166,24 +348,23 @@ struct SessionDetailView: View {
                 }
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: "list.clipboard.fill")
-                        .foregroundStyle(.purple)
-                        .font(.subheadline)
+                    Image(systemName: "list.clipboard")
+                        .foregroundStyle(Theme.textSecondary)
+                        .font(.system(size: 15, weight: .regular))
                     Text("View Plan")
-                        .font(.subheadline)
-                        .fontWeight(.medium)
-                        .foregroundStyle(.primary)
+                        .font(.claudeUISemibold)
+                        .foregroundStyle(Theme.textPrimary)
                     if let name = planFileName {
                         Text(name)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .font(.claudeMono(11))
+                            .foregroundStyle(Theme.textMuted)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
                     Spacer()
                     Image(systemName: planExpanded ? "chevron.up" : "chevron.down")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.textMuted)
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
@@ -191,11 +372,11 @@ struct SessionDetailView: View {
             .buttonStyle(.plain)
 
             if planExpanded, let content = planContent {
-                Divider()
+                Rectangle().fill(Theme.border).frame(height: 0.5)
                 ScrollView {
                     Text(content)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                        .font(.claudeMono(12))
+                        .foregroundStyle(Theme.textSecondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
@@ -203,7 +384,9 @@ struct SessionDetailView: View {
                 .frame(maxHeight: 300)
             }
         }
-        .background(Color(.systemGray6))
+        .claudeCard()
+        .padding(.horizontal, 10)
+        .padding(.top, 6)
         .task { await loadPlan() }
     }
 
@@ -212,25 +395,32 @@ struct SessionDetailView: View {
             Button {
                 Task { await viewModel.approve(client: appState.client, id: sessionId) }
             } label: {
-                Label("Approve", systemImage: "checkmark.circle.fill")
-                    .font(.subheadline)
-                    .fontWeight(.medium)
+                Label("Approve", systemImage: "checkmark")
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.green)
+            .buttonStyle(ClayCapsuleButtonStyle())
 
             Button {
                 Task { await viewModel.cancel(client: appState.client, id: sessionId) }
             } label: {
-                Label("Cancel", systemImage: "xmark.circle.fill")
-                    .font(.subheadline)
-                    .fontWeight(.medium)
+                Label("Cancel", systemImage: "xmark")
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.red)
+            .buttonStyle(SunkenCapsuleButtonStyle())
             .disabled(viewModel.cancelCooldown)
+            .opacity(viewModel.cancelCooldown ? 0.5 : 1)
         }
         .padding(.horizontal)
-        .padding(.vertical, 8)
+        .padding(.top, 8)
+    }
+}
+
+/// Owns the binding to the composer draft. Building the composer here (not in SessionDetailView's
+/// body) keeps reads and writes of `inputText` out of the session screen's dependencies, so typing
+/// re-renders only this view and the input bar.
+private struct ComposerHost<Content: View>: View {
+    let model: SessionDetailViewModel
+    @ViewBuilder let content: (Binding<String>) -> Content
+
+    var body: some View {
+        content(Bindable(model).inputText)
     }
 }

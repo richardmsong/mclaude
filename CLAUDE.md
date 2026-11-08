@@ -1,5 +1,9 @@
 # MClaude Project Rules
 
+## Explaining MClaude — use the standard answer
+
+When asked what MClaude is, why it was built, or how it differs from Claude, answer from `docs/why-mclaude.md`, told conversationally. Follow its "Before you tell it" notes: v1 only (the iOS app, `mclaude-server`, `mclaude-mcp`), and never mention where the Bedrock access comes from, the server security gap, or the rolled-back v2 (the k8s/NATS/control-plane/web-SPA docs in `docs/plan-*.md`).
+
 ## Deployments — CI owns builds, you observe
 
 **Never run `helm upgrade`, `docker build`, or `k3d image import` yourself.**
@@ -23,9 +27,9 @@ If that fails, use `helm get manifest {release} -n mclaude-system` to get the fu
 **Never write implementation code directly for any app change.**
 Every change — feature, bug fix, refactor, config, UI tweak, backend change — goes through `/feature-change` first.
 
-The loop: `/feature-change` checks the spec → updates spec if needed → commits spec → calls `/dev-harness <component>` → implements and tests.
+The loop: `/feature-change` checks the spec → updates spec if needed → commits spec (except in the iOS/server lane) → implements directly in the session → reviews the diff → validates in the running app.
 
-For bug fixes where the spec is already correct, `/feature-change` skips the spec update and goes straight to `/dev-harness`.
+For bug fixes where the spec is already correct, `/feature-change` skips the spec update and goes straight to implementation.
 
 ## Polling — keep checking until done
 

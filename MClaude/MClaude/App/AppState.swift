@@ -15,6 +15,17 @@ final class AppState {
         didSet { UserDefaults.standard.set(authToken, forKey: "authToken"); rebuildClient() }
     }
 
+    // Push notifications: a tapped notification asks the shell to open this session;
+    // visibleSessionId suppresses banners for the session already on screen.
+    var openSessionRequest: String?
+    var visibleSessionId: String? {
+        // Read state for the watch (docs/plan-watch-app.md → Read state): seen on open and on leave.
+        didSet {
+            if let oldValue { SeenStore.shared.markSeen(oldValue) }
+            if let visibleSessionId { SeenStore.shared.markSeen(visibleSessionId) }
+        }
+    }
+
     // Google SSO state
     var userName: String {
         didSet { UserDefaults.standard.set(userName, forKey: "userName") }
@@ -57,6 +68,17 @@ final class AppState {
         let config = ServerConfig(host: host, port: resolvedPort, token: token.isEmpty ? nil : token)
         self.client = APIClient(config: config)
         self.telemetry = TelemetryClient(config: ServerConfig(host: host, port: resolvedPort))
+        configureObservability()
+    }
+
+    /// OTLP telemetry to the collector on the Mac (docs/plan-observability.md).
+    private func configureObservability() {
+        let api = client
+        Telemetry.shared.uploadScreenshot = { data in try? await api.uploadScreenshot(imageData: data) }
+        Telemetry.shared.configure(serverHost: serverHost)
+        Task { @MainActor [weak self] in
+            AppVitals.shared.start(connected: { [weak self] in self?.isConnected ?? false })
+        }
     }
 
     // MARK: - Google SSO
@@ -133,7 +155,11 @@ final class AppState {
 
                 // Keep cached sessions during brief reconnects (don't replace with empty)
                 if !sessions.isEmpty || self.sessions.isEmpty {
-                    self.sessions = sessions.sorted { $0.tmuxWindow < $1.tmuxWindow }
+                    self.sessions = Self.sortedSessions(sessions)
+                }
+                // An update to the session on screen (app in front) is seen as it arrives.
+                if let visible = self.visibleSessionId, UIApplication.shared.applicationState == .active {
+                    SeenStore.shared.markSeen(visible)
                 }
                 self.isConnected = true
 
@@ -174,13 +200,10 @@ final class AppState {
                 var events = self.eventsCache[id] ?? []
                 // Deduplicate by uuid
                 if !events.contains(where: { $0.uuid == event.uuid }) {
-                    // Insert in timestamp-sorted position
-                    let insertIdx = events.firstIndex { $0.timestamp > event.timestamp } ?? events.endIndex
+                    // Insert in timestamp-sorted position. No cap: older pages loaded with
+                    // loadOlderEvents must not be trimmed away by live events.
+                    let insertIdx = events.lastIndex { $0.timestamp <= event.timestamp }.map { $0 + 1 } ?? 0
                     events.insert(event, at: insertIdx)
-                    // Cap at 200 events per session
-                    if events.count > 200 {
-                        events = Array(events.suffix(200))
-                    }
                     self.eventsCache[id] = events
                 }
             }
@@ -192,6 +215,9 @@ final class AppState {
             Task { @MainActor [weak self] in
                 let wasConnected = self?.isConnected ?? false
                 self?.isConnected = connected
+                if wasConnected != connected {   // telemetry: blank-screen evidence
+                    TranscriptProbe.shared.note(.connection, ["connected": connected, "reason": reason ?? ""])
+                }
                 if connected {
                     self?.lastDisconnectReason = nil
                 } else {
@@ -215,20 +241,134 @@ final class AppState {
     }
 
     func loadEvents(sessionId: String) async {
+        let loadStart = Date()   // telemetry: blank-screen evidence (docs/plan-observability.md)
+        Task { @MainActor in
+            TranscriptProbe.shared.note(.loads, ["event": "load_start", "session_id": sessionId, "at": loadStart])
+        }
+        let fetched = try? await client.fetchEvents(id: sessionId)
+        let loadEnd = Date()
+        let loadMs = Int(loadEnd.timeIntervalSince(loadStart) * 1000)
+        Task { @MainActor in
+            TranscriptProbe.shared.note(.loads, ["event": "load_end", "session_id": sessionId, "ms": loadMs, "at": loadEnd,
+                                                 "ok": fetched != nil, "events": fetched?.count ?? -1])
+        }
         // Always fetch latest events from server (merges with any WS events already cached)
-        if let freshEvents = try? await client.fetchEvents(id: sessionId) {
+        if let freshEvents = fetched {
             var merged = eventsCache[sessionId] ?? []
-            for event in freshEvents {
-                if !merged.contains(where: { $0.uuid == event.uuid }) {
-                    merged.append(event)
-                }
+            var known = Set(merged.map(\.uuid))
+            for event in freshEvents where known.insert(event.uuid).inserted {
+                merged.append(event)
             }
-            // Sort by timestamp
-            merged.sort { $0.timestamp < $1.timestamp }
-            if merged.count > 200 {
-                merged = Array(merged.suffix(200))
-            }
+            // Sort by timestamp (stable, so older pages keep their order). No cap; see setEvent.
+            merged = merged.enumerated()
+                .sorted { ($0.element.timestamp, $0.offset) < ($1.element.timestamp, $1.offset) }
+                .map(\.element)
             eventsCache[sessionId] = merged
+        }
+    }
+
+    /// Rename a session (Info screen), then refresh it right away instead of waiting for the
+    /// next WebSocket sessions update.
+    func renameSession(id: String, name: String) async throws {
+        try await client.renameSession(id: id, name: name)
+        if let fresh = try? await client.fetchSession(id: id),
+           let i = sessions.firstIndex(where: { $0.id == id }) {
+            sessions[i] = fresh
+        }
+    }
+
+    // MARK: - End and resume (docs/design-claude-uplift.md → Drawer, Resume sheet)
+
+    /// End a session. It leaves the list right away; the WebSocket update confirms it.
+    /// Restored to the list if the server refuses.
+    func endSession(id: String) async throws {
+        let removed = sessions.first { $0.id == id }
+        sessions.removeAll { $0.id == id }
+        do {
+            try await client.endSession(id: id)
+        } catch {
+            if let removed, !sessions.contains(where: { $0.id == id }) {
+                sessions = Self.sortedSessions(sessions + [removed])
+            }
+            throw error
+        }
+    }
+
+    /// Resume a transcript (by Claude session id) as a session and return its id. The session is
+    /// fetched into the list right away so it can be selected before the next WebSocket update.
+    func resumeTranscript(claudeSessionId: String) async throws -> String {
+        let id = try await client.resumeTranscript(id: claudeSessionId)
+        if !sessions.contains(where: { $0.id == id }), let fresh = try? await client.fetchSession(id: id),
+           !sessions.contains(where: { $0.id == id }) {
+            sessions = Self.sortedSessions(sessions + [fresh])
+        }
+        return id
+    }
+
+    // MARK: - Older history (docs/design-claude-uplift.md → History)
+
+    /// Sessions whose history is fully loaded back to the first event.
+    var historyComplete: Set<String> = []
+    /// Sessions with an older-history request in flight.
+    var historyLoading: Set<String> = []
+
+    /// Prepend the next page of older events. Returns false if nothing was added (complete, error,
+    /// or already loading).
+    @discardableResult
+    func loadOlderEvents(sessionId: String, limit: Int = 100) async -> Bool {
+        guard !historyComplete.contains(sessionId), !historyLoading.contains(sessionId) else { return false }
+        historyLoading.insert(sessionId)
+        defer { historyLoading.remove(sessionId) }
+
+        let cached = eventsCache[sessionId] ?? []
+        var cursor = cached.first
+        var novel: [SessionEvent] = []
+        // Pages can overlap the loaded window (live events have different uuids/times than the
+        // transcript), so step past pages that were all duplicates.
+        for _ in 0..<5 {
+            guard let page = try? await client.fetchHistory(id: sessionId, before: cursor, limit: limit) else {
+                return false
+            }
+            novel = Self.dropDuplicates(page.events, of: eventsCache[sessionId] ?? [])
+            if !page.hasMore { historyComplete.insert(sessionId) }
+            if !novel.isEmpty || !page.hasMore { break }
+            guard let first = page.events.first, first.uuid != cursor?.uuid else { break }
+            cursor = first
+        }
+        guard !novel.isEmpty else { return false }
+        eventsCache[sessionId] = novel + (eventsCache[sessionId] ?? [])
+        return true
+    }
+
+    /// Load everything back to the start (for exports).
+    func loadFullHistory(sessionId: String) async {
+        for _ in 0..<200 where !historyComplete.contains(sessionId) {
+            let added = await loadOlderEvents(sessionId: sessionId, limit: 500)
+            if !added && !historyComplete.contains(sessionId) {
+                // In flight elsewhere or failed: wait briefly, then try again once more
+                try? await Task.sleep(for: .milliseconds(300))
+                if !(await loadOlderEvents(sessionId: sessionId, limit: 500)) { break }
+            }
+        }
+    }
+
+    /// History events not already loaded: same uuid, or the same user/assistant text within a
+    /// minute (the live copy of an event can carry a different uuid and the server's receive time).
+    static func dropDuplicates(_ page: [SessionEvent], of loaded: [SessionEvent]) -> [SessionEvent] {
+        let uuids = Set(loaded.map(\.uuid))
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        func date(_ s: String) -> Date? { iso.date(from: s) ?? ISO8601DateFormatter().date(from: s) }
+        // Only the oldest loaded events can overlap a page of older history
+        let edge = loaded.prefix(60).compactMap { e -> (SessionEventType, String, Date)? in
+            guard e.type == .user || e.type == .text, let t = e.text, let d = date(e.timestamp) else { return nil }
+            return (e.type, t.trimmingCharacters(in: .whitespacesAndNewlines), d)
+        }
+        return page.filter { e in
+            if uuids.contains(e.uuid) { return false }
+            guard e.type == .user || e.type == .text, let t = e.text, let d = date(e.timestamp) else { return true }
+            let text = t.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !edge.contains { $0.0 == e.type && $0.1 == text && abs($0.2.timeIntervalSince(d)) < 60 }
         }
     }
 
@@ -249,6 +389,7 @@ final class AppState {
         let config = ServerConfig(host: serverHost, port: serverPort, token: token)
         client = APIClient(config: config)
         telemetry = TelemetryClient(config: ServerConfig(host: serverHost, port: serverPort))
+        configureObservability()
         connectWebSocket()
     }
 
@@ -279,7 +420,7 @@ final class AppState {
                 let freshSessions = try await client.fetchSessions()
                 await MainActor.run {
                     if !freshSessions.isEmpty {
-                        self.sessions = freshSessions.sorted { $0.tmuxWindow < $1.tmuxWindow }
+                        self.sessions = Self.sortedSessions(freshSessions)
                     }
                 }
                 task.setTaskCompleted(success: true)
@@ -289,6 +430,11 @@ final class AppState {
         }
 
         task.expirationHandler = { fetchTask.cancel() }
+    }
+
+    /// Oldest first (creation order), id as a stable tie-breaker.
+    static func sortedSessions(_ sessions: [ClaudeSession]) -> [ClaudeSession] {
+        sessions.sorted { ($0.startedAt, $0.id) < ($1.startedAt, $1.id) }
     }
 }
 

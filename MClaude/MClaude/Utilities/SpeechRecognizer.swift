@@ -15,6 +15,7 @@ final class SpeechRecognizer {
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private var finalizationContinuation: CheckedContinuation<String, Never>?
+    private var tapInstalled = false
 
     func requestPermission() async -> Bool {
         let speechStatus = await withCheckedContinuation { cont in
@@ -23,43 +24,94 @@ final class SpeechRecognizer {
             }
         }
         guard speechStatus == .authorized else {
-            error = "Speech recognition not authorized"
+            error = "Speech recognition not allowed"
             return false
         }
-
-        let audioSession = AVAudioSession.sharedInstance()
-        do {
-            try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
-            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
-        } catch {
-            self.error = "Audio session error"
+        guard await AVAudioApplication.requestRecordPermission() else {
+            error = "Microphone access not allowed"
             return false
         }
+        guard activateSession() else { return false }
         permissionGranted = true
         return true
     }
 
+    /// Sets the shared audio session up for recording and activates it. Run before every start:
+    /// iOS can deactivate the session while the app is in the background, or another app can take it.
+    @discardableResult
+    private func activateSession() -> Bool {
+        let audioSession = AVAudioSession.sharedInstance()
+        do {
+            try audioSession.setCategory(.record, mode: .measurement, options: .duckOthers)
+            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+            return true
+        } catch {
+            self.error = "Microphone unavailable"
+            return false
+        }
+    }
+
+    /// Starts recording if it can; otherwise sets `error` and leaves nothing installed, so the
+    /// next call starts cleanly. Never call twice for one press (see InputBarView's hold-to-talk).
     func startRecording() {
+        error = nil
+        guard !isRecording else { return }
+
+        // Permission not decided yet: ask now; this press doesn't record, the next one does.
+        if SFSpeechRecognizer.authorizationStatus() == .notDetermined
+            || AVAudioApplication.shared.recordPermission == .undetermined {
+            Task { @MainActor in _ = await requestPermission() }
+            return
+        }
+        guard SFSpeechRecognizer.authorizationStatus() == .authorized else {
+            error = "Speech recognition not allowed"
+            return
+        }
+        guard AVAudioApplication.shared.recordPermission == .granted else {
+            error = "Microphone access not allowed"
+            return
+        }
         guard let speechRecognizer, speechRecognizer.isAvailable else {
             error = "Speech recognizer unavailable"
             return
         }
+        guard activateSession() else { return }
+        permissionGranted = true
 
-        transcript = ""
-
-        recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
-        guard let recognitionRequest else { return }
-        recognitionRequest.shouldReportPartialResults = true
-        recognitionRequest.addsPunctuation = true
+        // A tap left on the input bus makes installTap raise an Objective-C exception (crash).
+        removeTapIfInstalled()
 
         let inputNode = audioEngine.inputNode
         let recordingFormat = inputNode.outputFormat(forBus: 0)
-
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
-            recognitionRequest.append(buffer)
+        // No usable input (e.g. during a call, or the session isn't really active): installTap
+        // would raise on a 0 Hz / 0 channel format.
+        guard recordingFormat.sampleRate > 0, recordingFormat.channelCount > 0 else {
+            error = "Microphone unavailable"
+            return
         }
 
-        recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { [weak self] result, error in
+        transcript = ""
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        request.addsPunctuation = true
+        recognitionRequest = request
+
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
+            request.append(buffer)
+        }
+        tapInstalled = true
+
+        audioEngine.prepare()
+        do {
+            try audioEngine.start()
+        } catch {
+            removeTapIfInstalled()
+            recognitionRequest = nil
+            self.error = "Microphone unavailable"
+            return
+        }
+
+        recognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
             guard let self else { return }
             if let result {
                 self.transcript = result.bestTranscription.formattedString
@@ -73,25 +125,24 @@ final class SpeechRecognizer {
                 self.finalizationContinuation = nil
             }
         }
-
-        audioEngine.prepare()
-        do {
-            try audioEngine.start()
-            isRecording = true
-        } catch {
-            self.error = "Could not start audio engine"
-        }
+        isRecording = true
     }
 
     func stopRecording() {
         guard isRecording else { return }
         audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
+        removeTapIfInstalled()
         recognitionRequest?.endAudio()
         recognitionRequest = nil
         isRecording = false
         isFinalizing = true
         // Let the task finish naturally — don't cancel it
+    }
+
+    private func removeTapIfInstalled() {
+        guard tapInstalled else { return }
+        audioEngine.inputNode.removeTap(onBus: 0)
+        tapInstalled = false
     }
 
     /// Waits for the recognizer to deliver a final transcript after stopRecording().

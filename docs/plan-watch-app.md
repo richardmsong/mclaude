@@ -1,0 +1,235 @@
+# MClaude for Apple Watch
+
+Added 2026-11-06 (Richard: "Scaffold out a simple watch app that I can see updates for mclaude"). Reworked 2026-11-07 (Richard: the flat list "seems overwhelming"; "whenever I'm working on a session, the user needs to be somewhat reminded of [the] train of thought"; "My goal with the watch app is to not have to take my phone out of my pocket"; "Ship it all at once").
+
+## Overview
+
+The watch handles the whole check-in loop without the iPhone leaving your pocket:
+1. **Know when to look:** a push when a session needs you (mirrored to the watch).
+2. **See what matters:** sessions grouped into Needs you, Working and Unread, with read sessions folded away.
+3. **Get back into a session:** each session has a short recap (Goal / Where it is / Next), shown on its detail screen.
+4. **Act on it:** answer a question, approve or deny, tell Claude to continue, or talk to it.
+
+## Decisions (Richard)
+
+| Topic | Decision |
+|---|---|
+| Purpose | Never having to take the phone out of your pocket (2026-11-07). |
+| List | Not one flat list. Sections Needs you / Working / Unread; read sessions behind one row (2026-11-07). |
+| Read vs unread | The split that matters is read vs unread, not idle vs active (2026-11-07). A session that just finished is unread until you look at it. |
+| Recap | Not in the list; only on the detail screen (2026-11-07). |
+| Rows | Two lines (2026-11-07). |
+| Scope | Ship everything at once (2026-11-07). |
+| Complication | Not yet (2026-11-06). |
+| Look | Black background with Claude accents (2026-11-06). |
+| Data path | The watch never talks to the network or holds the server token; the iPhone app relays (2026-11-06). |
+| Full message | A button on the session screen shows Claude's last answer in full, rendered (2026-11-07). |
+| Talk | Talk to the session on its screen, transcribed on the watch with Apple's dictation; tapping Done in dictation is fine (2026-11-07). |
+
+## Server
+
+### Recap
+
+Every session with a conversation carries a **recap**: three short lines that remind you where it stands.
+
+- `goal`: what you're trying to get done in this session overall (≤ 80 characters).
+- `progress`: where it is now, what's done or what just happened (≤ 120 characters).
+- `next`: what happens next (≤ 120 characters), and `nextBy`: `"you"` when it's waiting on you (a question, an approval, or Claude asked you something), `"claude"` when Claude proposed a next step it can take itself, `"none"` when the work is finished.
+
+**When it's made:** whenever a turn ends, and whenever a session starts waiting on a question, plan approval or tool permission. One recap runs per session at a time; a trigger that arrives while one is running causes one more run after it finishes. A failed or timed-out run (60 s) keeps the previous recap.
+
+**How it's made:** a one-shot call to the Haiku model outside the session (like session titles), so the session's own context isn't touched. The input is the session's first real prompt (up to 1,000 characters), the most recent user and assistant messages (newest kept, up to 6,000 characters, tool calls and thinking left out; answers to Claude's questions and plan approvals count as user messages, so the model knows a follow-up is based on real answers), and the pending question or request if there is one. The model returns JSON `{"goal","progress","next","nextBy"}`; anything that doesn't parse, or is missing a field, counts as a failed run. Fields over their limits are cut at a word boundary with "…".
+
+**Stored:** with the session, so it survives server restarts. Ended sessions drop it.
+
+**In the sessions list:** each session gains an optional `recap`:
+
+```
+"recap": {"goal": "...", "progress": "...", "next": "...", "nextBy": "you" | "claude" | "none", "at": "<ISO date>"}
+```
+
+Omitted until the first recap exists, and for k8s sessions. Older app builds ignore it.
+
+### Pending prompt detail
+
+The session's `prompt` object gains two optional fields so the watch can answer every question:
+
+- `kind`: `"question"`, `"plan"` or `"tool"`.
+- `questions`: for `kind: "question"`, every question of the pending AskUserQuestion as `{"question", "options": [labels], "multiSelect": bool}`.
+
+`question` and `options` keep their current meaning (the first question), so older builds are unaffected.
+
+### "Needs you" push
+
+When a session starts waiting on a question, a plan approval or a tool permission, the server sends a push to the registered devices: title = the session name, body = the question text (first question), "Approve the plan?", or "Allow <tool>?". The payload carries `sessionId`, like the long-turn push. One push per pending request. The existing long-turn push is unchanged. An auto-mode block sends a separate "Blocked: …" push (docs/design-claude-uplift.md → Permissions (auto mode)); it doesn't make the session wait, so it isn't a "needs you" push. On the iPhone, the banner is suppressed when that session is on screen (existing rule). The push mirrors to the watch.
+
+## iPhone app
+
+### Read state
+
+The iPhone app keeps, per session, the time you last saw it (`seenAt`), and shares it with the watch.
+
+- A session is **seen** while its screen is on the iPhone with the app in the foreground: when you open it, when you leave it, and when the app goes to the background while it's on screen.
+- Opening a session's detail screen on the watch marks it seen too (the watch tells the iPhone app).
+- The first time this version runs, it records that moment; any session without a `seenAt` counts as seen at that moment, so existing sessions don't all start out unread.
+- A session is **unread** when it isn't working or waiting on you and its last activity is newer than its `seenAt`.
+
+### Relay
+
+The watch sends requests; the iPhone app (woken in the background if needed) handles them and replies.
+
+- **Refresh** (`{"type":"refresh"}`): the iPhone app fetches `GET /sessions`, plus each session's last assistant message from `GET /sessions/:id/history?limit=40` (reused when the session isn't working and its last activity hasn't changed), and replies with a snapshot. It also stores the snapshot as the watch's "last known state".
+- **Mark read** (`{"type":"markRead","id":"s12","at":<seconds since 1970>}`): stores `seenAt` (keeping the later time if one exists) and replies `{"ok":true}`.
+- **Action** (`{"type":"action","id":"s12","action":...}`), replying `{"ok":true|false}` plus a fresh snapshot:
+  - `"answer"` with `"answers": {"<question>": "<answer>"}` → `POST /sessions/:id/answer`.
+  - `"approve"` → `POST /sessions/:id/approve`.
+  - `"deny"` → `POST /sessions/:id/cancel`.
+  - `"continue"` → sends the message "Continue." (`POST /sessions/:id/input`).
+  - `"reply"` with `"text"` → sends that text as a message.
+  - An action also marks the session seen.
+- **Full message** (`{"type":"message","id":"s12"}`): fetches `GET /sessions/:id/history?limit=40` and replies `{"text": "<the last assistant message, Markdown as written>"}` (capped at 20,000 characters, cut with "…"), or `{"text": null}` when there is none, or `{"error": "server"}`.
+- If the iPhone app isn't signed in, every request replies with `error: "signedOut"`.
+
+### Snapshot
+
+```
+{
+  "fetchedAt": <date>,
+  "error": "signedOut" | "server" | null,
+  "sessions": [
+    {
+      "id": "s12",
+      "name": "<display name>",
+      "project": "<project name>",
+      "state": "waiting" | "working" | "idle" | "starting" | "restarting" | "notRunning",
+      "since": <date>,                      // last activity
+      "seenAt": <date>,                     // when you last saw it (or the first-run moment)
+      "kind": "question" | "plan" | "tool" | null,
+      "question": "<first question / request>" | null,
+      "questions": [{"question", "options", "multiSelect"}] | null,
+      "recap": {"goal", "progress", "next", "nextBy", "at"} | null,
+      "lastText": "<last assistant message, Markdown, ≤ 600 chars>" | null
+    }
+  ]
+}
+```
+
+- `state` follows the drawer's rules: `starting` / `restarting` / `notRunning` while the process isn't running; otherwise `working`, `waiting` (waiting for input, needs approval, plan ready) or `idle` (idle, unknown).
+- `lastText` keeps the message's Markdown. Past 600 characters it's cut at the last line break (or else word boundary) before the limit and ends with "…"; a code block left open by the cut is closed.
+- `error: "server"`: the session list couldn't be fetched; `sessions` is the last good list.
+
+## Watch app
+
+### Session list
+
+```
+┌──────────────────────┐
+│ MClaude         9:41 │
+│ 1 needs you · 2 working · 3 unread │
+│ NEEDS YOU            │
+│ ● Fix deploy         │  ← blue dot
+│   2m                 │
+│ WORKING              │
+│ ● mclaude-v1 watch   │  ← clay dot
+│   14s                │
+│ UNREAD               │
+│ ● Weekly meals       │  ← white dot
+│   5m                 │
+│ Read · 14          › │
+│ Updated 9:41         │
+└──────────────────────┘
+```
+
+- **Summary line** under the title: the non-zero counts of `needs you`, `working` and `unread`, joined with ` · `. When all three are zero: "All caught up".
+- **Sections**, each with a small muted uppercase header, omitted when empty, newest activity first within each:
+  - **Needs you:** `waiting` sessions.
+  - **Working:** `working` sessions.
+  - **Unread:** every other session whose last activity is newer than its `seenAt`.
+- **Row** (two lines): a dot (blue = needs you, clay = working, white = unread) and the name (one line, semibold); then the age of the last activity, muted (`now`, `14s`, `2m`, `3h`, `2d`). Tapping a row opens the session.
+- **Read row:** `Read · <count>` with a chevron, shown when any read session exists; it opens the Read list.
+- **Footer:** `Updated <time>`, or `iPhone not reachable · updated <time>`, or `Can't reach the Mac · updated <time>`.
+- **States:** no snapshot yet → spinner and "Connecting to iPhone…" (or "iPhone not reachable" once a refresh failed); `signedOut` → "Sign in to MClaude on your iPhone."; no sessions at all → "No sessions".
+
+### Read list
+
+Titled "Read". Every read session, newest activity first, with the same two-line rows (no dot). Tapping opens the session.
+
+### Session detail
+
+```
+┌──────────────────────┐
+│ ‹ Fix deploy         │
+│ ● Needs you · 2m     │
+│ mclaude-v1           │
+│ GOAL                 │
+│ Ship the retry fix   │
+│ WHERE IT IS          │
+│ Tests pass; ready to │
+│ run the migration    │
+│ NEXT                 │
+│ Run it now or back   │
+│ up first?            │
+│ [ ▤ Full message ]   │
+│ ┌──────────────────┐ │
+│ │ Run now or back… │ │
+│ │ ○ Run now        │ │
+│ │ ● Back up first  │ │
+│ │ ○ Other…         │ │
+│ └──────────────────┘ │
+│ [      Send      ]   │
+└──────────────────────┘
+```
+
+When nothing is pending, the same screen ends with `[ ▤ Full message ]`, `[ Continue ]` (if Claude proposed a next step), `[ 🎤 Talk ]` and a small `Type…` field.
+
+- **Header:** dot, state label (`Needs you`, `Working`, `Idle`, `Starting`, `Restarting`, `Not running`) · age; the project name, muted.
+- **Recap:** three blocks, each a small muted uppercase label (`GOAL`, `WHERE IT IS`, `NEXT`) and its text. Without a recap yet: the last message under a `LAST MESSAGE` label (if any), rendered like the Last answer screen.
+- **Full message** (secondary capsule, `doc.text` icon): shown when the session has a last message. Opens the Last answer screen.
+- **Actions**, by situation:
+  - **Question** (`kind: "question"`): a card per question with its text and its options as rows (radio for single-select, checkbox for multi-select), plus **Other…**, which opens text input (dictation, Scribble or keyboard) and selects Other with that text. **Send** (clay capsule) is enabled once every question has an answer; it sends `answer`. Single-select: the option label (or the Other text). Multi-select: ticked labels in option order, Other text last, joined with ", ".
+  - **Plan or tool permission** (`kind: "plan"` / `"tool"`): the request text, then **Approve** (clay capsule) and **Deny** (secondary) buttons.
+  - **Continue** (secondary capsule): when the session isn't working or waiting and its recap's `nextBy` is `"claude"`.
+  - **Talk** (clay mic capsule, "Talk"): always, except while a question is pending. See Talk below.
+  - **Type** (secondary, small): a text field that opens the watch's text input (keyboard, Scribble or dictation). Hidden while a question is pending. A non-blank result is sent as `reply`.
+  - While an action is in flight its buttons are disabled and show a spinner. Success plays the watch's success haptic and refreshes; failure plays the failure haptic and shows "Couldn't send. Try again." under the buttons, keeping the selections.
+- **Read:** opening the screen marks the session seen (and again when an update arrives while it's open).
+- The screen scrolls with the Digital Crown, updates in place, and goes back to the list if the session ends.
+
+### Last answer
+
+Titled "Last answer". Shows a spinner while it loads, then Claude's last answer in full, rendered for the watch:
+- Headings (`#`…) as bold lines; paragraphs with inline bold, italic, inline code and links; bulleted and numbered list items with their marker and a hanging indent; quotes muted with a bar; code blocks in a small monospaced font on a raised card (wrapping, not scrolling sideways); tables as their rows in a small monospaced font; horizontal rules as a thin divider.
+- Scrolls with the Digital Crown. "No message yet" when there's none; "Couldn't load the message" with a Retry button when the request fails or the iPhone isn't reachable.
+
+### Talk
+
+- Tapping **Talk** opens Apple's dictation on the watch directly: the text appears as you speak, and you tap **Done** when you're finished. The transcription happens on the watch; the iPhone only relays the message.
+- **Done** with non-blank text sends it right away as `reply` (while Claude is working, the server queues it as usual). The Talk button shows a spinner while sending; success plays the success haptic; failure plays the failure haptic, shows "Couldn't send. Try again." and puts the text in the Type field so it can be sent again.
+- **Cancel**, or Done with nothing said, sends nothing.
+- If dictation can't be opened, the Type field's text input opens instead.
+
+### Notifications
+
+Tapping a MClaude notification on the watch opens the app on that session's detail screen.
+
+### Refreshing
+
+While the app is on screen it refreshes when it appears and every 15 seconds. A request with no reply within 10 seconds counts as "iPhone not reachable" (a late reply still applies). Refreshing stops while the app isn't on screen.
+
+### Formatting
+
+Claude's text keeps its Markdown everywhere on the watch, never shown as raw `**`, `#` or backticks:
+- **Block formatting** (as on the Last answer screen): the last message on the session screen and the Last answer screen.
+- **Inline formatting** (bold, italic, inline code, links): recap fields, question text, option labels, and plan/tool request text.
+
+## Look
+
+Black background. Text `#FAF9F5` / `#C2C0B6` / `#9C9A92`; raised cards `#30302E` with a 12pt radius; clay `#D97757` (working dot, primary buttons, tint); link blue `#5BA4E6` (needs-you dot); white `#FAF9F5` unread dot. System fonts (SF Pro).
+
+## Packaging
+
+A watchOS 10+ app embedded in the iPhone app (bundle id + `.watchkitapp`), same version and build number, shipped in the same TestFlight build.
+
+## Scope
+
+Not in this version: a complication, talking to the hub from the list, starting or ending sessions from the watch, and a recap card on the iPhone.

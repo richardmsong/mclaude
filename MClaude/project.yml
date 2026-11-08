@@ -3,6 +3,7 @@ options:
   bundleIdPrefix: com.rsong.mclaude
   deploymentTarget:
     iOS: "17.0"
+    watchOS: "10.0"
   xcodeVersion: "15.4"
 
 targets:
@@ -12,26 +13,77 @@ targets:
     sources:
       - MClaude
       - Packages/MClaude-Shared/Sources/MClaude-Shared
+    dependencies:
+      # The watch app (docs/plan-watch-app.md) ships inside the iPhone app.
+      - target: MClaudeWatch
     info:
       path: MClaude/Info.plist
       properties:
         CFBundleShortVersionString: "2.26.0"
-        CFBundleVersion: "84"
+        CFBundleVersion: "127"
         UILaunchScreen: {}
+        ITSAppUsesNonExemptEncryption: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
         NSSpeechRecognitionUsageDescription: "MClaude uses speech recognition to let you dictate input to Claude Code sessions."
         NSMicrophoneUsageDescription: "MClaude needs microphone access for voice input to Claude Code sessions."
+        NSCameraUsageDescription: "MClaude uses the camera to take photos you attach to Claude Code sessions."
         UIBackgroundModes:
           - fetch
         BGTaskSchedulerPermittedIdentifiers:
           - com.rsong.mclaude.app.refresh
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
-          NSAllowsArbitraryLoads: true
+          NSAllowsArbitraryLoads: true   # ignored by iOS while NSAllowsLocalNetworking is set
+          # Telemetry to the OTel Collector on the Mac is plain HTTP over Tailscale (WireGuard
+          # encrypts it); docs/plan-observability.md → App telemetry.
+          NSExceptionDomains:
+            ts.net:
+              NSIncludesSubdomains: true
+              NSExceptionAllowsInsecureHTTPLoads: true
+    entitlements:
+      path: MClaude/MClaude.entitlements
+      properties:
+        aps-environment: development
     settings:
-      DEVELOPMENT_TEAM: ""
+      DEVELOPMENT_TEAM: Y63FV5M5D9
       CODE_SIGN_IDENTITY: "Apple Development"
       CODE_SIGN_STYLE: Automatic
       PRODUCT_BUNDLE_IDENTIFIER: com.rsong.mclaude.app
       SUPPORTED_PLATFORMS: iphoneos
       SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: "NO"
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
+  # Apple Watch app: read-only session updates relayed by the iPhone app (docs/plan-watch-app.md).
+  # Keep CFBundleVersion / CFBundleShortVersionString equal to the iPhone app's.
+  MClaudeWatch:
+    type: application
+    platform: watchOS
+    sources:
+      - MClaudeWatch
+      - Packages/MClaude-Shared/Sources/MClaude-Shared
+    info:
+      path: MClaudeWatch/Info.plist
+      properties:
+        CFBundleDisplayName: MClaude
+        CFBundleShortVersionString: "2.26.0"
+        CFBundleVersion: "127"
+        WKApplication: true
+        WKCompanionAppBundleIdentifier: com.rsong.mclaude.app
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      DEVELOPMENT_TEAM: Y63FV5M5D9
+      CODE_SIGN_IDENTITY: "Apple Development"
+      CODE_SIGN_STYLE: Automatic
+      PRODUCT_BUNDLE_IDENTIFIER: com.rsong.mclaude.app.watchkitapp
+      PRODUCT_NAME: MClaudeWatch
+      SUPPORTED_PLATFORMS: "watchos watchsimulator"
+      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      # The /deploy-ios simulator build passes -sdk iphonesimulator, which this dependency inherits;
+      # the watch-only icon set has nothing for iPhone SDKs. Real watch builds are unaffected.
+      "ASSETCATALOG_COMPILER_APPICON_NAME[sdk=iphone*]": ""

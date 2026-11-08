@@ -28,11 +28,14 @@ public struct ToolResultBlock: Codable, Sendable {
     public let toolUseId: String
     public let content: String
     public let isError: Bool
+    /// Server paths of images in the result (e.g. Read of a .png); fetch with APIClient.fetchImage.
+    public let images: [String]?
 
-    public init(toolUseId: String, content: String, isError: Bool) {
+    public init(toolUseId: String, content: String, isError: Bool, images: [String]? = nil) {
         self.toolUseId = toolUseId
         self.content = content
         self.isError = isError
+        self.images = images
     }
 }
 
@@ -61,10 +64,23 @@ public struct SessionEvent: Codable, Sendable, Identifiable {
     public let model: String?
     public let durationMs: Int?
     public let subagentInfo: SubagentInfo?
+    /// Compaction only: context tokens before and after (nil on older servers).
+    public var compactPreTokens: Int? = nil
+    public var compactPostTokens: Int? = nil
+    /// Peer messages (docs/plan-peer-messages.md → Event enrichment; nil on older servers):
+    /// on a `user` event, one per `<cross-session-message>` tag; on a peer `SendMessage`
+    /// tool_use, one `sent` entry.
+    public var peerMessages: [PeerMessage]? = nil
+    /// `user` events with `peerMessages` only: the text outside the tags (shown as a bubble).
+    public var peerOtherText: String? = nil
+    /// On the tool_result of a peer `SendMessage`.
+    public var peerDelivery: PeerDelivery? = nil
 
     public var id: String { uuid }
 
-    public init(uuid: String, timestamp: String, type: SessionEventType, text: String?, thinking: String?, toolUse: ToolUseBlock?, toolResults: [ToolResultBlock]?, model: String?, durationMs: Int?, subagentInfo: SubagentInfo? = nil) {
+    public init(uuid: String, timestamp: String, type: SessionEventType, text: String?, thinking: String?, toolUse: ToolUseBlock?, toolResults: [ToolResultBlock]?, model: String?, durationMs: Int?, subagentInfo: SubagentInfo? = nil, compactPreTokens: Int? = nil, compactPostTokens: Int? = nil) {
+        self.compactPreTokens = compactPreTokens
+        self.compactPostTokens = compactPostTokens
         self.uuid = uuid
         self.timestamp = timestamp
         self.type = type

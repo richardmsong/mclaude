@@ -64,8 +64,7 @@ actor JSONLTailer {
         watchedSessionIds[id] = sessionId
 
         // Derive the JSONL path: ~/.claude/projects/{encoded-cwd}/{sessionId}.jsonl
-        let encodedPath = cwd.replacingOccurrences(of: "/", with: "-")
-        let jsonlPath = "\(projectsDir)/\(encodedPath)/\(sessionId).jsonl"
+        let jsonlPath = ClaudePaths.transcript(projectsDir: projectsDir, cwd: cwd, sessionId: sessionId)
 
         guard FileManager.default.fileExists(atPath: jsonlPath) else {
             print("[jsonl] File not found: \(jsonlPath)")
@@ -111,14 +110,55 @@ actor JSONLTailer {
 
     /// Send recent history for a session (last N events)
     func getRecentEvents(id: String, sessionId: String, cwd: String, count: Int = 50) -> [SessionEvent] {
-        let encodedPath = cwd.replacingOccurrences(of: "/", with: "-")
-        let jsonlPath = "\(projectsDir)/\(encodedPath)/\(sessionId).jsonl"
+        let jsonlPath = ClaudePaths.transcript(projectsDir: projectsDir, cwd: cwd, sessionId: sessionId)
 
         guard let data = FileManager.default.contents(atPath: jsonlPath),
               let content = String(data: data, encoding: .utf8) else { return [] }
 
         let lines = content.components(separatedBy: "\n").filter { !$0.isEmpty }
-        let recentLines = Array(lines.suffix(count))
+        return Self.parseLines(Array(lines.suffix(count)))
+    }
+
+    // MARK: - Paged history (GET /sessions/:id/history)
+
+    /// Whole-transcript parse, reused until the file's size or mtime changes.
+    private var parsedTranscripts: [String: (size: Int, mtime: Date, events: [SessionEvent])] = [:]
+
+    /// A page of events strictly older than the cursor, oldest first. The cursor is the app's oldest
+    /// loaded event: matched by uuid when the transcript has it, else by timestamp (live events carry
+    /// the server's receive time, so they may not appear in the transcript under the same uuid).
+    /// With no cursor, returns the newest `limit` events.
+    func historyPage(sessionId: String, cwd: String, before: String?, beforeTimestamp: String?,
+                     limit: Int) -> (events: [SessionEvent], hasMore: Bool) {
+        let all = allEvents(sessionId: sessionId, cwd: cwd)
+        var end = all.count
+        if let before, let idx = all.firstIndex(where: { $0.uuid == before }) {
+            end = idx
+        } else if let ts = beforeTimestamp {
+            end = all.firstIndex(where: { $0.timestamp >= ts }) ?? all.count
+        }
+        let start = max(0, end - limit)
+        return (Array(all[start..<end]), start > 0)
+    }
+
+    private func allEvents(sessionId: String, cwd: String) -> [SessionEvent] {
+        let path = ClaudePaths.transcript(projectsDir: projectsDir, cwd: cwd, sessionId: sessionId)
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else { return [] }
+        let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+        let mtime = attrs[.modificationDate] as? Date ?? .distantPast
+        if let cached = parsedTranscripts[path], cached.size == size, cached.mtime == mtime {
+            return cached.events
+        }
+        guard let data = FileManager.default.contents(atPath: path),
+              let content = String(data: data, encoding: .utf8) else { return [] }
+        let events = Self.parseLines(content.components(separatedBy: "\n").filter { !$0.isEmpty })
+        parsedTranscripts[path] = (size, mtime, events)
+        return events
+    }
+
+    /// Parse transcript lines into events: drops user lines that duplicate an enqueued mid-turn
+    /// message and moves synthetic queue events to when they were processed.
+    private static func parseLines(_ recentLines: [String]) -> [SessionEvent] {
 
         // Pre-scan for enqueue texts (for dedup) and remove timestamps (for positioning)
         var enqueuedForDedup: Set<String> = []
@@ -130,6 +170,8 @@ actor JSONLTailer {
             let op = json["operation"] as? String ?? ""
             if op == "enqueue", let text = json["content"] as? String {
                 enqueuedForDedup.insert(text.trimmingCharacters(in: .whitespacesAndNewlines))
+                // A peer message's user line wraps the enqueued bare tag: match it by its tags
+                if let sig = PeerParser.bareTagsSignature(text) { enqueuedForDedup.insert(sig) }
             } else if op == "remove" || op == "dequeue" {
                 if let ts = json["timestamp"] as? String {
                     removeTimestamps.append(ts)
@@ -149,6 +191,11 @@ actor JSONLTailer {
                     enqueuedForDedup.remove(trimmed)
                     continue
                 }
+                if let sig = PeerParser.bareTagsSignature(text), enqueuedForDedup.contains(sig),
+                   PeerParser.parse(text)?.otherText.isEmpty == true {
+                    enqueuedForDedup.remove(sig)
+                    continue
+                }
             }
             // Reposition synthetic queue events to when they were processed (remove/dequeue time)
             if event.type == .user, event.uuid.hasPrefix("q-"), removeIdx < removeTimestamps.count {
@@ -164,7 +211,34 @@ actor JSONLTailer {
             }
             events.append(event)
         }
-        return events
+        return mergeCompactionSummaries(events)
+    }
+
+    /// The transcript writes a compact_boundary followed by the summary as a user line; show them
+    /// as ONE marker carrying the summary text. A summary with no boundary stays as it is.
+    static func mergeCompactionSummaries(_ events: [SessionEvent]) -> [SessionEvent] {
+        var out: [SessionEvent] = []
+        for e in events {
+            if e.type == .compaction, e.text != nil,
+               let lastIdx = out.indices.last(where: { out[$0].type == .compaction }),
+               out[lastIdx].text == nil, out.count - lastIdx <= 3 {
+                let m = out[lastIdx]
+                out[lastIdx] = SessionEvent(uuid: m.uuid, timestamp: m.timestamp, type: .compaction, text: e.text,
+                                            thinking: nil, toolUse: nil, toolResults: nil, model: nil,
+                                            durationMs: m.durationMs, compactPreTokens: m.compactPreTokens,
+                                            compactPostTokens: m.compactPostTokens)
+                continue
+            }
+            // The transcript writes the "/compact" command line after the boundary; show the
+            // user's command first, then the marker.
+            if e.type == .user, e.text?.hasPrefix("/compact") == true,
+               let lastIdx = out.indices.last(where: { out[$0].type == .compaction }), out.count - lastIdx <= 3 {
+                out.insert(e, at: lastIdx)
+                continue
+            }
+            out.append(e)
+        }
+        return out
     }
 
     /// Scan tail of JSONL for the last turn_duration timestamp to survive restarts.

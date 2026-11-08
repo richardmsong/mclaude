@@ -2,7 +2,7 @@
 
 Record a bug with spec context so it's actionable for a future `/feature-change` session. Does not fix the bug — just documents it.
 
-Bugs live in `.agent/bugs/` as numbered markdown files. When a bug is fixed (by dev-harness), it moves to `.agent/bugs/fixed/`.
+Bugs live in `.agent/bugs/` as numbered markdown files. When a bug is fixed (via `/feature-change`), it moves to `.agent/bugs/fixed/`.
 
 ## Usage
 
@@ -119,7 +119,7 @@ Display the bug ID, file path, severity, and fix path.
 ## Rules
 
 - **Don't fix the bug.** This skill documents only. Use `/feature-change` to fix.
-- **Always reference the spec.** If no spec covers this behavior, note that — it may need `/plan-feature` first.
+- **Always reference the spec.** If no spec covers this behavior, note that — `/feature-change` will need to write one first.
 - **Always locate the code.** A bug report without file:line is not actionable.
 - **Check for duplicates first.** Don't duplicate bugs that already exist in `.agent/bugs/`.
 - **Severity guide:**
