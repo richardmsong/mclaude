@@ -364,7 +364,9 @@ Added 2026-11-05 (Richard: every open session should stay reachable by other ses
 - **Server startup:**
   - After orphaned processes from the previous run are stopped, every open session is started.
   - Sessions with a conversation start with `--resume`. Sessions created but never messaged start fresh with their session id.
-  - Launches are staggered by 1 second, in session order, so a restart doesn't spawn every process at once.
+  - Launches go one at a time, in session order. The next session starts once the previous one's MCP servers have finished connecting (none still `pending`, see `docs/plan-mcp-servers.md` → Startup pacing and recovery), or after 60 seconds, whichever comes first. Each session brings up about a dozen MCP servers, and starting them all at once starved the Mac until many timed out.
+  - A session that isn't started at boot (In use), or whose launch fails, doesn't hold up the next one.
+  - A session still waiting its turn shows as `starting`. Sending it a message starts it right away.
   - Sessions that were mid-turn still get the "Continue where you left off" message, as before.
   - A session whose launch fails is retried like a crash (below). It never blocks the server from coming up or other sessions from starting.
 - **New sessions:** a session created with `POST /sessions` starts its process right away, without waiting for the first message.

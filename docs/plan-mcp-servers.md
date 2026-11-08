@@ -105,7 +105,7 @@ These are for the laptop owner only (same check as `/transcripts`). Anyone else 
   - **404** for an unknown name.
 - `DELETE /mcp/servers/:name` → `claude mcp remove -s user`. **404** for an unknown name.
 - `POST /mcp/restart-all` restarts every managed session's process.
-  - Idle sessions restart now, staggered 1 s apart.
+  - Idle sessions restart now, one at a time, paced like server startup (see Startup pacing and recovery).
   - Sessions with a running turn or pending prompt are marked and restart when that turn ends.
   - Stopped (In use) and already-restarting sessions are skipped.
   - Returns `{"restarting": n, "afterTurn": n}`.
@@ -117,6 +117,18 @@ These are for the laptop owner only (same check as `/transcripts`). Anyone else 
 - The transcript gets one line: "↻ Restarted Claude to reload MCP servers."
 - A restart deferred until the turn ends happens right after the turn's result, before queued messages are delivered. Those messages then go to the new process.
 - If the launch fails, the session follows the crash-retry rules from "Session processes".
+
+### Startup pacing and recovery
+
+About 20 sessions with about a dozen MCP servers each used to start within 20 seconds. That starved the Mac so badly that roughly one connection in five hit Claude's 30 s connect timeout, and a server that failed stayed failed until someone tapped Reconnect.
+
+- **Connect timeout:** every session process starts with `MCP_TIMEOUT=90000` (90 s for a server to connect), unless the server's own environment already sets `MCP_TIMEOUT`.
+- **Settling:** after every launch (server startup, Restart, Restart all, crash restart, new or resumed session), the server waits for the process to be ready, then asks `mcp_status` every 2 s (5 s timeout each) until no server is `pending`. That moment is when the session's MCP servers have **settled**. It gives up after 120 s; a status call that times out just counts as still pending.
+- **Pacing:** server startup and Restart all start the next session once the previous one has settled, or after 60 s, whichever comes first. A session whose launch fails, or whose process exits before settling, releases the next one at once.
+- **Automatic reconnect:** once settled, every server with status `failed` is reconnected, all in parallel, through the same path as `POST /sessions/:id/mcp/reconnect`. If any are still `failed` 15 s later, they're reconnected once more. That's at most two automatic tries per server per launch.
+  - `needs-auth`, `disabled` and `connected` servers are left alone.
+  - It stops as soon as the process is replaced, stopped or exits.
+  - Nothing shows in the transcript. The server logs which servers it reconnected and which are still failed. A server that's still failed after both tries shows as failed in the MCP sheet, as before.
 
 ## iOS app
 
