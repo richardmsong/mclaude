@@ -125,7 +125,7 @@ Added 2026-11-08: build 124 crashed in the foreground (an Objective-C exception 
 Richard, 2026-11-08: "catch whenever the screen is blank. I'm seeing it quite often, especially if the server takes a long time loading."
 
 - **What's measured:** which transcript rows are on screen. Each row reports when it becomes visible in the scroll view or stops being visible, including when it's destroyed. Only these on/off changes run any code.
-- **Blank** means a session is open and no row is on screen, for at least 1 s (row swaps during layout leave one-frame gaps), while the app is active. Before the session's events have loaded, that's blank too.
+- **Blank** means a session is open and no row is on screen, for at least 1 s (row swaps during layout leave one-frame gaps), while the app is active. Before the session's events have loaded, that's blank too. A session whose events have loaded and are empty (a new chat) is not blank: there's nothing to show. It becomes blank-eligible again once it has events.
 - **Context kept in memory** (same ring buffers as the alignment probe, shared), plus:
   - the session's event loads: start, end, duration, whether they succeeded, and how many events came back
   - WebSocket connection changes, with the reason

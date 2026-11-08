@@ -255,6 +255,7 @@ Added 2026-11-04. Long sessions used to show only the last ~200 events: the serv
   - The scroll position is kept by re-anchoring, after layout, on the row that was first before the load (`.topLeading`). If the bottom sentinel is on screen too (a short conversation), it scrolls to the bottom instead. If the loader row is still on screen after a page lands (the reader is at the very top, or the page was short), it fetches the next page about 0.3s later, because it won't get another `onAppear` while visible.
   - Page events that duplicate loaded ones are dropped: either the same uuid, or the same type and text within 60s (the transcript copy of a live event). A page that was all duplicates advances the cursor and fetches again (up to 5 times).
   - When `hasMore` is false, the row becomes a muted "Beginning of conversation".
+  - A session with no events (a new chat) shows no row at all: no spinner, no marker.
   - If a load fails, the row reads "Couldn't load earlier messages. Tap to retry".
 - **Exports** (Markdown, plain text, PDF) and **Full Page** screenshots load the full history first, in pages of 500.
 
