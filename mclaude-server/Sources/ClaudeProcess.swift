@@ -48,6 +48,9 @@ final class ClaudeProcess: @unchecked Sendable {
         // launchd gives us a minimal PATH; Claude's Bash tool needs the user's usual one
         let extra = ["/opt/homebrew/bin", "/usr/local/bin", "\(NSHomeDirectory())/.local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
         env["PATH"] = (extra + (env["PATH"]?.split(separator: ":").map(String.init) ?? [])).joined(separator: ":")
+        // 90 s for an MCP server to connect (Claude's default is 30 s, too short while other
+        // sessions are starting theirs; docs/plan-mcp-servers.md → Startup pacing and recovery)
+        if env["MCP_TIMEOUT"] == nil { env["MCP_TIMEOUT"] = "90000" }
         // Claude Code's own OpenTelemetry, to the local collector (docs/plan-observability.md)  // telemetry
         env["CLAUDE_CODE_ENABLE_TELEMETRY"] = "1"  // telemetry
         env["CLAUDE_CODE_ENHANCED_TELEMETRY_BETA"] = "1"  // telemetry: traces

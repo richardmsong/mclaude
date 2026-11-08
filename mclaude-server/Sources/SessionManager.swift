@@ -59,6 +59,7 @@ private final class LiveSession {
     var lastActivity = Date()
     var crashTimes: [Date] = []
     var ready = false                    // the current process has reported in (init or any output)
+    var mcpSettledGeneration = 0         // the generation whose MCP servers finished connecting
     var restartPending = false           // exited unexpectedly or failed to launch; a restart is scheduled
     var stopping = false                 // deliberate stop: exit is not a crash
     var deleted = false
@@ -184,12 +185,14 @@ actor SessionManager {
         }
         publishSessions()
         // Every open session keeps a running process (docs/design-claude-uplift.md → Session
-        // processes), so a restart is invisible: start them all, 1 s apart, in session order.
+        // processes), so a restart is invisible: start them all in session order, one at a time,
+        // each once the previous one's MCP servers have settled (docs/plan-mcp-servers.md).
         let order = sessions.values.sorted(by: { $0.record.index < $1.record.index }).map(\.record.id)
         Task {
-            for (i, id) in order.enumerated() {
-                if i > 0 { try? await Task.sleep(nanoseconds: 1_000_000_000) }
+            for id in order {
+                let before = await self.sessions[id]?.generation ?? 0
                 await self.startAtBoot(id: id)
+                await self.waitForMcpSettle(id: id, after: before)
             }
         }
     }
@@ -819,7 +822,78 @@ actor SessionManager {
             await self.noteProcessExit(id: id, generation: generation, pid: proc.pid, status: status)  // telemetry
             await self.processExited(id: id, generation: generation, status: status, stderr: proc.recentStderr)
         }
+        Task { await self.watchMcp(id: id, generation: generation) }
         return true
+    }
+
+    // MARK: - MCP startup pacing and recovery (docs/plan-mcp-servers.md → Startup pacing and recovery)
+
+    static let mcpSettleLimit: TimeInterval = 120   // give up waiting for `pending` servers
+    static let mcpPaceLimit: TimeInterval = 60      // the next session starts after this at the latest
+    static let mcpRetryDelay: UInt64 = 15_000_000_000
+
+    /// `generation` is still this session's live, running process.
+    private func isCurrent(_ id: String, _ generation: Int) -> Bool {
+        guard let live = sessions[id], live.generation == generation, !live.stopping, !live.deleted,
+              let p = live.process, p.process.isRunning else { return false }
+        return true
+    }
+
+    private static func names(_ servers: [JSONBox], status: String) -> [String] {
+        servers.filter { $0.value["status"] as? String == status }.compactMap { $0.value["name"] as? String }
+    }
+
+    /// After a launch: wait until no MCP server is `pending` (settled), then reconnect any that
+    /// failed, twice at most.
+    private func watchMcp(id: String, generation: Int) async {
+        let start = Date()
+        var settled: [JSONBox]?
+        while Date().timeIntervalSince(start) < Self.mcpSettleLimit {
+            guard isCurrent(id, generation) else { return }
+            if sessions[id]?.ready == true, case .success(let v) = await mcpStatus(id: id, timeout: 5) {
+                guard isCurrent(id, generation) else { return }
+                if Self.names(v.servers, status: "pending").isEmpty { settled = v.servers; break }
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+        guard isCurrent(id, generation), let live = sessions[id] else { return }
+        live.mcpSettledGeneration = generation
+        guard let settled else {
+            print("[mcp] \(id): servers still pending after \(Int(Self.mcpSettleLimit)) s")
+            return
+        }
+        var failed = Self.names(settled, status: "failed")
+        guard !failed.isEmpty else { return }
+        let tried = failed
+        for attempt in 1...2 {
+            print("[mcp] \(id): reconnecting failed \(failed.joined(separator: ", ")) (try \(attempt))")
+            _ = await mcpReconnect(id: id, names: failed)
+            try? await Task.sleep(nanoseconds: Self.mcpRetryDelay)
+            guard isCurrent(id, generation), case .success(let v) = await mcpStatus(id: id, timeout: 5),
+                  isCurrent(id, generation) else { return }
+            failed = Self.names(v.servers, status: "failed").filter(tried.contains)
+            if failed.isEmpty { break }
+        }
+        print("[mcp] \(id): " + (failed.isEmpty ? "reconnected \(tried.joined(separator: ", "))"
+                                               : "still failed after 2 tries: \(failed.joined(separator: ", "))"))
+        Telemetry.shared.log("mclaude.mcp.auto_reconnect", attributes: ["mclaude.session_id": id, "mclaude.mcp.tried": tried.joined(separator: ","), "mclaude.mcp.still_failed": failed.joined(separator: ",")], severity: failed.isEmpty ? 9 : 13)  // telemetry
+    }
+
+    /// Startup / Restart all pacing: return once session `id` (launched, or being restarted,
+    /// after generation `old`) has settled its MCP servers, its launch is over, or 60 s pass.
+    private func waitForMcpSettle(id: String, after old: Int) async {
+        let start = Date()
+        while Date().timeIntervalSince(start) < Self.mcpPaceLimit {
+            guard let live = sessions[id], !live.deleted else { return }
+            if live.generation == old {
+                // Not relaunched (yet): only a deliberate restart that's still stopping is worth waiting for
+                guard live.stopping, let p = live.process, p.process.isRunning else { return }
+            } else {
+                guard let p = live.process, p.process.isRunning else { return }   // launch failed or exited
+                if live.mcpSettledGeneration == live.generation { return }
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
     }
 
     /// Crash watcher (v2 ADR-0051): an exit we didn't ask for restarts the session with --resume,
@@ -897,8 +971,9 @@ actor SessionManager {
         return .restarting
     }
 
-    /// Restart every session: idle ones now (1 s apart), busy ones when their turn ends.
-    /// Stopped (In use) and crash-restarting sessions are skipped.
+    /// Restart every session: idle ones now (one at a time, each once the previous one's MCP
+    /// servers settle), busy ones when their turn ends. Stopped (In use) and crash-restarting
+    /// sessions are skipped.
     func restartAll() -> (restarting: Int, afterTurn: Int) {
         var now: [String] = []
         var later = 0
@@ -912,9 +987,10 @@ actor SessionManager {
             }
         }
         Task {
-            for (i, id) in now.enumerated() {
-                if i > 0 { try? await Task.sleep(nanoseconds: 1_000_000_000) }
+            for id in now {
+                let before = await self.sessions[id]?.generation ?? 0
                 await self.restartIfIdle(id: id)
+                await self.waitForMcpSettle(id: id, after: before)
             }
         }
         return (now.count, later)
