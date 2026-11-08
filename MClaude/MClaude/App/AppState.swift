@@ -264,6 +264,9 @@ final class AppState {
                 .sorted { ($0.element.timestamp, $0.offset) < ($1.element.timestamp, $1.offset) }
                 .map(\.element)
             eventsCache[sessionId] = merged
+            // Loaded with nothing at all (a new chat): there's no older history to page, so the
+            // top row shows nothing instead of a spinner (docs/design-claude-uplift.md → History).
+            if merged.isEmpty { historyComplete.insert(sessionId) }
         }
     }
 
