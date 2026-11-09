@@ -119,7 +119,7 @@ A record whose key already exists isn't written again. So a server restart that 
 
 ### Event enrichment (live stream and history pages)
 
-The event model gains three optional fields. Clients that don't know them ignore them, and `text`, `toolUse` and `toolResults` are unchanged.
+The event model gains four optional fields. Clients that don't know them ignore them, and `text`, `toolUse` and `toolResults` are unchanged.
 
 **`peerMessages: [PeerMessage]`:**
 - On a `user` event that holds one or more `<cross-session-message>` tags, from either delivery form: one entry per tag, in order.
@@ -129,6 +129,9 @@ The event model gains three optional fields. Clients that don't know them ignore
 - Only on a `user` event that has `peerMessages`.
 - It's the event's text with every tag removed, the `Another Claude session sent a message:` line and the `This came from another Claude session…` trailer removed, and whitespace trimmed.
 - It's omitted when empty. When present, the app shows it as a normal user bubble after the cards.
+
+**`quiet: true`:**
+- Only on a top-level `user` event with `peerMessages` that starts a peer turn (docs/design-claude-uplift.md → Session order, read state and background work → Peer turns). Omitted otherwise. Set the same way live and in history.
 
 **`peerDelivery: {toolUseId, status: "delivered"|"failed", error?}`:**
 - On the `tool_result` event of a peer `SendMessage`. `error` is the result's `message`, only when `success` is false.
@@ -306,7 +309,7 @@ A card is **one line** (Richard, 2026-11-09: peer messages "clutter space even i
 A **peer turn** is a turn that a peer message started, with no input from you (docs/design-claude-uplift.md → Session order, read state and background work). Coordination between sessions often runs several turns, each with a From card, some work, a reply and a To card. The transcript folds them so they don't bury your own conversation.
 
 **What folds:**
-- In the transcript, a turn is the run of rows from a user event up to the next user event (design-claude-uplift → Work groups and thinking). A turn folds when its user event has `peerMessages` and no `peerOtherText`.
+- In the transcript, a turn is the run of rows from a user event up to the next user event (design-claude-uplift → Work groups and thinking). A turn folds when the server marked its user event `quiet` (Event enrichment): it starts a peer turn. A peer message delivered mid-turn, or a reply to a message sent on your behalf, isn't marked and doesn't fold. Events from a server that doesn't send `quiet` never fold.
 - Back-to-back folding turns form **one** exchange row. Anything else between them (your message, a task notification, a turn that doesn't fold) ends the exchange.
 - A turn never folds when it holds something that needs you: an AskUserQuestion card, a plan (`ExitPlanMode`) or a Blocked card. Nor does the last turn while the session is waiting on you.
 - Pending messages, the working indicator and the queue stay outside, at the bottom, as always.

@@ -75,6 +75,9 @@ public struct SessionEvent: Codable, Sendable, Identifiable {
     public var peerOtherText: String? = nil
     /// On the tool_result of a peer `SendMessage`.
     public var peerDelivery: PeerDelivery? = nil
+    /// The server marked this user line as the start of a quiet peer turn (docs/plan-peer-messages.md
+    /// → Event enrichment): the transcript folds it. Mid-turn deliveries and replies to your requests aren't.
+    public var quiet: Bool? = nil
 
     public var id: String { uuid }
 

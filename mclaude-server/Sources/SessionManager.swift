@@ -163,6 +163,8 @@ private final class LiveSession {
     var peerTurn: String?
     /// …and the peer's Claude session id, when resolved
     var peerTurnPeer: String?
+    /// Who this session last messaged from which kind of turn (decides quiet peer turns)
+    var peerState = PeerTurnState()
     /// Background tasks (running set mirrored into record.backgroundTasks)
     var tasks: BackgroundTaskTracker
     /// Interrupted-tasks note for the process just launched, until it's sent
@@ -261,7 +263,8 @@ actor SessionManager {
                 let past = peers.enrichHistory(
                     await history.getRecentEvents(id: record.id, sessionId: record.claudeSessionId, cwd: record.cwd, count: 200),
                     observing: record.claudeSessionId)
-                for event in past { append(event, to: live, broadcast: false) }
+                let marked = live.peerState.mark(past)   // quiet peer turns, same rule as live
+                for event in marked { append(event, to: live, broadcast: false) }
                 if let last = past.last(where: { $0.type == .system }), let date = Date.fromISO(last.timestamp) {
                     live.statusSince = date
                 }
@@ -518,7 +521,7 @@ actor SessionManager {
         // Rebuild the visible history from the transcript, as start() does
         let past = peers.enrichHistory(await history.getRecentEvents(id: record.id, sessionId: t.id, cwd: t.cwd, count: 200),
                                        observing: t.id)
-        for event in past { append(event, to: live, broadcast: false) }
+        for event in live.peerState.mark(past) { append(event, to: live, broadcast: false) }
         if let last = past.last, let date = Date.fromISO(last.timestamp) {
             live.statusSince = date
             live.lastActivity = date
@@ -598,7 +601,8 @@ actor SessionManager {
         guard let live = sessions[id] else { return nil }
         let page = await history.historyPage(sessionId: live.record.claudeSessionId, cwd: live.record.cwd,
                                              before: before, beforeTimestamp: beforeTimestamp, limit: limit)
-        return (peers.enrichHistory(page.events, observing: live.record.claudeSessionId), page.hasMore)
+        var state = PeerTurnState()   // an older page is classified on its own
+        return (state.mark(peers.enrichHistory(page.events, observing: live.record.claudeSessionId)), page.hasMore)
     }
 
     /// Claude session UUID of a session this server runs (nil for k8s or unknown ids).
@@ -1535,8 +1539,10 @@ actor SessionManager {
                                      thinking: nil, toolUse: nil, toolResults: nil, model: nil, durationMs: nil)
             }
             // A mid-turn peer message is replayed when Claude takes it; its timestamp is the enqueue
-            let enriched = observePeers(tag(event, parentToolUse, live), live, receivedAt: json["timestamp"] as? String)
-            if parentToolUse == nil, enriched.type == .user { notePeerTurn(live, enriched, startsTurn: startsTurn) }
+            var enriched = observePeers(tag(event, parentToolUse, live), live, receivedAt: json["timestamp"] as? String)
+            if parentToolUse == nil, enriched.type == .user, notePeerTurn(live, enriched, startsTurn: startsTurn) {
+                enriched.quiet = true                       // the app folds this turn
+            }
             append(enriched, to: live)
             if event.type == .toolResult { notifyBlocked(live, event) }
             if parentToolUse == nil, event.type == .toolResult {
@@ -1571,7 +1577,9 @@ actor SessionManager {
                         agentId: toolId, agentType: input["subagent_type"] as? String ?? "general-purpose",
                         description: input["description"] as? String ?? "", parentToolUseId: toolId)
                 }
-                append(observePeers(tag(event, parentToolUse, live), live), to: live)
+                let enriched = observePeers(tag(event, parentToolUse, live), live)
+                live.peerState.noteSend(enriched, fromQuietTurn: live.peerTurn != nil)
+                append(enriched, to: live)
                 if parentToolUse == nil, event.type == .text, let text = event.text, !text.isEmpty {
                     live.lastAssistantText = text
                 }
@@ -1807,18 +1815,23 @@ actor SessionManager {
     /// A top-level user line Claude took: a peer-only line that starts a turn makes it a peer turn;
     /// any other line (the user's message delivered mid-turn) ends one. Replayed task notifications
     /// and further peer-only lines don't count.
-    private func notePeerTurn(_ live: LiveSession, _ event: SessionEvent, startsTurn: Bool) {
+    /// True when `event` starts a quiet peer turn: peer-only, and not a reply to a message this
+    /// session sent from a turn the user started.
+    @discardableResult
+    private func notePeerTurn(_ live: LiveSession, _ event: SessionEvent, startsTurn: Bool) -> Bool {
         let sender = Self.peerOnlySender(event)
         if startsTurn {
-            live.peerTurn = sender
-            live.peerTurnPeer = sender == nil ? nil : event.peerMessages?.first?.peer.claudeSessionId
-            if sender != nil { publishSessions() }
-            return
+            let quiet = sender != nil && live.peerState.isQuietStart(event)
+            live.peerTurn = quiet ? sender : nil
+            live.peerTurnPeer = quiet ? event.peerMessages?.first?.peer.claudeSessionId : nil
+            if quiet { publishSessions() }
+            return quiet
         }
         guard live.peerTurn != nil, sender == nil,
-              !JSONLParser.isOnlyTaskNotifications(event.text ?? "") else { return }
+              !JSONLParser.isOnlyTaskNotifications(event.text ?? "") else { return false }
         live.peerTurn = nil
         publishSessions()
+        return false
     }
 
     /// Peer messages in a live event: record them and attach peerMessages / peerDelivery.

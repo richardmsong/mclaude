@@ -215,6 +215,8 @@ struct SessionEvent: Codable, Sendable {
     var peerOtherText: String? = nil
     /// tool_result of a peer SendMessage.
     var peerDelivery: PeerDelivery? = nil
+    /// On the user line that starts a quiet peer turn (docs/plan-peer-messages.md → Event enrichment)
+    var quiet: Bool? = nil
 
     init(uuid: String, timestamp: String, type: SessionEventType,
          text: String?, thinking: String?, toolUse: ToolUseBlock?,
