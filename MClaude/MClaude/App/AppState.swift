@@ -385,6 +385,18 @@ final class AppState {
         guard !historyComplete.contains(sessionId), !historyLoading.contains(sessionId) else { return false }
         historyLoading.insert(sessionId)
         defer { historyLoading.remove(sessionId) }
+        let pageStart = Date()   // telemetry: stall and blank evidence (docs/plan-observability.md)
+        Task { @MainActor in
+            TranscriptProbe.shared.note(.loads, ["event": "history_start", "session_id": sessionId, "limit": limit, "at": pageStart])
+        }
+        var added = 0
+        defer {
+            let end = Date(), n = added
+            Task { @MainActor in
+                TranscriptProbe.shared.note(.loads, ["event": "history_end", "session_id": sessionId, "added": n,
+                                                     "ms": Int(end.timeIntervalSince(pageStart) * 1000), "at": end])
+            }
+        }
 
         let cached = eventsCache[sessionId] ?? []
         var cursor = cached.first
@@ -402,6 +414,7 @@ final class AppState {
             cursor = first
         }
         guard !novel.isEmpty else { return false }
+        added = novel.count
         eventsCache[sessionId] = novel + (eventsCache[sessionId] ?? [])
         unsavedTranscripts.insert(sessionId)
         return true
