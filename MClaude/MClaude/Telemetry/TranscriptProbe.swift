@@ -131,8 +131,10 @@ final class TranscriptProbe {
     /// Sessions whose events have loaded successfully at least once.
     private var loadedSessions: Set<String> = []
     private var blankCheck: DispatchWorkItem?
-    private var blankEpisode: (span: Telemetry.Span, since: Date, reported: Bool)?
-    private var lastBlankReport = Date.distantPast
+    private var blankEpisode: (span: Telemetry.Span, since: Date, reported: Bool, kind: String, scrollAtBlank: Any)?
+    /// Last report per blank kind: a slow first load must not use up the report for a rendering
+    /// blank right after it (docs/plan-observability.md → Blank screen probe, Ops F-8).
+    private var lastBlankReport: [String: Date] = [:]
 
     /// Diagnostics only (docs/plan-observability.md → Blank screen probe → Diagnostics): the same
     /// on/off changes keyed by row view instance ("id#token"), never cleared by context(), and the
@@ -183,8 +185,16 @@ final class TranscriptProbe {
             if let ep = blankEpisode {
                 blankEpisode = nil
                 let seconds = Date().timeIntervalSince(ep.since) + 1.0
-                Telemetry.shared.log("mclaude.transcript.unblanked",
-                                     attributes: ["duration_s": seconds, "reported": ep.reported,
+                // Every episode, reported or not, keeps its evidence (Ops F-8).
+                var body: [String: Any] = [
+                    "session_id": sessionId, "event_count": eventCount, "kind": ep.kind,
+                    "duration_s": seconds, "reported": ep.reported,
+                    "scroll_view_at_blank": ep.scrollAtBlank,
+                    "scroll_view_at_unblank": Self.scrollState(viewportWidth: viewport?.width),
+                ]
+                for ring in Ring.allCases { body["recent_\(ring.rawValue)"] = rings[ring] ?? [] }
+                Telemetry.shared.log("mclaude.transcript.unblanked", body: Telemetry.json(body),
+                                     attributes: ["duration_s": seconds, "reported": ep.reported, "kind": ep.kind,
                                                   "mclaude.session_id": sessionId, "event_count": eventCount],
                                      in: ep.span.context)
                 ep.span.end(attributes: ["duration_s": seconds])
@@ -195,37 +205,30 @@ final class TranscriptProbe {
     private func confirmBlank() {
         guard isBlank, blankEpisode == nil,
               UIApplication.shared.applicationState == .active else { return }
-        let span = Telemetry.shared.startSpan("transcript.blank", attributes: ["mclaude.session_id": sessionId])
-        let report = Date().timeIntervalSince(lastBlankReport) > 120
-        blankEpisode = (span, Date(), report)
+        let kind = eventCount > 0 ? "rows_offscreen" : "not_loaded"
+        let span = Telemetry.shared.startSpan("transcript.blank",
+                                              attributes: ["mclaude.session_id": sessionId, "kind": kind])
+        let report = Date().timeIntervalSince(lastBlankReport[kind] ?? .distantPast) > 120
+        let scrollState = Self.scrollState(viewportWidth: viewport?.width)
+        blankEpisode = (span, Date(), report, kind, scrollState)
         guard report else { return }
-        lastBlankReport = Date()
+        lastBlankReport[kind] = Date()
 
         var body: [String: Any] = [
-            "session_id": sessionId, "event_count": eventCount, "visible_rows": 0,
+            "session_id": sessionId, "event_count": eventCount, "visible_rows": 0, "kind": kind,
             "since_session_open_s": Date().timeIntervalSince(sessionOpenedAt),
             "visible_instances": visibleInstances.count, "live_instances": liveInstances.count,
             "visible_instance_examples": Array(visibleInstances.sorted().prefix(10)),
             "live_instance_examples": Array(liveInstances.sorted().prefix(10)),
             "bottom_sentinel_visible": bottomSentinelVisible,
         ]
-        if let sv = Self.transcriptScrollView(viewportWidth: viewport?.width) {
-            body["scroll_view"] = [
-                "offset_y": Double(sv.contentOffset.y), "offset_x": Double(sv.contentOffset.x),
-                "content_height": Double(sv.contentSize.height), "content_width": Double(sv.contentSize.width),
-                "bounds_height": Double(sv.bounds.height),
-                "inset_top": Double(sv.adjustedContentInset.top), "inset_bottom": Double(sv.adjustedContentInset.bottom),
-                "dragging": sv.isDragging, "decelerating": sv.isDecelerating,
-            ]
-        } else {
-            body["scroll_view"] = "not found"
-        }
+        body["scroll_view"] = scrollState
         for ring in Ring.allCases { body["recent_\(ring.rawValue)"] = rings[ring] ?? [] }
         let ctx = span.context
         let capturedAt = ISO8601DateFormatter.withFraction.string(from: Date())   // drawn synchronously below
         Telemetry.shared.log("mclaude.rule.broken", body: Telemetry.json(body),
                              attributes: ["rule": "transcript_blank", "mclaude.session_id": sessionId,
-                                          "event_count": eventCount],
+                                          "event_count": eventCount, "kind": kind],
                              in: ctx, severity: 13)
         TelemetryScreenshot.capture { path in
             Telemetry.shared.log("mclaude.rule.screenshot", body: path,
@@ -235,7 +238,19 @@ final class TranscriptProbe {
         }
     }
 
-    /// The transcript's UIScrollView, read only when a blank is confirmed: the tallest vertical
+    /// The transcript scroll view's state, for blank reports and unblank records.
+    private static func scrollState(viewportWidth: CGFloat?) -> Any {
+        guard let sv = transcriptScrollView(viewportWidth: viewportWidth) else { return "not found" }
+        return [
+            "offset_y": Double(sv.contentOffset.y), "offset_x": Double(sv.contentOffset.x),
+            "content_height": Double(sv.contentSize.height), "content_width": Double(sv.contentSize.width),
+            "bounds_height": Double(sv.bounds.height),
+            "inset_top": Double(sv.adjustedContentInset.top), "inset_bottom": Double(sv.adjustedContentInset.bottom),
+            "dragging": sv.isDragging, "decelerating": sv.isDecelerating,
+        ] as [String: Any]
+    }
+
+    /// The transcript's UIScrollView, read only when a blank is confirmed or ends: the tallest vertical
     /// scroll view as wide as the viewport.
     private static func transcriptScrollView(viewportWidth: CGFloat?) -> UIScrollView? {
         guard let window = UIApplication.shared.connectedScenes

@@ -134,8 +134,11 @@ Richard, 2026-11-08: "catch whenever the screen is blank. I'm seeing it quite of
   - the transcript scroll view's state, read only at that moment: vertical and horizontal offset, content size, visible height, insets, and whether it's being dragged or decelerating
   - all the ring buffers
   - a screenshot, as for the other probes
-  - at most one report per 2 minutes
-- **When rows come back:** a `transcript.unblanked` record with how long the screen was blank.
+  - a `kind`, also as a record attribute: `rows_offscreen` when the session has events (rows exist and none is on screen), `not_loaded` when it has none yet (its first load is in flight or failed)
+  - at most one report per 2 minutes **for each kind**, so a slow first load can't use up the report for a rendering blank right after it (F-8: a send-time blank with 200 events went unreported 27 s after a `not_loaded` one)
+- **When rows come back:** a `transcript.unblanked` record with how long the screen was blank, its `kind`, and whether it was reported. Every episode, reported or not, carries a body: the scroll view's state read when the blank was confirmed (same fields as the report) and again when rows came back, and all the ring buffers as of that moment.
+- **Scroll reasons:** each `pin` entry in the scrolls ring says why it ran: `send` (the user sent a message), `queue` (a sent message landed in the server queue), `events` (the event count changed), `first_load` (0 → N), or `collapse` (a finished turn collapsed).
+- **Saved-copy restores** (docs/design-claude-uplift.md → Saved transcripts) go in the loads ring as `disk_restore`, with the event count and how long the read took.
 - **Diagnostics** (added 2026-11-09, Ops findings F-2/F-5: 14 of 20 reports were false alarms, with the rows on screen, and 6 were real blanks; the earlier data couldn't tell them apart). They only observe; what counts as blank is unchanged.
   - Each row view gets its own instance token. Besides the visible set keyed by row id, which drives the rule, the probe keeps a set of visible instances and a set of live instances (appeared and not yet disappeared). The report carries `visible_instances` and `live_instances` with up to 10 examples. Visible instances while `visible_rows` is 0 mean the id-keyed bookkeeping lost them (a false alarm). No visible instances but live instances mean rows are built and off screen. No live instances mean the list built nothing.
   - A `rows` ring of every on/off change: id, instance, visible, and source (geometry or disappear), and the id set's size after it. It keeps the last 80 changes.

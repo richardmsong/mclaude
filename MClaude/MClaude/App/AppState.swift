@@ -47,6 +47,14 @@ final class AppState {
     var loadedLines: [String: Int] = [:]  // displayId -> lines loaded so far
     var eventsCache: [String: [SessionEvent]] = [:]  // displayId -> structured events
     private var sessionIdMap: [String: String] = [:]  // displayId -> sessionId (tracks /clear)
+    /// Saved transcripts (docs/design-claude-uplift.md → Saved transcripts).
+    private(set) var transcriptStore: TranscriptStore
+    /// Sessions already looked up on disk in this process (restore at most once).
+    private var restoreTried: Set<String> = []
+    /// Sessions showing a restored copy that no fresh load has joined yet.
+    private var restoredFromDisk: Set<String> = []
+    /// Sessions whose events changed since they were last saved.
+    private var unsavedTranscripts: Set<String> = []
 
     // Skills autocomplete
     var skills: [SkillSuggestion] = []
@@ -68,6 +76,7 @@ final class AppState {
         let config = ServerConfig(host: host, port: resolvedPort, token: token.isEmpty ? nil : token)
         self.client = APIClient(config: config)
         self.telemetry = TelemetryClient(config: ServerConfig(host: host, port: resolvedPort))
+        self.transcriptStore = TranscriptStore(host: host, port: resolvedPort)
         configureObservability()
     }
 
@@ -128,6 +137,7 @@ final class AppState {
     }
 
     func signOut() {
+        TranscriptStore.removeAll()
         authToken = ""
         userName = ""
         userEmail = ""
@@ -147,6 +157,8 @@ final class AppState {
                 for session in sessions {
                     if let oldSessionId = self.sessionIdMap[session.id], oldSessionId != session.sessionId {
                         self.eventsCache.removeValue(forKey: session.id)
+                        self.transcriptStore.remove(session.id)
+                        self.restoredFromDisk.remove(session.id)
                         self.outputCache.removeValue(forKey: session.id)
                         self.loadedLines.removeValue(forKey: session.id)
                     }
@@ -205,6 +217,7 @@ final class AppState {
                     let insertIdx = events.lastIndex { $0.timestamp <= event.timestamp }.map { $0 + 1 } ?? 0
                     events.insert(event, at: insertIdx)
                     self.eventsCache[id] = events
+                    self.unsavedTranscripts.insert(id)
                 }
             }
         }
@@ -241,6 +254,7 @@ final class AppState {
     }
 
     func loadEvents(sessionId: String) async {
+        await restoreSavedTranscript(sessionId: sessionId)
         let loadStart = Date()   // telemetry: blank-screen evidence (docs/plan-observability.md)
         Task { @MainActor in
             TranscriptProbe.shared.note(.loads, ["event": "load_start", "session_id": sessionId, "at": loadStart])
@@ -255,6 +269,10 @@ final class AppState {
         // Always fetch latest events from server (merges with any WS events already cached)
         if let freshEvents = fetched {
             var merged = eventsCache[sessionId] ?? []
+            if restoredFromDisk.remove(sessionId) != nil {
+                // First fresh page over a restored copy (docs/design-claude-uplift.md → Saved transcripts)
+                merged = TranscriptStore.merge(restored: merged, fresh: freshEvents)
+            }
             var known = Set(merged.map(\.uuid))
             for event in freshEvents where known.insert(event.uuid).inserted {
                 merged.append(event)
@@ -267,7 +285,51 @@ final class AppState {
             // Loaded with nothing at all (a new chat): there's no older history to page, so the
             // top row shows nothing instead of a spinner (docs/design-claude-uplift.md → History).
             if merged.isEmpty { historyComplete.insert(sessionId) }
+            saveTranscript(sessionId: sessionId)
         }
+    }
+
+    // MARK: - Saved transcripts (docs/design-claude-uplift.md → Saved transcripts)
+
+    /// A session opening with nothing in memory shows its saved copy right away, before the
+    /// events request goes out.
+    private func restoreSavedTranscript(sessionId: String) async {
+        let shouldTry = await MainActor.run { () -> Bool in
+            guard (eventsCache[sessionId] ?? []).isEmpty else { return false }
+            return restoreTried.insert(sessionId).inserted
+        }
+        guard shouldTry else { return }
+        let store = transcriptStore
+        let started = Date()
+        let saved = await Task.detached(priority: .userInitiated) { store.load(sessionId) }.value
+        await MainActor.run {
+            guard let saved, !saved.events.isEmpty, (eventsCache[sessionId] ?? []).isEmpty else { return }
+            if let current = sessions.first(where: { $0.id == sessionId })?.sessionId,
+               let savedId = saved.claudeSessionId, savedId != current {
+                store.remove(sessionId)   // /clear'ed while the app wasn't running
+                return
+            }
+            eventsCache[sessionId] = saved.events
+            restoredFromDisk.insert(sessionId)
+            TranscriptProbe.shared.note(.loads, ["event": "disk_restore", "session_id": sessionId,
+                                                 "events": saved.events.count,
+                                                 "ms": Int(Date().timeIntervalSince(started) * 1000)])
+        }
+    }
+
+    private func saveTranscript(sessionId: String) {
+        unsavedTranscripts.remove(sessionId)
+        guard let events = eventsCache[sessionId], !events.isEmpty else { return }
+        let store = transcriptStore
+        let claudeId = sessions.first { $0.id == sessionId }?.sessionId ?? sessionIdMap[sessionId]
+        let newest = Array(events.suffix(TranscriptStore.keep))
+        Task.detached(priority: .utility) { store.save(sessionId, claudeSessionId: claudeId, events: newest) }
+    }
+
+    /// App going to the background: save every session whose events changed, and prune old files.
+    func saveTranscripts() {
+        for id in unsavedTranscripts { saveTranscript(sessionId: id) }
+        Task.detached(priority: .utility) { TranscriptStore.pruneOld() }
     }
 
     /// Rename a session (Info screen), then refresh it right away instead of waiting for the
@@ -289,6 +351,7 @@ final class AppState {
         sessions.removeAll { $0.id == id }
         do {
             try await client.endSession(id: id)
+            transcriptStore.remove(id)
         } catch {
             if let removed, !sessions.contains(where: { $0.id == id }) {
                 sessions = Self.sortedSessions(sessions + [removed])
@@ -340,6 +403,7 @@ final class AppState {
         }
         guard !novel.isEmpty else { return false }
         eventsCache[sessionId] = novel + (eventsCache[sessionId] ?? [])
+        unsavedTranscripts.insert(sessionId)
         return true
     }
 
@@ -392,6 +456,7 @@ final class AppState {
         let config = ServerConfig(host: serverHost, port: serverPort, token: token)
         client = APIClient(config: config)
         telemetry = TelemetryClient(config: ServerConfig(host: serverHost, port: serverPort))
+        transcriptStore = TranscriptStore(host: serverHost, port: serverPort)
         configureObservability()
         connectWebSocket()
     }
