@@ -505,16 +505,13 @@ struct ConversationView: View {
                 if !new.isEmpty {
                     // The running turn's groups stay open so the work can be watched
                     liveExpanded.formUnion(new)
-                } else if !old.isEmpty, isNearBottom {
-                    // Turn over: fold its work away, unless the reader is scrolled up (then
-                    // nothing should jump under them). Animated, so the list resizes smoothly
-                    // instead of in one jump.
-                    withAnimation(.easeInOut(duration: 0.25)) { liveExpanded.subtract(old) }
-                    Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(300))
-                        pinToBottom(proxy, animated: false, reason: "collapse")
-                    }
                 }
+                // A finished turn's groups stay open for the life of the screen; they start
+                // collapsed the next time the session opens. Folding them in place while the
+                // reader followed the bottom stranded the lazy stack: it kept the old, taller
+                // content height and left the offset where it builds no rows, a blank screen that
+                // no scroll call recovered (Ops F-13; reproduced in the simulator, and a fold with
+                // or without animation, delayed, re-pinned or not all blanked; no fold never did).
             }
             .onChange(of: events.count) { old, _ in
                 // First load (0 → N): jump, don't animate across rows that were never laid out
@@ -2468,11 +2465,18 @@ private struct OverscrollRecovery: ViewModifier {
                     && g.contentOffset.y + g.containerSize.height > g.contentSize.height + g.contentInsets.bottom + 48
             } action: { _, isPastEnd in
                 pastEnd = isPastEnd
+                // telemetry (Ops F-14: past the end on resume, and no recovery ran)
+                TranscriptProbe.shared.note(.scrolls, ["source": "past_end", "on": isPastEnd,
+                                                       "app_active": UIApplication.shared.applicationState == .active])
             }
             .task(id: pastEnd) {
                 guard pastEnd else { return }
                 try? await Task.sleep(for: .milliseconds(250))
-                guard !Task.isCancelled, pastEnd, !isUserScrolling() else { return }
+                guard !Task.isCancelled, pastEnd, !isUserScrolling() else {
+                    TranscriptProbe.shared.note(.scrolls, ["source": "overscroll_skipped", "cancelled": Task.isCancelled,
+                                                           "past_end": pastEnd, "user_scrolling": isUserScrolling()])   // telemetry
+                    return
+                }
                 recover()
             }
         } else {
