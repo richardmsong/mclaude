@@ -124,7 +124,9 @@ Added 2026-11-08: build 124 crashed in the foreground (an Objective-C exception 
 
 Richard, 2026-11-08: "catch whenever the screen is blank. I'm seeing it quite often, especially if the server takes a long time loading."
 
-- **What's measured:** which transcript rows are on screen. Each row reports when it becomes visible in the scroll view or stops being visible, including when it's destroyed. Only these on/off changes run any code.
+- **What's measured:** which transcript rows are on screen. Each row view (each instance, with its own token) reports when its visibility in the scroll view changes, and when it appears or disappears. Only these changes run any code.
+  - A row is **on screen** when its view has appeared and not disappeared, and its last measured visibility is on. The visibility is kept across a disappear: the lazy stack can fire disappear and then appear again on a view that never moved, and the visibility callback only fires on a change, so it won't report "visible" again (Ops F-9: the rows in the screenshot had last reported "disappeared").
+  - Opening another session clears nothing; the old session's row views disappear on their own. Clearing on open wiped rows of the new session that had already reported (Ops F-11: a row reported visible in the same millisecond as the switch, then stayed put).
 - **Blank** means a session is open and no row is on screen, for at least 1 s (row swaps during layout leave one-frame gaps), while the app is active. Before the session's events have loaded, that's blank too. A session whose events have loaded and are empty (a new chat) is not blank: there's nothing to show. It becomes blank-eligible again once it has events.
 - **Context kept in memory** (same ring buffers as the alignment probe, shared), plus:
   - the session's event loads: start, end, duration, whether they succeeded, and how many events came back
@@ -138,11 +140,11 @@ Richard, 2026-11-08: "catch whenever the screen is blank. I'm seeing it quite of
   - at most one report per 2 minutes **for each kind**, so a slow first load can't use up the report for a rendering blank right after it (F-8: a send-time blank with 200 events went unreported 27 s after a `not_loaded` one)
 - **When rows come back:** a `transcript.unblanked` record with how long the screen was blank, its `kind`, and whether it was reported. Every episode, reported or not, carries a body: the scroll view's state read when the blank was confirmed (same fields as the report) and again when rows came back, and all the ring buffers as of that moment.
 - **Scroll reasons:** each `pin` entry in the scrolls ring says why it ran: `send` (the user sent a message), `queue` (a sent message landed in the server queue), `events` (the event count changed), `first_load` (0 → N), or `collapse` (a finished turn collapsed).
-- **Saved-copy restores** (docs/design-claude-uplift.md → Saved transcripts) go in the loads ring as `disk_restore`, with the event count and how long the read took.
+- **Saved-copy restores** (docs/design-claude-uplift.md → Saved transcripts) go in the loads ring as `disk_restore`, with the event count and how long the read took. **Older-history pages** go there too, as `history_start` (with the page size) and `history_end` (events added, duration).
 - **Diagnostics** (added 2026-11-09, Ops findings F-2/F-5: 14 of 20 reports were false alarms, with the rows on screen, and 6 were real blanks; the earlier data couldn't tell them apart). They only observe; what counts as blank is unchanged.
-  - Each row view gets its own instance token. Besides the visible set keyed by row id, which drives the rule, the probe keeps a set of visible instances and a set of live instances (appeared and not yet disappeared). The report carries `visible_instances` and `live_instances` with up to 10 examples. Visible instances while `visible_rows` is 0 mean the id-keyed bookkeeping lost them (a false alarm). No visible instances but live instances mean rows are built and off screen. No live instances mean the list built nothing.
-  - A `rows` ring of every on/off change: id, instance, visible, and source (geometry or disappear), and the id set's size after it. It keeps the last 80 changes.
-  - A `context` ring: each `context()` call, with whether it opened a session and how many rows it cleared.
+  - The report carries `visible_instances` (instances whose last visibility is on, appeared or not) and `live_instances` (appeared and not disappeared), with up to 10 examples each. No live instances mean the list built nothing; live instances that are all off mean rows are built and off screen.
+  - A `rows` ring of every change: id, instance, visible, live, source (`geometry`, `appear` or `gone`), and the number of distinct row ids on screen after it. It keeps the last 80 changes.
+  - A `context` ring: each `context()` call, with whether it opened a session and how many row ids were on screen.
   - A `scene` ring: app active, inactive, background and foreground changes.
   - Whether the bottom sentinel is on screen (`bottom_sentinel_visible`).
   - `mclaude.rule.screenshot` carries `captured_at`, the phone's capture time. The screenshot is drawn at the report; the server's file name is the upload time.
@@ -156,7 +158,7 @@ Richard, 2026-11-08: "implement the system map/visual obs layer", covering phone
 
 - **Phone** (already sending), plus:
   - **Vitals:** every 10 s while in the foreground, gauges `mclaude.app.cpu` (percent of one core), `mclaude.app.memory` (footprint, bytes), and `mclaude.app.connected` (1 or 0, the WebSocket).
-  - **Main-thread stalls:** a watchdog thread pings the main thread every 50 ms. A stall of 250 ms or more becomes a `mclaude.app.stall` log record (duration, screen, session), sampled at 100%.
+  - **Main-thread stalls:** a watchdog thread pings the main thread every 50 ms. A stall of 250 ms or more becomes a `mclaude.app.stall` log record (duration, screen, session), sampled at 100%. Its body carries when the stall started and the transcript probe's ring buffers, read on the main thread right after it (so they show the work that ran before and during it, such as history pages, loads and scrolls; Ops F-10).
   - **HTTP client spans** for every request to mclaude-server: `HTTP <method>`, with method, path template, status and duration. Each request carries a W3C `traceparent` header, so the server's span joins the same trace.
 - **mclaude-server** (`service.name` = `mclaude-server`), with the same kind of built-in OTLP/JSON exporter as the app, sending to the local collector:
   - **Request spans** (server kind) for every HTTP request: method, route, status, duration, session ID. They continue the phone's trace from `traceparent`.
