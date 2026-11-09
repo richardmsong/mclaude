@@ -181,7 +181,7 @@ struct RootView: View {
     }
 
     private var mostRecentSessionId: String? {
-        appState.sessions.max { $0.lastActivity < $1.lastActivity }?.id
+        appState.sessions.max { $0.orderDate < $1.orderDate }?.id
     }
 
     /// Whether `point` (window coordinates) is on a scroll view whose content is wider than its

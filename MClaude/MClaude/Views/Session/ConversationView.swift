@@ -100,6 +100,8 @@ struct ConversationView: View {
         }
 
         items = Self.foldWork(items, lastTurnRunning: sessionWorking && !exportMode)
+        items = Self.foldPeerExchanges(items, lastTurnRunning: sessionWorking && !exportMode,
+                                       waitingOnYou: hasPendingPrompt)
         if exportMode { return items }
 
         // Pending messages at the bottom (removed by the view model once Claude's copy arrives)
@@ -129,6 +131,9 @@ struct ConversationView: View {
         case agentGroup(toolUse: SessionEvent, subEvents: [SessionEvent])
         /// Folded tool calls / results / narration (never nested).
         indirect case workGroup([(id: String, kind: TimelineKind)])
+        /// Back-to-back peer turns folded into one row (docs/plan-peer-messages.md → Peer exchanges).
+        /// Members are top-level rows, work groups included. `running`: its last turn is running.
+        indirect case peerExchange([(id: String, kind: TimelineKind)], running: Bool)
     }
 
     private enum FoldRole { case boundary, visible, text, work }
@@ -241,6 +246,67 @@ struct ConversationView: View {
         return out
     }
 
+    // MARK: Peer exchanges (docs/plan-peer-messages.md → Peer exchanges)
+
+    /// A user event that holds only peer messages: the start of a peer turn.
+    private static func isPeerOnlyUser(_ e: SessionEvent) -> Bool {
+        e.type == .user && e.subagentInfo == nil && !(e.peerMessages ?? []).isEmpty
+            && (e.peerOtherText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// A row that needs you (a question, a plan, a Blocked card): its turn never folds.
+    private static func needsYou(_ kind: TimelineKind) -> Bool {
+        switch kind {
+        case .event(let e):
+            if e.type == .toolUse, e.toolUse?.name == "AskUserQuestion" || e.toolUse?.name == "ExitPlanMode" { return true }
+            return e.type == .toolResult && AutoModeBlock.inEvent(e)
+        case .workGroup(let members): return members.contains { needsYou($0.kind) }
+        default: return false
+        }
+    }
+
+    /// Fold each run of back-to-back peer turns into one exchange row. A turn is a user event and
+    /// the rows up to the next one; it folds when its user event is peer-only and nothing in it
+    /// needs you. The last turn doesn't fold while the session waits on you.
+    private static func foldPeerExchanges(_ items: [(id: String, kind: TimelineKind)], lastTurnRunning: Bool,
+                                          waitingOnYou: Bool) -> [(id: String, kind: TimelineKind)] {
+        // Split into turns: rows before the first user event, then one turn per user event
+        var turns: [[(id: String, kind: TimelineKind)]] = [[]]
+        for item in items {
+            if case .event(let e) = item.kind, e.type == .user { turns.append([item]) } else { turns[turns.count - 1].append(item) }
+        }
+        var out: [(id: String, kind: TimelineKind)] = []
+        var run: [(id: String, kind: TimelineKind)] = []
+        func flush(running: Bool) {
+            if !run.isEmpty { out.append((id: "px-\(run[0].id)", kind: .peerExchange(run, running: running))) }
+            run = []
+        }
+        for (i, turn) in turns.enumerated() {
+            let isLast = i == turns.count - 1
+            let folds: Bool = {
+                guard i > 0, case .event(let first) = turn[0].kind, isPeerOnlyUser(first) else { return false }
+                if isLast, waitingOnYou { return false }
+                return !turn.contains { needsYou($0.kind) }
+            }()
+            if folds {
+                run.append(contentsOf: turn)
+            } else {
+                flush(running: false)
+                out.append(contentsOf: turn)
+            }
+        }
+        flush(running: lastTurnRunning)
+        return out
+    }
+
+    /// The peer messages in an exchange's rows, in order.
+    private static func exchangeMessages(_ members: [(id: String, kind: TimelineKind)]) -> [PeerMessage] {
+        members.flatMap { member -> [PeerMessage] in
+            if case .event(let e) = member.kind { return e.peerMessages ?? [] }
+            return []
+        }
+    }
+
     /// Work groups in the turn that's running (after the last user event), oldest first.
     private static func liveGroupIds(_ items: [(id: String, kind: TimelineKind)], running: Bool) -> [String] {
         guard running else { return [] }
@@ -310,6 +376,7 @@ struct ConversationView: View {
         case .queue: "queue"
         case .agentGroup: "agent_group"
         case .workGroup: "work_group"
+        case .peerExchange: "peer_exchange"
         }
     }
 
@@ -318,6 +385,8 @@ struct ConversationView: View {
     private func timelineRow(_ item: (id: String, kind: TimelineKind), liveGroupId: String? = nil) -> some View {
         if case .workGroup(let members) = item.kind {
             workGroupBlock(id: item.id, members: members, live: item.id == liveGroupId)
+        } else if case .peerExchange(let members, let running) = item.kind {
+            peerExchangeBlock(id: item.id, members: members, running: running, liveGroupId: liveGroupId)
         } else {
             memberRow(item)
         }
@@ -326,8 +395,8 @@ struct ConversationView: View {
     @ViewBuilder
     private func memberRow(_ item: (id: String, kind: TimelineKind)) -> some View {
         switch item.kind {
-        case .workGroup:
-            EmptyView()   // never nested
+        case .workGroup, .peerExchange:
+            EmptyView()   // rendered by timelineRow
         case .event(let event):
             eventRow(event)
         case .pending(let msg):
@@ -1068,6 +1137,24 @@ struct ConversationView: View {
             }
         }
         .padding(.vertical, 3)
+    }
+
+    /// One row for a run of peer turns ("⇄ Ops · 3 messages · 2m ago" and the last message's
+    /// preview); a tap shows the turns in place (docs/plan-peer-messages.md → Peer exchanges).
+    private func peerExchangeBlock(id: String, members: [(id: String, kind: TimelineKind)], running: Bool,
+                                   liveGroupId: String?) -> PeerExchangeRow<ForEach<[Int], Int, AnyView>> {
+        let expanded = isGroupExpanded(id)
+        return PeerExchangeRow(summary: PeerExchangeSummary(messages: Self.exchangeMessages(members)),
+                               expanded: expanded, running: running,
+                               onToggle: {
+                                   guard !scrollMotion.isSettling else { return }
+                                   groupOverride[id] = !expanded
+                               }) {
+            // AnyView per member breaks the opaque-type cycle (timelineRow renders exchanges)
+            ForEach(Array(members.indices), id: \.self) { i in
+                AnyView(timelineRow(members[i], liveGroupId: liveGroupId).id(members[i].id))
+            }
+        }
     }
 
     // MARK: - Tool use

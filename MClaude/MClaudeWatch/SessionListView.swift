@@ -56,9 +56,12 @@ struct SessionListView: View {
                                 .font(.caption2)
                                 .foregroundStyle(WatchTheme.textSecondary)
                                 .listRowBackground(Color.clear)
-                            section("Needs you", store.needsYou, now: context.date)
-                            section("Working", store.working, now: context.date)
-                            section("Unread", store.unread, now: context.date)
+                            // One list in the snapshot's order (your last input); status is only the dot
+                            ForEach(store.listed) { session in
+                                NavigationLink(value: WatchRoute.session(session.id)) {
+                                    SessionRow(session: session, dot: store.dot(session), now: context.date)
+                                }
+                            }
                             let readCount = store.read.count
                             if readCount > 0 {
                                 NavigationLink(value: WatchRoute.read) {
@@ -84,27 +87,10 @@ struct SessionListView: View {
 
     /// "1 needs you · 2 working · 3 unread", or "All caught up".
     private var summary: String {
-        let parts = [(store.needsYou.count, "needs you"), (store.working.count, "working"), (store.unread.count, "unread")]
+        let parts = [(store.needsYouCount, "needs you"), (store.workingCount, "working"), (store.unreadCount, "unread")]
             .filter { $0.0 > 0 }
             .map { "\($0.0) \($0.1)" }
         return parts.isEmpty ? "All caught up" : parts.joined(separator: " · ")
-    }
-
-    @ViewBuilder
-    private func section(_ title: String, _ sessions: [WatchSession], now: Date) -> some View {
-        if !sessions.isEmpty {
-            Section {
-                ForEach(sessions) { session in
-                    NavigationLink(value: WatchRoute.session(session.id)) {
-                        SessionRow(session: session, unread: store.isUnread(session), now: now)
-                    }
-                }
-            } header: {
-                Text(title.uppercased())
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(WatchTheme.textMuted)
-            }
-        }
     }
 
     private func message(_ text: String) -> some View {
@@ -144,7 +130,7 @@ struct ReadListView: View {
                 }
                 ForEach(store.read) { session in
                     NavigationLink(value: WatchRoute.session(session.id)) {
-                        SessionRow(session: session, unread: false, now: context.date)
+                        SessionRow(session: session, dot: nil, now: context.date)
                     }
                 }
             }
@@ -153,16 +139,16 @@ struct ReadListView: View {
     }
 }
 
-/// Two lines: dot + name, then the age of the last activity.
+/// Two lines: dot + name, then the age of your last input.
 struct SessionRow: View {
     let session: WatchSession
-    let unread: Bool
+    let dot: SessionDot?
     let now: Date
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                StatusDot(state: session.state, unread: unread)
+                if let dot { StatusDot(dot: dot) }
                 Text(session.name)
                     .font(.headline)
                     .foregroundStyle(WatchTheme.textPrimary)
@@ -177,13 +163,20 @@ struct SessionRow: View {
     }
 }
 
+/// Blue = needs you, clay = working, clay ring = background work, green = unread.
 struct StatusDot: View {
-    let state: WatchSession.State
-    var unread: Bool = false
+    let dot: SessionDot
 
     var body: some View {
-        if let color = WatchTheme.dot(state, unread: unread) {
-            Circle().fill(color).frame(width: 8, height: 8).accessibilityHidden(true)
+        Group {
+            switch dot {
+            case .needsYou: Circle().fill(WatchTheme.link)
+            case .working: Circle().fill(WatchTheme.clay)
+            case .background: Circle().strokeBorder(WatchTheme.clay, lineWidth: 1.5)
+            case .unread: Circle().fill(WatchTheme.success)
+            }
         }
+        .frame(width: 8, height: 8)
+        .accessibilityHidden(true)
     }
 }

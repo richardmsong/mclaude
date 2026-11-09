@@ -19,12 +19,14 @@ final class AppState {
     // visibleSessionId suppresses banners for the session already on screen.
     var openSessionRequest: String?
     var visibleSessionId: String? {
-        // Read state for the watch (docs/plan-watch-app.md → Read state): seen on open and on leave.
+        // Server-side read state (docs/design-claude-uplift.md → Session order, read state and
+        // background work): a session shown with the app in front is read.
         didSet {
-            if let oldValue { SeenStore.shared.markSeen(oldValue) }
-            if let visibleSessionId { SeenStore.shared.markSeen(visibleSessionId) }
+            if let visibleSessionId, UIApplication.shared.applicationState == .active { markReadIfUnread(visibleSessionId) }
         }
     }
+    /// Read requests in flight, so a burst of session updates sends one.
+    private var markingRead: Set<String> = []
 
     // Google SSO state
     var userName: String {
@@ -169,9 +171,9 @@ final class AppState {
                 if !sessions.isEmpty || self.sessions.isEmpty {
                     self.sessions = Self.sortedSessions(sessions)
                 }
-                // An update to the session on screen (app in front) is seen as it arrives.
+                // The session on screen (app in front) turning unread is read as it arrives.
                 if let visible = self.visibleSessionId, UIApplication.shared.applicationState == .active {
-                    SeenStore.shared.markSeen(visible)
+                    self.markReadIfUnread(visible)
                 }
                 self.isConnected = true
 
@@ -514,6 +516,23 @@ final class AppState {
     }
 
     /// Oldest first (creation order), id as a stable tie-breaker.
+    /// Tell the server `id` was seen, when it says the session is unread.
+    func markReadIfUnread(_ id: String) {
+        guard sessions.first(where: { $0.id == id })?.isUnread == true else { return }
+        markRead(id)
+    }
+
+    /// Tell the server `id` was seen (watch detail screens and actions always send it).
+    func markRead(_ id: String) {
+        guard !markingRead.contains(id) else { return }
+        markingRead.insert(id)
+        let client = client
+        Task { @MainActor [weak self] in
+            defer { self?.markingRead.remove(id) }
+            try? await client.markRead(id: id)
+        }
+    }
+
     static func sortedSessions(_ sessions: [ClaudeSession]) -> [ClaudeSession] {
         sessions.sorted { ($0.startedAt, $0.id) < ($1.startedAt, $1.id) }
     }

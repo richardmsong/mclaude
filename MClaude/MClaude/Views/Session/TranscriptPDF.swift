@@ -189,8 +189,8 @@ private struct ExportHeader: View {
                 .shadow(color: .black.opacity(0.06), radius: 8, y: 2)
             Spacer(minLength: 0)
             HStack(spacing: 6) {
-                if let dot = session?.status.themeDot {
-                    Circle().fill(dot).frame(width: 7, height: 7)
+                if let dot = session?.dot, dot != .unread {
+                    SessionDotView(dot: dot, size: 7)
                 }
                 Text(session?.displayName ?? "Session \(sessionId)")
                     .font(.claudeUISemibold)

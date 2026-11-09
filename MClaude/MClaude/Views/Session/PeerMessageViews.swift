@@ -7,8 +7,9 @@ import UIKit
 
 // MARK: - Peer card (transcript)
 
-/// Collapsed From/To card for one `PeerMessage`. Resolved peers open the thread on tap; unresolved
-/// ones expand the body inline (Show more / Show less). Long-press copies the full body.
+/// One-line From/To card for one `PeerMessage` (docs/plan-peer-messages.md → Peer card). Resolved
+/// peers open the thread on tap; unresolved ones expand the full message inline when the line cut
+/// something off. Long-press copies the full body.
 struct PeerCard: View {
     let message: PeerMessage
     /// Sent cards only: from the paired tool_result (`sending` until it arrives).
@@ -20,25 +21,25 @@ struct PeerCard: View {
     var canTap: () -> Bool = { true }
 
     @State private var expanded = false
-    @State private var limitedHeight: CGFloat = 0
+    @State private var lineHeight: CGFloat = 0
     @State private var fullHeight: CGFloat = 0
 
     private var sent: Bool { message.isSent }
     private var peer: PeerRef { message.peer ?? PeerRef() }
     private var resolved: Bool { peer.isResolved && onOpenThread != nil }
-    private var truncated: Bool { fullHeight > limitedHeight + 1 }
     private var bodyText: String { message.body.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var preview: String { PeerPreview.text(message) }
+    /// The line doesn't show the whole message: a summary hides the body, the body has more
+    /// lines, or the preview didn't fit.
+    private var cut: Bool {
+        if message.summary != nil, !bodyText.isEmpty { return true }
+        if preview != bodyText { return true }
+        return fullHeight > lineHeight + 1
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            header
-            if let summary = message.summary {
-                Text(summary)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Theme.textPrimary)
-                    .lineLimit(1)
-            }
-            if !bodyText.isEmpty { messageBody }
+            line
             if status == .failed, let error {
                 Text(error)
                     .font(.claudeFootnote)
@@ -46,10 +47,10 @@ struct PeerCard: View {
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            footer
+            if expanded { fullMessage }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
         .claudeCard()
         .contentShape(Rectangle())
@@ -61,38 +62,48 @@ struct PeerCard: View {
                 Label("Copy message", systemImage: "doc.on.doc")
             }
         }
-        .padding(.top, sent ? 3 : 10)
-        .padding(.bottom, sent ? 3 : 4)
+        .padding(.vertical, 3)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityText)
-        .accessibilityAddTraits(resolved || truncated ? .isButton : [])
-        .accessibilityHint(resolved ? "Opens the thread" : truncated ? (expanded ? "Shows less" : "Shows the full message") : "")
+        .accessibilityAddTraits(resolved || cut ? .isButton : [])
+        .accessibilityHint(resolved ? "Opens the thread" : cut ? (expanded ? "Shows less" : "Shows the full message") : "")
         .accessibilityAction { tap() }
         .accessibilityAction(named: "Copy message") { UIPasteboard.general.string = message.body }
     }
 
-    private var header: some View {
+    private var line: some View {
         HStack(spacing: 6) {
             Image(systemName: sent ? "arrow.up.right" : "arrow.down.left")
                 .font(.system(size: 12, weight: .regular))
                 .foregroundStyle(Theme.textSecondary)
-            Text(sent ? "To" : "From")
-                .font(.claudeCaption)
-                .foregroundStyle(Theme.textMuted)
             Text(peer.name)
                 .font(.claudeCaptionSemibold)
                 .foregroundStyle(Theme.textPrimary)
                 .lineLimit(1)
                 .layoutPriority(1)
-            if let cc = peer.ccName, cc != peer.name {
-                Text(cc)
-                    .font(.claudeMono(11))
-                    .foregroundStyle(Theme.textMuted)
+            if !preview.isEmpty {
+                Text(preview)
+                    .font(.claudeCaption)
+                    .foregroundStyle(Theme.textSecondary)
                     .lineLimit(1)
-                    .truncationMode(.middle)
+                    .truncationMode(.tail)
+                    .background(alignment: .topLeading) {
+                        // The same text, wrapped, to tell whether the one line cut it off
+                        Text(preview)
+                            .font(.claudeCaption)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .hidden()
+                            .readHeight($fullHeight)
+                    }
+                    .readHeight($lineHeight)
             }
             Spacer(minLength: 4)
             if sent { statusView }
+            if resolved {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.textMuted)
+            }
         }
     }
 
@@ -108,6 +119,7 @@ struct PeerCard: View {
                 .font(.claudeFootnote)
                 .foregroundStyle(Theme.danger)
                 .lineLimit(1)
+                .fixedSize()
         case .sending, .received:
             ProgressView()
                 .controlSize(.mini)
@@ -115,59 +127,37 @@ struct PeerCard: View {
         }
     }
 
-    /// Up to 4 lines; the hidden full copy measures whether that cut anything off.
-    private var messageBody: some View {
-        Text(bodyText)
-            .font(.system(size: 14))
-            .foregroundStyle(Theme.textSecondary)
-            .lineLimit(expanded ? nil : 4)
-            .truncationMode(.tail)
-            .multilineTextAlignment(.leading)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(alignment: .topLeading) {
-                if !expanded {
-                    Text(bodyText)
-                        .font(.system(size: 14))
-                        .fixedSize(horizontal: false, vertical: true)
-                        .hidden()
-                        .readHeight($fullHeight)
-                }
+    /// Unresolved cards, expanded: the whole summary and text.
+    private var fullMessage: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let summary = message.summary {
+                Text(summary)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .readHeight($limitedHeight, enabled: !expanded)
-    }
-
-    @ViewBuilder
-    private var footer: some View {
-        if resolved {
-            HStack {
-                Spacer()
-                Text("View thread ›")
-                    .font(.claudeCaption)
-                    .foregroundStyle(Theme.link)
-            }
-        } else if truncated || expanded {
-            HStack {
-                Spacer()
-                Text(expanded ? "Show less" : "Show more")
-                    .font(.claudeCaption)
-                    .foregroundStyle(Theme.link)
+            if !bodyText.isEmpty {
+                Text(bodyText)
+                    .font(.system(size: 14))
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func tap() {
         guard canTap() else { return }
         if resolved {
             onOpenThread?(message)
-        } else if truncated || expanded {
+        } else if cut || expanded {
             withAnimation(.snappy(duration: 0.2)) { expanded.toggle() }
         }
     }
 
     private var accessibilityText: String {
         var parts = ["\(sent ? "Message to" : "Message from") \(peer.name)"]
-        if let cc = peer.ccName, cc != peer.name { parts.append(cc) }
         if sent {
             switch status ?? .sending {
             case .delivered: parts.append("Delivered")
@@ -178,6 +168,119 @@ struct PeerCard: View {
         if let summary = message.summary { parts.append(summary) }
         if !bodyText.isEmpty { parts.append(bodyText) }
         return parts.joined(separator: ". ")
+    }
+}
+
+/// The one-line preview of a peer message: its summary, else the first non-empty line of its text.
+enum PeerPreview {
+    static func text(_ message: PeerMessage) -> String {
+        if let summary = message.summary?.trimmingCharacters(in: .whitespacesAndNewlines), !summary.isEmpty {
+            return summary
+        }
+        let body = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        return body.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty } ?? ""
+    }
+}
+
+/// What an exchange row says (docs/plan-peer-messages.md → Peer exchanges).
+struct PeerExchangeSummary {
+    let messages: [PeerMessage]
+
+    /// Distinct peer names in order of first appearance, two at most, then "+N".
+    var peers: String {
+        var names: [String] = []
+        for m in messages {
+            let name = (m.peer ?? PeerRef()).name
+            if !names.contains(name) { names.append(name) }
+        }
+        if names.isEmpty { return "Another session" }
+        let shown = names.prefix(2).joined(separator: ", ")
+        return names.count > 2 ? "\(shown) +\(names.count - 2)" : shown
+    }
+
+    var countText: String { messages.count == 1 ? "1 message" : "\(messages.count) messages" }
+
+    /// " · 3 messages · 2m ago" (no age when the last message has no time).
+    func detail(now: Date) -> String {
+        var parts = [countText]
+        if let date = messages.last?.date { parts.append(relativeTimeLabel(date, now: now)) }
+        return " · " + parts.joined(separator: " · ")
+    }
+
+    /// The last message's preview: "You: …" when it was sent, else "<peer>: …".
+    var preview: String? {
+        guard let last = messages.last else { return nil }
+        let text = PeerPreview.text(last)
+        guard !text.isEmpty else { return nil }
+        return "\(last.isSent ? "You" : (last.peer ?? PeerRef()).name): \(text)"
+    }
+
+    func accessibilityLabel(now: Date, expanded: Bool) -> String {
+        var parts = ["Exchange with \(peers)", countText]
+        if let date = messages.last?.date { parts.append(relativeTimeLabel(date, now: now)) }
+        if let preview { parts.append(preview) }
+        parts.append(expanded ? "expanded" : "collapsed")
+        return parts.joined(separator: ", ")
+    }
+}
+
+/// The exchange row and, when expanded, its turns (docs/plan-peer-messages.md → Peer exchanges).
+/// A plain struct (not AnyView) so expanding keeps the row's identity in the transcript's LazyVStack.
+struct PeerExchangeRow<Content: View>: View {
+    let summary: PeerExchangeSummary
+    let expanded: Bool
+    let running: Bool
+    let onToggle: () -> Void
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Button(action: onToggle) {
+                HStack(alignment: .center, spacing: 8) {
+                    if running { PulsingDot() }
+                    Image(systemName: "arrow.left.arrow.right")
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundStyle(Theme.textSecondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        TimelineView(.periodic(from: .now, by: 30)) { context in
+                            (Text(summary.peers).font(.claudeCaptionSemibold).foregroundStyle(Theme.textPrimary)
+                             + Text(summary.detail(now: context.date)).font(.claudeCaption).foregroundStyle(Theme.textSecondary))
+                                .lineLimit(1)
+                        }
+                        if let preview = summary.preview {
+                            Text(preview)
+                                .font(.claudeCaption)
+                                .foregroundStyle(Theme.textMuted)
+                                .lineLimit(1)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.textMuted)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .claudeCard()
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(summary.accessibilityLabel(now: Date(), expanded: expanded))
+            .accessibilityAddTraits(.isButton)
+            if expanded {
+                VStack(alignment: .leading, spacing: 2) {
+                    content()
+                }
+                .padding(.leading, 10)
+                .overlay(alignment: .leading) {
+                    Theme.border.frame(width: 1.5).padding(.vertical, 4)
+                }
+            }
+        }
+        .padding(.vertical, 3)
     }
 }
 

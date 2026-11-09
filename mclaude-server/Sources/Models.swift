@@ -63,6 +63,19 @@ struct ClaudeSession: Codable, Sendable {
     var compacting: Bool? = nil     // true while /compact (or auto-compact) runs; omitted otherwise
     var process: String? = nil      // starting | running | restarting | stopped (managed sessions only)
     var recap: SessionRecap? = nil  // managed sessions only; omitted until the first recap exists
+    // docs/design-claude-uplift.md → Session order, read state and background work (managed sessions only)
+    var lastInputAt: Date? = nil    // the last time the user gave the session input
+    var unread: Bool? = nil         // a finished turn not seen yet; omitted when false
+    var peerTurn: String? = nil     // during a peer turn: display name of the peer that started it
+    var peerTurnPeer: String? = nil // …and that peer's Claude session id, when resolved (the app shows its session name)
+    var backgroundTasks: Int? = nil // background tasks still running; omitted when 0
+}
+
+/// A background task Claude started (docs/design-claude-uplift.md → Background work).
+struct BackgroundTask: Codable, Sendable, Equatable {
+    let id: String
+    let taskType: String      // "local_bash", "local_agent", …
+    let description: String
 }
 
 /// A message the user sent while Claude was mid-turn. The server holds it (so it can still be

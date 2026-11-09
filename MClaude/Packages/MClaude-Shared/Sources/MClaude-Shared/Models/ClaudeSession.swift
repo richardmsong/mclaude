@@ -60,6 +60,18 @@ public struct QueuedMessage: Codable, Identifiable, Sendable, Equatable {
     }
 }
 
+/// The status dot shown for a session (docs/design-claude-uplift.md → Drawer → Session list).
+public enum SessionDot: String, Codable, Sendable {
+    /// Blue, filled: waiting for input, a permission or a plan.
+    case needsYou
+    /// Clay, filled.
+    case working
+    /// Clay ring: idle, background work still running.
+    case background
+    /// Green, filled: a finished turn you haven't seen.
+    case unread
+}
+
 public struct ClaudeSession: Codable, Identifiable, Sendable {
     public let id: String
     public let pid: Int
@@ -86,17 +98,54 @@ public struct ClaudeSession: Codable, Identifiable, Sendable {
     public let process: String?
     /// Server-made recap (nil until the first one exists, or on older servers).
     public let recap: SessionRecap?
+    /// The last time you gave this session input (nil on older servers / k8s).
+    /// docs/design-claude-uplift.md → Session order, read state and background work.
+    public let lastInputAt: Date?
+    /// A turn finished that you haven't seen (server-side read state; nil = read).
+    public let unread: Bool?
+    /// During a turn a peer message started: the peer's display name.
+    public let peerTurn: String?
+    /// …and the peer's Claude session id, when resolved (so its session name can be shown).
+    public let peerTurnPeer: String?
+    /// Background tasks Claude started that are still running (nil = none).
+    public let backgroundTasks: Int?
+
+    /// What the list is ordered by: your last input (older servers: the last status change).
+    public var orderDate: Date { lastInputAt ?? lastActivity }
+
+    public var isUnread: Bool { unread == true }
+
+    public var runningBackgroundTasks: Int { max(0, backgroundTasks ?? 0) }
+
+    /// The drawer/header dot (first that applies), or nil for none. No dot while the process is down.
+    public var dot: SessionDot? {
+        if processDown { return nil }
+        switch status {
+        case .waitingForInput, .needsPermission, .planMode: return .needsYou
+        case .working: return .working
+        case .idle, .unknown: break
+        }
+        if runningBackgroundTasks > 0 { return .background }
+        if isUnread { return .unread }
+        return nil
+    }
 
     /// The process isn't up and ready, so `status` doesn't describe the session.
     public var processDown: Bool { process != nil && process != "running" }
 
     /// Lowercase status word for the drawer: the process state while it's down, else the status.
-    public var statusWord: String {
+    public var statusWord: String { statusWord(peerName: nil) }
+
+    /// `statusWord`, naming the peer of a peer turn with `peerName` (its open session's name).
+    public func statusWord(peerName: String?) -> String {
         switch process {
         case "starting": return "starting"
         case "restarting": return "restarting"
         case "stopped": return "not running"
-        default: return status.label.lowercased()
+        default:
+            if status == .working, let peer = peerName ?? peerTurn, !peer.isEmpty { return "replying to \(peer)" }
+            if status == .idle, runningBackgroundTasks > 0 { return "\(runningBackgroundTasks) in background" }
+            return status.label.lowercased()
         }
     }
 

@@ -51,8 +51,8 @@ struct SessionDetailView: View {
     private func header(_ s: WatchSession, now: Date) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                StatusDot(state: s.state)
-                Text("\(s.state == .waiting ? "Needs you" : s.state.label) · \(s.age(now: now))")
+                if let dot = s.dot(readLocally: true) { StatusDot(dot: dot) }
+                Text("\(s.state == .waiting ? "Needs you" : s.state.label) · \(s.stateAge(now: now))")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(WatchTheme.textPrimary)
             }

@@ -32,8 +32,9 @@ enum JSONLParser {
 
     static func parseQueueOperation(json: [String: Any], timestamp: String) -> SessionEvent? {
         guard json["operation"] as? String == "enqueue",
-              let content = json["content"] as? String,
-              !content.isEmpty else { return nil }
+              let raw = json["content"] as? String else { return nil }
+        let content = SessionManager.visibleText(ofUserLine: raw)   // the server's hidden messages
+        guard !content.isEmpty else { return nil }
         let seed = "\(timestamp)-\(content)"
         let syntheticUuid = "q-\(seed.hashValue)"
         return SessionEvent(uuid: syntheticUuid, timestamp: timestamp, type: .user,
@@ -85,8 +86,14 @@ enum JSONLParser {
         // (e.g. "[Image: original 1206x2622, displayed at ...]" after a Read of an image), which
         // would otherwise render as a user bubble. Tool results are never meta, so keep those.
         if json["isMeta"] as? Bool == true, toolResults.isEmpty { return nil }
-        // The server's own nudge to a session that was mid-turn when the server restarted: restarts are invisible
-        if toolResults.isEmpty, text == SessionManager.restartResumeText { return nil }
+        // The server's own messages: the nudge to a session that was mid-turn when the server
+        // restarted (restarts are invisible) and the interrupted-background-tasks note, alone or
+        // appended to a resume message (a crash resume still shows, without the note)
+        if toolResults.isEmpty {
+            let visible = SessionManager.visibleText(ofUserLine: text)
+            if visible.isEmpty, !text.isEmpty { return nil }
+            text = visible
+        }
         if text.hasPrefix("[Image: source:") || text.hasPrefix("[Image source:") || text.hasPrefix("[Image: original") { return nil }
         // The user's own /compact, echoed in Claude Code's command form → show it as they typed it
         if text.hasPrefix("<command-name>/compact</command-name>") {
@@ -367,6 +374,11 @@ enum JSONLParser {
             removed = true
         }
         return removed ? (result as String).trimmingCharacters(in: .whitespacesAndNewlines) : nil
+    }
+
+    /// The text is nothing but `<task-notification>` blocks (a replayed task notification).
+    static func isOnlyTaskNotifications(_ text: String) -> Bool {
+        removingTaskNotifications(from: text) { _ in true } == ""
     }
 
     // MARK: - Compaction

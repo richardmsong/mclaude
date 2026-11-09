@@ -30,15 +30,9 @@ final class WatchRelay: NSObject, WCSessionDelegate, @unchecked Sendable {
     func session(_ session: WCSession, didReceiveMessage message: [String: Any],
                  replyHandler: @escaping ([String: Any]) -> Void) {
         let type = message[WatchSnapshot.requestKey] as? String
-        if type == WatchSnapshot.requestMarkRead {
-            if let id = message["id"] as? String {
-                let at = (message["at"] as? Double).map { Date(timeIntervalSince1970: $0) } ?? Date()
-                SeenStore.shared.markSeen(id, at: min(at, Date()))
-            }
-            replyHandler(["ok": true]); return
-        }
         if type == WatchSnapshot.requestMessage { handleFullMessage(message, replyHandler: replyHandler); return }
-        guard type == WatchSnapshot.requestRefresh || type == WatchSnapshot.requestAction else {
+        guard type == WatchSnapshot.requestRefresh || type == WatchSnapshot.requestAction
+                || type == WatchSnapshot.requestMarkRead else {
             replyHandler([:]); return
         }
         // Keep running if iOS woke us in the background just for this request.
@@ -46,6 +40,7 @@ final class WatchRelay: NSObject, WCSessionDelegate, @unchecked Sendable {
         Task {
             var reply: [String: Any] = [:]
             if type == WatchSnapshot.requestAction { reply["ok"] = await perform(message) }
+            if type == WatchSnapshot.requestMarkRead { reply["ok"] = await markRead(message["id"] as? String) }
             let snapshot = await buildSnapshot()
             let data = snapshot.encoded() ?? Data()
             reply[WatchSnapshot.messageKey] = data
@@ -79,7 +74,7 @@ final class WatchRelay: NSObject, WCSessionDelegate, @unchecked Sendable {
     private func perform(_ message: [String: Any]) async -> Bool {
         guard let client = client(), let id = message["id"] as? String,
               let action = message["action"] as? String else { return false }
-        SeenStore.shared.markSeen(id)
+        _ = await markRead(id)   // an action also marks it read
         do {
             switch action {
             case "answer":
@@ -104,6 +99,12 @@ final class WatchRelay: NSObject, WCSessionDelegate, @unchecked Sendable {
         }
     }
 
+    /// Server-side read state (docs/plan-watch-app.md → Read state).
+    private func markRead(_ id: String?) async -> Bool {
+        guard let client = client(), let id else { return false }
+        do { try await client.markRead(id: id); return true } catch { return false }
+    }
+
     // MARK: - Snapshot
 
     private func client() -> APIClient? {
@@ -122,9 +123,9 @@ final class WatchRelay: NSObject, WCSessionDelegate, @unchecked Sendable {
         guard let sessions = try? await client.fetchSessions() else {
             return WatchSnapshot(fetchedAt: Date(), error: .server, sessions: lock.withLock { lastGood })
         }
-        let seen = SeenStore.shared
-        if !sessions.isEmpty { seen.prune(keeping: Set(sessions.map(\.id))) }
-        let base = sessions.map { WatchSession($0, lastText: nil, seenAt: seen.seenAt($0.id)) }
+        // The drawer's order: newest last input first, the Ops session last
+        let ordered = sessions.filter { !$0.isOps }.sorted(by: sessionOrder) + sessions.filter(\.isOps)
+        let base = ordered.map { WatchSession($0, lastText: nil) }
         let cached = lock.withLock { lastTextCache }
 
         // Reuse a session's last message unless it's working or its activity time changed.
@@ -161,7 +162,7 @@ final class WatchRelay: NSObject, WCSessionDelegate, @unchecked Sendable {
                 return s
             }
             lastTextCache = next
-            lastGood = WatchSession.sorted(merged)
+            lastGood = merged
             return lastGood
         }
         return WatchSnapshot(fetchedAt: Date(), error: nil, sessions: result)

@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// Claude-style session drawer (docs/design-claude-uplift.md → Drawer): New session, Resume
-/// session, project chips, one list of open sessions (Active, then Recent; newest activity first)
-/// with a pull-down search field, swipe right to end, and Settings at the bottom.
+/// session, project chips, one list of open sessions (ordered by your last input only; status shows
+/// as dots) with the Ops session pinned last, a pull-down search field, swipe right to end, and
+/// Settings at the bottom.
 struct SessionDrawer: View {
     @Environment(AppState.self) private var appState
     let selectedSessionId: String?
@@ -29,17 +30,9 @@ struct SessionDrawer: View {
 
     // MARK: - Data
 
-    private static func isActive(_ s: ClaudeSession) -> Bool {
-        if s.processDown { return false }
-        return switch s.status {
-        case .working, .waitingForInput, .needsPermission, .planMode: true
-        case .idle, .unknown: false
-        }
-    }
-
-    /// Projects with an open session, most recent activity first.
+    /// Projects with an open session, most recent input first.
     private var projects: [String] {
-        projectsByRecency(appState.sessions.map { ($0.projectName, $0.lastActivity) })
+        projectsByRecency(appState.sessions.map { ($0.projectName, $0.orderDate) })
     }
 
     /// The saved chip, unless that project has no open sessions left.
@@ -56,7 +49,7 @@ struct SessionDrawer: View {
                 query.isEmpty || $0.displayName.localizedCaseInsensitiveContains(query)
                     || $0.projectName.localizedCaseInsensitiveContains(query)
             }
-            .sorted { $0.lastActivity > $1.lastActivity }
+            .sorted(by: sessionOrder)
     }
 
     // MARK: - Body
@@ -147,8 +140,7 @@ struct SessionDrawer: View {
         let rows = visible
         // The Ops session is pinned in its own section at the bottom (docs/design-claude-uplift.md → Drawer)
         let ops = rows.filter(\.isOps)
-        let active = rows.filter { !$0.isOps && Self.isActive($0) }
-        let recent = rows.filter { !$0.isOps && !Self.isActive($0) }
+        let others = rows.filter { !$0.isOps }
         return ScrollViewReader { proxy in
             List {
                 DrawerSearchField(text: $searchText, prompt: "Search sessions")
@@ -157,14 +149,8 @@ struct SessionDrawer: View {
                 Color.clear.frame(height: 0).id(Self.topId)
                     .drawerListRow(EdgeInsets())
 
-                if !active.isEmpty {
-                    sectionHeader("Active")
-                    ForEach(active) { sessionRow($0) }
-                }
-                if !recent.isEmpty {
-                    sectionHeader("Recent")
-                    ForEach(recent) { sessionRow($0) }
-                }
+                // Ordered by your last input only: status never moves a row
+                ForEach(others) { sessionRow($0) }
                 if !ops.isEmpty {
                     sectionHeader("Ops")
                     ForEach(ops) { sessionRow($0) }
@@ -202,9 +188,15 @@ struct SessionDrawer: View {
             .drawerListRow(EdgeInsets(top: 14, leading: 20, bottom: 4, trailing: 12))
     }
 
+    /// A peer turn's peer, by its open session's name when you can see that session.
+    private func peerSessionName(_ session: ClaudeSession) -> String? {
+        guard let uuid = session.peerTurnPeer else { return nil }
+        return appState.sessions.first { $0.sessionId == uuid }?.displayName
+    }
+
     private func sessionRow(_ session: ClaudeSession) -> some View {
         Button { onSelect(session.id) } label: {
-            DrawerSessionRow(session: session)
+            DrawerSessionRow(session: session, peerName: peerSessionName(session))
         }
         .buttonStyle(DrawerRowStyle(selected: session.id == selectedSessionId))
         .drawerListRow(EdgeInsets(top: 1, leading: 8, bottom: 1, trailing: 8))
@@ -374,6 +366,7 @@ struct SessionDrawer: View {
 
 private struct DrawerSessionRow: View {
     let session: ClaudeSession
+    var peerName: String? = nil
 
     var body: some View {
         HStack(spacing: 10) {
@@ -381,22 +374,22 @@ private struct DrawerSessionRow: View {
                 HStack(spacing: 6) {
                     if session.isOps { OpsMark() }
                     Text(session.displayName)
-                        .font(.claudeUI)
+                        .font(session.isUnread ? .claudeUISemibold : .claudeUI)
                         .foregroundStyle(session.isOps ? Theme.ops : Theme.textPrimary)
                         .lineLimit(1)
                 }
                 TimelineView(.periodic(from: .now, by: 30)) { context in
-                    Text([relativeTimeLabel(session.lastActivity, now: context.date),
+                    Text([relativeTimeLabel(session.orderDate, now: context.date),
                           session.projectName,
-                          session.statusWord].joined(separator: " · "))
+                          session.statusWord(peerName: peerName)].joined(separator: " · "))
                         .font(.claudeFootnote)
                         .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
                 }
             }
             Spacer(minLength: 8)
-            if !session.processDown, let dot = session.status.themeDot {
-                Circle().fill(dot).frame(width: 8, height: 8)
+            if let dot = session.dot {
+                SessionDotView(dot: dot)
             }
         }
         .padding(.horizontal, 12)
@@ -407,6 +400,13 @@ private struct DrawerSessionRow: View {
 }
 
 // MARK: - Shared with the Resume sheet
+
+/// Drawer order (docs/design-claude-uplift.md → Session list): newest last input first. Ties keep
+/// a stable order by id so rows never swap on a refresh.
+func sessionOrder(_ a: ClaudeSession, _ b: ClaudeSession) -> Bool {
+    if a.orderDate != b.orderDate { return a.orderDate > b.orderDate }
+    return a.id > b.id
+}
 
 /// Distinct project names ordered by their most recent date.
 func projectsByRecency(_ items: [(project: String, date: Date)]) -> [String] {
