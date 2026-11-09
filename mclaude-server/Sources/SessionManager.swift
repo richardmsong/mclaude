@@ -141,6 +141,9 @@ private final class LiveSession {
     /// Messages sent while a turn is running. Held here (not written to Claude's stdin) so they
     /// stay editable, then delivered together at the next step boundary or when the turn ends.
     var queue: [QueuedMessage] = []
+    /// Queued messages already written to Claude's stdin, until Claude's copy of them arrives
+    /// (docs/design-claude-uplift.md → Queue group → Delivered messages)
+    var delivered = DeliveredQueue()
     var lastAssistantText = ""            // latest main-thread reply text (push notification body)
     var compacting = false                // /compact (or auto-compact) is running
     var blockPushedThisTurn = false       // an auto-mode "Blocked" push went out this turn
@@ -759,6 +762,7 @@ actor SessionManager {
             live.queue.append(item)
             publishSessions()
             inputRouted(live, "queued", ["mclaude.queue_id": item.id])  // telemetry
+            Telemetry.shared.log("mclaude.queue.queued", attributes: ["mclaude.session_id": live.record.id, "mclaude.queue_id": item.id, "mclaude.queue.length": live.queue.count], in: inputRequest ?? Telemetry.currentRequest)  // telemetry
             return .queued(item.id)
         }
         inputRouted(live, "message")  // telemetry
@@ -800,8 +804,55 @@ actor SessionManager {
         let count = batch.count
         live.queue.removeFirst(count)
         print("[sessions] \(live.record.id): delivering \(count) queued message(s) (\(reason))")
-        _ = deliver(text, to: live)
+        if deliver(text, to: live) {
+            // Claude takes it at its next step: show it as delivered until its copy arrives
+            let now = Date()
+            live.delivered.add(batch, at: now)
+            for item in batch {  // telemetry
+                Telemetry.shared.log("mclaude.queue.delivered", attributes: ["mclaude.session_id": live.record.id, "mclaude.queue_id": item.id, "mclaude.queue.reason": reason, "mclaude.queue.batch_size": count, "mclaude.queue.waited_ms": Int(now.timeIntervalSince(item.queuedAt) * 1000)])  // telemetry
+            }  // telemetry
+            expireDelivered(live, ids: Set(batch.map(\.id)), after: DeliveredQueue.safetyCap, reason: "cap")
+        }
         publishSessions()
+    }
+
+    /// Claude's copy of a user message arrived: the delivered items it carries were read.
+    private func noteUserMessage(_ text: String, in live: LiveSession) {
+        guard !live.delivered.isEmpty else { return }
+        let read = live.delivered.read(text)
+        guard !read.isEmpty else { return }
+        let now = Date()
+        for item in read {  // telemetry
+            Telemetry.shared.log("mclaude.queue.read", attributes: ["mclaude.session_id": live.record.id, "mclaude.queue_id": item.id, "mclaude.queue.delivered_ms": Int(now.timeIntervalSince(item.deliveredAt ?? now) * 1000)])  // telemetry
+        }  // telemetry
+        publishSessions()
+    }
+
+    /// Drop delivered items that weren't matched (all of them when `ids` is nil).
+    private func clearDelivered(_ live: LiveSession, ids: Set<String>? = nil, reason: String) {
+        let gone = ids.map { live.delivered.remove(ids: $0) } ?? live.delivered.removeAll()
+        guard !gone.isEmpty else { return }
+        print("[sessions] \(live.record.id): dropped \(gone.count) delivered message(s) not read (\(reason))")
+        let now = Date()
+        for item in gone {  // telemetry
+            Telemetry.shared.log("mclaude.queue.cleared", attributes: ["mclaude.session_id": live.record.id, "mclaude.queue_id": item.id, "mclaude.queue.reason": reason, "mclaude.queue.delivered_ms": Int(now.timeIntervalSince(item.deliveredAt ?? now) * 1000)], severity: 13)  // telemetry
+        }  // telemetry
+        publishSessions()
+    }
+
+    /// After `delay`, drop those of `ids` still waiting for Claude's copy.
+    private func expireDelivered(_ live: LiveSession, ids: Set<String>, after delay: TimeInterval, reason: String) {
+        guard !ids.isEmpty else { return }
+        let id = live.record.id
+        Task {
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            self.expireDelivered(sessionId: id, ids: ids, reason: reason)
+        }
+    }
+
+    private func expireDelivered(sessionId: String, ids: Set<String>, reason: String) {
+        guard let live = sessions[sessionId] else { return }
+        clearDelivered(live, ids: ids, reason: reason)
     }
 
     /// "Send now": deliver the queue immediately. Mid-turn that means interrupting the current
@@ -1133,6 +1184,7 @@ actor SessionManager {
     private func processExited(id: String, generation: Int, status: Int32, stderr: String) {
         guard let live = sessions[id], live.generation == generation else { return }
         live.process = nil
+        clearDelivered(live, reason: "process_exit")     // that process can't read them any more
         let wasTurnActive = live.turnActive
         live.turnActive = false
         live.peerTurn = nil
@@ -1235,6 +1287,7 @@ actor SessionManager {
         live.restartAfterTurn = false
         let id = live.record.id
         let generation = live.generation
+        clearDelivered(live, reason: "restart")
         publishSessions()
         print("[sessions] \(id): restarting claude (MCP reload)")
         proc.stop(grace: 5)
@@ -1639,6 +1692,8 @@ actor SessionManager {
             if live.pending == nil { setStatus(live, .idle) }
             if !peerTurn { notifyIfLongTurn(live, result: json) }
             requestRecap(live)
+            // Delivered during this turn and still not read: Claude may never echo it
+            expireDelivered(live, ids: Set(live.delivered.ids), after: DeliveredQueue.turnEndGrace, reason: "turn_end")
             if live.restartAfterTurn, live.pending == nil {
                 // Restart all ran mid-turn; queued messages go to the new process
                 live.restartAfterTurn = false
@@ -1894,6 +1949,8 @@ actor SessionManager {
         if live.events.count > SessionManager.maxEvents { live.events.removeFirst(live.events.count - SessionManager.maxEvents) }
         for line in SessionManager.render(event) { addTranscript(live, line, broadcast: broadcast) }
         if broadcast { onEvent?(live.record.id, event) }
+        // After the event goes out, so the bubble shows before the "Delivered" row leaves
+        if event.type == .user, event.subagentInfo == nil, let text = event.text { noteUserMessage(text, in: live) }
     }
 
     private func addTranscript(_ live: LiveSession, _ line: String, broadcast: Bool = true) {
@@ -1989,6 +2046,7 @@ actor SessionManager {
             name: live.record.windowName, status: live.status,
             statusSince: live.statusSince, projectName: (live.record.cwd as NSString).lastPathComponent,
             lastOutput: "", prompt: prompt, queue: live.queue,
+            delivered: live.delivered.isEmpty ? nil : live.delivered.items,
             contextTokens: live.record.usage?.contextTokens, contextWindow: live.record.usage?.contextWindow,
             compacting: live.compacting ? true : nil,
             process: state, recap: live.record.recap,

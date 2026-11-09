@@ -25,6 +25,10 @@ final class AppState {
             if let visibleSessionId, UIApplication.shared.applicationState == .active { markReadIfUnread(visibleSessionId) }
         }
     }
+    /// Highest sessions-frame `seq` on the current connection; older frames are dropped.
+    @ObservationIgnored private var highestSessionsSeq: Int?
+    /// Last `mclaude.queue.frame` logged: open session + its queue/delivered ids.  // telemetry
+    @ObservationIgnored private var lastQueueFrameKey = ""  // telemetry
     /// Read requests in flight, so a burst of session updates sends one.
     private var markingRead: Set<String> = []
 
@@ -145,16 +149,38 @@ final class AppState {
         userEmail = ""
     }
 
+    /// `mclaude.queue.frame` for the open session, only when its queue or delivered ids change.  // telemetry
+    @MainActor private func logQueueFrame(_ sessions: [ClaudeSession], seq: Int?, previous: Int?, stale: Bool) {  // telemetry
+        guard let open = visibleSessionId, let session = sessions.first(where: { $0.id == open }) else { return }  // telemetry
+        let queueIds = (session.queue ?? []).map(\.id).joined(separator: ",")  // telemetry
+        let deliveredIds = (session.delivered ?? []).map(\.id).joined(separator: ",")  // telemetry
+        let key = "\(open)|\(queueIds)|\(deliveredIds)"  // telemetry
+        guard key != lastQueueFrameKey else { return }  // telemetry
+        if !stale { lastQueueFrameKey = key }  // telemetry: a dropped frame changes nothing on screen
+        var attrs: [String: Any] = ["mclaude.session_id": open, "queue_ids": queueIds, "delivered_ids": deliveredIds]  // telemetry
+        if let seq { attrs["seq"] = seq }  // telemetry
+        if let previous { attrs["previous_seq"] = previous }  // telemetry
+        if stale { attrs["stale"] = true }  // telemetry
+        Telemetry.shared.log("mclaude.queue.frame", attributes: attrs)  // telemetry
+    }  // telemetry
+
     func connectWebSocket() {
         wsClient?.disconnect()
         let token = authToken.isEmpty ? nil : authToken
         let config = ServerConfig(host: serverHost, port: serverPort, token: token)
 
         let capturedClient = client
-        let setSessions: @Sendable ([ClaudeSession]) -> Void = { [weak self] sessions in
+        let setSessions: @Sendable ([ClaudeSession], Int?) -> Void = { [weak self] sessions, seq in
             guard let self else { return }
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                // Frames can arrive out of order: never apply a snapshot older than one already
+                // applied on this connection (docs/plan-observability.md → Queue delivery).
+                let previous = self.highestSessionsSeq
+                let staleFrame = seq.map { $0 < (previous ?? 0) } ?? false
+                if let seq, !staleFrame { self.highestSessionsSeq = seq }
+                self.logQueueFrame(sessions, seq: seq, previous: previous, stale: staleFrame)   // telemetry
+                if staleFrame { return }
                 // Clear caches for sessions whose sessionId changed (e.g. /clear)
                 for session in sessions {
                     if let oldSessionId = self.sessionIdMap[session.id], oldSessionId != session.sessionId {
@@ -234,6 +260,7 @@ final class AppState {
                     TranscriptProbe.shared.note(.connection, ["connected": connected, "reason": reason ?? ""])
                 }
                 if connected {
+                    self?.highestSessionsSeq = nil   // a new connection (maybe a restarted server) numbers afresh
                     self?.lastDisconnectReason = nil
                 } else {
                     self?.lastDisconnectReason = reason

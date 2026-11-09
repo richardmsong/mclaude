@@ -30,6 +30,8 @@ struct ConversationView: View {
     var sessionCompacting: Bool = false
     /// The server's queue for this session: messages held for Claude's next step.
     var queue: [QueuedMessage] = []
+    /// Handed to Claude, not read yet: shown in the queue group as "Delivered", without actions.
+    var delivered: [QueuedMessage] = []
     var onEditQueued: ((QueuedMessage, String) -> Void)?
     var onDeleteQueued: ((QueuedMessage) -> Void)?
     /// Interrupt Claude's current step and deliver the whole queue now.
@@ -116,8 +118,9 @@ struct ConversationView: View {
         }
 
         // The server's queue, always last. One row with a fixed id (items keyed by their server id).
-        if !queue.isEmpty {
-            items.append((id: "queue-group", kind: .queue(queue)))
+        // Delivered messages stay in it until Claude's copy arrives (docs/design-claude-uplift.md → Queue group).
+        if !queue.isEmpty || !delivered.isEmpty {
+            items.append((id: "queue-group", kind: .queue(queue, delivered: delivered)))
         }
 
         return items
@@ -127,7 +130,7 @@ struct ConversationView: View {
         case event(SessionEvent)
         case pending(PendingMessage)
         case working
-        case queue([QueuedMessage])
+        case queue([QueuedMessage], delivered: [QueuedMessage])
         case agentGroup(toolUse: SessionEvent, subEvents: [SessionEvent])
         /// Folded tool calls / results / narration (never nested).
         indirect case workGroup([(id: String, kind: TimelineKind)])
@@ -403,8 +406,8 @@ struct ConversationView: View {
             pendingBubble(msg)
         case .working:
             WorkingIndicatorRow(compacting: sessionCompacting)
-        case .queue(let queued):
-            QueueGroupView(items: queued,
+        case .queue(let queued, let delivered):
+            QueueGroupView(items: queued, delivered: delivered,
                            onEdit: { item, text in onEditQueued?(item, text) },
                            onDelete: { item in onDeleteQueued?(item) },
                            onFlush: { onFlushQueue?() })
@@ -2539,6 +2542,8 @@ private struct WorkingIndicatorRow: View {
 /// expand/collapse and edit-sheet state so toggling it never re-evaluates ConversationView.body.
 private struct QueueGroupView: View {
     let items: [QueuedMessage]
+    /// Already handed to Claude: below the queued ones, muted, no actions.
+    let delivered: [QueuedMessage]
     let onEdit: (QueuedMessage, String) -> Void
     let onDelete: (QueuedMessage) -> Void
     let onFlush: () -> Void
@@ -2554,6 +2559,9 @@ private struct QueueGroupView: View {
                     QueuedItemBubble(item: item,
                                      onEdit: { editing = item },
                                      onDelete: { onDelete(item) })
+                }
+                ForEach(delivered) { item in      // server queue ids, kept on delivery
+                    QueuedItemBubble(item: item, delivered: true, onEdit: {}, onDelete: {})
                 }
             }
             footer
@@ -2574,7 +2582,7 @@ private struct QueueGroupView: View {
                 Spacer(minLength: 0)
                 Image(systemName: "clock")
                     .font(.system(size: 11, weight: .regular))
-                Text("Queued · \(items.count)")
+                Text(title)
                     .font(.claudeCaptionSemibold)
                 Image(systemName: expanded ? "chevron.up" : "chevron.down")
                     .font(.system(size: 11, weight: .regular))
@@ -2584,8 +2592,24 @@ private struct QueueGroupView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(items.count == 1 ? "1 queued message" : "\(items.count) queued messages")
+        .accessibilityLabel(accessibilityTitle)
         .accessibilityHint(expanded ? "Collapses the queue" : "Expands the queue")
+    }
+
+    /// "Queued · 2", "Queued · 1 · Delivered · 1" or "Delivered · 1".
+    private var title: String {
+        var parts: [String] = []
+        if !items.isEmpty { parts.append("Queued · \(items.count)") }
+        if !delivered.isEmpty { parts.append("Delivered · \(delivered.count)") }
+        return parts.joined(separator: " · ")
+    }
+
+    private var accessibilityTitle: String {
+        func count(_ n: Int, _ word: String) -> String { n == 1 ? "1 \(word) message" : "\(n) \(word) messages" }
+        var parts: [String] = []
+        if !items.isEmpty { parts.append(count(items.count, "queued")) }
+        if !delivered.isEmpty { parts.append(count(delivered.count, "delivered")) }
+        return parts.joined(separator: ", ")
     }
 
     private var footer: some View {
@@ -2596,13 +2620,15 @@ private struct QueueGroupView: View {
                 .foregroundStyle(Theme.textMuted)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
-            Button(action: onFlush) {
-                Text("Send now")
-                    .font(.claudeCaptionSemibold)
-                    .foregroundStyle(Theme.clay)
+            if !items.isEmpty {   // delivered ones can't be sped up
+                Button(action: onFlush) {
+                    Text("Send now")
+                        .font(.claudeCaptionSemibold)
+                        .foregroundStyle(Theme.clay)
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Interrupts Claude's current step so it reads the queued messages now")
             }
-            .buttonStyle(.plain)
-            .accessibilityHint("Interrupts Claude's current step so it reads the queued messages now")
         }
     }
 }
@@ -2610,47 +2636,62 @@ private struct QueueGroupView: View {
 /// One queued message: right-aligned like a pending bubble, dashed outline, photos as thumbnails.
 private struct QueuedItemBubble: View {
     let item: QueuedMessage
+    /// Handed to Claude already: muted, labelled "Delivered", no Edit/Delete.
+    var delivered = false
     let onEdit: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
-        let parsed = ConversationView.parseUserContent(FindingParser.compactText(item.text))
         HStack {
             Spacer(minLength: 40)
             VStack(alignment: .trailing, spacing: 6) {
-                VStack(alignment: .trailing, spacing: 6) {
-                    if !parsed.photoPaths.isEmpty {
-                        QueuedPhotoStrip(paths: parsed.photoPaths)
+                if delivered {
+                    message
+                        .opacity(0.7)
+                    Text("Delivered")
+                        .font(.claudeFootnote)
+                        .foregroundStyle(Theme.textMuted)
+                        .accessibilityLabel("Delivered. Claude reads it at its next step")
+                } else {
+                    message
+                        .contextMenu {
+                            Button(action: onEdit) { Label("Edit", systemImage: "pencil") }
+                            Button(role: .destructive, action: onDelete) { Label("Delete", systemImage: "trash") }
+                        }
+                    HStack(spacing: 14) {
+                        Button(action: onEdit) { Text("Edit") }
+                        Button(action: onDelete) { Text("Delete") }
                     }
-                    if !parsed.message.isEmpty {
-                        Text(parsed.message)
-                            .font(.claudeBody)
-                            .foregroundStyle(Theme.textPrimary)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 10)
-                            .background(Theme.bgSunken,
-                                        in: RoundedRectangle(cornerRadius: Theme.radiusBubble, style: .continuous))
-                            .overlay(
-                                // Dashed outline = not yet delivered to Claude
-                                RoundedRectangle(cornerRadius: Theme.radiusBubble, style: .continuous)
-                                    .strokeBorder(Theme.textMuted.opacity(0.45), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-                            )
-                    }
+                    .buttonStyle(.plain)
+                    .font(.claudeFootnote)
+                    .foregroundStyle(Theme.textMuted)
                 }
-                .contentShape(Rectangle())
-                .contextMenu {
-                    Button(action: onEdit) { Label("Edit", systemImage: "pencil") }
-                    Button(role: .destructive, action: onDelete) { Label("Delete", systemImage: "trash") }
-                }
-                HStack(spacing: 14) {
-                    Button(action: onEdit) { Text("Edit") }
-                    Button(action: onDelete) { Text("Delete") }
-                }
-                .buttonStyle(.plain)
-                .font(.claudeFootnote)
-                .foregroundStyle(Theme.textMuted)
             }
         }
+    }
+
+    private var message: some View {
+        let parsed = ConversationView.parseUserContent(FindingParser.compactText(item.text))
+        return VStack(alignment: .trailing, spacing: 6) {
+            if !parsed.photoPaths.isEmpty {
+                QueuedPhotoStrip(paths: parsed.photoPaths)
+            }
+            if !parsed.message.isEmpty {
+                Text(parsed.message)
+                    .font(.claudeBody)
+                    .foregroundStyle(delivered ? Theme.textSecondary : Theme.textPrimary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(Theme.bgSunken,
+                                in: RoundedRectangle(cornerRadius: Theme.radiusBubble, style: .continuous))
+                    .overlay(
+                        // Dashed outline = not in the transcript yet (queued, or delivered and not read)
+                        RoundedRectangle(cornerRadius: Theme.radiusBubble, style: .continuous)
+                            .strokeBorder(Theme.textMuted.opacity(0.45), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                    )
+            }
+        }
+        .contentShape(Rectangle())
     }
 }
 

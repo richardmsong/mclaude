@@ -3,7 +3,8 @@ import Foundation
 /// WebSocket client that receives real-time session and output updates.
 public final class WSClient: Sendable {
     private let config: ServerConfig
-    private let onSessions: @Sendable ([ClaudeSession]) -> Void
+    /// Sessions frames, with the server's snapshot number (nil on older servers).
+    private let onSessions: @Sendable ([ClaudeSession], Int?) -> Void
     private let onOutput: @Sendable (String, String) -> Void
     private let onFullOutput: @Sendable (String, String) -> Void
     private let onConnectionChange: @Sendable (Bool, String?) -> Void  // connected, error reason
@@ -41,7 +42,7 @@ public final class WSClient: Sendable {
 
     public init(
         config: ServerConfig,
-        onSessions: @escaping @Sendable ([ClaudeSession]) -> Void,
+        onSessions: @escaping @Sendable ([ClaudeSession], Int?) -> Void,
         onOutput: @escaping @Sendable (String, String) -> Void,
         onFullOutput: @escaping @Sendable (String, String) -> Void,
         onConnectionChange: @escaping @Sendable (Bool, String?) -> Void,
@@ -167,6 +168,7 @@ public final class WSClient: Sendable {
                 struct WSMessage: Codable {
                     let type: String
                     let data: String
+                    let seq: Int?
                 }
 
                 guard let msg = try? decoder.decode(WSMessage.self, from: data),
@@ -175,7 +177,7 @@ public final class WSClient: Sendable {
                 switch msg.type {
                 case "sessions":
                     if let sessions = try? decoder.decode([ClaudeSession].self, from: payload) {
-                        onSessions(sessions)
+                        onSessions(sessions, msg.seq)
                     }
                 case "output":
                     if let dict = try? decoder.decode([String: String].self, from: payload),

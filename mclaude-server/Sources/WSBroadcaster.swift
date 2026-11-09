@@ -64,13 +64,28 @@ actor WSBroadcaster {
 struct WSMessage: Codable {
     let type: String       // "sessions", "output", "status_change"
     let data: String       // JSON-encoded payload
+    /// `sessions` frames only: snapshot number (docs/plan-observability.md → Queue delivery)
+    var seq: Int? = nil
 }
 
-func encodeWSMessage(type: String, data: some Encodable) -> String? {
+/// Numbers `sessions` snapshots in the order they're taken: +1 per frame, from 1 at server start.
+final class SessionsSeq: @unchecked Sendable {
+    static let shared = SessionsSeq()
+    private let lock = NSLock()
+    private var last = 0
+
+    func next() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        last += 1
+        return last
+    }
+}
+
+func encodeWSMessage(type: String, data: some Encodable, seq: Int? = nil) -> String? {
     let encoder = JSONEncoder()
     encoder.dateEncodingStrategy = .iso8601
     guard let payload = try? encoder.encode(data) else { return nil }
-    let msg = WSMessage(type: type, data: String(data: payload, encoding: .utf8) ?? "")
+    let msg = WSMessage(type: type, data: String(data: payload, encoding: .utf8) ?? "", seq: seq)
     guard let msgData = try? JSONEncoder().encode(msg) else { return nil }
     return String(data: msgData, encoding: .utf8)
 }

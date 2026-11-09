@@ -52,11 +52,14 @@ public struct QueuedMessage: Codable, Identifiable, Sendable, Equatable {
     public let id: String
     public let text: String
     public let queuedAt: Date
+    /// When the server handed it to Claude (delivered list only; nil while queued).
+    public let deliveredAt: Date?
 
-    public init(id: String, text: String, queuedAt: Date) {
+    public init(id: String, text: String, queuedAt: Date, deliveredAt: Date? = nil) {
         self.id = id
         self.text = text
         self.queuedAt = queuedAt
+        self.deliveredAt = deliveredAt
     }
 }
 
@@ -91,6 +94,9 @@ public struct ClaudeSession: Codable, Identifiable, Sendable {
     public let contextWindow: Int?
     /// Messages the server is holding for Claude's next step (nil on older servers = empty).
     public let queue: [QueuedMessage]?
+    /// Messages already handed to Claude that it hasn't read yet (nil = none / older server).
+    /// docs/design-claude-uplift.md → Queue group → Delivered messages.
+    public let delivered: [QueuedMessage]?
     /// True while /compact (or auto-compact) runs (nil = not compacting / older server).
     public let compacting: Bool?
     /// Server-side process state: "starting", "running", "restarting" or "stopped" (nil = k8s
