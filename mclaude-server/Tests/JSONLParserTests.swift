@@ -137,6 +137,21 @@ final class JSONLParserTests: XCTestCase {
         XCTAssertFalse(SessionManager.echoedThisTurn("/cost", in: [ev(.user, "/cost"), ev(.text, "Total cost")]))
     }
 
+    // MARK: - /clear (docs/design-claude-uplift.md → Clearing)
+
+    func testClearCommandLineBecomesUserEvent() {
+        let line = #"{"type":"user","uuid":"d790eb3c","timestamp":"2026-11-09T14:00:04.241Z","message":{"role":"user","content":"<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>"}}"#
+        let event = JSONLParser.parseEvent(line: line)
+        XCTAssertEqual(event?.type, .user)
+        XCTAssertEqual(event?.text, "/clear")
+        XCTAssertEqual(event?.uuid, "d790eb3c")
+    }
+
+    func testOtherCommandLinesStayHidden() {
+        let line = #"{"type":"user","uuid":"x","timestamp":"2026-11-09T14:00:04.241Z","message":{"role":"user","content":"<command-name>/cost</command-name>\n<command-args></command-args>"}}"#
+        XCTAssertNil(JSONLParser.parseEvent(line: line))
+    }
+
     // MARK: - /compact (docs/design-claude-uplift.md → Compaction)
 
     func testCompactBoundaryFromTranscript() {

@@ -95,6 +95,11 @@ enum JSONLParser {
                                 text: args.isEmpty ? "/compact" : "/compact \(args)", thinking: nil, toolUse: nil,
                                 toolResults: nil, model: nil, durationMs: nil)
         }
+        // /clear starts the new conversation's transcript (docs/design-claude-uplift.md → Clearing)
+        if text.hasPrefix("<command-name>/clear</command-name>") {
+            return SessionEvent(uuid: uuid, timestamp: timestamp, type: .user, text: "/clear", thinking: nil,
+                                toolUse: nil, toolResults: nil, model: nil, durationMs: nil)
+        }
         if text.hasPrefix("<local-command-caveat>") || text.hasPrefix("<command-name>") { return nil }
         // A local command's output (older CLIs write it as a user line): show it as its reply
         if text.hasPrefix("<local-command-stdout>") {

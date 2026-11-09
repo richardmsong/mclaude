@@ -4,7 +4,7 @@ import Foundation
 struct ManagedSessionRecord: Codable, Sendable {
     let id: String               // display id used by the API and ownership store ("s12")
     let index: Int               // stable ordering (creation order)
-    let claudeSessionId: String  // passed to --session-id / --resume
+    var claudeSessionId: String  // passed to --session-id / --resume; follows /clear (docs/design-claude-uplift.md → Clearing)
     let cwd: String
     var windowName: String       // display label; persisted key kept for state-file compatibility
     let createdAt: Date
@@ -16,6 +16,8 @@ struct ManagedSessionRecord: Codable, Sendable {
     var startOnFirstMessage: Bool?
     /// Latest recap (docs/plan-watch-app.md → Recap); nil until the first one is made
     var recap: SessionRecap?
+    /// Claude session ids this session had before a /clear, oldest first (peer messages still map to it)
+    var earlierClaudeSessionIds: [String]?
 }
 
 private struct ManagedSessionsFile: Codable {
@@ -402,6 +404,10 @@ actor SessionManager {
     /// Open sessions and ended names, for filling in PeerRefs.
     func peerDirectory() -> PeerDirectory {
         var open: [String: PeerDirectory.OpenSession] = [:]
+        // Ids from before a /clear first, so a session's current id always wins
+        for live in sessions.values {
+            for old in live.record.earlierClaudeSessionIds ?? [] { open[old] = .init(id: live.record.id, name: live.record.windowName) }
+        }
         for live in sessions.values { open[live.record.claudeSessionId] = .init(id: live.record.id, name: live.record.windowName) }
         return PeerDirectory(open: open, ended: endedNames)
     }
@@ -1234,6 +1240,10 @@ actor SessionManager {
         switch type {
         case "system":
             let subtype = json["subtype"] as? String
+            if subtype == "init", parentToolUse == nil, let newId = (json["session_id"] as? String)?.lowercased(),
+               !newId.isEmpty, newId != live.record.claudeSessionId {
+                resetConversation(live, to: newId)
+            }
             let taskId = json["task_id"] as? String
             if subtype == "task_started", let taskId, json["is_backgrounded"] as? Bool == false {
                 live.foregroundTasks.insert(taskId)
@@ -1585,6 +1595,34 @@ actor SessionManager {
     }
 
     // MARK: - State, transcript and broadcasting
+
+    /// The conversation was reset (/clear): follow Claude's new session id and restart the visible
+    /// history (docs/design-claude-uplift.md → Clearing).
+    private func resetConversation(_ live: LiveSession, to newId: String) {
+        let oldId = live.record.claudeSessionId
+        if live.record.hasConversation { endedNames[oldId] = live.record.windowName }
+        var earlier = (live.record.earlierClaudeSessionIds ?? []).filter { $0 != newId }
+        if !earlier.contains(oldId) { earlier.append(oldId) }
+        live.record.earlierClaudeSessionIds = earlier
+        live.record.claudeSessionId = newId
+        live.record.hasConversation = true   // the new transcript exists from the /clear on
+        endedNames.removeValue(forKey: newId)
+        if live.record.usage != nil { live.record.usage?.contextTokens = 0 }
+        live.events.removeAll()
+        live.transcript.removeAll()
+        live.subagents.removeAll()
+        live.shownTaskNotices.removeAll()
+        live.foregroundTasks.removeAll()
+        live.peerSends.removeAll()
+        live.pendingCompaction = nil
+        live.pendingCompactionSummary = nil
+        live.lastAssistantText = ""
+        persist()
+        publishSessions()
+        print("[sessions] \(live.record.id) conversation reset: claude session \(oldId) -> \(newId)")
+        // The CLI replays the "/clear" command line right after this init; it opens the new history
+        scheduleOutputFlush(live.record.id)
+    }
 
     private func append(_ event: SessionEvent, to live: LiveSession, broadcast: Bool = true) {
         live.events.append(event)
