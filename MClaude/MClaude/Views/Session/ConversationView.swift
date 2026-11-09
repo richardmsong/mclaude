@@ -399,9 +399,11 @@ struct ConversationView: View {
                         .onAppear {
                             sentinelVisible = true
                             isNearBottom = true
+                            TranscriptProbe.shared.bottomSentinel(true)   // telemetry
                         }
                         .onDisappear {
                             sentinelVisible = false
+                            TranscriptProbe.shared.bottomSentinel(false)   // telemetry
                             // New content pushing the bottom off screen must not stop following;
                             // only a user scroll does (tracked via scroll phase on iOS 18+).
                             if !Self.tracksScrollPhase || userScrolling { isNearBottom = false }
