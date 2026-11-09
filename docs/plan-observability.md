@@ -178,7 +178,7 @@ Richard, 2026-11-08: "implement the system map/visual obs layer", covering phone
   - full content: prompts, responses and tool content
   - resource attribute `mclaude.session_id`
   - trace propagation into tool subprocesses
-- **Mac** (`service.name` = `mac-host`): a native OpenTelemetry Collector (contrib, the official release binary, checksum-verified), run as launchd service `com.mclaude.otel-host`. Every 10 s it reports host CPU utilization, memory usage and utilization, load, plus per-process CPU and memory for mclaude-server and the Claude processes, to the Docker collector on localhost.
+- **Mac** (`service.name` = `mac-host`): a native OpenTelemetry Collector (contrib, the official release binary, checksum-verified), run as launchd service `com.mclaude.otel-host`. Every 10 s it reports host CPU utilization, memory usage and utilization, load, free space on the data volume (`/System/Volumes/Data`), plus per-process CPU and memory for mclaude-server and the Claude processes, to the Docker collector on localhost.
 
 ### Obs API
 
@@ -214,7 +214,7 @@ Box colors come **only from reliability signals**: errors, latency, stalls, down
 | server | no `up` heartbeat in the window | a 5xx response | a request ≥5 s, not counting input requests | sessions and WebSocket clients |
 | claude | server has no data | a process restarting | an API error event | processes running, and turns running |
 | bedrock | no model request in the window (shown as "idle", not grey) | model request errors | median model request ≥2 min (long generations are normal; only a median that suggests stuck requests counts) | median model request time, tokens per minute |
-| mac | no host metrics in the window | — | CPU ≥85% or memory ≥90% | CPU % |
+| mac | no host metrics in the window | data-volume free space < 5 GB | free space < 15 GB, CPU ≥85% or memory ≥90% | CPU % and GB free |
 | obs | — (the API answered) | ingest lag ≥120 s | ingest lag ≥30 s | ingest lag |
 
 Missing data is never drawn as healthy: `nodata` is grey with the words "no data".
@@ -277,6 +277,8 @@ Decided by Richard, 2026-11-08: all four. Only live data counts, using the same 
 | `stall` | `mclaude.app.stall` with `duration_ms` ≥ 1000 |
 | `crash` | `mclaude.app.exception`, `mclaude.app.crash`, `mclaude.app.unclean_exit`; `mclaude.process.exited` with `mclaude.expected` = false; `mclaude.process.restart_scheduled`; server request spans with a 5xx status |
 | `model` | Claude Code `api_error` events, and errored `claude_code.llm_request` spans |
+
+Plus one metric-based trigger, kind `host`: the Mac's data volume has under 5 GB free (`system.filesystem.usage`, state `free`), at most one finding per hour. On 2026-11-08 the disk filled up and took OrbStack and the whole stack down with no warning.
 
 The Ops session's own process restarts and model errors never trigger, so a problem in Ops can't loop into more Ops work.
 
