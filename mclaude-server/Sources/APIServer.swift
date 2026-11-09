@@ -1301,11 +1301,12 @@ func buildRouter(monitor: SessionManager, broadcaster: WSBroadcaster, sessionSto
 
         // Send current state immediately on connect (filtered)
         var currentSessions = await capturedMonitor.getCachedSessions()
+        let seq = SessionsSeq.shared.next()
         if let k8s = capturedK8s {
             currentSessions += await k8s.getCachedSessions()
         }
         currentSessions = await capturedStore?.filterSessions(currentSessions, userId: userId) ?? currentSessions
-        if let sessionsMsg = encodeWSMessage(type: "sessions", data: currentSessions) {
+        if let sessionsMsg = encodeWSMessage(type: "sessions", data: currentSessions, seq: seq) {
             try? await outbound.write(.text(sessionsMsg))
         }
         for session in currentSessions {

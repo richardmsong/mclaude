@@ -51,6 +51,7 @@ struct SessionDetailView: View {
                     sessionWorking: session?.status == .working,
                     sessionCompacting: session?.compacting == true,
                     queue: session?.queue ?? [],
+                    delivered: session?.delivered ?? [],
                     onEditQueued: { item, text in
                         Task {
                             do {

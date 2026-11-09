@@ -38,12 +38,13 @@ await monitor.setOnStatusChange { session, oldStatus, newStatus in
 // Wire up WebSocket broadcasts (per-user filtered)
 let capturedStore = sessionStore
 await monitor.setOnSessionsUpdated { hostSessions in
+    let seq = SessionsSeq.shared.next()   // numbered when the snapshot is taken
     Task {
         let k8sSessions = await capturedK8s.getCachedSessions()
         let allSessions = hostSessions + k8sSessions
         await broadcaster.broadcastFiltered { userId in
             let filtered = await capturedStore.filterSessions(allSessions, userId: userId)
-            return encodeWSMessage(type: "sessions", data: filtered)
+            return encodeWSMessage(type: "sessions", data: filtered, seq: seq)
         }
     }
 }
@@ -63,12 +64,13 @@ await monitor.setOnOutputChanged { id, content in
 // Wire up K8s session broadcasts (per-user filtered)
 let capturedK8s = k8sManager
 await k8sManager.setOnSessionsUpdated { k8sSessions in
+    let seq = SessionsSeq.shared.next()
     Task {
         let hostSessions = await monitor.getCachedSessions()
         let allSessions = hostSessions + k8sSessions
         await broadcaster.broadcastFiltered { userId in
             let filtered = await capturedStore.filterSessions(allSessions, userId: userId)
-            return encodeWSMessage(type: "sessions", data: filtered)
+            return encodeWSMessage(type: "sessions", data: filtered, seq: seq)
         }
     }
 }

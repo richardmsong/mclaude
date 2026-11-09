@@ -58,6 +58,7 @@ struct ClaudeSession: Codable, Sendable {
     let lastOutput: String
     let prompt: DetectedPrompt?
     var queue: [QueuedMessage] = []  // held while Claude is busy; editable until delivered
+    var delivered: [QueuedMessage]? = nil  // handed to Claude, not read yet; omitted when empty
     var contextTokens: Int? = nil   // tokens in Claude's current context (main thread)
     var contextWindow: Int? = nil   // the model's context limit
     var compacting: Bool? = nil     // true while /compact (or auto-compact) runs; omitted otherwise
@@ -84,6 +85,8 @@ struct QueuedMessage: Codable, Sendable {
     let id: String
     var text: String
     let queuedAt: Date
+    /// When it was written to Claude's stdin (delivered list only; docs/design-claude-uplift.md → Queue group)
+    var deliveredAt: Date? = nil
 }
 
 enum SendOutcome: Sendable {
