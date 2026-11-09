@@ -314,6 +314,23 @@ Added 2026-11-07 (Richard: "Reload plugins doesn't get acknowledged as a respons
   - **History:** the typed command already shows, from its queue operation. The `system/local_command` line, and a `<local-command-stdout>` user line, become a `.text` event (`model "<synthetic>"`) with the tags and ANSI codes stripped, so the output reads the same live and after a reload. Output that's empty after trimming is dropped. Output starting with "Compacted" is dropped, as in the `/compact` section.
 - **App:** no special handling. The command is a normal user bubble and the output is a normal assistant reply, followed by the turn-duration line.
 
+## Clearing (`/clear`)
+
+Added 2026-11-09 (Richard: the Ops session, `/clear`ed hours earlier, showed as "Not open in MClaude" in its peers' Messages sheets, and its conversation came back as the pre-clear one after a reload). Behaviour was checked against a real headless run (CLI 2.1.317).
+
+- **What the CLI does:**
+  - **Live stream:** `/clear` sends a top-level `{"type":"conversation_reset","trigger":"clear",…}` (still carrying the old `session_id`), then a `system/init` whose `session_id` is a **new Claude session id**. Every later message carries the new id: first the replayed command as a `<command-name>/clear</command-name>…` user line (the input's `uuid` comes back as its `uuid`, since the server always sends one), then the `result`.
+  - **Transcript:** a new file, `<new id>.jsonl`, starting with the caveat line and the same `<command-name>/clear</command-name>…` user line. The old file stays on disk unchanged.
+  - `--resume <id>` keeps the same id, so an id change is never a normal restart.
+- **Server:**
+  - **Detecting it:** a top-level `system/init` whose `session_id` differs from the session's Claude session id means the conversation was reset (by `/clear` or anything else that resets it).
+  - **Following the new id:** the session's Claude session id becomes the new one and is persisted at once. Everything keyed by it follows: history pages and the startup rebuild read the new transcript, peer messages are observed as the new id, the Resume sheet counts the new transcript as in use, and a process restart resumes the new conversation.
+  - **The old conversation** is remembered the way an ended session is: its name goes into `endedNames` under the old id (when it had a conversation), so the Resume sheet lists it by name and it can be resumed as its own session. The old id is also kept in the session's list of earlier ids, so peer messages from before the clear still name and open this session (`docs/plan-peer-messages.md`).
+  - **The visible history restarts:** the in-memory events and output lines are dropped, and so are the turn's per-conversation leftovers (subagent info, task-notice bookkeeping, pending peer sends, a pending compaction). The context gauge goes to 0 until the next reply reports its size. Token and cost totals are kept, because they count the session's spending, not the conversation's.
+  - The sessions list is published with the new `sessionId` right away.
+  - **The `/clear` line:** the `<command-name>/clear</command-name>` user line becomes a user event with text `/clear`, both live (the replay that follows the init) and in history, so the user's command opens the new conversation, the pending bubble clears, and live and reloaded transcripts match.
+- **App:** a `sessionId` change already drops the session's event cache, output cache and saved transcript copy (Saved transcripts, above), so the transcript restarts at the `/clear` line.
+
 ## Video attachments (screen recordings)
 
 Added 2026-11-04 (Richard: attach screen recordings so Claude can analyze them). Claude can't read video, so the server turns each video into an **index**: a few overview frames Claude can `Read`, plus a motion timeline that says where the screen changed. The index is a starting point, not the only input. The original video stays untouched, and for an animation bug Claude extracts the relevant stretch at full frame rate itself (Richard, 2026-11-04: "treating it as an index rather than the only input").

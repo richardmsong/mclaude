@@ -160,6 +160,7 @@ All under mclaude-server's REST API. JSON keys are camelCase and dates are ISO 8
 ```
 
 - Built from every record where session `:id`'s UUID is either the observing side or the resolved peer, grouped by the other side's UUID. Records with an unresolved peer are left out.
+- "Session `:id`'s UUID" is its current one: after a `/clear` the session's own list starts afresh. In other sessions' lists, the same peer's messages from before and after its clear are two rows with the same name, because they're grouped by UUID.
 - `messageCount` counts messages after cross-side merging.
 - `lastPreview` is the first non-empty line of the latest message's body, cut to 120 characters plus `…`.
 - A session with no records returns `[]`.
@@ -199,6 +200,7 @@ All under mclaude-server's REST API. JSON keys are camelCase and dates are ISO 8
 - `claudeSessionId` is omitted when unresolved.
 - `ccName` and `address` are each omitted when unknown.
 - `sessionId` is present only for an **open** managed session the caller can see.
+- A managed session matches its current Claude UUID and also the UUIDs it had before a `/clear` (`docs/design-claude-uplift.md` → Clearing). So a message from before the clear still names and opens that session. Its UUID in the PeerRef stays the one recorded.
 - `open` is true when `sessionId` is present.
 - `displayName`, first match wins:
   1. the managed session's current name (open session the caller can see)
