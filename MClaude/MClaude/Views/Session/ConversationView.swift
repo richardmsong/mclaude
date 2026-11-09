@@ -53,6 +53,15 @@ struct ConversationView: View {
     /// first layout, when the list is still empty or estimating). Reference type so poking it
     /// re-renders only HistoryTopRow, not this view.
     @State private var historyGate = HistoryLoadGate()
+    /// Progressive reveal (docs/design-claude-uplift.md → History): rows render from the row that
+    /// holds the event `revealFrom`, plus `revealAbove` rows above it. Set when rows first arrive
+    /// (the newest `revealChunk` rows); it only grows, so new rows at the bottom never push rows
+    /// off the top, and older pages prepended to the events stay hidden until revealed.
+    @State private var revealFrom: String?
+    @State private var revealAbove = 0
+    /// Bumped after each reveal: log it, and check again whether the reader is still near the top.
+    @State private var revealTick = 0
+    @State private var reveal = RevealState()
     /// Work groups (docs/design-claude-uplift.md → Work groups): the user's own toggles, which
     /// win over everything, and the groups of the running turn, auto-expanded while it runs.
     @State private var groupOverride: [String: Bool] = [:]
@@ -434,17 +443,24 @@ struct ConversationView: View {
     }
 
     private var liveBody: some View {
-        let items = timelineItems
-        let liveIds = Self.liveGroupIds(items, running: sessionWorking)
+        let allItems = timelineItems
+        reveal.latestRows = allItems
+        reveal.historyComplete = historyComplete
+        let liveIds = Self.liveGroupIds(allItems, running: sessionWorking)
+        // Only the revealed rows render (docs/design-claude-uplift.md → History)
+        let firstShown = revealStart(allItems)
+        let items = firstShown > 0 ? Array(allItems[firstShown...]) : allItems
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
-                    if let onLoadOlder {
-                        HistoryTopRow(complete: historyComplete, hasEvents: !events.isEmpty, gate: historyGate) {
-                            // Keep the reader's place: re-anchor on the row that was first. If the
-                            // bottom is on screen too (a short conversation), stay at the bottom.
+                    if onLoadOlder != nil {
+                        HistoryTopRow(complete: historyComplete && firstShown == 0, hasEvents: !events.isEmpty,
+                                      gate: historyGate) {
+                            // The reader reached the top. Keep their place: re-anchor on the row
+                            // that was first. If the bottom is on screen too (a short
+                            // conversation), stay at the bottom.
                             let anchor = items.first?.id
-                            let added = await onLoadOlder()
+                            let added = await revealOlder(source: "top_row")
                             if added {
                                 // After the prepended rows are laid out, not in the same update
                                 try? await Task.sleep(for: .milliseconds(30))
@@ -486,6 +502,7 @@ struct ConversationView: View {
                 // against the left edge" glitch (seen in telemetry, 2026-11-08: offset_x = 16 with
                 // content as wide as the screen).
                 .padding(.vertical, 8)
+                .background(ScrollViewLocator(state: reveal))   // progressive reveal keeps the reader's place
                 // Pin the column to the screen width. If any row came out wider, the stack grew
                 // and the (horizontally centred) bottom anchor shifted every row left until a
                 // re-layout.
@@ -517,6 +534,10 @@ struct ConversationView: View {
                 // First load (0 → N): jump, don't animate across rows that were never laid out
                 if isNearBottom { pinToBottom(proxy, animated: old > 0, reason: old > 0 ? "events" : "first_load") }
             }
+            // Progressive reveal: fix the window when rows arrive, reveal as the reader nears the top
+            .modifier(RevealTriggers(eventCount: events.count, firstEventId: events.first?.uuid, tick: revealTick,
+                                     settle: eventsChanged, state: reveal, nearTopChanged: nearTopChanged,
+                                     revealed: afterReveal))
             .onChange(of: events.last?.text?.count ?? 0) {
                 // Streaming growth of the last message
                 if isNearBottom {
@@ -537,6 +558,8 @@ struct ConversationView: View {
             }
             .modifier(UserScrollPhaseTracking(userScrolling: $userScrolling, scrollMotion: scrollMotion, onUserScrollStarted: {
                 historyGate.userHasScrolled = true
+                // Already near the top when the reader first scrolls (a short window)
+                if reveal.nearTop { Task { await revealOlder(source: "scroll") } }
             }) {
                 // A user scroll ended: follow again only if they ended at the bottom
                 isNearBottom = sentinelVisible
@@ -2395,6 +2418,186 @@ struct AskUserQuestionView: View {
                 .font(.claudeFootnote)
                 .foregroundStyle(Theme.textMuted)
         }
+    }
+}
+
+// MARK: - Progressive reveal (docs/design-claude-uplift.md → History)
+
+extension ConversationView {
+    /// Rows rendered on open and added per reveal: about two screenfuls.
+    static let revealChunk = 40
+
+    /// Index of the first rendered row. Before the window is set (or if its events were
+    /// replaced), the newest chunk.
+    private func revealStart(_ rows: [(id: String, kind: TimelineKind)]) -> Int {
+        guard let i = revealAnchorIndex(rows) else { return max(0, rows.count - Self.revealChunk) }
+        return max(0, i - revealAbove)
+    }
+
+    /// Index of the row that holds the window's first event (searched from the end: it's usually
+    /// near it).
+    private func revealAnchorIndex(_ rows: [(id: String, kind: TimelineKind)]) -> Int? {
+        guard let from = revealFrom else { return nil }
+        return rows.lastIndex { Self.row($0.kind, holds: from) }
+    }
+
+    /// Whether a row holds the event: itself, or as a member of a group.
+    private static func row(_ kind: TimelineKind, holds uuid: String) -> Bool {
+        switch kind {
+        case .event(let e): e.uuid == uuid
+        case .agentGroup(let toolUse, _): toolUse.uuid == uuid
+        case .workGroup(let members), .peerExchange(let members, _): members.contains { row($0.kind, holds: uuid) }
+        case .pending, .working, .queue: false
+        }
+    }
+
+    /// The oldest event in a row.
+    private static func firstEventId(_ kind: TimelineKind) -> String? {
+        switch kind {
+        case .event(let e): e.uuid
+        case .agentGroup(let toolUse, _): toolUse.uuid
+        case .workGroup(let members), .peerExchange(let members, _): members.first.flatMap { firstEventId($0.kind) }
+        case .pending, .working, .queue: nil
+        }
+    }
+
+    /// The rows as of the latest render. Reveals run in tasks that outlive the view value they
+    /// were started from, so they read the rows from here, not from that value's `events`.
+    private var latestRows: [(id: String, kind: TimelineKind)] {
+        reveal.latestRows as? [(id: String, kind: TimelineKind)] ?? timelineItems
+    }
+
+    /// Events changed. Set the window when rows first arrive, or when the events it started at are
+    /// gone (a replaced saved copy, a cleared conversation): the newest chunk of rows. Then keep
+    /// memory topped up if the reader is already scrolling back.
+    private func eventsChanged() {
+        settleRevealWindow()
+        prefetchIfLow()
+    }
+
+    private func settleRevealWindow() {
+        let rows = latestRows
+        if revealAnchorIndex(rows) != nil { return }
+        let start = max(0, rows.count - Self.revealChunk)
+        guard let id = rows[start...].lazy.compactMap({ Self.firstEventId($0.kind) }).first else { return }
+        revealFrom = id
+        revealAbove = 0
+        guard !reveal.opened else { return }
+        reveal.opened = true
+        logRevealRecord(["source": "open", "rows_shown": rows.count - start, "rows_hidden": start,
+                         "events": events.count])
+    }
+
+    /// Reveal the next chunk of older rows. Concurrent callers (the scroll position, the top row)
+    /// share one reveal. Returns whether rows were added.
+    @discardableResult
+    private func revealOlder(source: String) async -> Bool {
+        if let running = reveal.inFlight { return await running.value }
+        let task = Task { await revealStep(source: source) }
+        reveal.inFlight = task
+        let added = await task.value
+        reveal.inFlight = nil
+        return added
+    }
+
+    /// From memory when rows are hidden; otherwise wait for the page being prefetched, or fetch the
+    /// next older page and reveal its newest chunk.
+    private func revealStep(source: String) async -> Bool {
+        let started = Date()
+        if revealFrom == nil { settleRevealWindow() }
+        let rows = latestRows
+        let start = revealStart(rows)
+        let before = reveal.geometry
+        let from: String
+        reveal.keptSinceReveal = 0
+        if start > 0 {
+            from = "memory"
+            reveal.keepPlaceUntil = Date().addingTimeInterval(0.4)
+            revealAbove += min(Self.revealChunk, start)
+        } else {
+            let added: Bool
+            if let pending = reveal.prefetch {
+                from = "prefetch"
+                added = await pending.value
+            } else if !reveal.historyComplete, let onLoadOlder {
+                from = "fetch"
+                added = await onLoadOlder()
+            } else {
+                return false
+            }
+            guard added else { return false }
+            reveal.keepPlaceUntil = Date().addingTimeInterval(0.4)
+            // The page landed above every row shown before: reveal up to a chunk of it
+            revealAbove = (revealAnchorIndex(rows) ?? 0) + Self.revealChunk
+        }
+        reveal.revealed = true
+        var log: [String: Any] = ["source": source, "from": from, "rows_before": rows.count - start,
+                                  "ms": Int(Date().timeIntervalSince(started) * 1000)]
+        if let before {
+            log["offset_before"] = Double(before.offsetY)
+            log["content_before"] = Double(before.contentHeight)
+        }
+        reveal.pendingLog = log
+        revealTick += 1
+        return true
+    }
+
+    /// Once the reader has revealed older rows: when fewer than two chunks stay hidden in memory
+    /// and history remains, fetch the next older page ahead (again each time a page lands, until
+    /// memory is ahead of the reader).
+    private func prefetchIfLow() {
+        guard reveal.revealed, reveal.prefetch == nil, !reveal.historyComplete, let onLoadOlder,
+              revealStart(latestRows) < Self.revealChunk * 2 else { return }
+        let state = reveal
+        state.prefetch = Task {
+            let added = await onLoadOlder()
+            state.prefetch = nil
+            return added
+        }
+    }
+
+    /// The reader came within two screens of the top, or moved away (iOS 18+).
+    private func nearTopChanged(_ near: Bool) {
+        reveal.nearTop = near
+        if near, historyGate.userHasScrolled { Task { await revealOlder(source: "scroll") } }
+    }
+
+    /// After a reveal rendered: log it, fetch ahead if memory is low, and if the reader is still
+    /// near the top (a short chunk, a fast fling), reveal the next chunk.
+    private func afterReveal() async {
+        guard revealTick > 0 else { return }
+        prefetchIfLow()
+        try? await Task.sleep(for: .milliseconds(150))
+        logReveal()
+        guard !Task.isCancelled, reveal.nearTop, historyGate.userHasScrolled else { return }
+        await revealOlder(source: "scroll")
+    }
+
+    /// The last reveal's record, with the row counts it rendered and how the scroll position
+    /// moved. With the place kept, the offset moves by as much as the content grew (`drift` ≈ 0,
+    /// unless the reader was scrolling meanwhile).
+    private func logReveal() {
+        guard var attrs = reveal.pendingLog else { return }
+        reveal.pendingLog = nil
+        let rows = latestRows
+        let start = revealStart(rows)
+        attrs["rows_shown"] = rows.count - start
+        attrs["rows_hidden"] = start
+        attrs["events"] = events.count
+        if let after = reveal.geometry, let offset = attrs["offset_before"] as? Double,
+           let content = attrs["content_before"] as? Double {
+            attrs["offset_after"] = Double(after.offsetY)
+            attrs["content_after"] = Double(after.contentHeight)
+            attrs["drift"] = (Double(after.offsetY) - offset) - (Double(after.contentHeight) - content)
+            attrs["user_scrolling"] = userScrolling
+            attrs["kept"] = Double(reveal.keptSinceReveal)
+        }
+        logRevealRecord(attrs)
+    }
+
+    private func logRevealRecord(_ attrs: [String: Any]) {
+        TranscriptProbe.shared.note(.loads, attrs.merging(["event": "reveal", "session_id": sessionId]) { a, _ in a })   // telemetry
+        Telemetry.shared.log("mclaude.transcript.reveal", attributes: attrs.merging(["mclaude.session_id": sessionId]) { a, _ in a })
     }
 }
 
