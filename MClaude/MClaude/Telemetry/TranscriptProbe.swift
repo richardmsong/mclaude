@@ -14,6 +14,7 @@ final class TranscriptProbe {
 
     enum Ring: String, CaseIterable {
         case wideRows = "wide_rows", drawer, keyboard, scrolls, scrollX = "scroll_x", viewport, loads, connection
+        case rows, context, scene
     }
 
     private var rings: [Ring: [[String: Any]]] = [:]
@@ -49,6 +50,15 @@ final class TranscriptProbe {
                 }
             }
         }
+        // App lifecycle: F-5's real blank started right at the return to the foreground.
+        for (name, label) in [(UIApplication.didBecomeActiveNotification, "active"),
+                              (UIApplication.willResignActiveNotification, "resign_active"),
+                              (UIApplication.didEnterBackgroundNotification, "background"),
+                              (UIApplication.willEnterForegroundNotification, "foreground")] {
+            nc.addObserver(forName: name, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { TranscriptProbe.shared.note(.scene, ["event": label]) }
+            }
+        }
     }
 
     // MARK: - Inputs
@@ -57,6 +67,8 @@ final class TranscriptProbe {
         let opened = sessionId != self.sessionId
         if opened { Telemetry.shared.contextSessionId = sessionId }
         let countChanged = eventCount != self.eventCount
+        note(.context, ["session_id": sessionId, "opened": opened, "event_count": eventCount,
+                        "cleared": opened ? visibleRows.count : 0])
         self.sessionId = sessionId
         self.eventCount = eventCount
         if opened {
@@ -75,7 +87,8 @@ final class TranscriptProbe {
         e["at"] = nil
         var list = rings[ring] ?? []
         list.append(e)
-        if list.count > ringCap { list.removeFirst(list.count - ringCap) }
+        let cap = ring == .rows ? 80 : ringCap   // row on/off changes come in bursts
+        if list.count > cap { list.removeFirst(list.count - cap) }
         rings[ring] = list
         // A successful load: from then on, zero events in that session means an empty chat. Kept
         // per session, because a cached load can finish before the view switches sessions.
@@ -121,12 +134,32 @@ final class TranscriptProbe {
     private var blankEpisode: (span: Telemetry.Span, since: Date, reported: Bool)?
     private var lastBlankReport = Date.distantPast
 
+    /// Diagnostics only (docs/plan-observability.md → Blank screen probe → Diagnostics): the same
+    /// on/off changes keyed by row view instance ("id#token"), never cleared by context(), and the
+    /// instances that have appeared and not yet disappeared. The blank rule still uses visibleRows.
+    private var visibleInstances: Set<String> = []
+    private var liveInstances: Set<String> = []
+    private var bottomSentinelVisible = false
+
     /// A row became visible in the scroll view, or stopped being visible (or was destroyed).
-    func rowVisible(id: String, _ visible: Bool) {
+    /// `source` is "geometry" (visibility changed) or "gone" (onDisappear).
+    func rowVisible(id: String, instance: String, _ visible: Bool, source: String) {
+        let key = "\(id)#\(instance)"
+        if visible { visibleInstances.insert(key) } else { visibleInstances.remove(key) }
         let before = visibleRows.isEmpty
         if visible { visibleRows.insert(id) } else { visibleRows.remove(id) }
+        note(.rows, ["id": id, "inst": instance, "visible": visible, "src": source, "set": visibleRows.count])
         if before != visibleRows.isEmpty { evaluateBlank() }
     }
+
+    /// A row view appeared (was built by the lazy stack) or disappeared.
+    func rowLive(id: String, instance: String, _ alive: Bool) {
+        let key = "\(id)#\(instance)"
+        if alive { liveInstances.insert(key) } else { liveInstances.remove(key) }
+    }
+
+    /// The transcript's bottom sentinel came on or went off screen.
+    func bottomSentinel(_ visible: Bool) { bottomSentinelVisible = visible }
 
     /// No row on screen in an open session. A session that loaded with no events (a new chat) has
     /// nothing to show, so it isn't blank (docs/plan-observability.md → Blank screen probe).
@@ -171,6 +204,10 @@ final class TranscriptProbe {
         var body: [String: Any] = [
             "session_id": sessionId, "event_count": eventCount, "visible_rows": 0,
             "since_session_open_s": Date().timeIntervalSince(sessionOpenedAt),
+            "visible_instances": visibleInstances.count, "live_instances": liveInstances.count,
+            "visible_instance_examples": Array(visibleInstances.sorted().prefix(10)),
+            "live_instance_examples": Array(liveInstances.sorted().prefix(10)),
+            "bottom_sentinel_visible": bottomSentinelVisible,
         ]
         if let sv = Self.transcriptScrollView(viewportWidth: viewport?.width) {
             body["scroll_view"] = [
@@ -185,6 +222,7 @@ final class TranscriptProbe {
         }
         for ring in Ring.allCases { body["recent_\(ring.rawValue)"] = rings[ring] ?? [] }
         let ctx = span.context
+        let capturedAt = ISO8601DateFormatter.withFraction.string(from: Date())   // drawn synchronously below
         Telemetry.shared.log("mclaude.rule.broken", body: Telemetry.json(body),
                              attributes: ["rule": "transcript_blank", "mclaude.session_id": sessionId,
                                           "event_count": eventCount],
@@ -192,7 +230,7 @@ final class TranscriptProbe {
         TelemetryScreenshot.capture { path in
             Telemetry.shared.log("mclaude.rule.screenshot", body: path,
                                  attributes: ["rule": "transcript_blank", "path": path ?? "",
-                                              "uploaded": path != nil],
+                                              "uploaded": path != nil, "captured_at": capturedAt],
                                  in: ctx)
         }
     }
@@ -349,16 +387,32 @@ extension View {
 
     /// On each transcript row: its width, and whether it's on screen.
     func transcriptRowProbe(id: String, kind: String) -> some View {
-        onGeometryChange(for: CGFloat.self) { ($0.size.width * 2).rounded() / 2 } action: { w in
-            TranscriptProbe.shared.rowWidth(id: id, kind: kind, width: w)
-        }
-        .onGeometryChange(for: Bool.self) { proxy in
-            guard let visible = proxy.bounds(of: .scrollView) else { return false }
-            return CGRect(origin: .zero, size: proxy.size).intersects(visible)
-        } action: { visible in
-            TranscriptProbe.shared.rowVisible(id: id, visible)
-        }
-        .onDisappear { TranscriptProbe.shared.rowVisible(id: id, false) }
+        modifier(TranscriptRowProbe(id: id, kind: kind))
+    }
+}
+
+private struct TranscriptRowProbe: ViewModifier {
+    let id: String
+    let kind: String
+    /// Tells two views of the same row id apart (diagnostics).
+    @State private var instance = String(UUID().uuidString.prefix(6))
+
+    func body(content: Content) -> some View {
+        content
+            .onGeometryChange(for: CGFloat.self) { ($0.size.width * 2).rounded() / 2 } action: { w in
+                TranscriptProbe.shared.rowWidth(id: id, kind: kind, width: w)
+            }
+            .onGeometryChange(for: Bool.self) { proxy in
+                guard let visible = proxy.bounds(of: .scrollView) else { return false }
+                return CGRect(origin: .zero, size: proxy.size).intersects(visible)
+            } action: { visible in
+                TranscriptProbe.shared.rowVisible(id: id, instance: instance, visible, source: "geometry")
+            }
+            .onAppear { TranscriptProbe.shared.rowLive(id: id, instance: instance, true) }
+            .onDisappear {
+                TranscriptProbe.shared.rowVisible(id: id, instance: instance, false, source: "gone")
+                TranscriptProbe.shared.rowLive(id: id, instance: instance, false)
+            }
     }
 }
 

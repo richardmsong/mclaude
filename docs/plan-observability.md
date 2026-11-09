@@ -136,6 +136,13 @@ Richard, 2026-11-08: "catch whenever the screen is blank. I'm seeing it quite of
   - a screenshot, as for the other probes
   - at most one report per 2 minutes
 - **When rows come back:** a `transcript.unblanked` record with how long the screen was blank.
+- **Diagnostics** (added 2026-11-09, Ops findings F-2/F-5: 14 of 20 reports were false alarms, with the rows on screen, and 6 were real blanks; the earlier data couldn't tell them apart). They only observe; what counts as blank is unchanged.
+  - Each row view gets its own instance token. Besides the visible set keyed by row id, which drives the rule, the probe keeps a set of visible instances and a set of live instances (appeared and not yet disappeared). The report carries `visible_instances` and `live_instances` with up to 10 examples. Visible instances while `visible_rows` is 0 mean the id-keyed bookkeeping lost them (a false alarm). No visible instances but live instances mean rows are built and off screen. No live instances mean the list built nothing.
+  - A `rows` ring of every on/off change: id, instance, visible, and source (geometry or disappear), and the id set's size after it. It keeps the last 80 changes.
+  - A `context` ring: each `context()` call, with whether it opened a session and how many rows it cleared.
+  - A `scene` ring: app active, inactive, background and foreground changes.
+  - Whether the bottom sentinel is on screen (`bottom_sentinel_visible`).
+  - `mclaude.rule.screenshot` carries `captured_at`, the phone's capture time. The screenshot is drawn at the report; the server's file name is the upload time.
 - **It never changes the screen.**
 
 ## System map (phase 2)
