@@ -3,13 +3,13 @@ import XCTest
 
 final class SessionTitlerTests: XCTestCase {
     func testSanitizePlainTitle() {
-        XCTAssertEqual(SessionTitler.sanitize("Fix Weather App Caching\n"), "Fix Weather App Caching")
+        XCTAssertEqual(SessionTitler.sanitize("Fix Weather App Caching\n"), "💬 Fix Weather App Caching")
     }
 
     func testSanitizeStripsQuotesPrefixAndPunctuation() {
-        XCTAssertEqual(SessionTitler.sanitize("Title: \"Add Error Handling.\""), "Add Error Handling")
-        XCTAssertEqual(SessionTitler.sanitize("**Refactor  Login   Flow**"), "Refactor Login Flow")
-        XCTAssertEqual(SessionTitler.sanitize("\n\n  “Debug TLS Errors”!\nextra line"), "Debug TLS Errors")
+        XCTAssertEqual(SessionTitler.sanitize("Title: \"Add Error Handling.\""), "💬 Add Error Handling")
+        XCTAssertEqual(SessionTitler.sanitize("**Refactor  Login   Flow**"), "💬 Refactor Login Flow")
+        XCTAssertEqual(SessionTitler.sanitize("\n\n  “Debug TLS Errors”!\nextra line"), "💬 Debug TLS Errors")
     }
 
     func testSanitizeRejectsEmpty() {
@@ -21,7 +21,8 @@ final class SessionTitlerTests: XCTestCase {
         let long = "Supercalifragilisticexpialidocious Antidisestablishmentarianism Pneumonoultramicroscopic Floccinaucinihilipilification"
         let title = SessionTitler.sanitize(long)
         XCTAssertNotNil(title)
-        XCTAssertLessThanOrEqual(title!.count, SessionTitler.maxLength + 1)
+        XCTAssertTrue(title!.hasPrefix("💬 "))
+        XCTAssertLessThanOrEqual(title!.dropFirst(2).count, SessionTitler.maxLength + 1)
         XCTAssertTrue(title!.hasSuffix("…"))
     }
 
@@ -53,7 +54,28 @@ final class SessionTitlerTests: XCTestCase {
         XCTAssertNil(SessionTitler.sanitize("I’m sorry, but I need more details"))
         XCTAssertNil(SessionTitler.sanitize("Could You Share More Context"))
         XCTAssertNil(SessionTitler.sanitize("Here is a short title that describes what you asked me about today"))
-        XCTAssertEqual(SessionTitler.sanitize("Rinse Cycle Laundry Tips"), "Rinse Cycle Laundry Tips")
+        XCTAssertEqual(SessionTitler.sanitize("Rinse Cycle Laundry Tips"), "💬 Rinse Cycle Laundry Tips")
+    }
+
+    func testSanitizeKeepsModelEmojiAsPrefix() {
+        XCTAssertEqual(SessionTitler.sanitize("🐛 Fix Login Token Refresh"), "🐛 Fix Login Token Refresh")
+        XCTAssertEqual(SessionTitler.sanitize("Title: \"🧾 Taxes 2026 Plan.\""), "🧾 Taxes 2026 Plan")
+        // Emoji at the end, or several: the first one wins, the rest are dropped
+        XCTAssertEqual(SessionTitler.sanitize("Plan Kyoto Trip ✈️"), "✈️ Plan Kyoto Trip")
+        XCTAssertEqual(SessionTitler.sanitize("🚀 Ship Watch App 🎉"), "🚀 Ship Watch App")
+        // ZWJ sequences stay whole
+        XCTAssertEqual(SessionTitler.sanitize("👩‍💻 Pair On Parser"), "👩‍💻 Pair On Parser")
+        // Digits, # and * aren't emoji
+        XCTAssertEqual(SessionTitler.sanitize("Top 10 C# Tips"), "💬 Top 10 C# Tips")
+    }
+
+    func testSanitizeRejectsEmojiOnlyAndEmojiRefusals() {
+        XCTAssertNil(SessionTitler.sanitize("🤔"))
+        XCTAssertNil(SessionTitler.sanitize("🙏 I'm sorry, I can't help"))
+    }
+
+    func testPromptAsksForEmoji() {
+        XCTAssertTrue(SessionTitler.titlePrompt(for: "fix the login bug").contains("one emoji"))
     }
 
     func testPromptIsNotCodingFramed() {

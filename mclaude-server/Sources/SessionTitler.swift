@@ -7,6 +7,8 @@ enum SessionTitler {
     static let timeout: TimeInterval = 45
     static let maxLength = 60
     static let maxWords = 8
+    /// Used when the model's title has no emoji, so every inferred title carries one.
+    static let fallbackEmoji = "💬"
 
     /// Phrases that mean the model answered (refused, explained, asked back) instead of titling.
     static let replyMarkers = [
@@ -44,18 +46,25 @@ enum SessionTitler {
         let cleaned = typedText(of: message)
         let request = cleaned.isEmpty ? "(the user attached images without any text)" : String(cleaned.prefix(2000))
         return """
-        Write a short title (3 to 6 words) for a conversation that starts with the message \
-        below. The conversation can be about anything: code, writing, questions, personal \
-        topics. Always reply with a title that names the topic, never a refusal, explanation or \
-        question. Use Title Case. No quotes, no emoji, no trailing punctuation. Reply with only \
-        the title.
+        Write a short title for a conversation that starts with the message below: one emoji \
+        that fits the topic, a space, then 3 to 6 words. The conversation can be about anything: \
+        code, writing, questions, personal topics. Always reply with a title that names the \
+        topic, never a refusal, explanation or question. Use Title Case. No quotes, no other \
+        emoji, no trailing punctuation. Reply with only the title, e.g. "🐛 Fix Login Token Refresh".
 
         Message:
         \(request)
         """
     }
 
-    /// Normalise model output into a display title, or nil if unusable (empty, or a reply/refusal).
+    /// True for a character that renders as an emoji (not plain digits, `#` or `*`).
+    static func isEmoji(_ c: Character) -> Bool {
+        guard let first = c.unicodeScalars.first else { return false }
+        return first.properties.isEmojiPresentation || (first.properties.isEmoji && c.unicodeScalars.count > 1)
+    }
+
+    /// Normalise model output into `<emoji> <Title>`, or nil if unusable (empty, or a reply/refusal).
+    /// The first emoji anywhere in the line becomes the prefix; others are dropped. No emoji → 💬.
     static func sanitize(_ raw: String) -> String? {
         guard var line = raw.split(whereSeparator: \.isNewline)
             .map({ $0.trimmingCharacters(in: .whitespaces) })
@@ -63,6 +72,9 @@ enum SessionTitler {
         for prefix in ["Title:", "title:", "TITLE:"] where line.hasPrefix(prefix) {
             line = String(line.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
         }
+        let emoji = line.first(where: isEmoji).map(String.init) ?? fallbackEmoji
+        // Drop emoji plus the variation selectors / joiners left around them.
+        line = String(line.filter { !isEmoji($0) && !$0.unicodeScalars.allSatisfy { $0.value == 0xFE0F || $0.value == 0x200D } })
         let strip = CharacterSet(charactersIn: "\"'`*_#“”‘’ ")
         // Quotes and trailing punctuation can nest ("“Title”!"), so strip until stable.
         var previous = ""
@@ -76,7 +88,7 @@ enum SessionTitler {
         if line.count > maxLength {
             line = String(line.prefix(maxLength)).trimmingCharacters(in: .whitespaces) + "…"
         }
-        return line
+        return "\(emoji) \(line)"
     }
 
     /// Run the title model. Returns nil on error/timeout.
