@@ -48,6 +48,7 @@ struct MClaudeApp: App {
                     case .background:
                         if let id = appState.visibleSessionId { SeenStore.shared.markSeen(id) }
                         appState.scheduleBackgroundRefresh()
+                        appState.saveTranscripts()
                     default:
                         break
                     }

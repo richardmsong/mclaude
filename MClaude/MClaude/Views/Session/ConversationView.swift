@@ -282,8 +282,9 @@ struct ConversationView: View {
     /// estimated heights for rows it hasn't built, so the first jump can land short of the end
     /// (the conversation opening mid-way) or past it (a blank screen). Re-pin a few times as the
     /// newly built rows report their real heights, until the bottom sentinel is on screen.
-    private func pinToBottom(_ proxy: ScrollViewProxy, animated: Bool) {
-        TranscriptProbe.shared.note(.scrolls, ["source": "pin", "animated": animated])   // telemetry
+    /// `reason` is telemetry only (docs/plan-observability.md → Blank screen probe, scroll reasons).
+    private func pinToBottom(_ proxy: ScrollViewProxy, animated: Bool, reason: String) {
+        TranscriptProbe.shared.note(.scrolls, ["source": "pin", "animated": animated, "reason": reason])   // telemetry
         if animated {
             withAnimation { proxy.scrollTo("bottom", anchor: .bottomLeading) }
         } else {
@@ -442,13 +443,13 @@ struct ConversationView: View {
                     withAnimation(.easeInOut(duration: 0.25)) { liveExpanded.subtract(old) }
                     Task { @MainActor in
                         try? await Task.sleep(for: .milliseconds(300))
-                        pinToBottom(proxy, animated: false)
+                        pinToBottom(proxy, animated: false, reason: "collapse")
                     }
                 }
             }
             .onChange(of: events.count) { old, _ in
                 // First load (0 → N): jump, don't animate across rows that were never laid out
-                if isNearBottom { pinToBottom(proxy, animated: old > 0) }
+                if isNearBottom { pinToBottom(proxy, animated: old > 0, reason: old > 0 ? "events" : "first_load") }
             }
             .onChange(of: events.last?.text?.count ?? 0) {
                 // Streaming growth of the last message
@@ -461,12 +462,12 @@ struct ConversationView: View {
                 // The user just sent something: always jump to it and resume following
                 guard new > old else { return }
                 isNearBottom = true
-                pinToBottom(proxy, animated: true)
+                pinToBottom(proxy, animated: true, reason: "send")
             }
             .onChange(of: queue.count) { old, new in
                 // A sent message landed in the server queue (its local bubble was just removed)
                 guard new > old, isNearBottom else { return }
-                pinToBottom(proxy, animated: true)
+                pinToBottom(proxy, animated: true, reason: "queue")
             }
             .modifier(UserScrollPhaseTracking(userScrolling: $userScrolling, scrollMotion: scrollMotion, onUserScrollStarted: {
                 historyGate.userHasScrolled = true
