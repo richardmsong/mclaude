@@ -264,6 +264,17 @@ Added 2026-11-04. Long sessions used to show only the last ~200 events: the serv
   - If a load fails, the row reads "Couldn't load earlier messages. Tap to retry".
 - **Exports** (Markdown, plain text, PDF) and **Full Page** screenshots load the full history first, in pages of 500.
 
+## Saved transcripts (copy on the phone)
+
+Added 2026-11-09 (Richard, Ops finding F-8). The event cache used to live only in memory. A session that hadn't been opened since the app last launched opened empty, and stayed empty until its first load returned. After the app wakes, the phone's network can take a second or more to come back, even when the server answers in milliseconds.
+
+- **What's saved:** for each session, the newest 200 events in the cache, plus the session's Claude session id. One file per session, in the app's Caches folder (iOS may purge it; that only costs the copy), under a folder for the server's host and port, so another server's `s56` never shows up.
+- **When it's saved:** after each successful events load for that session, and, for every session whose events changed since the last save, when the app goes to the background.
+- **When it's used:** when a session opens with nothing in memory, its saved copy (if any) loads into the cache right away, before the events request is sent. The transcript shows it at once; the request then refreshes it as usual.
+  - A copy whose Claude session id differs from the session's current one (the session was `/clear`ed while the app wasn't running) is deleted, not shown.
+- **Refresh:** the fresh events merge into the shown copy by uuid, as with any load. If the fresh page holds the full 200 events and shares no event with the saved copy, the saved copy is too old to join up, so it's replaced by the fresh page; there's never a gap in the middle. Older history still loads from the "Loading earlier messages…" row.
+- **Removed:** when the session is ended from the app, when its Claude session id changes, when a file hasn't been written for 14 days (checked at each background save), and all of them at sign-out.
+
 ## Compaction (`/compact`)
 
 Added 2026-11-04 (Richard: "handle /compact gracefully"). Behaviour was checked against a real `claude --print --input-format stream-json` run (CLI 2.1.317).
