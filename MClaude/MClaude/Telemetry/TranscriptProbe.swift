@@ -56,12 +56,15 @@ final class TranscriptProbe {
     func context(sessionId: String, eventCount: Int) {
         let opened = sessionId != self.sessionId
         if opened { Telemetry.shared.contextSessionId = sessionId }
+        let countChanged = eventCount != self.eventCount
         self.sessionId = sessionId
         self.eventCount = eventCount
         if opened {
             sessionOpenedAt = Date()
             visibleRows.removeAll()
             evaluateBlank()
+        } else if countChanged {
+            evaluateBlank()   // an empty chat that gets its first event is blank-eligible again
         }
         if eventCount > 0 { logBaselineIfNeeded() }   // measurements usually arrive first
     }
@@ -74,6 +77,12 @@ final class TranscriptProbe {
         list.append(e)
         if list.count > ringCap { list.removeFirst(list.count - ringCap) }
         rings[ring] = list
+        // A successful load: from then on, zero events in that session means an empty chat. Kept
+        // per session, because a cached load can finish before the view switches sessions.
+        if ring == .loads, entry["event"] as? String == "load_end", entry["ok"] as? Bool == true,
+           let id = entry["session_id"] as? String, loadedSessions.insert(id).inserted, id == sessionId {
+            evaluateBlank()
+        }
     }
 
     func viewportChanged(minX: CGFloat, width: CGFloat) {
@@ -106,6 +115,8 @@ final class TranscriptProbe {
 
     private var visibleRows: Set<String> = []
     private var sessionOpenedAt = Date()
+    /// Sessions whose events have loaded successfully at least once.
+    private var loadedSessions: Set<String> = []
     private var blankCheck: DispatchWorkItem?
     private var blankEpisode: (span: Telemetry.Span, since: Date, reported: Bool)?
     private var lastBlankReport = Date.distantPast
@@ -117,7 +128,11 @@ final class TranscriptProbe {
         if before != visibleRows.isEmpty { evaluateBlank() }
     }
 
-    private var isBlank: Bool { !sessionId.isEmpty && visibleRows.isEmpty }
+    /// No row on screen in an open session. A session that loaded with no events (a new chat) has
+    /// nothing to show, so it isn't blank (docs/plan-observability.md → Blank screen probe).
+    private var isBlank: Bool {
+        !sessionId.isEmpty && visibleRows.isEmpty && !(eventCount == 0 && loadedSessions.contains(sessionId))
+    }
 
     private func evaluateBlank() {
         if isBlank {
