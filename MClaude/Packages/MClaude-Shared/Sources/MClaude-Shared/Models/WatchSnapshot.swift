@@ -62,23 +62,20 @@ public struct WatchSession: Codable, Sendable, Equatable, Identifiable {
             }
         }
 
-        /// Sort group: waiting first, then working, then everything else.
-        public var rank: Int {
-            switch self {
-            case .waiting: 0
-            case .working: 1
-            default: 2
-            }
-        }
     }
 
     public var id: String
     public var name: String
     public var project: String
     public var state: State
+    /// When the state began (last status change).
     public var since: Date
-    /// When you last saw it (on either device), or the read-state baseline.
-    public var seenAt: Date?
+    /// Your last input (the server's lastInputAt); nil from older iPhone builds.
+    public var inputAt: Date?
+    /// The server's read state: a finished turn you haven't seen.
+    public var unread: Bool?
+    /// Background tasks still running (nil or 0 = none).
+    public var background: Int?
     /// "question", "plan" or "tool" while something is pending.
     public var kind: String?
     public var question: String?
@@ -87,7 +84,8 @@ public struct WatchSession: Codable, Sendable, Equatable, Identifiable {
     public var recap: SessionRecap?
     public var lastText: String?
 
-    public init(id: String, name: String, project: String, state: State, since: Date, seenAt: Date? = nil,
+    public init(id: String, name: String, project: String, state: State, since: Date, inputAt: Date? = nil,
+                unread: Bool? = nil, background: Int? = nil,
                 kind: String? = nil, question: String?, options: [String]?, questions: [PromptQuestion]? = nil,
                 recap: SessionRecap? = nil, lastText: String?) {
         self.id = id
@@ -95,7 +93,9 @@ public struct WatchSession: Codable, Sendable, Equatable, Identifiable {
         self.project = project
         self.state = state
         self.since = since
-        self.seenAt = seenAt
+        self.inputAt = inputAt
+        self.unread = unread
+        self.background = background
         self.kind = kind
         self.question = question
         self.options = options
@@ -104,12 +104,20 @@ public struct WatchSession: Codable, Sendable, Equatable, Identifiable {
         self.lastText = lastText
     }
 
-    /// Unread: not working or waiting on you, with activity newer than when you last saw it.
-    public func isUnread(seenAt localSeen: Date? = nil) -> Bool {
-        guard state != .working, state != .waiting else { return false }
-        let seen = [seenAt, localSeen].compactMap { $0 }.max()
-        guard let seen else { return true }
-        return since > seen
+    /// What the list is ordered by and its age shows: your last input.
+    public var orderDate: Date { inputAt ?? since }
+
+    /// The status dot, first that applies (docs/plan-watch-app.md → Session list). `readLocally`:
+    /// the watch marked it read after this snapshot was fetched, before the server confirmed.
+    public func dot(readLocally: Bool = false) -> SessionDot? {
+        switch state {
+        case .waiting: return .needsYou
+        case .working: return .working
+        case .idle:
+            if (background ?? 0) > 0 { return .background }
+            return unread == true && !readLocally ? .unread : nil
+        case .starting, .restarting, .notRunning: return nil
+        }
     }
 
     /// What's pending: "question", "plan", "tool" or nil. Older servers send no `kind`, so it's
@@ -131,7 +139,7 @@ public struct WatchSession: Codable, Sendable, Equatable, Identifiable {
     }
 
     /// Build from the server's session, following the drawer's status rules.
-    public init(_ s: ClaudeSession, lastText: String?, seenAt: Date? = nil) {
+    public init(_ s: ClaudeSession, lastText: String?) {
         let state: State
         switch s.process {
         case "starting": state = .starting
@@ -145,23 +153,19 @@ public struct WatchSession: Codable, Sendable, Equatable, Identifiable {
             }
         }
         self.init(id: s.id, name: s.displayName, project: s.projectName, state: state, since: s.lastActivity,
-                  seenAt: seenAt, kind: s.prompt?.kind, question: s.prompt?.question,
+                  inputAt: s.orderDate, unread: s.isUnread, background: s.runningBackgroundTasks, kind: s.prompt?.kind, question: s.prompt?.question,
                   options: s.prompt?.options.flatMap { $0.isEmpty ? nil : $0 },
                   questions: s.prompt?.questions.flatMap { $0.isEmpty ? nil : $0 }, recap: s.recap, lastText: lastText)
     }
 
-    /// Waiting first, then working, then the rest; newest activity first within each group.
-    public static func sorted(_ sessions: [WatchSession]) -> [WatchSession] {
-        sessions.sorted { a, b in
-            if a.state.rank != b.state.rank { return a.state.rank < b.state.rank }
-            if a.since != b.since { return a.since > b.since }
-            return a.id < b.id
-        }
-    }
+    /// Short age of your last input (list rows): now, 14s, 2m, 3h, 2d.
+    public func age(now: Date = Date()) -> String { Self.shortAge(from: orderDate, now: now) }
 
-    /// Short age of the last activity: now, 14s, 2m, 3h, 2d.
-    public func age(now: Date = Date()) -> String {
-        let s = Int(max(0, now.timeIntervalSince(since)))
+    /// How long it has been in its state (detail header).
+    public func stateAge(now: Date = Date()) -> String { Self.shortAge(from: since, now: now) }
+
+    private static func shortAge(from date: Date, now: Date) -> String {
+        let s = Int(max(0, now.timeIntervalSince(date)))
         if s < 5 { return "now" }
         if s < 60 { return "\(s)s" }
         if s < 3600 { return "\(s / 60)m" }

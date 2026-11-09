@@ -24,14 +24,7 @@ enum WatchTheme {
 
     static let danger = Color(hex: 0xDD5353)
 
-    /// Blue = needs you, clay = working, white = unread, none otherwise.
-    static func dot(_ state: WatchSession.State, unread: Bool) -> Color? {
-        switch state {
-        case .waiting: link
-        case .working: clay
-        default: unread ? textPrimary : nil
-        }
-    }
+    static let success = Color(hex: 0x65BB30)
 }
 
 extension Color {

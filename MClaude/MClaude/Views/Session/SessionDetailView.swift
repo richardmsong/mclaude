@@ -195,8 +195,9 @@ struct SessionDetailView: View {
             }
             ToolbarItem(placement: .principal) {
                 HStack(spacing: 6) {
-                    if session?.processDown != true, let dot = session?.status.themeDot {
-                        Circle().fill(dot).frame(width: 7, height: 7)
+                    // Same dot as the drawer, minus unread: the session on screen is read
+                    if let dot = session?.dot, dot != .unread {
+                        SessionDotView(dot: dot, size: 7)
                     }
                     // Tap the name for the Info screen (full title, rename, usage)
                     Button { showInfo = true } label: {

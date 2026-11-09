@@ -13,7 +13,7 @@ final class WatchStore: NSObject {
     private(set) var snapshot: WatchSnapshot?
     /// Set when the latest refresh didn't get a reply from the iPhone app.
     private(set) var linkProblem: LinkProblem?
-    /// Sessions opened on the watch, so they read as seen before the iPhone confirms.
+    /// Sessions marked read on the watch, so they read as read before a newer snapshot confirms.
     private(set) var localSeen: [String: Date] = [:]
     /// A tapped notification asks the list to open this session.
     var openRequest: String?
@@ -39,21 +39,24 @@ final class WatchStore: NSObject {
         }
     }
 
-    // MARK: - Sections (docs/plan-watch-app.md → Session list)
+    // MARK: - List (docs/plan-watch-app.md → Session list)
 
+    /// In the snapshot's order: newest last input first, Ops last (the iPhone sorts it).
     var sessions: [WatchSession] { snapshot?.sessions ?? [] }
 
-    func isUnread(_ s: WatchSession) -> Bool { s.isUnread(seenAt: localSeen[s.id]) }
+    /// The session's dot, counting a read made on the watch after the snapshot was fetched.
+    func dot(_ s: WatchSession) -> SessionDot? {
+        let readLocally = localSeen[s.id].map { $0 > (snapshot?.fetchedAt ?? .distantPast) } ?? false
+        return s.dot(readLocally: readLocally)
+    }
 
-    private func newestFirst(_ list: [WatchSession]) -> [WatchSession] {
-        list.sorted { ($0.since, $0.id) > ($1.since, $1.id) }
-    }
-    var needsYou: [WatchSession] { newestFirst(sessions.filter { $0.state == .waiting }) }
-    var working: [WatchSession] { newestFirst(sessions.filter { $0.state == .working }) }
-    var unread: [WatchSession] { newestFirst(sessions.filter(isUnread)) }
-    var read: [WatchSession] {
-        newestFirst(sessions.filter { $0.state != .waiting && $0.state != .working && !isUnread($0) })
-    }
+    /// Sessions with a dot (needs you, working, background, unread); status never reorders them.
+    var listed: [WatchSession] { sessions.filter { dot($0) != nil } }
+    var read: [WatchSession] { sessions.filter { dot($0) == nil } }
+
+    var needsYouCount: Int { sessions.filter { dot($0) == .needsYou }.count }
+    var workingCount: Int { sessions.filter { dot($0) == .working || dot($0) == .background }.count }
+    var unreadCount: Int { sessions.filter { dot($0) == .unread }.count }
 
     func session(_ id: String) -> WatchSession? { sessions.first { $0.id == id } }
 
@@ -102,7 +105,7 @@ final class WatchStore: NSObject {
 
     // MARK: - Read state and actions
 
-    /// Opening a session on the watch marks it seen, here and on the iPhone.
+    /// Opening a session on the watch marks it read: here at once, and on the server via the iPhone.
     func markRead(_ id: String) {
         let now = Date()
         localSeen[id] = now
@@ -110,8 +113,11 @@ final class WatchStore: NSObject {
         if !ids.isEmpty { localSeen = localSeen.filter { ids.contains($0.key) } }
         UserDefaults.standard.set(localSeen.mapValues(\.timeIntervalSince1970), forKey: Self.seenKey)
         guard activated, WCSession.default.isReachable else { return }
-        WCSession.default.sendMessage([WatchSnapshot.requestKey: WatchSnapshot.requestMarkRead, "id": id,
-                                       "at": now.timeIntervalSince1970], replyHandler: { _ in }, errorHandler: nil)
+        WCSession.default.sendMessage([WatchSnapshot.requestKey: WatchSnapshot.requestMarkRead, "id": id],
+                                      replyHandler: { reply in
+            guard let data = reply[WatchSnapshot.messageKey] as? Data, let snap = WatchSnapshot.decode(data) else { return }
+            Task { @MainActor in self.apply(snap, data: data) }
+        }, errorHandler: nil)
     }
 
     /// Send an action (answer, approve, deny, continue, reply) through the iPhone app. True on success.

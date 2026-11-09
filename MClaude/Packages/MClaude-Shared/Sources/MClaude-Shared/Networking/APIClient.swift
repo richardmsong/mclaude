@@ -204,6 +204,15 @@ public struct APIClient: Sendable {
         try Self.requireSuccess(response)
     }
 
+    /// Mark a session read on the server, for every device
+    /// (docs/design-claude-uplift.md → Session order, read state and background work).
+    public func markRead(id: String) async throws {
+        let url = config.baseURL.appendingPathComponent("sessions/\(id)/read")
+        let request = authedRequest(url: url, method: "POST")
+        let (_, response) = try await observedData(for: request)
+        try Self.requireSuccess(response)
+    }
+
     /// Interrupt Claude's current step and deliver the whole queue now.
     public func flushQueue(sessionId: String) async throws {
         let url = config.baseURL.appendingPathComponent("sessions/\(sessionId)/queue/flush")

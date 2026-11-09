@@ -147,13 +147,33 @@ struct SunkenCapsuleButtonStyle: ButtonStyle {
 
 // MARK: - Session status (drawer dot / header)
 
-extension SessionStatus {
-    /// Claude palette: clay = working, blue = waiting on you, none = idle/unknown.
-    var themeDot: Color? {
+/// The session status dot (docs/design-claude-uplift.md → Drawer → Session list): blue = needs
+/// you, clay = working, clay ring = background work running, green = unread.
+struct SessionDotView: View {
+    let dot: SessionDot
+    var size: CGFloat = 8
+
+    var body: some View {
+        Group {
+            switch dot {
+            case .needsYou: Circle().fill(Theme.link)
+            case .working: Circle().fill(Theme.clay)
+            case .background: Circle().strokeBorder(Theme.clay, lineWidth: 1.5)
+            case .unread: Circle().fill(Theme.success)
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityLabel(dot.accessibilityText)
+    }
+}
+
+extension SessionDot {
+    var accessibilityText: String {
         switch self {
-        case .working: Theme.clay
-        case .waitingForInput, .needsPermission, .planMode: Theme.link
-        case .idle, .unknown: nil
+        case .needsYou: "Needs you"
+        case .working: "Working"
+        case .background: "Background work running"
+        case .unread: "Unread"
         }
     }
 }

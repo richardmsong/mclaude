@@ -758,6 +758,20 @@ func buildRouter(monitor: SessionManager, broadcaster: WSBroadcaster, sessionSto
                         body: .init(byteBuffer: .init(data: data)))
     }
 
+    // Mark a session read (docs/design-claude-uplift.md → Read state): owner or laptop owner, else 404
+    router.post("/sessions/:id/read") { request, context in
+        guard let id = context.parameters.get("id") else { return Response(status: .badRequest) }
+        guard let userId = await requireAuth(request: request) else { return unauthorized }
+        var allowed = await isLaptopOwner(userId)
+        if !allowed { allowed = await capturedStore?.userOwns(sessionId: id, userId: userId) ?? true }
+        guard allowed, !id.hasPrefix("k8s-"), await capturedMonitor.markRead(id: id) else {
+            return Response(status: .notFound, headers: [.contentType: "application/json"],
+                            body: .init(byteBuffer: .init(string: "{\"error\":\"not found\"}")))
+        }
+        return Response(status: .ok, headers: [.contentType: "application/json"],
+                        body: .init(byteBuffer: .init(string: "{\"ok\":true}")))
+    }
+
     // Token usage, context size and cost for one conversation (app's Info screen)
     router.get("/sessions/:id/usage") { request, context in
         guard let id = context.parameters.get("id") else { return Response(status: .badRequest) }

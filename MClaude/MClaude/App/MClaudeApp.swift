@@ -42,11 +42,10 @@ struct MClaudeApp: App {
                 .onChange(of: scenePhase) { _, newPhase in
                     switch newPhase {
                     case .active:
-                        if let id = appState.visibleSessionId { SeenStore.shared.markSeen(id) }
+                        if let id = appState.visibleSessionId { appState.markReadIfUnread(id) }
                         guard appState.isSignedIn else { break }
                         appState.connectWebSocket()
                     case .background:
-                        if let id = appState.visibleSessionId { SeenStore.shared.markSeen(id) }
                         appState.scheduleBackgroundRefresh()
                         appState.saveTranscripts()
                     default:

@@ -22,7 +22,8 @@ The scope is the iOS app (`MClaude/`) and mclaude-server only. The web SPA runs 
 | Who parses the format | **The server** parses the undocumented tag and tool formats and attaches structured fields to events. The app never parses `<cross-session-message>`. | One place to fix when Claude Code changes the format. Older apps keep working because `text` is unchanged. |
 | Entry points | Cards in the transcript plus a **per-session list** on the Info screen (Richard). No global inbox. | |
 | Thread interaction | **Read-only** (Richard). It has an "Open <peer>" link; you type in the session itself. | Messages are written by Claude sessions, not by you, so a composer in the thread would be ambiguous. |
-| Card style | **Collapsed cards in both directions** (Richard). Sent cards are pulled out of the work group. | Coordination messages matter and shouldn't hide in a folded tool group. Long messages (often a full screen) are collapsed. |
+| Card style | **One-line cards in both directions** (Richard; one line since 2026-11-09). Sent cards are pulled out of the work group. | Coordination messages matter and shouldn't hide in a folded tool group, but full cards cluttered the transcript. The thread has the full text. |
+| Peer turns | **Folded into one exchange row** and **quiet**: no drawer reorder, no unread, no push (Richard, 2026-11-09). | Sessions coordinating with each other shouldn't reshuffle your list or bury your own conversation. |
 | In-process subagent messages | **Not** peer messages. `SendMessage` to a subagent or teammate (`recipient_kind: "agent"`) keeps the existing tool row. | They aren't cross-session. |
 
 ## Background: Claude Code's formats (observed, undocumented)
@@ -266,50 +267,73 @@ Where it appears:
 - `peerOtherText`, if present, follows as a normal user bubble.
 - The `tool_result` of a peer `SendMessage` isn't shown as its own row. Its status is shown on the To card.
 
+A card is **one line** (Richard, 2026-11-09: peer messages "clutter space even in the transcript view"). The full text is in the thread sheet.
+
 ```
 ┌──────────────────────────────────────┐
-│ ↙ From  Drawer/resume  mclaude-v1-f1 │
-│ About to archive TestFlight build    │
-│ 109 from the shared tree. Are you    │
-│ editing anything in MClaude/ or      │
-│ mclaude-server/ that isn't ready …   │
-│                      View thread  ›  │
+│ ↙ Drawer/resume  About to archive… › │
 └──────────────────────────────────────┘
 ┌──────────────────────────────────────┐
-│ ↗ To  Drawer/resume              ✓   │
-│ Ack: holding restart until told      │
-│ ok — nothing of mine is in flight…   │
-│                      View thread  ›  │
+│ ↗ Drawer/resume  Ack: holding… ✓  › │
 └──────────────────────────────────────┘
 ```
 
-**Container:** full-width raised card, 12pt radius, hairline border, like tool cards. It's not a right-aligned user bubble.
+**Container:** full-width raised card, 12pt radius, hairline border, 12pt horizontal and 9pt vertical padding, like a work group's summary row. It's not a right-aligned user bubble.
 
-**Header row:**
+**The line**, left to right:
 - An icon: `arrow.down.left` for received, `arrow.up.right` for sent, coloured text-secondary.
-- "From" or "To" in sans 13 muted.
-- `peer.displayName` in sans semibold 13, text primary, one line.
-- `peer.ccName` in muted mono 11, shown only when it's different from `displayName`.
+- `peer.displayName` in sans semibold 13, text primary, one line. It keeps its full width before the preview is cut.
+- The preview in sans 13, text-secondary, one line, cut with a trailing ellipsis: the `summary` when present, else the first non-empty line of the message `text`.
+- **Status** (sent cards only). It comes from the paired tool_result's `peerDelivery`; with no result yet it's `sending`.
+  - `sending`: a small spinner
+  - `delivered`: `checkmark` in muted
+  - `failed`: "Not delivered" in danger caption 12. The `error` follows on a second line in danger caption, up to 2 lines.
+- A muted `chevron.right` when the peer is resolved (`peer.claudeSessionId` is present).
 
-**Status** (sent cards only, trailing in the header). It comes from the paired tool_result's `peerDelivery`; with no result yet it's `sending`.
-- `sending`: a small spinner
-- `delivered`: `checkmark` in muted
-- `failed`: "Not delivered" in danger caption 12, and the `error` in danger caption under the body, up to 2 lines
-
-**Body:**
-- `summary`, when present, in sans semibold 14, one line.
-- Then the message `text` in sans 14, text-secondary, limited to **4 lines** with a trailing ellipsis.
-
-**Footer:**
-- **"View thread ›"** in link colour, sans 13, shown when `peer.claudeSessionId` is present (the peer was resolved).
-- When it's absent (pre-feature or unresolved) and the body was truncated, the footer is **"Show more"** instead, which expands the full text inline. The label then becomes "Show less".
+`peer.ccName` isn't shown on the card; the thread sheet shows it.
 
 **Taps:**
 - Anywhere on a resolved card opens the thread sheet, scrolled to this message.
-- On an unresolved card, a tap does the same as Show more or Show less.
+- On an unresolved card (pre-feature or unresolved peer), a tap expands the full `summary` and `text` inline below the line (sans 14, text-secondary), and a second tap collapses it again. A card whose whole message already fits on the line does nothing.
 - Long-press: a context menu with **Copy message**, which copies the full body.
 
+**VoiceOver:** "Message from <peer>" or "Message to <peer>", the delivery status for sent cards, then the summary and the full text. Hint: "Opens the thread" (resolved) or "Shows the full message" (unresolved, cut).
+
 **Live behaviour:** cards appear as events arrive, with no reload. A sent card's status changes in place when its result arrives.
+
+### Peer exchanges (folded peer turns)
+
+A **peer turn** is a turn that a peer message started, with no input from you (docs/design-claude-uplift.md → Session order, read state and background work). Coordination between sessions often runs several turns, each with a From card, some work, a reply and a To card. The transcript folds them so they don't bury your own conversation.
+
+**What folds:**
+- In the transcript, a turn is the run of rows from a user event up to the next user event (design-claude-uplift → Work groups and thinking). A turn folds when its user event has `peerMessages` and no `peerOtherText`.
+- Back-to-back folding turns form **one** exchange row. Anything else between them (your message, a task notification, a turn that doesn't fold) ends the exchange.
+- A turn never folds when it holds something that needs you: an AskUserQuestion card, a plan (`ExitPlanMode`) or a Blocked card. Nor does the last turn while the session is waiting on you.
+- Pending messages, the working indicator and the queue stay outside, at the bottom, as always.
+
+```
+┌──────────────────────────────────────┐
+│ ⇄ Ops · 3 messages · 2m ago        › │
+│   You: Ack, holding restart until …  │
+└──────────────────────────────────────┘
+```
+
+**Exchange row** (raised card, 12pt radius, hairline border, 12pt horizontal and 9pt vertical padding):
+- Line one: `arrow.left.arrow.right` in text-secondary, then the peers, `· <n> messages` and `· <age>`, in sans 13, text-secondary, one line.
+  - Peers: the distinct peer display names in the order they first appear, in semibold text primary. Two at most; more shows as `Ops, Drawer/resume +2`.
+  - `<n>`: the number of peer messages in the exchange, both directions (`1 message`, `3 messages`).
+  - `<age>`: the time since the exchange's last peer message, in the drawer's relative style (`now`, `2m ago`, `3h ago`). It's left out when the message has no time.
+- A pulsing clay dot leads line one while the last turn in the exchange is running.
+- Line two: the last peer message's preview (as on a card), muted sans 13, one line, prefixed `You: ` when it was sent, else `<peer name>: `.
+- A trailing `chevron.right`, turning to `chevron.down` when expanded.
+
+**Taps:**
+- A tap expands the exchange in place: its turns render exactly as unfolded turns would (one-line cards, work groups, thinking, Claude's text, turn times), indented 10pt with a 1.5pt leading rule, like an open work group. A second tap folds it again.
+- The expanded state lasts while the session is on screen, keyed by the exchange's first event, so a new turn joining the exchange doesn't fold it back.
+- A running exchange stays folded; it isn't expanded automatically.
+- Export (copy, share, Full Page screenshot) shows exchanges folded, like work groups.
+
+**VoiceOver:** "Exchange with <peers>, <n> messages, <age>, <preview>, collapsed" (or "expanded"); activating it toggles it.
 
 ### Thread sheet
 

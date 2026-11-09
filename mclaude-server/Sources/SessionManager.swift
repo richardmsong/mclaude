@@ -18,6 +18,78 @@ struct ManagedSessionRecord: Codable, Sendable {
     var recap: SessionRecap?
     /// Claude session ids this session had before a /clear, oldest first (peer messages still map to it)
     var earlierClaudeSessionIds: [String]?
+    // docs/design-claude-uplift.md → Session order, read state and background work
+    /// The last time the user gave the session input (nil only in records from before the field)
+    var lastInputAt: Date?
+    /// A non-peer turn ended and the user hasn't read the session since
+    var unreadPending: Bool?
+    /// Background tasks still running in the current process; any left at a launch were interrupted
+    var backgroundTasks: [BackgroundTask]?
+}
+
+/// Claude's tasks, from its stdout `system` lines (task_started / task_updated /
+/// task_notification): which ones are running in the background (docs/design-claude-uplift.md →
+/// Background work).
+struct BackgroundTaskTracker: Sendable, Equatable {
+    /// Every task the current process started, so a foreground task moved to the background has its type and description
+    private(set) var known: [String: BackgroundTask] = [:]
+    /// Running background tasks, in start order
+    private(set) var running: [BackgroundTask]
+
+    init(running: [BackgroundTask] = []) { self.running = running }
+
+    /// Apply one stdout `system` line. True when the running set changed. `keepStopped`: the server
+    /// is stopping this process itself (restart, drain), so Claude Code's own "stopped"/"killed"
+    /// endings mean interrupted: the task stays listed for the next launch's note.
+    mutating func apply(_ json: [String: Any], keepStopped: Bool = false) -> Bool {
+        func ends(_ status: String?) -> Bool {
+            guard let status, status != "running", status != "pending" else { return false }
+            return !(keepStopped && (status == "stopped" || status == "killed"))
+        }
+        guard let id = json["task_id"] as? String, !id.isEmpty else { return false }
+        switch json["subtype"] as? String {
+        case "task_started":
+            let task = BackgroundTask(id: id, taskType: json["task_type"] as? String ?? "task",
+                                      description: json["description"] as? String ?? "")
+            known[id] = task
+            guard json["is_backgrounded"] as? Bool == true else { return false }
+            return add(task)
+        case "task_updated":
+            guard let patch = json["patch"] as? [String: Any] else { return false }
+            var changed = false
+            if patch["is_backgrounded"] as? Bool == true {
+                let task = known[id] ?? BackgroundTask(id: id, taskType: patch["task_type"] as? String ?? "task",
+                                                       description: patch["description"] as? String ?? "")
+                changed = add(task)
+            }
+            if ends(patch["status"] as? String) {
+                changed = remove(id) || changed
+            }
+            return changed
+        case "task_notification":
+            return ends(json["status"] as? String ?? "completed") ? remove(id) : false
+        default:
+            return false
+        }
+    }
+
+    /// A new process: nothing of the old one runs any more.
+    mutating func reset() {
+        known = [:]
+        running = []
+    }
+
+    private mutating func add(_ task: BackgroundTask) -> Bool {
+        guard !running.contains(where: { $0.id == task.id }) else { return false }
+        running.append(task)
+        return true
+    }
+
+    private mutating func remove(_ id: String) -> Bool {
+        guard let i = running.firstIndex(where: { $0.id == id }) else { return false }
+        running.remove(at: i)
+        return true
+    }
 }
 
 private struct ManagedSessionsFile: Codable {
@@ -87,8 +159,19 @@ private final class LiveSession {
     var recapRunning = false
     var recapRerun = false
     var firstPrompt: String?             // first real prompt, read from the transcript once
+    /// During a peer turn: the display name of the peer whose message started it
+    var peerTurn: String?
+    /// …and the peer's Claude session id, when resolved
+    var peerTurnPeer: String?
+    /// Background tasks (running set mirrored into record.backgroundTasks)
+    var tasks: BackgroundTaskTracker
+    /// Interrupted-tasks note for the process just launched, until it's sent
+    var tasksNote: String?
 
-    init(record: ManagedSessionRecord) { self.record = record }
+    init(record: ManagedSessionRecord) {
+        self.record = record
+        tasks = BackgroundTaskTracker(running: record.backgroundTasks ?? [])
+    }
 }
 
 /// Owns every Claude Code process the server runs. Port of mclaude v2's session agent:
@@ -163,6 +246,7 @@ actor SessionManager {
             nextIndex = file.nextIndex
             modelWindows = file.modelWindows ?? [:]
             endedNames = file.endedNames ?? [:]
+            var migrated = false
             for record in file.sessions {
                 let live = LiveSession(record: record)
                 live.statusSince = record.createdAt
@@ -181,8 +265,14 @@ actor SessionManager {
                 if let last = past.last(where: { $0.type == .system }), let date = Date.fromISO(last.timestamp) {
                     live.statusSince = date
                 }
+                if live.record.lastInputAt == nil {
+                    // Saved before lastInputAt existed: the last real prompt, else the creation time
+                    live.record.lastInputAt = Self.lastPromptDate(in: past) ?? record.createdAt
+                    migrated = true
+                }
             }
             print("[sessions] Loaded \(file.sessions.count) managed sessions")
+            if migrated { persist() }
             await reapOrphans()
         }
         publishSessions()
@@ -202,19 +292,130 @@ actor SessionManager {
     /// The message a mid-turn session gets after a server restart. It's hidden from the
     /// transcript (live and history): the restart must not show.
     static let restartResumeText = "The previous turn was interrupted by a server restart. Continue where you left off."
+    /// The message a mid-turn session gets after its process crashed. It's shown (crashes should be known).
+    static let crashResumeText = "The previous turn was interrupted by a crash. Continue where you left off."
+    /// Fixed start of the interrupted-background-tasks note (docs/design-claude-uplift.md → Background work)
+    static let tasksNotePrefix = "A restart stopped your background tasks; they won't report back: "
+    /// Between a resume message and the note appended to it
+    static let tasksNoteSeparator = "\n\n"
+
+    /// The note Claude gets when a launch finds background tasks of the old process on the list.
+    /// Nil when there are none.
+    nonisolated static func interruptedTasksNote(_ tasks: [BackgroundTask]) -> String? {
+        guard !tasks.isEmpty else { return nil }
+        let list = tasks.map { t -> String in
+            let kind = switch t.taskType {
+            case "local_agent": "Agent"
+            case "local_bash": "command"
+            default: t.taskType
+            }
+            return "\(kind) \"\(t.description)\""
+        }
+        return tasksNotePrefix + list.joined(separator: ", ") + ". Restart any you still need, then continue."
+    }
+
+    /// The text to show for a user line that may be (or contain) one of the server's hidden
+    /// messages: "" when all of it is hidden (the server-restart resume, the interrupted-tasks note,
+    /// or the two combined), the crash resume without its appended note, else `text` unchanged.
+    nonisolated static func visibleText(ofUserLine text: String) -> String {
+        if text == restartResumeText || text.hasPrefix(tasksNotePrefix) { return "" }
+        if text.hasPrefix(restartResumeText + tasksNoteSeparator + tasksNotePrefix) { return "" }
+        if text.hasPrefix(crashResumeText + tasksNoteSeparator + tasksNotePrefix) { return crashResumeText }
+        return text
+    }
+
+    /// One message for a fresh process: the mid-turn resume (if any) with the note appended (if any).
+    nonisolated static func messageAfterLaunch(resume: String?, note: String?) -> String? {
+        switch (resume, note) {
+        case let (r?, n?): return r + tasksNoteSeparator + n
+        case let (r?, nil): return r
+        case let (nil, n?): return n
+        case (nil, nil): return nil
+        }
+    }
+
+    /// Right after a launch: send the mid-turn resume message and/or the interrupted-tasks note
+    /// as one message, which starts a turn. False when there was nothing to send.
+    @discardableResult
+    private func sendAfterLaunch(_ live: LiveSession, resume: String?, trigger: String) -> Bool {
+        let note = live.tasksNote
+        live.tasksNote = nil
+        guard let text = Self.messageAfterLaunch(resume: resume, note: note) else { return false }
+        if note != nil { print("[sessions] \(live.record.id): background tasks were interrupted; telling Claude") }
+        let turn = startTurnSpan(live, trigger: resume == nil ? "tasks_interrupted" : trigger)  // telemetry
+        live.process?.sendUserMessage(uuid: UUID().uuidString.lowercased(), content: text, traceparent: turn?.traceparent)  // telemetry: + traceparent
+        setTurn(live, true)
+        setStatus(live, .working)
+        return true
+    }
 
     private func startAtBoot(id: String) {
         guard let live = sessions[id], live.process == nil, !live.deleted, !draining,
               live.record.startOnFirstMessage != true else { return }
         let midTurn = live.record.turnInProgress == true && live.record.hasConversation
         guard launch(live) else { scheduleRestart(live, resumeTurn: midTurn); return }
-        if midTurn {
-            print("[sessions] \(live.record.id): was mid-turn when the server stopped; resuming")
-            let turn = startTurnSpan(live, trigger: "server_restart")  // telemetry
-            live.process?.sendUserMessage(uuid: UUID().uuidString.lowercased(), content: SessionManager.restartResumeText, traceparent: turn?.traceparent)  // telemetry: + traceparent
-            setTurn(live, true)
-            setStatus(live, .working)
+        if midTurn { print("[sessions] \(live.record.id): was mid-turn when the server stopped; resuming") }
+        sendAfterLaunch(live, resume: midTurn ? SessionManager.restartResumeText : nil, trigger: "server_restart")
+    }
+
+    // MARK: - Read state, peer turns and input time (docs/design-claude-uplift.md → Session order, read state and background work)
+
+    /// `unread` as the app sees it: unread pending, and idle with nothing running or waiting.
+    nonisolated static func unreadShown(pending: Bool, processRunning: Bool, status: SessionStatus,
+                                        promptPending: Bool, turnActive: Bool, backgroundTasks: Int) -> Bool {
+        pending && processRunning && status == .idle && !promptPending && !turnActive && backgroundTasks == 0
+    }
+
+    /// A user event that holds only peer messages (it has peerMessages and no peerOtherText): the
+    /// display name of the first peer. Nil otherwise.
+    nonisolated static func peerOnlySender(_ e: SessionEvent) -> String? {
+        guard e.type == .user, e.peerOtherText == nil, let first = e.peerMessages?.first else { return nil }
+        let name = first.peer.displayName
+        return name.isEmpty ? (first.peer.ccName ?? "Another session") : name
+    }
+
+    /// Time of the last real prompt in rebuilt history: a top-level user line that isn't only peer
+    /// messages, a task notification or a server message.
+    nonisolated static func lastPromptDate(in events: [SessionEvent]) -> Date? {
+        for e in events.reversed() where e.type == .user && e.subagentInfo == nil {
+            guard let text = e.text, !text.isEmpty, peerOnlySender(e) == nil,
+                  !JSONLParser.isOnlyTaskNotifications(text),
+                  !text.hasPrefix("The previous turn was interrupted by"),
+                  !visibleText(ofUserLine: text).isEmpty else { continue }
+            if let date = Date.fromISO(e.timestamp) { return date }
         }
+        return nil
+    }
+
+    /// Input from the user: it sets lastInputAt and clears unread pending.
+    private func noteInput(_ live: LiveSession) {
+        live.record.lastInputAt = Date()
+        live.record.unreadPending = nil
+        persist()
+        publishSessions()
+    }
+
+    /// POST /sessions/:id/read. False for an unknown session.
+    func markRead(id: String) -> Bool {
+        guard let live = sessions[id] else { return false }
+        guard live.record.unreadPending == true else { return true }
+        live.record.unreadPending = nil
+        persist()
+        publishSessions()
+        return true
+    }
+
+    /// Apply a stdout `system` task line; persist and publish when the running set changed.
+    private func trackTask(_ live: LiveSession, _ json: [String: Any]) {
+        guard live.tasks.apply(json, keepStopped: live.stopping || draining) else { return }
+        saveBackgroundTasks(live)
+    }
+
+    private func saveBackgroundTasks(_ live: LiveSession) {
+        let running = live.tasks.running
+        live.record.backgroundTasks = running.isEmpty ? nil : running
+        persist()
+        publishSessions()
     }
 
     /// If the previous server died hard, its Claude children outlive it (reparented to launchd)
@@ -260,10 +461,11 @@ actor SessionManager {
         }
         let index = nextIndex
         nextIndex += 1
+        let now = Date()
         let record = ManagedSessionRecord(
             id: "s\(index)", index: index, claudeSessionId: UUID().uuidString.lowercased(), cwd: cwd,
-            windowName: name ?? (cwd as NSString).lastPathComponent, createdAt: Date(),
-            oauthToken: token, hasConversation: false)
+            windowName: name ?? (cwd as NSString).lastPathComponent, createdAt: now,
+            oauthToken: token, hasConversation: false, lastInputAt: now)
         let live = LiveSession(record: record)
         sessions[record.id] = live
         persist()
@@ -299,10 +501,11 @@ actor SessionManager {
         // Same rule as the Resume sheet's In use tag: maybe still live in a terminal
         let inUse = Date().timeIntervalSince(t.modifiedAt) < TranscriptIndex.inUseWindow
         let name = endedNames[t.id] ?? t.aiTitle ?? t.firstPrompt.map { String($0.prefix(60)) } ?? projectName
+        let now = Date()
         let record = ManagedSessionRecord(
             id: "s\(index)", index: index, claudeSessionId: t.id, cwd: t.cwd, windowName: name,
-            createdAt: Date(), oauthToken: token, hasConversation: true,
-            startOnFirstMessage: inUse ? true : nil)
+            createdAt: now, oauthToken: token, hasConversation: true,
+            startOnFirstMessage: inUse ? true : nil, lastInputAt: now)   // resuming is input
         let live = LiveSession(record: record)
         live.statusSince = t.modifiedAt
         live.lastActivity = t.modifiedAt
@@ -440,6 +643,7 @@ actor SessionManager {
             return sendMessage(text, to: live)
         }
         live.lastActivity = Date()
+        noteInput(live)   // typed input: messages (even queued), answers, keys
         inputRequest = Telemetry.currentRequest  // telemetry
         defer { inputRequest = nil }  // telemetry
 
@@ -498,6 +702,7 @@ actor SessionManager {
             cleaned[q.question] = a
         }
         live.lastActivity = Date()
+        noteInput(live)
         live.draft = ""
         var input = (try? JSONSerialization.jsonObject(with: pending.inputJSON)) as? [String: Any] ?? [:]
         input["answers"] = cleaned
@@ -510,12 +715,14 @@ actor SessionManager {
     func approve(id: String) -> Bool {
         guard let live = sessions[id] else { return false }
         guard let pending = live.pending else { return true }
+        noteInput(live)
         return answer(pending, in: live, text: "Enter", sendEnter: false)
     }
 
     /// "Cancel" = Escape: decline a pending prompt, or interrupt the running turn.
     func cancel(id: String) -> Bool {
         guard let live = sessions[id] else { return false }
+        if live.pending != nil || live.turnActive { noteInput(live) }   // deny or interrupt
         if let pending = live.pending { return answer(pending, in: live, text: "Escape", sendEnter: false) }
         if live.turnActive { live.process?.interrupt() }
         return true
@@ -606,6 +813,7 @@ actor SessionManager {
 
     func flushQueue(id: String) -> Bool {
         guard let live = sessions[id] else { return false }
+        if !live.queue.isEmpty { noteInput(live) }   // "Send now"
         return flushNow(live)
     }
 
@@ -790,7 +998,9 @@ actor SessionManager {
     @discardableResult
     private func ensureRunning(_ live: LiveSession) -> Bool {
         if let p = live.process, p.process.isRunning { return true }
-        return launch(live)
+        guard launch(live) else { return false }
+        sendAfterLaunch(live, resume: nil, trigger: "tasks_interrupted")   // before the message that needed the launch
+        return true
     }
 
     private func launch(_ live: LiveSession) -> Bool {
@@ -813,9 +1023,20 @@ actor SessionManager {
         live.restartAfterTurn = false        // a fresh process already has the current config
         live.stopping = false
         live.turnActive = false
+        live.peerTurn = nil
         live.pending = nil
         live.ready = false
         live.restartPending = false
+        // Background tasks die with their process: any still listed were interrupted. The caller
+        // sends the note (sendAfterLaunch), joined to its mid-turn resume message if it has one.
+        if !live.tasks.running.isEmpty {
+            live.tasksNote = Self.interruptedTasksNote(live.tasks.running)
+            live.tasks.reset()
+            live.record.backgroundTasks = nil
+            persist()
+        } else {
+            live.tasks.reset()
+        }
         publishSessions()
         print("[sessions] \(live.record.id): claude pid \(proc.pid) (\(resume ? "resume" : "new"))")
         let id = live.record.id
@@ -910,6 +1131,7 @@ actor SessionManager {
         live.process = nil
         let wasTurnActive = live.turnActive
         live.turnActive = false
+        live.peerTurn = nil
         live.pending = nil
         if live.stopping || live.deleted {
             setStatus(live, .idle)
@@ -952,14 +1174,8 @@ actor SessionManager {
             return
         }
         addTranscript(live, "↻ Restarted Claude (resumed session).")
-        if resumeTurn {
-            // The turn died with the process; ask Claude to pick it back up from the transcript.
-            let turn = startTurnSpan(live, trigger: "crash_resume")  // telemetry
-            live.process?.sendUserMessage(uuid: UUID().uuidString.lowercased(),
-                content: "The previous turn was interrupted by a crash. Continue where you left off.", traceparent: turn?.traceparent)  // telemetry: + traceparent
-            setTurn(live, true)
-            setStatus(live, .working)
-        } else {
+        // A running turn died with the process; ask Claude to pick it back up from the transcript.
+        if !sendAfterLaunch(live, resume: resumeTurn ? SessionManager.crashResumeText : nil, trigger: "crash_resume") {
             setStatus(live, .idle)
         }
     }
@@ -1033,8 +1249,11 @@ actor SessionManager {
             return
         }
         addTranscript(live, "↻ Restarted Claude to reload MCP servers.")
-        setStatus(live, .idle)
-        flushQueue(live, reason: "restarted")
+        // With interrupted background tasks, their note is the next turn; queued messages follow it
+        if !sendAfterLaunch(live, resume: nil, trigger: "tasks_interrupted") {
+            setStatus(live, .idle)
+            flushQueue(live, reason: "restarted")
+        }
     }
 
     // MARK: - MCP control (docs/plan-mcp-servers.md)
@@ -1245,6 +1464,9 @@ actor SessionManager {
                 resetConversation(live, to: newId)
             }
             let taskId = json["task_id"] as? String
+            if subtype == "task_started" || subtype == "task_updated" || subtype == "task_notification" {
+                trackTask(live, json)                       // background work (docs/design-claude-uplift.md)
+            }
             if subtype == "task_started", let taskId, json["is_backgrounded"] as? Bool == false {
                 live.foregroundTasks.insert(taskId)
             }
@@ -1296,6 +1518,7 @@ actor SessionManager {
                 live.pendingCompactionSummary = event.text
                 return
             }
+            let startsTurn = parentToolUse == nil && event.type == .user && !live.turnActive
             if parentToolUse == nil, event.type == .user {
                 setTurn(live, true)                         // Claude took a message: a turn is running
                 if live.pending == nil { setStatus(live, .working) }
@@ -1312,7 +1535,9 @@ actor SessionManager {
                                      thinking: nil, toolUse: nil, toolResults: nil, model: nil, durationMs: nil)
             }
             // A mid-turn peer message is replayed when Claude takes it; its timestamp is the enqueue
-            append(observePeers(tag(event, parentToolUse, live), live, receivedAt: json["timestamp"] as? String), to: live)
+            let enriched = observePeers(tag(event, parentToolUse, live), live, receivedAt: json["timestamp"] as? String)
+            if parentToolUse == nil, enriched.type == .user { notePeerTurn(live, enriched, startsTurn: startsTurn) }
+            append(enriched, to: live)
             if event.type == .toolResult { notifyBlocked(live, event) }
             if parentToolUse == nil, event.type == .toolResult {
                 // A step finished; Claude reads stdin before its next model call
@@ -1371,6 +1596,10 @@ actor SessionManager {
         case "result":
             // Turn finished (success, error, or interrupted). The app reads system events with
             // durationMs as "turn ended", exactly what the JSONL turn_duration entries gave it.
+            // A peer turn is quiet: no unread, no long-turn push.
+            let peerTurn = live.peerTurn != nil
+            live.peerTurn = nil
+            if !peerTurn { live.record.unreadPending = true }
             var usage = live.record.usage ?? SessionUsage()
             usage.addResult(json)
             live.record.usage = usage
@@ -1400,7 +1629,7 @@ actor SessionManager {
             append(event, to: live)
             if json["subtype"] as? String == "error_during_execution" { addTranscript(live, "⏹ Interrupted.") }
             if live.pending == nil { setStatus(live, .idle) }
-            notifyIfLongTurn(live, result: json)
+            if !peerTurn { notifyIfLongTurn(live, result: json) }
             requestRecap(live)
             if live.restartAfterTurn, live.pending == nil {
                 // Restart all ran mid-turn; queued messages go to the new process
@@ -1458,6 +1687,10 @@ actor SessionManager {
         }
         live.selectedOptions = []
         live.submitRequested = false
+        if live.peerTurn != nil {
+            live.peerTurn = nil                             // the user is needed: no longer a quiet peer turn
+            publishSessions()
+        }
         notifyNeedsYou(live)
         requestRecap(live)
     }
@@ -1571,6 +1804,23 @@ actor SessionManager {
         }
     }
 
+    /// A top-level user line Claude took: a peer-only line that starts a turn makes it a peer turn;
+    /// any other line (the user's message delivered mid-turn) ends one. Replayed task notifications
+    /// and further peer-only lines don't count.
+    private func notePeerTurn(_ live: LiveSession, _ event: SessionEvent, startsTurn: Bool) {
+        let sender = Self.peerOnlySender(event)
+        if startsTurn {
+            live.peerTurn = sender
+            live.peerTurnPeer = sender == nil ? nil : event.peerMessages?.first?.peer.claudeSessionId
+            if sender != nil { publishSessions() }
+            return
+        }
+        guard live.peerTurn != nil, sender == nil,
+              !JSONLParser.isOnlyTaskNotifications(event.text ?? "") else { return }
+        live.peerTurn = nil
+        publishSessions()
+    }
+
     /// Peer messages in a live event: record them and attach peerMessages / peerDelivery.
     private func observePeers(_ event: SessionEvent, _ live: LiveSession, receivedAt: String? = nil) -> SessionEvent {
         let e = peers.observeLive(event, observing: live.record.claudeSessionId, now: event.timestamp,
@@ -1613,6 +1863,8 @@ actor SessionManager {
         live.subagents.removeAll()
         live.shownTaskNotices.removeAll()
         live.foregroundTasks.removeAll()
+        live.tasks.reset()
+        live.record.backgroundTasks = nil
         live.peerSends.removeAll()
         live.pendingCompaction = nil
         live.pendingCompactionSummary = nil
@@ -1713,6 +1965,11 @@ actor SessionManager {
                 prompt = .tool(p.toolName)
             }
         }
+        let state = processState(live)
+        let background = live.tasks.running.count
+        let unread = Self.unreadShown(pending: live.record.unreadPending == true, processRunning: state == "running",
+                                      status: live.status, promptPending: live.pending != nil,
+                                      turnActive: live.turnActive, backgroundTasks: background)
         return ClaudeSession(
             id: live.record.id, pid: Int(live.process?.pid ?? 0), sessionId: live.record.claudeSessionId,
             cwd: live.record.cwd, startedAt: live.record.createdAt,
@@ -1721,7 +1978,12 @@ actor SessionManager {
             lastOutput: "", prompt: prompt, queue: live.queue,
             contextTokens: live.record.usage?.contextTokens, contextWindow: live.record.usage?.contextWindow,
             compacting: live.compacting ? true : nil,
-            process: processState(live), recap: live.record.recap)
+            process: state, recap: live.record.recap,
+            lastInputAt: live.record.lastInputAt ?? live.record.createdAt,
+            unread: unread ? true : nil,
+            peerTurn: live.turnActive ? live.peerTurn : nil,
+            peerTurnPeer: live.turnActive && live.peerTurn != nil ? live.peerTurnPeer : nil,
+            backgroundTasks: background > 0 ? background : nil)
     }
 
     /// docs/design-claude-uplift.md → Session processes → Process state.
