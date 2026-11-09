@@ -11,7 +11,7 @@ Spec: `docs/plan-observability.md` → "Ops session (phase 3)". How evidence is 
 
 ## Hard rules
 
-- **Never ship.** No TestFlight upload, no live server restart, no `helm`/`docker build` (CLAUDE.md). Richard says "ship it" first, and shipping then follows the normal `/feature-change` lane, including coordinating with other sessions.
+- **Auto-ship validated fixes** (Richard, 2026-11-09: "Auto ship for more velocity"). Once a fix is validated in its worktree (simulator against a :8399 test server, or `swift test` for the server), ship it without waiting for "ship it": merge, then follow the normal `/feature-change` lane (iOS: `/deploy-ios` to TestFlight), coordinating with other sessions first. Ship only validated work. A live server restart interrupts every session, so give peers the usual heads-up before one. Still no `helm` or `docker build` (CLAUDE.md).
 - **Never test against the live server** (:8377). Use a throwaway :8399 test server; see `/deploy-server` step 2, and follow its auth-file md5 and no-new-sessions rules.
 - **Don't edit the shared working tree** without Richard's OK. Other sessions work in it. Read freely.
 - **No proof from time alone.** Two things happening together is a lead. A root cause rests on trace or parent links, span links, the same process or session, or measured attribution.
@@ -77,8 +77,8 @@ Claude Code's spans don't share our trace IDs (2.1.317 ignores the parent we sen
    The worktree has only *committed* code. If the shared tree has uncommitted changes to the files you need, check `git -C ~/work/mclaude-v1 status`, and say in the finding that the fix is against `main` as committed.
    - Make the fix in `/tmp/ops/<id>`, including the signal or detector that would have caught it. Build and test there: iOS with its own `SYMROOT` and the simulator against a :8399 test server, the server with `swift build` and `swift test` in the worktree. Commit it on `ops/<id>`.
    - Record `proposed_fix` (the branch, a short diff summary, and what you validated) and set `fix_proposed`.
-   - When Richard says "ship it", merge `ops/<id>` into `main` from `~/work/mclaude-v1`, coordinating with other sessions first as the shared-tree rule says. Then follow the normal `/feature-change` shipping lane. Remove the worktree afterwards: `git worktree remove /tmp/ops/<id>`.
-   - Don't edit the shared tree outside a "ship it".
+   - Then ship it (auto-ship rule above): merge `ops/<id>` into `main` from `~/work/mclaude-v1`, coordinating with other sessions first as the shared-tree rule says. Then follow the normal `/feature-change` shipping lane, set the finding to `resolved` with the build number, and remove the worktree: `git worktree remove /tmp/ops/<id>`.
+   - Don't edit the shared tree except to ship.
 8. **Can't prove it?** Set `needs_you` with a `question`, or with the missing signal that would settle it, proposed as the fix: "add X to the composer probe".
 9. **Not a bug** (expected behavior, test data, or an instrumentation glitch): set `not_a_bug` with the reason. A broken or noisy detector is itself worth a fix plan.
 
