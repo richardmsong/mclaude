@@ -173,11 +173,21 @@ final class StallWatchdog: @unchecked Sendable {
             guard valid else { continue }
             Telemetry.shared.count("mclaude.app.stalls", attributes: ["bucket": stall >= 1 ? "1s+" : "250ms+"])
             if report {
-                Telemetry.shared.log("mclaude.app.stall", attributes: [
-                    "duration_ms": Int(stall * 1000),
-                    "mclaude.session_id": Telemetry.shared.contextSessionId,
-                    "mclaude.sampling.rate": 1.0,
-                ], severity: stall >= 1 ? 13 : 9)
+                let started = Date().addingTimeInterval(-stall)
+                // On main, now that it's free again: the transcript probe's rings show what the app
+                // was doing just before and during the stall (docs/plan-observability.md, Ops F-10).
+                DispatchQueue.main.async { MainActor.assumeIsolated {
+                    var body = TranscriptProbe.shared.ringsBody()
+                    let iso = ISO8601DateFormatter()
+                    iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                    body["stall_started_at"] = iso.string(from: started)
+                    body["duration_ms"] = Int(stall * 1000)
+                    Telemetry.shared.log("mclaude.app.stall", body: Telemetry.json(body), attributes: [
+                        "duration_ms": Int(stall * 1000),
+                        "mclaude.session_id": Telemetry.shared.contextSessionId,
+                        "mclaude.sampling.rate": 1.0,
+                    ], severity: stall >= 1 ? 13 : 9)
+                } }
             }
         }
     }

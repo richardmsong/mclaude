@@ -68,17 +68,23 @@ final class TranscriptProbe {
         if opened { Telemetry.shared.contextSessionId = sessionId }
         let countChanged = eventCount != self.eventCount
         note(.context, ["session_id": sessionId, "opened": opened, "event_count": eventCount,
-                        "cleared": opened ? visibleRows.count : 0])
+                        "on_screen": visibleRowCount])
         self.sessionId = sessionId
         self.eventCount = eventCount
         if opened {
             sessionOpenedAt = Date()
-            visibleRows.removeAll()
             evaluateBlank()
         } else if countChanged {
             evaluateBlank()   // an empty chat that gets its first event is blank-eligible again
         }
         if eventCount > 0 { logBaselineIfNeeded() }   // measurements usually arrive first
+    }
+
+    /// All ring buffers, for records outside the probe (stalls).
+    func ringsBody() -> [String: Any] {
+        var body: [String: Any] = ["session_id": sessionId, "event_count": eventCount]
+        for ring in Ring.allCases { body["recent_\(ring.rawValue)"] = rings[ring] ?? [] }
+        return body
     }
 
     func note(_ ring: Ring, _ entry: [String: Any]) {
@@ -126,7 +132,6 @@ final class TranscriptProbe {
 
     // MARK: - Blank screen
 
-    private var visibleRows: Set<String> = []
     private var sessionOpenedAt = Date()
     /// Sessions whose events have loaded successfully at least once.
     private var loadedSessions: Set<String> = []
@@ -136,28 +141,44 @@ final class TranscriptProbe {
     /// blank right after it (docs/plan-observability.md → Blank screen probe, Ops F-8).
     private var lastBlankReport: [String: Date] = [:]
 
-    /// Diagnostics only (docs/plan-observability.md → Blank screen probe → Diagnostics): the same
-    /// on/off changes keyed by row view instance ("id#token"), never cleared by context(), and the
-    /// instances that have appeared and not yet disappeared. The blank rule still uses visibleRows.
-    private var visibleInstances: Set<String> = []
+    /// Row bookkeeping, per row view instance ("id#token") (docs/plan-observability.md → Blank
+    /// screen probe; Ops F-9/F-11). A row is on screen when its view has appeared and not
+    /// disappeared, and its last measured visibility is on. The visibility is kept across a
+    /// disappear: the lazy stack can fire onDisappear and then onAppear again on a view that never
+    /// moved, and a geometry callback only fires when the value changes, so it won't say "visible"
+    /// again. Session switches don't clear anything: the old session's rows disappear on their own.
+    private var geometryVisible: [String: Bool] = [:]
     private var liveInstances: Set<String> = []
+    private var onScreen: Set<String> = []
     private var bottomSentinelVisible = false
 
-    /// A row became visible in the scroll view, or stopped being visible (or was destroyed).
-    /// `source` is "geometry" (visibility changed) or "gone" (onDisappear).
-    func rowVisible(id: String, instance: String, _ visible: Bool, source: String) {
+    /// Distinct row ids on screen.
+    private var visibleRowCount: Int { Set(onScreen.map { $0.split(separator: "#").first ?? "" }).count }
+
+    /// A row's measured visibility in the scroll view changed.
+    func rowVisible(id: String, instance: String, _ visible: Bool) {
         let key = "\(id)#\(instance)"
-        if visible { visibleInstances.insert(key) } else { visibleInstances.remove(key) }
-        let before = visibleRows.isEmpty
-        if visible { visibleRows.insert(id) } else { visibleRows.remove(id) }
-        note(.rows, ["id": id, "inst": instance, "visible": visible, "src": source, "set": visibleRows.count])
-        if before != visibleRows.isEmpty { evaluateBlank() }
+        geometryVisible[key] = visible
+        update(key, id: id, instance: instance, source: "geometry", visible: visible)
     }
 
     /// A row view appeared (was built by the lazy stack) or disappeared.
     func rowLive(id: String, instance: String, _ alive: Bool) {
         let key = "\(id)#\(instance)"
         if alive { liveInstances.insert(key) } else { liveInstances.remove(key) }
+        if !alive, liveInstances.count < geometryVisible.count - 2000 {
+            // Bound memory: forget instances that are gone (keeping the ones still on screen).
+            geometryVisible = geometryVisible.filter { liveInstances.contains($0.key) }
+        }
+        update(key, id: id, instance: instance, source: alive ? "appear" : "gone", visible: geometryVisible[key] ?? false)
+    }
+
+    private func update(_ key: String, id: String, instance: String, source: String, visible: Bool) {
+        let wasBlank = onScreen.isEmpty
+        if liveInstances.contains(key) && geometryVisible[key] == true { onScreen.insert(key) } else { onScreen.remove(key) }
+        note(.rows, ["id": id, "inst": instance, "visible": visible, "live": liveInstances.contains(key),
+                     "src": source, "set": visibleRowCount])
+        if wasBlank != onScreen.isEmpty { evaluateBlank() }
     }
 
     /// The transcript's bottom sentinel came on or went off screen.
@@ -166,7 +187,7 @@ final class TranscriptProbe {
     /// No row on screen in an open session. A session that loaded with no events (a new chat) has
     /// nothing to show, so it isn't blank (docs/plan-observability.md → Blank screen probe).
     private var isBlank: Bool {
-        !sessionId.isEmpty && visibleRows.isEmpty && !(eventCount == 0 && loadedSessions.contains(sessionId))
+        !sessionId.isEmpty && onScreen.isEmpty && !(eventCount == 0 && loadedSessions.contains(sessionId))
     }
 
     private func evaluateBlank() {
@@ -217,8 +238,8 @@ final class TranscriptProbe {
         var body: [String: Any] = [
             "session_id": sessionId, "event_count": eventCount, "visible_rows": 0, "kind": kind,
             "since_session_open_s": Date().timeIntervalSince(sessionOpenedAt),
-            "visible_instances": visibleInstances.count, "live_instances": liveInstances.count,
-            "visible_instance_examples": Array(visibleInstances.sorted().prefix(10)),
+            "visible_instances": geometryVisible.filter(\.value).count, "live_instances": liveInstances.count,
+            "visible_instance_examples": Array(geometryVisible.filter(\.value).keys.sorted().prefix(10)),
             "live_instance_examples": Array(liveInstances.sorted().prefix(10)),
             "bottom_sentinel_visible": bottomSentinelVisible,
         ]
@@ -421,13 +442,10 @@ private struct TranscriptRowProbe: ViewModifier {
                 guard let visible = proxy.bounds(of: .scrollView) else { return false }
                 return CGRect(origin: .zero, size: proxy.size).intersects(visible)
             } action: { visible in
-                TranscriptProbe.shared.rowVisible(id: id, instance: instance, visible, source: "geometry")
+                TranscriptProbe.shared.rowVisible(id: id, instance: instance, visible)
             }
             .onAppear { TranscriptProbe.shared.rowLive(id: id, instance: instance, true) }
-            .onDisappear {
-                TranscriptProbe.shared.rowVisible(id: id, instance: instance, false, source: "gone")
-                TranscriptProbe.shared.rowLive(id: id, instance: instance, false)
-            }
+            .onDisappear { TranscriptProbe.shared.rowLive(id: id, instance: instance, false) }
     }
 }
 
