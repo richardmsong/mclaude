@@ -209,7 +209,13 @@ MAP_METRICS = [
     "mclaude.server.up", "mclaude.server.ws_clients", "mclaude.server.sessions", "mclaude.server.turns_running",
     "system.cpu.utilization", "system.memory.utilization", "system.memory.usage", "system.cpu.load_average.1m",
     "process.cpu.utilization", "process.memory.usage",
+    "system.filesystem.usage",
 ]
+
+# Free space on the Mac's data volume (the disk filled up on 2026-11-08 and took OrbStack and the
+# whole stack down without warning). Amber below 15 GB, red below 5 GB; red also opens an Ops finding.
+DISK_DEGRADED_BYTES = float(os.environ.get("OBS_DISK_DEGRADED_GB", "15")) * 1e9
+DISK_FAILING_BYTES = float(os.environ.get("OBS_DISK_FAILING_GB", "5")) * 1e9
 
 Q_EVENTS = f"""
 SELECT t, svc, ev, trace_id, attrs FROM (
@@ -632,17 +638,28 @@ def api_map(qs):
             p = procs.setdefault(x["role"] or "other", {"pids": set(), "cpu": 0.0, "mem": 0.0})
             p["pids"].add(x["pid"])
             p[key] += num(x["v"]) or 0
+    fs = m.rows(MAC, "system.filesystem.usage")
+    disk_free = sum(num(x["v"]) or 0 for x in fs if x["state"] == "free") if fs else None
+    disk_total = sum(num(x["v"]) or 0 for x in fs) if fs else None
     has_mac = bool(cpu_rows or mem_rows or m.has(MAC, ["system.cpu.load_average.1m"]))
     if not has_mac:
         state, reason = "nodata", "no host metrics"
+    elif disk_free is not None and disk_free < DISK_FAILING_BYTES:
+        state, reason = "failing", f"disk almost full: {disk_free / 1e9:.1f} GB free"
+    elif disk_free is not None and disk_free < DISK_DEGRADED_BYTES:
+        state, reason = "degraded", f"disk low: {disk_free / 1e9:.1f} GB free"
     elif mac_cpu is not None and mac_cpu >= MAC_CPU_PCT:
         state, reason = "degraded", f"CPU {mac_cpu:.0f}%"
     elif mac_mem is not None and mac_mem >= MAC_MEM_PCT:
         state, reason = "degraded", f"memory {mac_mem:.0f}%"
     else:
         state, reason = "ok", None
-    nodes.append(node("mac", "Mac", state, f"cpu {mac_cpu:.0f}%" if mac_cpu is not None else None, reason, {
+    mac_value = " · ".join(v for v in [f"cpu {mac_cpu:.0f}%" if mac_cpu is not None else None,
+                                         f"{disk_free / 1e9:.0f} GB free" if disk_free is not None else None] if v)
+    nodes.append(node("mac", "Mac", state, mac_value or None, reason, {
         "cpu_pct": rnd(mac_cpu), "memory_pct": rnd(mac_mem),
+        "disk_free_gb": rnd(disk_free / 1e9 if disk_free is not None else None, 1),
+        "disk_total_gb": rnd(disk_total / 1e9 if disk_total else None, 1),
         "memory_used_gb": rnd(used_b / 1e9 if used_b is not None else None, 2),
         "memory_total_gb": rnd(total_b / 1e9 if total_b else None, 2),
         "load_1m": rnd(m.latest(MAC, "system.cpu.load_average.1m"), 2),
@@ -861,6 +878,12 @@ SID_SPAN = "coalesce(nullIf(SpanAttributes['mclaude.session_id'], ''), ResourceA
 NOT_OPS = "({ops:String} = '' OR sid != {ops:String})"
 
 # Triggers table: rule, stall, crash (app and Claude process), model (api_error events).
+Q_DISK_FREE = f"""
+SELECT count() AS n, argMax(Value, TimeUnix) AS free FROM otel_metrics_sum
+WHERE ServiceName IN {{svcs:Array(String)}} AND MetricName = 'system.filesystem.usage'
+  AND Attributes['state'] = 'free' AND TimeUnix > now() - INTERVAL 5 MINUTE
+"""
+
 Q_TRIGGER_LOGS = f"""
 SELECT tns, svc, name, trace_id, span_id, sid, attrs, body FROM (
     SELECT toUnixTimestamp64Nano(Timestamp) AS tns, ServiceName AS svc, {EV_EXPR} AS name, TraceId AS trace_id,
@@ -1222,6 +1245,16 @@ class Dispatcher:
                                          json.dumps(r["attrs"], sort_keys=True)]).encode()).hexdigest()
             outcome = self.store.record(key, t, f"{kind}|{name}|{sid}", kind, name, sid, r["svc"], summary,
                                         r["trace_id"], now)
+            counts[outcome] += 1
+        # Disk almost full on the Mac (a metric, not a record): one trigger per 10-minute bucket,
+        # folded into one finding per hour by the usual signature dedupe.
+        disk = query(Q_DISK_FREE, {"svcs": MAC}, deadline)
+        free = num(disk[0]["free"]) if disk and disk[0].get("n") else None
+        if free is not None and free < DISK_FAILING_BYTES:
+            bucket = int(now // 600)
+            outcome = self.store.record(f"disk|{bucket}", now, "host|disk_low|", "host", "disk_low", "", "mac-host",
+                                        f"The Mac's disk is almost full: {free / 1e9:.1f} GB free. OrbStack and the "
+                                        "observability stack crash when it fills up.", "", now)
             counts[outcome] += 1
         full = len(logs) >= OPS_SCAN_LIMIT or len(spans) >= OPS_SCAN_LIMIT
         # A full page: continue from its last record next time, without the late look-back, so a
