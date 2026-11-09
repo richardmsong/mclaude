@@ -194,7 +194,7 @@ Added 2026-11-04 (Richard). Everything Claude does in a turn used to be spelled 
   - Tapping toggles it. Expanded, the group's rows render as usual under the header, with a thin left rule.
 - **Default expansion:**
   - Groups in the turn that's running (the last turn, while the session is working) start and stay expanded, so the work can be watched live.
-  - When the turn ends, they collapse (animated over 0.25s, then the view re-pins to the bottom), unless the user isn't at the bottom. Then they stay expanded, so nothing jumps under the reader. When they collapse while the user is at the bottom, the view stays pinned to the bottom.
+  - When the turn ends, they stay expanded for the life of the screen; they start collapsed the next time the session is opened. (They used to fold at the turn's end while the reader was at the bottom. Folding a large group in place left the lazy list with its old, taller content height and the scroll position where it builds no rows: a blank screen until the user dragged, which no scroll call recovered. Ops F-13, reproduced in the simulator; every fold variant blanked, no fold never did.)
   - Every other group (older turns, history pages, a session opened after the turn) starts collapsed.
   - A group the user has toggled keeps their choice for the life of the screen.
 - **Pulsing dots** (the Working row, the live group's header) use `PhaseAnimator` on opacity only. A `repeatForever` animation started in `onAppear` also animated the dot's position, so it drifted toward where the row first appeared.
