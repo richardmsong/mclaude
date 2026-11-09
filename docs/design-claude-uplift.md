@@ -48,14 +48,22 @@ Rules:
   - Opens by tapping ☰, a swipe from the left edge, or a **rightward swipe anywhere** (Richard, 2026-11-04). The swipe must be mostly horizontal (vertical travel under 0.6× horizontal) and at least 70pt, or a flick: predicted ≥220pt and at least 30pt actual. It's recognized simultaneously with scrolling, so vertical scrolling is untouched. It's ignored in two cases: when it starts on a text view that holds a selection (with 24pt of slack for the handles), because then it's a selection-handle drag; and when it starts on content that scrolls horizontally and is wider than its frame (tables, code blocks, image and attachment strips), because then it's scrolling that content. A horizontal scroller whose content fits doesn't block the swipe. The ☰ button and the left-edge swipe still open the drawer from anywhere. A swipe anywhere else opens the drawer and clears any leftover selection, so a stale selection can't quietly disable the gesture. The drawer slides over a dimmed page.
   - Top to bottom: the brand row, a "New session" row, a "Resume session" row (`clock.arrow.circlepath`, opens the Resume sheet), project filter chips, the session list, and Settings at the bottom.
   - **Session list** (redesigned 2026-11-04, Richard: grouping by project made it hard to find what's recent). It holds only open sessions, in **one list, not grouped by project**. There's no grouping toggle.
-    - **Active** section first: working and waiting sessions, newest activity first. Then a **Recent** section with every other session, newest activity first. Each section has a small muted header and is omitted when empty.
-    - Row: the name on line one. Line two is muted: `<last activity> · <project> · <status>`, e.g. `2m ago · mclaude-v1 · working`. A small status dot sits on the right: clay = working, blue = waiting on you, none = idle.
+    - **Ordered by your last input only** (Richard, 2026-11-09: "don't reorder anything based on status, only use status circles to denote. Only order based on my last input time"). Sessions are sorted by `lastInputAt`, newest first (see Session order, read state and background work). Status never moves a row, and neither does a turn another session started by messaging this one. There are no Active or Recent sections and no header above the list. With an older server that sends no `lastInputAt`, the last status change is used instead.
+    - Row: the name on line one, **semibold while the session is unread**, otherwise regular. Line two is muted: `<last input> · <project> · <status>`, e.g. `2m ago · mclaude-v1 · working`. The time is the same `lastInputAt` the list is sorted by, so the list always reads newest first.
+    - **Status dot**, on the right (8pt). The first state that applies wins:
+      1. **blue** (filled): needs you (waiting for input, a permission or a plan)
+      2. **clay** (filled): working
+      3. **clay ring** (hollow, 1.5pt stroke): idle, but background work Claude started is still running (background commands, agents, watchers)
+      4. **green** (filled, the success colour): unread, i.e. a turn finished that you haven't seen
+      5. none: idle and read
+      - No dot while the process isn't running (starting, restarting, not running).
+    - **Status word** (line two): `starting`, `restarting` or `not running` while the process is down. Otherwise **`replying to <peer>`** during a turn a peer message started (the peer's display name), **`<n> in background`** while idle with background work running, and the status label (`working`, `idle`, …) in every other case.
   - **Ops session** (Richard, 2026-11-08: "visually distinct", "pinned to the bottom of the MClaude project"). The session named **Ops** (case-insensitive) is the observability agent (docs/plan-observability.md → Ops session).
-    - It sits in its own **Ops** section at the very bottom of the list, after Recent, and never moves into Active or Recent. Its status dot still shows when it's working or waiting.
+    - It sits in its own **Ops** section (with a small muted "Ops" header) at the very bottom of the drawer, after every other session, whatever its last input. Its status dot follows the same rules as any row.
     - Like any session, it's shown under `All` and under its project's chip (mclaude-v1), and search applies.
     - Its row shows a `stethoscope` icon before the name, and the name is in the Ops tint (violet: light `#6E56CF`, dark `#9E8CFC`).
     - On its session screen, the header shows the same icon before the name, in the same tint.
-  - **Project chips:** a horizontally scrolling row of capsule chips: `All`, then one per project that has an open session, ordered by its most recent activity. Selecting one shows only that project's sessions; selecting it again goes back to `All`. The selection is saved (`@AppStorage`) and survives launches. If the saved project has no open sessions left, `All` is used. The chips are hidden when every open session is in one project.
+  - **Project chips:** a horizontally scrolling row of capsule chips: `All`, then one per project that has an open session, ordered by its sessions' most recent `lastInputAt`. Selecting one shows only that project's sessions; selecting it again goes back to `All`. The selection is saved (`@AppStorage`) and survives launches. If the saved project has no open sessions left, `All` is used. The chips are hidden when every open session is in one project.
   - **Search:** a search field sits at the top of the list, scrolled just out of view when the drawer opens, so pulling the list down reveals it (when the list is shorter than the drawer, it's simply visible). Case-insensitive match on the name and project. It applies on top of the chip filter. With no matches, a muted "No matching sessions" line shows.
   - **Swipe right on a row to end the session.** A red "End" action (`xmark.circle`) is revealed under the row. A full swipe ends it right away; a partial swipe leaves the button showing, and tapping it ends the session. Ending calls `DELETE /sessions/:id` (stops Claude and drops the session from the list; the transcript stays on disk, so it can be resumed). The row leaves the list, and a toast at the bottom of the drawer shows "Ended · Undo" for 4 seconds. Undo resumes it through the Resume endpoint and keeps the drawer open. If the ended session was the one on screen, the app switches to the most recent remaining session. A left drag still closes the drawer, wherever it starts.
   - **Long-press a row** for a context menu with **Rename** (an alert with a text field, prefilled with the name, saved with `PATCH /sessions/:id`) and **End** (destructive, same as the swipe).
@@ -79,7 +87,7 @@ Rules:
     - Claude starts with `--resume` right away (see Session processes), except when the transcript was **In use**. Then it starts only on the first message, so a session that's live in a terminal doesn't get a second process until you send.
     - Errors: 404 for an unknown transcript; 422 `{"error":"directory missing"}` when its cwd no longer exists.
   - Ending a session (`DELETE /sessions/:id`, `/exit`, `/quit`) stays "stop and forget", but first saves the session's name under its Claude session id (`endedNames` in `~/.mclaude/managed-sessions.json`) so the Resume sheet can show it. A resume removes that entry.
-  - On launch the app opens the most recent session; with no sessions it shows an empty state.
+  - On launch the app opens the session with the newest `lastInputAt`; with no sessions it shows an empty state.
 - **User message:** right-aligned, sunken-bg bubble, sans 16, text primary, radius about 18. Attached photos sit as thumbnails above the bubble, matching the App Store "dog deck" screenshot. Attached videos sit in the same strip as poster tiles with a play glyph (see Video attachments).
 - **Photo viewer:** tapping a photo (one the user sent, or a tool-result screenshot) opens it full screen, fitted, on the page bg, with a clay **Done** button in the nav bar. The image is laid out against the whole screen, under the nav bar and status bar, so showing or hiding the nav bar never moves it.
   - **Pinch** zooms around the point between the fingers, from 1× to 4×. Each pinch continues from the current zoom. Releasing past 4× springs back to 4×; releasing below 1× springs back to 1× and re-centres.
@@ -414,8 +422,46 @@ Added 2026-11-05 (Richard: every open session should stay reachable by other ses
   - `restarting`: the process exited unexpectedly or failed to launch, and a restart is scheduled (backoff or the 10-minute retry).
   - `stopped`: deliberately not running, i.e. an In use resumed session waiting for its first message.
 - **Status word (app):**
-  - When `process` is present and not `running`, the drawer row's status word and the ••• menu's status label show **starting**, **restarting** or **not running** instead of the status label. Each counts as not active, so the row goes in Recent. Neither the drawer row nor the header shows a status dot.
+  - When `process` is present and not `running`, the drawer row's status word and the ••• menu's status label show **starting**, **restarting** or **not running** instead of the status label. Neither the drawer row nor the header shows a status dot.
   - When `process` is `running` or absent, the status label shows as today. So "idle" always means a running process that's ready for a message.
+
+## Session order, read state and background work
+
+Added 2026-11-09 (Richard: peer-message traffic "reorders my entire recently updated, since A2A counts as an update"; "have a status circle for finished but unread"; a status for "temporarily not working but active background agents or watchers"; "I also need it to know if the background agents were interrupted by a restart"). mclaude-server only; k8s sessions omit every field below.
+
+**Sessions list fields (server → app).** Each session in `GET /sessions` and the WebSocket sessions update gains these optional fields. Older apps ignore them.
+- `lastInputAt` (ISO 8601): the last time **you** gave the session input.
+  - Counts: a message you send (when you send it, even if it's queued), an answer to a question, approving or denying a plan or permission, and an interrupt.
+  - Doesn't count: peer messages, background-task notifications, the server's own messages (restart and crash resumes), automated input from the Ops dispatcher, rename, recap, restart and read.
+  - A new session starts at its creation time. Resuming a transcript from the Resume sheet sets it to the moment of the resume.
+  - It's persisted with the session. A session saved before this field existed gets the time of the last real prompt in its rebuilt history (a user line that isn't only peer messages, a task notification or a server message), else its creation time.
+- `unread` (bool, omitted when false): a turn finished that you haven't seen. See Read state.
+- `peerTurn` (string): during a **peer turn** (below), the display name of the peer whose message started it (its Claude Code name when it isn't resolved further). `peerTurnPeer` (string): that peer's Claude session id, when resolved. Both are omitted otherwise. The app shows the name of your open session with that Claude session id when there is one, else `peerTurn`.
+- `backgroundTasks` (int, omitted when 0): how many background tasks Claude started are still running. See Background work.
+
+**Peer turns.** A turn that a peer message started, with no input from you, is a peer turn.
+- It's a peer turn when the user line that starts the turn holds only peer messages: it has `peerMessages` and no `peerOtherText` (docs/plan-peer-messages.md → Event enrichment).
+- It stops being one when anything else reaches Claude during it: your message delivered mid-turn, or a question, permission or plan prompt (you're needed, so it's no longer quiet).
+- A peer turn never sets `unread`, and doesn't send the long-turn "finished" push.
+- `lastInputAt` isn't touched by a peer turn, as by any non-input.
+
+**Read state.** It's kept on the server, so a session read on one device is read on all of them (iPhone, iPad, Watch).
+- **Set:** when a turn that isn't a peer turn ends (Claude's `result`), the session becomes *unread pending*.
+- **Shown:** `unread` is true while the session is unread pending, idle (no turn, nothing waiting on you, process running) and has no background tasks running. So a turn that leaves background agents running isn't "finished" yet; it turns unread once that work and the turns it triggers are done.
+- **Cleared:** by `POST /sessions/:id/read`, and by any input from you to the session.
+- It's persisted with the session.
+- `POST /sessions/:id/read` → `{"ok": true}`. Same access rule as the other session endpoints (owner or laptop owner, else 404). It publishes the sessions list when it changes something.
+- **When the iPhone app marks a session read:** when the session's screen is shown with the app in the foreground (opening it, switching to it, the app coming back to the foreground on it), and whenever a sessions update says the session on screen is unread while the app is in the foreground. Opening a session's detail screen on the Watch, and any Watch action on it, also marks it read (docs/plan-watch-app.md → Read state).
+
+**Background work.** Claude's background commands, background agents and watchers are tasks on its stdout: `task_started` with `"is_backgrounded": true` (or a foreground task that a later `task_updated` patch moves to the background), with a `task_type` (`local_bash`, `local_agent`, …) and a `description`. A task ends with a `task_updated` patch whose `status` is no longer running (`completed`, `failed`, `killed`, …), or with its `task_notification`, whichever comes first.
+- The server keeps each session's running background tasks (id, type, description), persisted with the session. `backgroundTasks` is their count.
+- **Interrupted by a restart:** background tasks live inside the Claude process, so they die whenever it does: a server restart, a crash, or a deliberate restart (Restart Claude, Restart all). A newly launched process never has tasks running, so every task still on the list when a process is launched was interrupted. When the server stops the process itself (a restart or the shutdown drain), Claude Code first reports its background tasks as `stopped` or `killed`; those endings don't remove a task, so it's still on the list for the note. A task that completes during the stop is removed as usual.
+  - The list is cleared and Claude gets a note right after the launch: `A restart stopped your background tasks; they won't report back: Agent "Map server code", command "npm test". Restart any you still need, then continue.` Agents are listed as `Agent "<description>"`, background commands as `command "<description>"`, anything else as `<task_type> "<description>"`.
+  - When the session also gets the "Continue where you left off" message (it was mid-turn), the note is appended to that message, so it's one turn. Otherwise the note is sent on its own and starts a turn, so Claude relaunches what it still needs without waiting for you.
+  - The note is hidden from the transcript, live and in history, like the server-restart message. Interrupted tasks get no status of their own in the app.
+- **App:** the drawer row and the session header show a hollow clay ring while the session is idle with `backgroundTasks` > 0, and the status word `<n> in background` (Drawer → Session list).
+
+**Session header dot.** The dot before the name in the session header follows the drawer row's dot rules, without the green unread state (the session on screen is read).
 
 ## Permissions (auto mode)
 

@@ -6,7 +6,7 @@ Added 2026-11-06 (Richard: "Scaffold out a simple watch app that I can see updat
 
 The watch handles the whole check-in loop without the iPhone leaving your pocket:
 1. **Know when to look:** a push when a session needs you (mirrored to the watch).
-2. **See what matters:** sessions grouped into Needs you, Working and Unread, with read sessions folded away.
+2. **See what matters:** one list in the order you last worked in each session, with a dot for what each is doing (needs you, working, background work, unread) and read sessions folded away.
 3. **Get back into a session:** each session has a short recap (Goal / Where it is / Next), shown on its detail screen.
 4. **Act on it:** answer a question, approve or deny, tell Claude to continue, or talk to it.
 
@@ -15,8 +15,8 @@ The watch handles the whole check-in loop without the iPhone leaving your pocket
 | Topic | Decision |
 |---|---|
 | Purpose | Never having to take the phone out of your pocket (2026-11-07). |
-| List | Not one flat list. Sections Needs you / Working / Unread; read sessions behind one row (2026-11-07). |
-| Read vs unread | The split that matters is read vs unread, not idle vs active (2026-11-07). A session that just finished is unread until you look at it. |
+| List | One list ordered by your last input, the same order as the iPhone drawer; status shows only as dots, never as sections or order (2026-11-09, replacing the 2026-11-07 Needs you / Working / Unread sections). Read sessions stay behind one row (2026-11-07). |
+| Read vs unread | The split that matters is read vs unread, not idle vs active (2026-11-07). A session that just finished is unread until you look at it. Read state lives on the server and is shared by every device (2026-11-09). |
 | Recap | Not in the list; only on the detail screen (2026-11-07). |
 | Rows | Two lines (2026-11-07). |
 | Scope | Ship everything at once (2026-11-07). |
@@ -67,26 +67,25 @@ When a session starts waiting on a question, a plan approval or a tool permissio
 
 ### Read state
 
-The iPhone app keeps, per session, the time you last saw it (`seenAt`), and shares it with the watch.
+Read state is kept on the server and shared by every device (docs/design-claude-uplift.md → Session order, read state and background work). The server's `unread` flag is the only source; the iPhone app keeps no seen times of its own.
 
-- A session is **seen** while its screen is on the iPhone with the app in the foreground: when you open it, when you leave it, and when the app goes to the background while it's on screen.
-- Opening a session's detail screen on the watch marks it seen too (the watch tells the iPhone app).
-- The first time this version runs, it records that moment; any session without a `seenAt` counts as seen at that moment, so existing sessions don't all start out unread.
-- A session is **unread** when it isn't working or waiting on you and its last activity is newer than its `seenAt`.
+- The iPhone app marks a session read (`POST /sessions/:id/read`) when its screen is shown with the app in the foreground, and when a sessions update says the session on screen is unread while the app is in the foreground.
+- Opening a session's detail screen on the watch, and any watch action on a session, marks it read too (the watch asks the iPhone app, which calls the server).
+- A session is **unread** when the server says so: a turn that wasn't started by a peer message finished, and the session is now idle with no background work running.
 
 ### Relay
 
 The watch sends requests; the iPhone app (woken in the background if needed) handles them and replies.
 
 - **Refresh** (`{"type":"refresh"}`): the iPhone app fetches `GET /sessions`, plus each session's last assistant message from `GET /sessions/:id/history?limit=40` (reused when the session isn't working and its last activity hasn't changed), and replies with a snapshot. It also stores the snapshot as the watch's "last known state".
-- **Mark read** (`{"type":"markRead","id":"s12","at":<seconds since 1970>}`): stores `seenAt` (keeping the later time if one exists) and replies `{"ok":true}`.
+- **Mark read** (`{"type":"markRead","id":"s12"}`): calls `POST /sessions/:id/read` and replies `{"ok":true|false}` plus a fresh snapshot.
 - **Action** (`{"type":"action","id":"s12","action":...}`), replying `{"ok":true|false}` plus a fresh snapshot:
   - `"answer"` with `"answers": {"<question>": "<answer>"}` → `POST /sessions/:id/answer`.
   - `"approve"` → `POST /sessions/:id/approve`.
   - `"deny"` → `POST /sessions/:id/cancel`.
   - `"continue"` → sends the message "Continue." (`POST /sessions/:id/input`).
   - `"reply"` with `"text"` → sends that text as a message.
-  - An action also marks the session seen.
+  - An action also marks the session read.
 - **Full message** (`{"type":"message","id":"s12"}`): fetches `GET /sessions/:id/history?limit=40` and replies `{"text": "<the last assistant message, Markdown as written>"}` (capped at 20,000 characters, cut with "…"), or `{"text": null}` when there is none, or `{"error": "server"}`.
 - If the iPhone app isn't signed in, every request replies with `error: "signedOut"`.
 
@@ -102,8 +101,10 @@ The watch sends requests; the iPhone app (woken in the background if needed) han
       "name": "<display name>",
       "project": "<project name>",
       "state": "waiting" | "working" | "idle" | "starting" | "restarting" | "notRunning",
-      "since": <date>,                      // last activity
-      "seenAt": <date>,                     // when you last saw it (or the first-run moment)
+      "since": <date>,                      // when the state began (last status change)
+      "inputAt": <date>,                    // your last input (the server's lastInputAt; else `since`)
+      "unread": true | false,               // the server's unread flag
+      "background": <n>,                    // background tasks still running (0 when none)
       "kind": "question" | "plan" | "tool" | null,
       "question": "<first question / request>" | null,
       "questions": [{"question", "options", "multiSelect"}] | null,
@@ -115,6 +116,7 @@ The watch sends requests; the iPhone app (woken in the background if needed) han
 ```
 
 - `state` follows the drawer's rules: `starting` / `restarting` / `notRunning` while the process isn't running; otherwise `working`, `waiting` (waiting for input, needs approval, plan ready) or `idle` (idle, unknown).
+- `sessions` is ordered like the iPhone drawer: newest `inputAt` first, with the Ops session last.
 - `lastText` keeps the message's Markdown. Past 600 characters it's cut at the last line break (or else word boundary) before the limit and ends with "…"; a code block left open by the cut is closed.
 - `error: "server"`: the session list couldn't be fetched; `sessions` is the last good list.
 
@@ -125,34 +127,31 @@ The watch sends requests; the iPhone app (woken in the background if needed) han
 ```
 ┌──────────────────────┐
 │ MClaude         9:41 │
-│ 1 needs you · 2 working · 3 unread │
-│ NEEDS YOU            │
+│ 1 needs you · 2 working · 1 unread │
 │ ● Fix deploy         │  ← blue dot
 │   2m                 │
-│ WORKING              │
-│ ● mclaude-v1 watch   │  ← clay dot
-│   14s                │
-│ UNREAD               │
-│ ● Weekly meals       │  ← white dot
+│ ● Weekly meals       │  ← green dot
 │   5m                 │
+│ ○ mclaude-v1 watch   │  ← clay ring
+│   20m                │
+│ ● Drawer/resume      │  ← clay dot
+│   1h                 │
 │ Read · 14          › │
 │ Updated 9:41         │
 └──────────────────────┘
 ```
 
-- **Summary line** under the title: the non-zero counts of `needs you`, `working` and `unread`, joined with ` · `. When all three are zero: "All caught up".
-- **Sections**, each with a small muted uppercase header, omitted when empty, newest activity first within each:
-  - **Needs you:** `waiting` sessions.
-  - **Working:** `working` sessions.
-  - **Unread:** every other session whose last activity is newer than its `seenAt`.
-- **Row** (two lines): a dot (blue = needs you, clay = working, white = unread) and the name (one line, semibold); then the age of the last activity, muted (`now`, `14s`, `2m`, `3h`, `2d`). Tapping a row opens the session.
+- **Summary line** under the title: the non-zero counts of `needs you`, `working` (working or with background work running) and `unread`, joined with ` · `. When all three are zero: "All caught up".
+- **One list, no sections:** every session that needs you, is working, has background work running or is unread, in the snapshot's order (newest `inputAt` first, Ops last). Status never changes the order.
+- **Row** (two lines): a dot and the name (one line, semibold); then the age of your last input (`inputAt`), muted (`now`, `14s`, `2m`, `3h`, `2d`). Tapping a row opens the session.
+- **Dot**, the first that applies: blue (filled) = needs you; clay (filled) = working; clay ring (hollow) = background work running; green (filled, `#65BB30`) = unread.
 - **Read row:** `Read · <count>` with a chevron, shown when any read session exists; it opens the Read list.
 - **Footer:** `Updated <time>`, or `iPhone not reachable · updated <time>`, or `Can't reach the Mac · updated <time>`.
 - **States:** no snapshot yet → spinner and "Connecting to iPhone…" (or "iPhone not reachable" once a refresh failed); `signedOut` → "Sign in to MClaude on your iPhone."; no sessions at all → "No sessions".
 
 ### Read list
 
-Titled "Read". Every read session, newest activity first, with the same two-line rows (no dot). Tapping opens the session.
+Titled "Read". Every other session (idle, read, no background work, or its process isn't running), in the snapshot's order, with the same two-line rows (no dot). Tapping opens the session.
 
 ### Session detail
 
@@ -224,7 +223,7 @@ Claude's text keeps its Markdown everywhere on the watch, never shown as raw `**
 
 ## Look
 
-Black background. Text `#FAF9F5` / `#C2C0B6` / `#9C9A92`; raised cards `#30302E` with a 12pt radius; clay `#D97757` (working dot, primary buttons, tint); link blue `#5BA4E6` (needs-you dot); white `#FAF9F5` unread dot. System fonts (SF Pro).
+Black background. Text `#FAF9F5` / `#C2C0B6` / `#9C9A92`; raised cards `#30302E` with a 12pt radius; clay `#D97757` (working dot, primary buttons, tint); link blue `#5BA4E6` (needs-you dot); green `#65BB30` unread dot. System fonts (SF Pro).
 
 ## Packaging
 
