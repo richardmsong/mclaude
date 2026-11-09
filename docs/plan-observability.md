@@ -150,6 +150,20 @@ Richard, 2026-11-08: "catch whenever the screen is blank. I'm seeing it quite of
   - `mclaude.rule.screenshot` carries `captured_at`, the phone's capture time. The screenshot is drawn at the report; the server's file name is the upload time.
 - **It never changes the screen.**
 
+## Queue delivery
+
+Richard, 2026-11-09: queued messages vanished when he switched sessions. The server had handed them to Claude, so they'd left the queue, but Claude hadn't read them yet, so they weren't in the transcript either (docs/design-claude-uplift.md → Queue group). These records show each queued message's whole trip, and what the phone was shown at each step.
+
+- **Server** log records, each with `mclaude.session_id` and `mclaude.queue_id`:
+  - `mclaude.queue.queued`: a message went into the queue (`mclaude.queue.length` after it).
+  - `mclaude.queue.delivered`: it was written to Claude's stdin, with `mclaude.queue.reason` (`step boundary`, `turn ended`, `send now`, `restarted`), `mclaude.queue.batch_size`, and `mclaude.queue.waited_ms` since it was queued.
+  - `mclaude.queue.read`: Claude's copy arrived as a user message, with `mclaude.queue.delivered_ms` since delivery.
+  - `mclaude.queue.cleared` (WARN): it left the delivered list without a match, with `mclaude.queue.reason` (`turn_end`, `process_exit`, `restart`, `cap`) and `mclaude.queue.delivered_ms`.
+- **`seq` on every WebSocket `sessions` frame:** a number that goes up by one per frame, numbered when the snapshot is taken, so a frame that arrives after a newer one shows up as a lower `seq`. It starts again at 1 when the server restarts. Older apps ignore it.
+  - The server sends each frame from its own task, so frames can arrive out of order. The first test run caught it: the frame that added a queued message (`seq` 62) arrived just before an older one without it (`seq` 61), and the queue group vanished until the next frame.
+  - **The app drops a stale frame:** one whose `seq` is lower than the highest it has applied on the current connection. That highest `seq` resets on every new connection, since a restarted server counts from 1 again. Frames without `seq` (older servers) are always applied.
+- **Phone:** for the open session, a `mclaude.queue.frame` record each time the frame's queue or delivered ids change (switching to another session counts as a change). It carries the session ID, `seq`, `queue_ids` and `delivered_ids` (comma-separated), and `previous_seq`, the highest `seq` applied before it. A dropped stale frame also records, with `stale` = true, when its ids differ. Frames that change nothing record nothing.
+
 ## System map (phase 2)
 
 Richard, 2026-11-08: "implement the system map/visual obs layer", covering phone, Mac, server and Claude. It's the human's live view of the whole system. Claude keeps reading the data with SQL.
