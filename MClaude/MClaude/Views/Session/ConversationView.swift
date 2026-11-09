@@ -248,10 +248,10 @@ struct ConversationView: View {
 
     // MARK: Peer exchanges (docs/plan-peer-messages.md → Peer exchanges)
 
-    /// A user event that holds only peer messages: the start of a peer turn.
-    private static func isPeerOnlyUser(_ e: SessionEvent) -> Bool {
-        e.type == .user && e.subagentInfo == nil && !(e.peerMessages ?? []).isEmpty
-            && (e.peerOtherText ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    /// A user event the server marked as starting a quiet peer turn (not a mid-turn delivery, not
+    /// a reply to a message sent on your behalf).
+    private static func startsQuietPeerTurn(_ e: SessionEvent) -> Bool {
+        e.type == .user && e.subagentInfo == nil && e.quiet == true
     }
 
     /// A row that needs you (a question, a plan, a Blocked card): its turn never folds.
@@ -266,8 +266,8 @@ struct ConversationView: View {
     }
 
     /// Fold each run of back-to-back peer turns into one exchange row. A turn is a user event and
-    /// the rows up to the next one; it folds when its user event is peer-only and nothing in it
-    /// needs you. The last turn doesn't fold while the session waits on you.
+    /// the rows up to the next one; it folds when the server marked its user event `quiet` and
+    /// nothing in it needs you. The last turn doesn't fold while the session waits on you.
     private static func foldPeerExchanges(_ items: [(id: String, kind: TimelineKind)], lastTurnRunning: Bool,
                                           waitingOnYou: Bool) -> [(id: String, kind: TimelineKind)] {
         // Split into turns: rows before the first user event, then one turn per user event
@@ -284,7 +284,7 @@ struct ConversationView: View {
         for (i, turn) in turns.enumerated() {
             let isLast = i == turns.count - 1
             let folds: Bool = {
-                guard i > 0, case .event(let first) = turn[0].kind, isPeerOnlyUser(first) else { return false }
+                guard i > 0, case .event(let first) = turn[0].kind, startsQuietPeerTurn(first) else { return false }
                 if isLast, waitingOnYou { return false }
                 return !turn.contains { needsYou($0.kind) }
             }()
