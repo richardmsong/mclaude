@@ -245,6 +245,7 @@ Added 2026-11-04 (Richard). There is deliberately **no** per-turn copy button in
 - **Full Page screenshot:** the app adopts `UIScreenshotService`. While a session is open, the system screenshot editor shows **Screen | Full Page**. Full Page saves to Photos as a long image or to Files as a PDF; iOS handles both.
   - The app supplies a **single-page** PDF of the transcript, rendered like the PDF export (header and composer included).
   - It covers the **whole conversation**: older history is loaded first, like an export. The only limit is the 65,535px image-height ceiling. Past about 60,000pt (≈70 screens) the oldest events are dropped, and the page starts with the "Earlier messages omitted" note.
+  - It's drawn in pieces of whole turns (a piece starts at a user message, about 60 events each), measured newest first until the height limit, then drawn top to bottom into the one page, with the main thread free between pieces. Laying out a long conversation in one go, and re-measuring it to trim, froze the app for a second or more (Ops F-23). Markdown and plain-text exports are built off the main thread for the same reason.
   - It's drawn at **1× PDF units** (1 unit per point). iOS flattens a shared or saved Full Page at about one pixel per unit. 3× (build 101) matched screenshot resolution, but Richard found it too heavy and chose 1× (2026-11-04). The editor still shows the page as sharp vectors. If the conversation is longer, the oldest events are dropped and the page starts with a muted line: "Earlier messages omitted. Use ••• → Export → PDF for the full conversation."
   - The visible rect points at the bottom of the page (the latest messages), so the editor opens there.
   - Outside a session screen (drawer, empty state, settings), the delegate returns no PDF, so only "Screen" is offered.
@@ -275,7 +276,7 @@ Added 2026-11-04. Long sessions used to show only the last ~200 events: the serv
   - When `hasMore` is false, the row becomes a muted "Beginning of conversation".
   - A session whose events load with none at all (a new chat) has no older history: it counts as complete, so the row shows nothing (no spinner, no marker). While that first load is still in flight, the spinner shows as before.
   - If a load fails, the row reads "Couldn't load earlier messages. Tap to retry".
-- **Exports** (Markdown, plain text, PDF) and **Full Page** screenshots load the full history first, in pages of 500.
+- **Exports** (Markdown, plain text, PDF) and **Full Page** screenshots load the full history first, in pages of 500, into a copy of their own: the open transcript isn't changed, and keeps loading older pages only from the row at its top. (Loading hundreds of older events into the open transcript at once rebuilt it on screen and froze the app for a second or more: Ops F-23.)
 
 ## Saved transcripts (copy on the phone)
 

@@ -497,16 +497,26 @@ final class AppState {
         }?.uuid
     }
 
-    /// Load everything back to the start (for exports).
-    func loadFullHistory(sessionId: String) async {
-        for _ in 0..<200 where !historyComplete.contains(sessionId) {
-            let added = await loadOlderEvents(sessionId: sessionId, limit: 500)
-            if !added && !historyComplete.contains(sessionId) {
-                // In flight elsewhere or failed: wait briefly, then try again once more
+    /// The whole conversation back to the start, for exports and Full Page (docs/design-claude-
+    /// uplift.md → History). Older pages go into a copy of their own: the open transcript isn't
+    /// changed. Loading hundreds of older events into it at once rebuilt the transcript on screen
+    /// and froze the app for a second or more (Ops F-23).
+    func fullHistory(sessionId: String) async -> [SessionEvent] {
+        var all = eventsCache[sessionId] ?? []
+        guard !historyComplete.contains(sessionId) else { return all }
+        var cursor = all.first
+        for _ in 0..<200 {
+            var page = try? await client.fetchHistory(id: sessionId, before: cursor, limit: 500)
+            if page == nil {   // failed: wait briefly, then try once more
                 try? await Task.sleep(for: .milliseconds(300))
-                if !(await loadOlderEvents(sessionId: sessionId, limit: 500)) { break }
+                page = try? await client.fetchHistory(id: sessionId, before: cursor, limit: 500)
             }
+            guard let page else { break }
+            all = Self.dropDuplicates(page.events, of: all) + all
+            guard page.hasMore, let first = page.events.first, first.uuid != cursor?.uuid else { break }
+            cursor = first
         }
+        return all
     }
 
     /// History events not already loaded: same uuid, or the same user/assistant text within a
