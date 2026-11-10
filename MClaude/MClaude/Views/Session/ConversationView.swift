@@ -43,6 +43,12 @@ struct ConversationView: View {
     /// Render for PDF export / Full Page screenshot: a plain VStack (no scroll view, sheets,
     /// copy buttons, pending/working/queue rows) for ImageRenderer.
     var exportMode = false
+    /// Land on this finding's card (a System map events-strip tap; docs/plan-observability.md →
+    /// Map screen → Events strip).
+    var focusFinding: FindingFocus?
+    /// Finds the card's event uuid, loading older history as needed.
+    var onLocateFinding: ((String) async -> String?)?
+    var onFocusFindingHandled: ((FindingFocus) -> Void)?
 
     @State private var selectedEvent: SessionEvent?
     @State private var isNearBottom = true
@@ -65,6 +71,9 @@ struct ConversationView: View {
     @State private var scrollMotion = ScrollMotion()
     /// The peer thread opened from a From/To card.
     @State private var peerThread: PeerThreadTarget?
+    /// The Finding card briefly ringed after a jump. Reference type so the ring's fade re-renders
+    /// only the card, not this view.
+    @State private var findingHighlight = FindingHighlight()
 
     /// Merge events and pending messages into a single timeline.
     /// Pending messages appear at the bottom. The view model removes each one as soon as its
@@ -378,6 +387,32 @@ struct ConversationView: View {
         max(0, ((count - eagerRows) / 20) * 20)
     }
 
+    /// Scroll so the card that delivered `focus.findingId` is at the top, ring it, and stop
+    /// following the bottom. Not in the transcript (still queued, or cleared): stay at the bottom.
+    private func land(on focus: FindingFocus, _ proxy: ScrollViewProxy) async {
+        defer { onFocusFindingHandled?(focus) }
+        guard let id = await onLocateFinding?(focus.findingId), !Task.isCancelled else {
+            if !Task.isCancelled {
+                TranscriptProbe.shared.note(.scrolls, ["source": "finding_missing", "finding": focus.findingId])   // telemetry
+                isNearBottom = true
+                pinToBottom(proxy, animated: false, reason: "finding_missing")
+            }
+            return
+        }
+        try? await Task.sleep(for: .milliseconds(60))   // after the rows (and any older page) are laid out
+        guard !Task.isCancelled else { return }
+        isNearBottom = false
+        TranscriptProbe.shared.note(.scrolls, ["source": "finding_focus", "finding": focus.findingId])   // telemetry
+        proxy.scrollTo(id, anchor: .topLeading)
+        findingHighlight.ring(eventId: id, findingId: focus.findingId)
+        // Rows above the target settle to their real heights: re-aim until the user takes over
+        for delay in [120, 250, 500] {
+            try? await Task.sleep(for: .milliseconds(delay))
+            guard !Task.isCancelled, !userScrolling, !isNearBottom else { return }
+            proxy.scrollTo(id, anchor: .topLeading)
+        }
+    }
+
     /// Short row kind for the alignment probe (telemetry).
     private static func probeKind(_ kind: TimelineKind) -> String {
         switch kind {
@@ -581,6 +616,10 @@ struct ConversationView: View {
                 TranscriptProbe.shared.note(.scrolls, ["source": "overscroll_recovery"])   // telemetry
                 proxy.scrollTo("bottom", anchor: .bottomLeading)
             })
+            .task(id: focusFinding) {
+                guard let focus = focusFinding else { return }
+                await land(on: focus, proxy)
+            }
             .onChange(of: pendingQuestionEventId) { _, newId in
                 // A question just became pending: bring it into view if the user is at the bottom;
                 // otherwise the "Question waiting" pill offers a jump.
@@ -622,7 +661,9 @@ struct ConversationView: View {
             } else if let text = event.text, let parsed = FindingParser.cards(in: text) {
                 // Ops findings (docs/plan-observability.md → Delivery: the Finding card)
                 VStack(alignment: .leading, spacing: 4) {
-                    ForEach(Array(parsed.findings.enumerated()), id: \.offset) { FindingCard(finding: $0.element) }
+                    ForEach(Array(parsed.findings.enumerated()), id: \.offset) {
+                        FindingCard(finding: $0.element, eventId: event.uuid, highlight: findingHighlight)
+                    }
                     if !parsed.remainder.isEmpty {
                         userBubble(SessionEvent(uuid: event.uuid, timestamp: event.timestamp, type: .user,
                                                 text: parsed.remainder, thinking: nil, toolUse: nil,

@@ -143,6 +143,14 @@ struct RootView: View {
             setDrawer(false)
             appState.openSessionRequest = nil
         }
+        .onChange(of: appState.findingFocus) { _, focus in
+            // A System map event was tapped: show the Ops session; its conversation scrolls to the
+            // finding's card and clears the request.
+            guard let focus else { return }
+            selectedSessionId = focus.sessionId
+            didAutoSelect = true
+            setDrawer(false)
+        }
         .onChange(of: appState.sessions.map(\.id)) { _, ids in
             // Launch: open the most recent session once sessions arrive.
             if !didAutoSelect, !ids.isEmpty {

@@ -237,6 +237,27 @@ struct ObsFinding: Decodable {
     }
 }
 
+/// One entry of the Ops findings list (`GET /api/findings`), only the fields the map needs to link
+/// an event to the Finding card that delivered it.
+struct ObsFindingRef: Decodable, Equatable {
+    let id: String          // "F-12"
+    let traceIds: [String]
+    let delivery: String?   // pending / delivered / held
+
+    var delivered: Bool { delivery == "delivered" }
+
+    enum CodingKeys: String, CodingKey { case id, traceIds = "trace_ids", delivery }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        traceIds = (try? c.decode([String].self, forKey: .traceIds)) ?? []
+        delivery = try? c.decode(String.self, forKey: .delivery)
+    }
+}
+
+private struct ObsFindingList: Decodable { let findings: [ObsFindingRef] }
+
 // MARK: - Client
 
 struct ObsAPIClient {
@@ -281,6 +302,12 @@ struct ObsAPIClient {
 
     func finding(traceId: String) async throws -> ObsFinding {
         try await get("api/finding", [URLQueryItem(name: "trace_id", value: traceId)])
+    }
+
+    /// The Ops findings, newest first.
+    func findings(limit: Int = 500) async throws -> [ObsFindingRef] {
+        let list: ObsFindingList = try await get("api/findings", [URLQueryItem(name: "limit", value: String(limit))])
+        return list.findings
     }
 }
 
