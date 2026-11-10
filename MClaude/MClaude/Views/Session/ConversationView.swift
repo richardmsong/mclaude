@@ -2690,14 +2690,15 @@ private struct QueueGroupView: View {
                 .foregroundStyle(Theme.textMuted)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
-            if !items.isEmpty {   // delivered ones can't be sped up
+            // Delivered ones too: interrupting makes Claude read them at once
+            if !items.isEmpty || !delivered.isEmpty {
                 Button(action: onFlush) {
                     Text("Send now")
                         .font(.claudeCaptionSemibold)
                         .foregroundStyle(Theme.clay)
                 }
                 .buttonStyle(.plain)
-                .accessibilityHint("Interrupts Claude's current step so it reads the queued messages now")
+                .accessibilityHint("Interrupts Claude's current step so it reads these messages now")
             }
         }
     }
