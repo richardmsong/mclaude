@@ -379,6 +379,14 @@ struct ConversationView: View {
         }
     }
 
+    /// Where the lazy history ends and the normally laid-out newest rows begin: the last 40 to 59
+    /// rows are laid out normally. The cut moves in steps of 20, so a row only crosses from one
+    /// stack to the other (and is rebuilt) once per 20 new rows.
+    static let eagerRows = 40
+    static func eagerCut(_ count: Int) -> Int {
+        max(0, ((count - eagerRows) / 20) * 20)
+    }
+
     /// Scroll so the card that delivered `focus.findingId` is at the top, ring it, and stop
     /// following the bottom. Not in the transcript (still queued, or cleared): stay at the bottom.
     private func land(on focus: FindingFocus, _ proxy: ScrollViewProxy) async {
@@ -474,8 +482,16 @@ struct ConversationView: View {
     private var liveBody: some View {
         let items = timelineItems
         let liveIds = Self.liveGroupIds(items, running: sessionWorking)
+        let cut = Self.eagerCut(items.count)
         return ScrollViewReader { proxy in
             ScrollView {
+                // Older history is lazy; the newest rows are laid out normally (docs/design-claude-
+                // uplift.md → Transcript list; Ops F-15). A lazy stack guesses the heights of rows
+                // it hasn't built, and with some rows thousands of points tall (long replies, tool
+                // output, an expanded work group) the guesses are far off; pinned to the bottom it
+                // then shows a spot where it builds no rows: a blank screen that no scroll call
+                // fixes. With the rows near the bottom measured for real, the bottom is exact.
+                VStack(alignment: .leading, spacing: 2) {
                 LazyVStack(alignment: .leading, spacing: 2) {
                     if let onLoadOlder {
                         HistoryTopRow(complete: historyComplete, hasEvents: !events.isEmpty, gate: historyGate) {
@@ -498,7 +514,14 @@ struct ConversationView: View {
                         }
                         .padding(.horizontal, 16)
                     }
-                    ForEach(items, id: \.id) { item in
+                    ForEach(items[..<cut], id: \.id) { item in
+                        timelineRow(item, liveGroupId: liveIds.last)
+                            .padding(.horizontal, 16)
+                            .transcriptRowProbe(id: item.id, kind: Self.probeKind(item.kind))   // telemetry
+                    }
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(items[cut...], id: \.id) { item in
                         timelineRow(item, liveGroupId: liveIds.last)
                             .padding(.horizontal, 16)
                             .transcriptRowProbe(id: item.id, kind: Self.probeKind(item.kind))   // telemetry
@@ -516,6 +539,7 @@ struct ConversationView: View {
                             // only a user scroll does (tracked via scroll phase on iOS 18+).
                             if !Self.tracksScrollPhase || userScrolling { isNearBottom = false }
                         }
+                }
                 }
                 // The 16pt side padding is inside each row (above), not around the stack, so every
                 // scroll target (each row and the bottom sentinel) starts at x = 0. With the padding
@@ -544,12 +568,17 @@ struct ConversationView: View {
                     // The running turn's groups stay open so the work can be watched
                     liveExpanded.formUnion(new)
                 }
-                // A finished turn's groups stay open for the life of the screen; they start
-                // collapsed the next time the session opens. Folding them in place while the
-                // reader followed the bottom stranded the lazy stack: it kept the old, taller
-                // content height and left the offset where it builds no rows, a blank screen that
-                // no scroll call recovered (Ops F-13; reproduced in the simulator, and a fold with
-                // or without animation, delayed, re-pinned or not all blanked; no fold never did).
+                else if !old.isEmpty, isNearBottom {
+                    // Turn over: fold its work away, unless the reader is scrolled up (then
+                    // nothing should jump under them). Animated, so the list resizes smoothly
+                    // instead of in one jump. Safe again with the newest rows laid out normally
+                    // (Ops F-13/F-15: the fold in a lazy stack is what stranded it).
+                    withAnimation(.easeInOut(duration: 0.25)) { liveExpanded.subtract(old) }
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(300))
+                        pinToBottom(proxy, animated: false, reason: "collapse")
+                    }
+                }
             }
             .onChange(of: events.count) { old, _ in
                 // First load (0 → N): jump, don't animate across rows that were never laid out
