@@ -194,7 +194,7 @@ Richard, 2026-11-08: "implement the system map/visual obs layer", covering phone
   - full content: prompts, responses and tool content
   - resource attribute `mclaude.session_id`
   - trace propagation into tool subprocesses
-- **Mac** (`service.name` = `mac-host`): a native OpenTelemetry Collector (contrib, the official release binary, checksum-verified), run as launchd service `com.mclaude.otel-host`. Every 10 s it reports host CPU utilization, memory usage and utilization, load, free space on the data volume (`/System/Volumes/Data`), plus per-process CPU and memory for mclaude-server and the Claude processes, to the Docker collector on localhost.
+- **Mac** (`service.name` = `mac-host`): a native OpenTelemetry Collector (contrib, the official release binary, checksum-verified), run as launchd service `com.mclaude.otel-host`. Every 10 s it reports host CPU utilization, memory usage and utilization, load, free space on the data volume (`/System/Volumes/Data`), plus per-process CPU and memory for mclaude-server and the Claude processes, to the Docker collector on localhost. A second launchd job, `com.mclaude.swap-gauge`, reads `sysctl vm.swapusage` every 30 s and sends `mclaude.host.swap.used` and `mclaude.host.swap.total` (bytes) as `mac-host` gauges: macOS keeps swap files on the same APFS space, so swap growth is what took free space down to 3 GB (Ops F-24), and the collector's paging scraper reports zeros on macOS.
 
 ### Obs API
 
