@@ -22,6 +22,9 @@ public struct WatchSnapshot: Codable, Sendable, Equatable {
     public static let requestMarkRead = "markRead"
     public static let requestAction = "action"
     public static let requestMessage = "message"
+    /// Live view (docs/plan-watch-app.md → Relay → Live): request, and the iPhone's pushed frames.
+    public static let requestLive = "live"
+    public static let pushLiveFrame = "liveFrame"
 
     private static let encoder: JSONEncoder = {
         let e = JSONEncoder(); e.dateEncodingStrategy = .iso8601; return e
@@ -83,11 +86,19 @@ public struct WatchSession: Codable, Sendable, Equatable, Identifiable {
     public var questions: [PromptQuestion]?
     public var recap: SessionRecap?
     public var lastText: String?
+    /// The server's queue for the session, oldest first (nil or empty = nothing queued).
+    public var queue: [Queued]?
+
+    public struct Queued: Codable, Sendable, Equatable, Identifiable {
+        public let id: String
+        public let text: String
+        public init(id: String, text: String) { self.id = id; self.text = text }
+    }
 
     public init(id: String, name: String, project: String, state: State, since: Date, inputAt: Date? = nil,
                 unread: Bool? = nil, background: Int? = nil,
                 kind: String? = nil, question: String?, options: [String]?, questions: [PromptQuestion]? = nil,
-                recap: SessionRecap? = nil, lastText: String?) {
+                recap: SessionRecap? = nil, lastText: String?, queue: [Queued]? = nil) {
         self.id = id
         self.name = name
         self.project = project
@@ -102,6 +113,7 @@ public struct WatchSession: Codable, Sendable, Equatable, Identifiable {
         self.questions = questions
         self.recap = recap
         self.lastText = lastText
+        self.queue = queue
     }
 
     /// What the list is ordered by and its age shows: your last input.
@@ -155,7 +167,8 @@ public struct WatchSession: Codable, Sendable, Equatable, Identifiable {
         self.init(id: s.id, name: s.displayName, project: s.projectName, state: state, since: s.lastActivity,
                   inputAt: s.orderDate, unread: s.isUnread, background: s.runningBackgroundTasks, kind: s.prompt?.kind, question: s.prompt?.question,
                   options: s.prompt?.options.flatMap { $0.isEmpty ? nil : $0 },
-                  questions: s.prompt?.questions.flatMap { $0.isEmpty ? nil : $0 }, recap: s.recap, lastText: lastText)
+                  questions: s.prompt?.questions.flatMap { $0.isEmpty ? nil : $0 }, recap: s.recap, lastText: lastText,
+                  queue: s.queue.flatMap { q in q.isEmpty ? nil : q.map { Queued(id: $0.id, text: $0.text) } })
     }
 
     /// Short age of your last input (list rows): now, 14s, 2m, 3h, 2d.

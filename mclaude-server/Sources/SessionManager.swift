@@ -172,6 +172,10 @@ private final class LiveSession {
     var tasks: BackgroundTaskTracker
     /// Interrupted-tasks note for the process just launched, until it's sent
     var tasksNote: String?
+    /// Main-thread thinking/text/tools of the current turn (docs/plan-watch-app.md → Live stream)
+    var liveTurn = LiveTurn()
+    var liveFlushScheduled = false
+    var lastLiveFrameAt = Date.distantPast
 
     init(record: ManagedSessionRecord) {
         self.record = record
@@ -204,6 +208,7 @@ actor SessionManager {
     private var onSessionsUpdated: (@Sendable ([ClaudeSession]) -> Void)?
     private var onOutputChanged: (@Sendable (String, String) -> Void)?
     private var onEvent: (@Sendable (String, SessionEvent) -> Void)?
+    private var onLive: (@Sendable (LiveTurn.Frame) -> Void)?
     private var onStatusChange: (@Sendable (ClaudeSession, SessionStatus, SessionStatus) -> Void)?
     private var outputFlushScheduled: Set<String> = []
     private var draining = false
@@ -238,6 +243,7 @@ actor SessionManager {
     func setOnSessionsUpdated(_ h: @escaping @Sendable ([ClaudeSession]) -> Void) { onSessionsUpdated = h }
     func setOnOutputChanged(_ h: @escaping @Sendable (String, String) -> Void) { onOutputChanged = h }
     func setOnEvent(_ h: @escaping @Sendable (String, SessionEvent) -> Void) { onEvent = h }
+    func setOnLive(_ h: @escaping @Sendable (LiveTurn.Frame) -> Void) { onLive = h }
     func setOnStatusChange(_ h: @escaping @Sendable (ClaudeSession, SessionStatus, SessionStatus) -> Void) { onStatusChange = h }
 
     // MARK: - Startup and persistence
@@ -1041,6 +1047,8 @@ actor SessionManager {
     /// recovered: sessions that were mid-turn get resumed and nudged to continue on startup.
     private func setTurn(_ live: LiveSession, _ active: Bool) {
         if active, !live.turnActive { live.blockPushedThisTurn = false }   // a new turn
+        if active, !live.liveTurn.active { live.liveTurn.begin() }
+        if !active { endLiveTurn(live) }
         live.turnActive = active
         if (live.record.turnInProgress ?? false) != active {
             live.record.turnInProgress = active
@@ -1078,6 +1086,7 @@ actor SessionManager {
         live.restartAfterTurn = false        // a fresh process already has the current config
         live.stopping = false
         live.turnActive = false
+        endLiveTurn(live)
         live.peerTurn = nil
         live.pending = nil
         live.ready = false
@@ -1187,6 +1196,7 @@ actor SessionManager {
         clearDelivered(live, reason: "process_exit")     // that process can't read them any more
         let wasTurnActive = live.turnActive
         live.turnActive = false
+        endLiveTurn(live)
         live.peerTurn = nil
         live.pending = nil
         if live.stopping || live.deleted {
@@ -1719,9 +1729,51 @@ actor SessionManager {
                 setStatus(live, live.turnActive ? .working : .idle)
             }
 
+        case "stream_event":                                // subagent lines are left out by ingest
+            if live.liveTurn.ingest(json) { scheduleLiveFrame(live) }
+
         default:
-            break                                           // stream_event, control_response, status...
+            break                                           // control_response, status...
         }
+    }
+
+    // MARK: - Live stream (docs/plan-watch-app.md → Server → Live stream)
+
+    static let liveFrameInterval: TimeInterval = 0.2
+
+    /// At most one `live` frame per session every 200 ms: the first change after a quiet period
+    /// schedules a flush, which sends everything appended until then.
+    private func scheduleLiveFrame(_ live: LiveSession) {
+        guard !live.liveFlushScheduled else { return }
+        live.liveFlushScheduled = true
+        let delay = max(0, Self.liveFrameInterval - Date().timeIntervalSince(live.lastLiveFrameAt))
+        let id = live.record.id
+        Task {
+            if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+            self.flushLiveFrame(id: id)
+        }
+    }
+
+    private func flushLiveFrame(id: String) {
+        guard let live = sessions[id] else { return }
+        live.liveFlushScheduled = false
+        sendLiveFrame(live)
+    }
+
+    private func sendLiveFrame(_ live: LiveSession) {
+        guard let frame = live.liveTurn.takeFrame(id: live.record.id) else { return }
+        live.lastLiveFrameAt = Date()
+        onLive?(frame)
+    }
+
+    /// The turn ended (result, exit or relaunch): one last frame with `ended: true`, right away.
+    private func endLiveTurn(_ live: LiveSession) {
+        guard live.liveTurn.end() else { return }
+        sendLiveFrame(live)
+    }
+
+    func liveSnapshot(id: String) -> LiveTurn.Snapshot? {
+        sessions[id]?.liveTurn.snapshot
     }
 
     private func registerPending(requestId: String, request: [String: Any], in live: LiveSession) {

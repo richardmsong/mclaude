@@ -2,6 +2,9 @@ import Foundation
 import Observation
 import UserNotifications
 import WatchConnectivity
+import os
+
+private let liveLog = Logger(subsystem: "com.rsong.mclaude.watch", category: "live")
 
 /// The watch's view of MClaude: the latest snapshot relayed by the iPhone app, refreshed every
 /// 15 seconds while the app is on screen, plus read state and actions that go back through the
@@ -17,6 +20,12 @@ final class WatchStore: NSObject {
     private(set) var localSeen: [String: Date] = [:]
     /// A tapped notification asks the list to open this session.
     var openRequest: String?
+    /// The live turn per session while its live view is open (docs/plan-watch-app.md → Live view).
+    private(set) var live: [String: LiveTurn] = [:]
+    /// When a pushed frame (or a live reply) last arrived, per session.
+    private var liveHeard: [String: Date] = [:]
+    /// Goes up on every change to a session's live turn (what the live view follows).
+    private(set) var liveRevision: [String: Int] = [:]
 
     private static let savedKey = "lastSnapshot"
     private static let seenKey = "localSeen"
@@ -158,6 +167,51 @@ final class WatchStore: NSObject {
         return reply["error"] == nil ? .none : .failed
     }
 
+    // MARK: - Live view
+
+    /// Ask the iPhone for the live turn (and renew the push subscription).
+    func requestLive(_ id: String) async {
+        guard let reply = await request([WatchSnapshot.requestKey: WatchSnapshot.requestLive, "id": id], timeout: 8),
+              let data = reply["live"] as? Data, let turn = LiveTurn.decode(data) else { return }
+        let ended = live[id]?.active == true && !turn.active
+        if live[id] != turn { live[id] = turn; liveRevision[id, default: 0] += 1 }
+        liveHeard[id] = Date()
+        if ended { refresh() }
+    }
+
+    /// While a session's screen is open: ask on open and every 3 s; apply pushed frames as they
+    /// come; if pushes stop for 1.5 s while the turn is active, ask every second instead.
+    func followLive(_ id: String) async {
+        await requestLive(id)
+        var lastAsked = Date()
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(250))
+            let now = Date()
+            let quiet = now.timeIntervalSince(liveHeard[id] ?? .distantPast)
+            let sinceAsk = now.timeIntervalSince(lastAsked)
+            let active = live[id]?.active ?? false
+            if sinceAsk >= 3 || (active && quiet >= 1.5 && sinceAsk >= 1) {
+                lastAsked = now
+                await requestLive(id)
+            }
+        }
+    }
+
+    fileprivate func received(frame data: Data) {
+        guard let frame = LiveTurn.decodeFrame(data) else { return }
+        guard var turn = live[frame.id] else { return }       // not watching this session
+        let wasActive = turn.active
+        if turn.apply(frame) {
+            live[frame.id] = turn
+            liveRevision[frame.id, default: 0] += 1
+            liveHeard[frame.id] = Date()
+            if wasActive && !turn.active { refresh() }            // turn ended: get the new state
+        } else {
+            liveLog.info("frame gap: turn \(frame.turn) vs \(turn.turn); re-syncing")
+            Task { await requestLive(frame.id) }                 // gap: re-sync
+        }
+    }
+
     fileprivate func activationDone() {
         activated = true
         if let data = WCSession.default.receivedApplicationContext[WatchSnapshot.messageKey] as? Data,
@@ -195,6 +249,13 @@ extension WatchStore: WCSessionDelegate {
     nonisolated func session(_ session: WCSession, didReceiveApplicationContext context: [String: Any]) {
         guard let data = context[WatchSnapshot.messageKey] as? Data else { return }
         Task { @MainActor in self.received(context: data) }
+    }
+
+    // Pushed live frames from the iPhone (no reply expected).
+    nonisolated func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        guard message[WatchSnapshot.requestKey] as? String == WatchSnapshot.pushLiveFrame,
+              let data = message["frame"] as? Data else { return }
+        Task { @MainActor in self.received(frame: data) }
     }
 
     nonisolated func sessionReachabilityDidChange(_ session: WCSession) {

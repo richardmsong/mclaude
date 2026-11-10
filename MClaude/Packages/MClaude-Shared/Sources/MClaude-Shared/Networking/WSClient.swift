@@ -9,6 +9,8 @@ public final class WSClient: Sendable {
     private let onFullOutput: @Sendable (String, String) -> Void
     private let onConnectionChange: @Sendable (Bool, String?) -> Void  // connected, error reason
     private let onEvent: @Sendable (String, SessionEvent) -> Void
+    /// `live` frames' data (docs/plan-watch-app.md → Live stream), as raw JSON.
+    private let onLive: @Sendable (Data) -> Void
 
     private let urlSession = URLSession(configuration: .default)
     private let taskHolder = TaskHolder()
@@ -46,7 +48,8 @@ public final class WSClient: Sendable {
         onOutput: @escaping @Sendable (String, String) -> Void,
         onFullOutput: @escaping @Sendable (String, String) -> Void,
         onConnectionChange: @escaping @Sendable (Bool, String?) -> Void,
-        onEvent: @escaping @Sendable (String, SessionEvent) -> Void = { _, _ in }
+        onEvent: @escaping @Sendable (String, SessionEvent) -> Void = { _, _ in },
+        onLive: @escaping @Sendable (Data) -> Void = { _ in }
     ) {
         self.config = config
         self.onSessions = onSessions
@@ -54,6 +57,7 @@ public final class WSClient: Sendable {
         self.onFullOutput = onFullOutput
         self.onConnectionChange = onConnectionChange
         self.onEvent = onEvent
+        self.onLive = onLive
     }
 
     public func connect() {
@@ -198,6 +202,8 @@ public final class WSClient: Sendable {
                     if let envelope = try? decoder.decode(EventEnvelope.self, from: payload) {
                         onEvent(envelope.id, envelope.event)
                     }
+                case "live":
+                    onLive(payload)
                 default:
                     break
                 }

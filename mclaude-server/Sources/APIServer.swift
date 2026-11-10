@@ -1063,6 +1063,22 @@ func buildRouter(monitor: SessionManager, broadcaster: WSBroadcaster, sessionSto
         )
     }
 
+    // The live turn as it stands (docs/plan-watch-app.md → Server → Live stream)
+    router.get("/sessions/:id/live") { request, context in
+        guard let id = context.parameters.get("id") else {
+            return Response(status: .badRequest)
+        }
+        guard let userId = await requireAuth(request: request) else { return unauthorized }
+        guard await capturedStore!.userOwns(sessionId: id, userId: userId),
+              let snapshot = await capturedMonitor.liveSnapshot(id: id) else {
+            return jsonResponse(.notFound, "{\"error\":\"not found\"}")
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return Response(status: .ok, headers: [.contentType: "application/json"],
+                        body: .init(byteBuffer: .init(data: try encoder.encode(snapshot))))
+    }
+
     // Older conversation history, paged from the transcript on disk:
     // GET /sessions/:id/history?before=<uuid>&beforeTs=<iso8601>&limit=<n>  ->  {"events":[…],"hasMore":bool}
     router.get("/sessions/:id/history") { request, context in
