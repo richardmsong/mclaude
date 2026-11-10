@@ -265,6 +265,8 @@ Missing data is never drawn as healthy: `nodata` is grey with the words "no data
 - **Events strip:** the `events` of the selected moment, newest first. Tapping a rule event opens its finding sheet.
 - **Scrubber:** the timeline bins for the last 24 hours, each colored by its worst state, with ▲ pins for rule breaks.
   - Dragging selects a moment, and the map and events update to it. **● Live** returns to now.
+  - The map follows the finger while it drags. You don't have to lift to see a moment, so sliding over a ▲ pin shows that rule break's event and node states right away. One request runs at a time, and each answer is shown as soon as it arrives. The "At hh:mm" header names the moment on screen, which can trail the finger for a moment. The moment under the finger when it stops is always the last one fetched.
+  - Answers for scrubbed moments are cached until Live is turned back on, so dragging back over a moment shows it instantly.
   - While Live, the map polls every 3 s, and the timeline every 60 s.
 - **Tapping a box** opens a detail sheet with the node's `details` as label–value rows, plus its `reason`.
 - **Finding sheet:** rule, time and node, the screenshot (if any), and the record's JSON summarized as label–value rows, with the raw JSON in a collapsed section.
