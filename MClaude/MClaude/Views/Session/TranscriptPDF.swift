@@ -48,37 +48,89 @@ enum TranscriptPDF {
     /// conversation, unless it's taller than `fullPageMaxUnits` (≈70 screens), in which case the
     /// oldest events are dropped and the page starts with a note pointing to Export.
     static func fullPage(events: [SessionEvent], session: ClaudeSession?, sessionId: String, width: CGFloat,
-                         scheme: ColorScheme, appState: AppState) -> (data: Data, scale: CGFloat)? {
-        var start = 0
-        var renderer = renderer(events: events, session: session, sessionId: sessionId, width: width, scheme: scheme,
-                                omittedNote: false, appState: appState)
-        // Trim from the oldest end until it fits (a few re-renders at most)
-        for _ in 0..<8 {
-            guard let r = renderer else { return nil }
-            var height: CGFloat = 0
-            r.render { size, _ in height = size.height }   // measure only; nothing is drawn
-            guard height * fullPageScale > fullPageMaxUnits, start < events.count - 1 else { break }
-            let keep = Double(events.count - start) * Double(fullPageMaxUnits / (height * fullPageScale)) * 0.92
-            start = min(events.count - 1, events.count - max(1, Int(keep)))
-            renderer = self.renderer(events: Array(events[start...]), session: session, sessionId: sessionId,
-                                     width: width, scheme: scheme, omittedNote: true, appState: appState)
+                         scheme: ColorScheme, appState: AppState) async -> (data: Data, scale: CGFloat)? {
+        // Drawn in pieces of whole turns, newest first, with the main thread free between pieces:
+        // laying out a long conversation in one go (and re-measuring it to trim) froze the app for
+        // a second or more (Ops F-23). Pieces split at user messages, so groups render the same.
+        func piece<V: View>(_ v: V) -> ImageRenderer<AnyView> {
+            let r = ImageRenderer(content: AnyView(v.frame(width: width).background(Theme.bgPage)
+                .environment(\.colorScheme, scheme).environment(appState)))
+            r.proposedSize = ProposedViewSize(width: width, height: nil)
+            r.scale = rasterScale
+            return r
         }
-        guard let renderer else { return nil }
+        func height(_ r: ImageRenderer<AnyView>) -> CGFloat {
+            var h: CGFloat = 0
+            r.render { size, _ in h = size.height }   // measure only; nothing is drawn
+            return h
+        }
+        func breather() async { try? await Task.sleep(for: .milliseconds(2)) }
+
+        let limit = fullPageMaxUnits / fullPageScale
+        let composer = piece(ExportComposer())
+        var used = height(composer) + 140   // + the header, measured below
+        var pieces: [(renderer: ImageRenderer<AnyView>, height: CGFloat)] = []
+        var omitted = false
+        for chunk in turnChunks(events).reversed() {
+            await breather()
+            let r = piece(ConversationView(events: chunk, sessionId: sessionId, exportMode: true))
+            let h = height(r)
+            if used + h > limit, !pieces.isEmpty { omitted = true; break }
+            pieces.insert((r, h), at: 0)
+            used += h
+        }
+        let header = piece(VStack(alignment: .leading, spacing: 0) {
+            ExportHeader(session: session, sessionId: sessionId)
+            if omitted {
+                Text("Earlier messages omitted. Use ••• → Export → PDF for the full conversation.")
+                    .font(.claudeFootnote)
+                    .foregroundStyle(Theme.textMuted)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 16)
+            }
+        })
+        let all = [(header, height(header))] + pieces + [(composer, height(composer))]
+        let total = all.reduce(0) { $0 + $1.1 }
+
         let data = NSMutableData()
-        var scale: CGFloat = 1
-        renderer.render { size, draw in
-            guard let consumer = CGDataConsumer(data: data as CFMutableData) else { return }
-            let k = fullPageScale
-            scale = k
-            var box = CGRect(x: 0, y: 0, width: size.width * k, height: size.height * k)
-            guard let pdf = CGContext(consumer: consumer, mediaBox: &box, nil) else { return }
-            pdf.beginPDFPage(nil)
-            pdf.scaleBy(x: k, y: k)
-            draw(pdf)
-            pdf.endPDFPage()
-            pdf.closePDF()
+        let k = fullPageScale
+        var box = CGRect(x: 0, y: 0, width: width * k, height: total * k)
+        guard let consumer = CGDataConsumer(data: data as CFMutableData),
+              let pdf = CGContext(consumer: consumer, mediaBox: &box, nil) else { return nil }
+        pdf.beginPDFPage(nil)
+        pdf.scaleBy(x: k, y: k)
+        var top: CGFloat = 0
+        for (r, _) in all {
+            await breather()
+            r.render { size, draw in
+                pdf.saveGState()
+                // The renderer draws its view with its top at y = size.height (PDF origin is
+                // bottom-left); shift it down to this piece's place on the page.
+                pdf.translateBy(x: 0, y: total - top - size.height)
+                draw(pdf)
+                pdf.restoreGState()
+                top += size.height
+            }
         }
-        return data.length > 0 ? (data as Data, scale) : nil
+        pdf.endPDFPage()
+        pdf.closePDF()
+        return data.length > 0 ? (data as Data, k) : nil
+    }
+
+    /// The events split into runs of whole turns (a turn starts at a user message), each about
+    /// `target` events, so a piece never cuts a turn's groups apart.
+    static func turnChunks(_ events: [SessionEvent], target: Int = 60) -> [[SessionEvent]] {
+        var chunks: [[SessionEvent]] = []
+        var current: [SessionEvent] = []
+        for e in events {
+            if e.type == .user, current.count >= target {
+                chunks.append(current)
+                current = []
+            }
+            current.append(e)
+        }
+        if !current.isEmpty { chunks.append(current) }
+        return chunks
     }
 
     /// The transcript between static copies of the session header and the composer, so it reads

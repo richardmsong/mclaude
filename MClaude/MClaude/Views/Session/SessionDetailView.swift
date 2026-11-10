@@ -286,17 +286,24 @@ struct SessionDetailView: View {
         guard !exporting else { return }
         exporting = true
         defer { exporting = false }
-        await appState.loadFullHistory(sessionId: sessionId)
-        let all = appState.eventsCache[sessionId] ?? []
+        let all = await appState.fullHistory(sessionId: sessionId)
         let title = session?.displayName ?? "Session \(sessionId)"
         let cwd = session?.cwd ?? ""
         let data: Data?
         let ext: String
         switch format {
+        // Markdown and plain text are built off the main thread: for a long session (1,000+ events)
+        // building them froze the app for a second or more (Ops F-23).
         case .markdown:
-            data = Data(TranscriptExport.markdown(events: all, title: title, cwd: cwd).utf8); ext = "md"
+            data = await Task.detached(priority: .userInitiated) {
+                Data(TranscriptExport.markdown(events: all, title: title, cwd: cwd).utf8)
+            }.value
+            ext = "md"
         case .plainText:
-            data = Data(TranscriptExport.plainText(events: all, title: title, cwd: cwd).utf8); ext = "txt"
+            data = await Task.detached(priority: .userInitiated) {
+                Data(TranscriptExport.plainText(events: all, title: title, cwd: cwd).utf8)
+            }.value
+            ext = "txt"
         case .pdf:
             let screen = currentScreenBounds
             data = TranscriptPDF.paged(events: all, session: session, sessionId: sessionId, width: screen.width,
@@ -321,6 +328,13 @@ struct SessionDetailView: View {
             #if DEBUG
             // Simulator check (the screenshot editor can't be driven there): launch with
             // `-MClaudeDumpFullPage YES` to write the Full Page PDF to tmp/exports/fullpage.pdf.
+            // `-MClaudeDumpExport YES`: export Markdown 4 s after opening (Ops F-23 stall check).
+            if UserDefaults.standard.bool(forKey: "MClaudeDumpExport") {
+                Task {
+                    try? await Task.sleep(for: .seconds(4))
+                    await export(.markdown)
+                }
+            }
             if UserDefaults.standard.bool(forKey: "MClaudeDumpFullPage") {
                 Task {
                     try? await Task.sleep(for: .seconds(4))
@@ -333,12 +347,12 @@ struct SessionDetailView: View {
         }
         FullPageScreenshot.shared.activate(for: sessionId) { [appState, sessionId] in
             // The whole conversation, like an export (older pages load first if needed)
-            await appState.loadFullHistory(sessionId: sessionId)
+            let all = await appState.fullHistory(sessionId: sessionId)
             let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
             let width = scene?.screen.bounds.width ?? 393
             let scheme: ColorScheme = scene?.traitCollection.userInterfaceStyle == .dark ? .dark : .light
             let session = appState.sessions.first { $0.id == sessionId }
-            return TranscriptPDF.fullPage(events: appState.eventsCache[sessionId] ?? [], session: session, sessionId: sessionId,
+            return await TranscriptPDF.fullPage(events: all, session: session, sessionId: sessionId,
                                           width: width, scheme: scheme, appState: appState)
         }
     }
