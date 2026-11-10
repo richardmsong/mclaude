@@ -60,7 +60,7 @@ final class SystemMapModel {
     private(set) var failed = false
     private(set) var lastUpdated: Date?
 
-    /// Delivered Ops findings by trace ID: which events lead to a Finding card in Ops.
+    /// Delivered Ops findings by trace ID: which finding sheets get a Show in Ops button.
     private(set) var findingByTrace: [String: String] = [:]
 
     private var scrubTask: Task<Void, Never>?
@@ -160,8 +160,6 @@ struct SystemMapView: View {
     @State private var model = SystemMapModel()
     @State private var detailNodeId: NodeRef?
     @State private var finding: FindingRef?
-    /// The trace of a tapped event while its finding is looked up (one tap at a time).
-    @State private var resolving: String?
 
     private struct NodeRef: Identifiable { let id: String }
     struct FindingRef: Identifiable { let id: String; let nodeLabel: String? }
@@ -193,7 +191,9 @@ struct SystemMapView: View {
             NodeDetailSheet(node: node(ref.id))
         }
         .sheet(item: $finding) { ref in
-            FindingSheet(traceId: ref.id, nodeLabel: ref.nodeLabel, client: model.client)
+            FindingSheet(traceId: ref.id, nodeLabel: ref.nodeLabel, client: model.client,
+                         opsTarget: { await opsTarget(trace: ref.id) },
+                         onShowInOps: showInOps)
         }
     }
 
@@ -261,29 +261,18 @@ struct SystemMapView: View {
 
     // MARK: Events strip
 
-    /// The event's trace is in a delivered finding and there's an Ops session to open.
-    private func linked(_ e: ObsEvent) -> Bool {
-        guard let trace = e.traceId else { return false }
-        return model.findingByTrace[trace] != nil && appState.opsSessionId != nil
+    /// Where the finding sheet's Show in Ops lands: the delivered finding holding `trace`, in the
+    /// Ops session. Nil (no button) when it was held, there's no finding, or no Ops session.
+    private func opsTarget(trace: String) async -> FindingFocus? {
+        guard let findingId = await model.resolveFinding(trace: trace), let ops = appState.opsSessionId else { return nil }
+        return FindingFocus(sessionId: ops, findingId: findingId)
     }
 
-    /// Linked events go to their Finding card in Ops; other rule breaks open the finding sheet.
-    private func tappable(_ e: ObsEvent) -> Bool {
-        e.traceId != nil && (e.isRule || linked(e))
-    }
-
-    /// docs/plan-observability.md → Map screen → Events strip.
-    private func open(_ e: ObsEvent, trace: String, nodeLabel label: String?) {
-        resolving = trace
-        Task {
-            defer { resolving = nil }
-            if let findingId = await model.resolveFinding(trace: trace), let ops = appState.opsSessionId {
-                appState.findingFocus = FindingFocus(sessionId: ops, findingId: findingId)
-                dismiss()
-            } else if e.isRule {
-                finding = FindingRef(id: trace, nodeLabel: label)
-            }
-        }
+    /// docs/plan-observability.md → Map screen → Finding sheet → Show in Ops.
+    private func showInOps(_ focus: FindingFocus) {
+        finding = nil
+        appState.findingFocus = focus
+        dismiss()
     }
 
     private func eventsStrip(_ map: ObsMap) -> some View {
@@ -343,7 +332,7 @@ struct SystemMapView: View {
             Text(ObsFormat.hms(Date(timeIntervalSince1970: e.t)))
                 .font(.claudeMono(11))
                 .foregroundStyle(Theme.textMuted)
-            if tappable(e) {
+            if e.isRule, e.traceId != nil {
                 Image(systemName: "chevron.right")
                     .font(.system(size: 11, weight: .regular))
                     .foregroundStyle(Theme.textMuted)
@@ -353,13 +342,11 @@ struct SystemMapView: View {
         .padding(.vertical, 7)
         .contentShape(Rectangle())
 
-        if tappable(e), let trace = e.traceId {
-            let inOps = linked(e)
-            Button { open(e, trace: trace, nodeLabel: label) } label: { row }
+        if e.isRule, let trace = e.traceId {
+            Button { finding = FindingRef(id: trace, nodeLabel: label) } label: { row }
                 .buttonStyle(DrawerRowStyle(selected: false))
-                .disabled(resolving != nil)
-                .accessibilityLabel("\(e.isRule ? "Rule break" : "Event") \(title)\(label.map { " on \($0)" } ?? ""), \(ObsFormat.hms(Date(timeIntervalSince1970: e.t)))")
-                .accessibilityHint(inOps ? "Opens the finding in Ops" : "Opens the finding")
+                .accessibilityLabel("Rule break \(title)\(label.map { " on \($0)" } ?? ""), \(ObsFormat.hms(Date(timeIntervalSince1970: e.t)))")
+                .accessibilityHint("Opens the finding")
         } else {
             row.accessibilityElement(children: .combine)
         }
