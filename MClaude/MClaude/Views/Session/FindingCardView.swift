@@ -119,10 +119,36 @@ enum FindingParser {
     }
 }
 
+/// The Finding card a System map jump landed on, ringed in clay for about a second. The ring
+/// holds before fading because a lazily built card may only appear once the scroll settles.
+@Observable
+final class FindingHighlight {
+    private(set) var eventId: String?
+    private(set) var findingId: String?
+    private(set) var opacity: Double = 0
+    @ObservationIgnored private var fade: Task<Void, Never>?
+
+    @MainActor
+    func ring(eventId: String, findingId: String) {
+        self.eventId = eventId
+        self.findingId = findingId
+        opacity = 1
+        fade?.cancel()
+        fade = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(900))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.8)) { self.opacity = 0 }
+        }
+    }
+}
+
 /// Raised card for a finding: ▲ title, local time, the summary, ×N, and Open → the System map's
 /// finding sheet for its trace.
 struct FindingCard: View {
     let finding: FindingNotice
+    /// The event holding the card, and the ring shown after a System map jump lands on it.
+    var eventId: String? = nil
+    var highlight: FindingHighlight? = nil
     @Environment(AppState.self) private var appState: AppState?
     @State private var showSheet = false
 
@@ -184,6 +210,14 @@ struct FindingCard: View {
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .claudeCard()
+        .overlay {
+            if let highlight, highlight.eventId == eventId, highlight.findingId == finding.id {
+                RoundedRectangle(cornerRadius: Theme.radiusCard, style: .continuous)
+                    .stroke(Theme.clay, lineWidth: 2)
+                    .opacity(highlight.opacity)
+                    .allowsHitTesting(false)
+            }
+        }
         .padding(.vertical, 3)
         .accessibilityElement(children: .contain)
         .sheet(isPresented: $showSheet) {

@@ -18,6 +18,9 @@ final class AppState {
     // Push notifications: a tapped notification asks the shell to open this session;
     // visibleSessionId suppresses banners for the session already on screen.
     var openSessionRequest: String?
+    /// A System map event was tapped: open the Ops session and scroll to the card that delivered
+    /// this finding (docs/plan-observability.md → Map screen → Events strip). Cleared once handled.
+    var findingFocus: FindingFocus?
     var visibleSessionId: String? {
         // Server-side read state (docs/design-claude-uplift.md → Session order, read state and
         // background work): a session shown with the app in front is read.
@@ -449,6 +452,51 @@ final class AppState {
         return true
     }
 
+    // MARK: - Finding focus (docs/plan-observability.md → Map screen → Events strip)
+
+    /// The Ops session: named "Ops", preferring one working in ~/work/mclaude-v1, then the
+    /// oldest (the dispatcher's pick).
+    var opsSessionId: String? {
+        sessions.filter { $0.name == "Ops" }
+            .min { a, b in
+                let ah = a.cwd.hasSuffix("/work/mclaude-v1"), bh = b.cwd.hasSuffix("/work/mclaude-v1")
+                return ah != bh ? ah : a.startedAt < b.startedAt
+            }?.id
+    }
+
+    /// The uuid of the event holding finding `findingId`'s card in `sessionId`, loading older
+    /// history page by page until it's found or the start is reached. Nil if it isn't there.
+    func locateFinding(_ findingId: String, sessionId: String) async -> String? {
+        // The first load: a fresh page (not just the saved copy), or give up waiting after ~6 s
+        for _ in 0..<60 {
+            if !(eventsCache[sessionId] ?? []).isEmpty, !restoredFromDisk.contains(sessionId) { break }
+            if historyComplete.contains(sessionId) { break }
+            try? await Task.sleep(for: .milliseconds(100))
+            if Task.isCancelled { return nil }
+        }
+        for _ in 0..<50 {
+            if let uuid = Self.findingEventId(findingId, in: eventsCache[sessionId] ?? []) { return uuid }
+            if historyComplete.contains(sessionId) || Task.isCancelled { return nil }
+            if !(await loadOlderEvents(sessionId: sessionId, limit: 200)) {
+                if historyComplete.contains(sessionId) { continue }   // one last look at the final page
+                // In flight elsewhere or failed: wait briefly, then try once more
+                try? await Task.sleep(for: .milliseconds(300))
+                if !(await loadOlderEvents(sessionId: sessionId, limit: 200)), !historyComplete.contains(sessionId) {
+                    return Self.findingEventId(findingId, in: eventsCache[sessionId] ?? [])
+                }
+            }
+        }
+        return Self.findingEventId(findingId, in: eventsCache[sessionId] ?? [])
+    }
+
+    /// The last top-level user event whose text carries a well-formed card for `findingId`.
+    static func findingEventId(_ findingId: String, in events: [SessionEvent]) -> String? {
+        events.last { e in
+            guard e.type == .user, e.subagentInfo == nil, let text = e.text, FindingParser.containsFinding(text) else { return false }
+            return FindingParser.parse(text).findings.contains { $0.id == findingId }
+        }?.uuid
+    }
+
     /// Load everything back to the start (for exports).
     func loadFullHistory(sessionId: String) async {
         for _ in 0..<200 where !historyComplete.contains(sessionId) {
@@ -575,4 +623,12 @@ final class GoogleSignInPresenter: NSObject, ASWebAuthenticationPresentationCont
             .flatMap(\.windows)
             .first { $0.isKeyWindow } ?? ASPresentationAnchor()
     }
+}
+
+/// Where an events-strip tap on the System map lands: a finding's card in a session. `nonce`
+/// makes a repeat tap on the same finding a new request.
+struct FindingFocus: Equatable {
+    let sessionId: String
+    let findingId: String
+    let nonce = UUID()
 }
