@@ -64,6 +64,9 @@ final class SystemMapModel {
     private(set) var findingByTrace: [String: String] = [:]
 
     private var scrubTask: Task<Void, Never>?
+    private var scrubGeneration = 0
+    /// Maps for scrubbed moments, by request second; cleared when Live comes back.
+    private var scrubCache: [Int: ObsMap] = [:]
 
     static let pollInterval: Duration = .seconds(3)
     static let timelineInterval: TimeInterval = 60
@@ -126,20 +129,57 @@ final class SystemMapModel {
         return findingByTrace[trace]
     }
 
-    /// Scrubbing: Live off, and fetch the map at `date` once the finger rests for a moment.
+    /// Scrubbing: Live off, and the map follows the finger. A cached moment shows at once; otherwise
+    /// one fetch runs at a time, and when it lands it fetches whatever is selected by then, so the
+    /// map keeps updating mid-drag and the moment under the finger when it stops is fetched last.
     func select(_ date: Date) {
         live = false
         selectedAt = date
-        scrubTask?.cancel()
-        scrubTask = Task {
-            try? await Task.sleep(for: .milliseconds(150))
-            guard !Task.isCancelled else { return }
-            await loadMap(at: date)
+        if let m = scrubCache[Self.scrubKey(date)] { show(m) }
+        guard scrubTask == nil else { return }
+        scrubGeneration += 1
+        let gen = scrubGeneration
+        scrubTask = Task { [weak self] in
+            await self?.followScrub()
+            if self?.scrubGeneration == gen { self?.scrubTask = nil }
         }
     }
 
+    private func followScrub() async {
+        while !Task.isCancelled, !live, let at = selectedAt {
+            let key = Self.scrubKey(at)
+            if scrubCache[key] == nil {
+                do {
+                    let m = try await client.map(at: at)
+                    guard !Task.isCancelled, !live else { return }
+                    if scrubCache.count >= 300 { scrubCache.removeAll() }
+                    scrubCache[key] = m
+                } catch {
+                    guard !Task.isCancelled, !live else { return }
+                    // Only a failure for the moment still selected counts; otherwise try the newer one.
+                    if selectedAt.map(Self.scrubKey) == key { failed = true; return }
+                    continue
+                }
+            }
+            // Shown even if the finger has moved on: it's still newer than what's on screen.
+            if let m = scrubCache[key] { show(m) }
+            if selectedAt.map(Self.scrubKey) == key { return }
+        }
+    }
+
+    private func show(_ m: ObsMap) {
+        map = m
+        failed = false
+        lastUpdated = Date()
+    }
+
+    /// The request's `at`, in whole seconds (the client rounds up the same way).
+    private static func scrubKey(_ d: Date) -> Int { Int(d.timeIntervalSince1970.rounded(.up)) }
+
     func goLive() {
         scrubTask?.cancel()
+        scrubTask = nil
+        scrubCache.removeAll()
         selectedAt = nil
         live = true
     }
