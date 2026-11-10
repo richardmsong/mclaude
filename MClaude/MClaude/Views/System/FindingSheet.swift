@@ -7,7 +7,12 @@ struct FindingSheet: View {
     let traceId: String
     let nodeLabel: String?
     let client: ObsAPIClient
+    /// The Ops card this finding was delivered as (nil: no Show in Ops button). Not passed when the
+    /// sheet opens from a Finding card, which is already in Ops.
+    var opsTarget: (() async -> FindingFocus?)? = nil
+    var onShowInOps: ((FindingFocus) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
+    @State private var ops: FindingFocus?
 
     private enum LoadState { case loading, loaded(ObsFinding), failed }
     @State private var state: LoadState = .loading
@@ -35,6 +40,7 @@ struct FindingSheet: View {
         .presentationDetents([.large])
         .presentationBackground(Theme.bgPage)
         .task { await load() }
+        .task { if let opsTarget { ops = await opsTarget() } }
     }
 
     private func load() async {
@@ -65,6 +71,17 @@ struct FindingSheet: View {
             .padding(.top, 60)
         case .loaded(let f):
             header(f)
+            if let ops, let onShowInOps {
+                Button { onShowInOps(ops) } label: {
+                    Label("Show in Ops", systemImage: "arrow.up.forward.square")
+                        .font(.claudeUISemibold)
+                        .foregroundStyle(Theme.clay)
+                        .padding(.vertical, 2)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Opens the Ops conversation at this finding")
+            }
             if let path = f.screenshot {
                 RemoteImageView(path: path, contentMode: .fit)
                     .frame(maxWidth: .infinity, maxHeight: 420)

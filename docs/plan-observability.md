@@ -262,16 +262,15 @@ Missing data is never drawn as healthy: `nodata` is grey with the words "no data
   ```
 - **Boxes** show the label, a state word ("ok", "degraded", "failing", "no data") and the value. Colors: green ok, amber degraded, red failing, grey no data. The word is always shown, so meaning never depends on color alone.
 - **Lines** are colored the same way, labelled with the edge label. The Mac and Obs boxes have no lines.
-- **Events strip:** the `events` of the selected moment, newest first. Tapping an event goes to its Finding card in the Ops conversation (Richard, 2026-11-09: "when I click on a finding, navigate to the ops conversation and snap to the message where ops is notified of the finding"):
-  - An event **belongs to a finding** when its trace ID is in that finding's trace IDs (`GET /api/findings`) and the finding was delivered. The map fetches the findings list when it opens and again with each timeline poll. When the tapped event isn't linked yet, it fetches the list once more before deciding.
-  - **Linked**, with an Ops session in the session list: the map closes and the app opens the Ops session. The session is the one named "Ops", preferring one working in `~/work/mclaude-v1`, then the oldest, the same pick the dispatcher makes. The conversation scrolls so the card that delivered the finding is at the top, rings it in clay for about a second, and stops following the bottom. If the card isn't loaded yet, older history loads page by page until it's found or the start is reached. If it's not in the transcript at all (still waiting in the queue, or the transcript was cleared), the conversation stays at the bottom, where the queue group is.
-  - **Not linked** (held by the rate limit, no finding, or no Ops session): a rule event opens its finding sheet as before. Other events do nothing.
-  - Rows that respond to a tap show a chevron. The VoiceOver hint is "Opens the finding in Ops" or "Opens the finding".
+- **Events strip:** the `events` of the selected moment, newest first. Tapping a rule event opens its finding sheet.
 - **Scrubber:** the timeline bins for the last 24 hours, each colored by its worst state, with ▲ pins for rule breaks.
   - Dragging selects a moment, and the map and events update to it. **● Live** returns to now.
   - While Live, the map polls every 3 s, and the timeline every 60 s.
 - **Tapping a box** opens a detail sheet with the node's `details` as label–value rows, plus its `reason`.
 - **Finding sheet:** rule, time and node, the screenshot (if any), and the record's JSON summarized as label–value rows, with the raw JSON in a collapsed section.
+  - **Show in Ops** (Richard, 2026-11-10: "I still want the card for details of finding … just create a button to take me to the ops session"): a button under the header, shown once the record's trace ID is found in the trace IDs of a delivered finding (`GET /api/findings`, fetched when the map opens and with each timeline poll, and fetched again when the sheet opens if the trace isn't in it yet) and there's an Ops session in the session list. Held findings, rule breaks with no finding, and no Ops session show no button.
+  - Tapping it closes the sheet and the map and opens the Ops session: the one named "Ops", preferring one working in `~/work/mclaude-v1`, then the oldest, the same pick the dispatcher makes. The conversation scrolls so the card that delivered the finding is at the top, rings it in clay for about a second, and stops following the bottom. If the card isn't loaded yet, older history loads page by page until it's found or the start is reached. If it's not in the transcript at all (still waiting in the queue, or from before the transcript was cleared), the conversation stays at the bottom, where the queue group is.
+  - The sheet opened from a Finding card's **Open** (already in Ops) has no Show in Ops button.
 - **States:**
   - a spinner on first load
   - "Can't reach observability (\<host\>:4320)" with Retry when the API fails
@@ -325,7 +324,7 @@ Part of the obs-api service.
   - ▲ "Finding F-12 · composer_desync"
   - the time, the summary, and "×N" when count > 1
   - an **Open** button that opens the System map's finding sheet for that trace
-  - the card is where an events-strip tap on the System map lands (see Map screen → Events strip)
+  - the card is where the finding sheet's **Show in Ops** lands (see Map screen → Finding sheet)
   - the trailing instruction line is not shown
 
 ### Ops API
