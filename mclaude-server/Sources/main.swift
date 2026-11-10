@@ -117,6 +117,20 @@ await monitor.setOnEvent { id, event in
     }
 }
 
+// Live turn frames (docs/plan-watch-app.md → Live stream): one ordered consumer, so a turn's
+// last frame never overtakes the one before it. Same ownership rule as `event` frames.
+let (liveFrames, liveFramesIn) = AsyncStream.makeStream(of: LiveTurn.Frame.self)
+await monitor.setOnLive { frame in liveFramesIn.yield(frame) }
+Task {
+    for await frame in liveFrames {
+        guard let message = encodeWSMessage(type: "live", data: frame) else { continue }
+        await broadcaster.broadcastFiltered { userId in
+            guard await capturedStore.userOwns(sessionId: frame.id, userId: userId) else { return nil }
+            return message
+        }
+    }
+}
+
 let pushNotifier = PushNotifier(dir: stateDir + "/apns")
 await pushNotifier.load()
 await monitor.setPushNotifier(pushNotifier)

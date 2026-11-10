@@ -504,6 +504,14 @@ public struct APIClient: Sendable {
         return try decoder.decode(HistoryPage.self, from: data)
     }
 
+    /// The live turn as raw JSON (docs/plan-watch-app.md → Live stream: `GET /sessions/:id/live`).
+    public func fetchLive(id: String) async throws -> Data {
+        let url = config.baseURL.appendingPathComponent("sessions/\(id)/live")
+        let (data, response) = try await authedData(from: url)
+        try Self.requireSuccess(response)
+        return data
+    }
+
     public func fetchProjects() async throws -> [ProjectInfo] {
         let url = config.baseURL.appendingPathComponent("projects")
         let (data, _) = try await authedData(from: url)

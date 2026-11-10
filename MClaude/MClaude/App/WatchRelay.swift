@@ -1,6 +1,9 @@
 import Foundation
 import UIKit
 import WatchConnectivity
+import os
+
+private let liveLog = Logger(subsystem: "com.rsong.mclaude.app", category: "watch-live")
 
 /// Answers the watch app's refresh requests: fetches sessions (and each one's last assistant
 /// message) from the server and replies with a snapshot. docs/plan-watch-app.md → Data path.
@@ -31,6 +34,7 @@ final class WatchRelay: NSObject, WCSessionDelegate, @unchecked Sendable {
                  replyHandler: @escaping ([String: Any]) -> Void) {
         let type = message[WatchSnapshot.requestKey] as? String
         if type == WatchSnapshot.requestMessage { handleFullMessage(message, replyHandler: replyHandler); return }
+        if type == WatchSnapshot.requestLive { handleLive(message, replyHandler: replyHandler); return }
         guard type == WatchSnapshot.requestRefresh || type == WatchSnapshot.requestAction
                 || type == WatchSnapshot.requestMarkRead else {
             replyHandler([:]); return
@@ -49,6 +53,98 @@ final class WatchRelay: NSObject, WCSessionDelegate, @unchecked Sendable {
             try? WCSession.default.updateApplicationContext([WatchSnapshot.messageKey: data])
             if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
         }
+    }
+
+    // MARK: - Live (docs/plan-watch-app.md → Relay → Live)
+
+    /// Sessions the watch is watching, until when (renewed by each `live` request).
+    private var liveSubscriptions: [String: Date] = [:]
+    /// Our own WebSocket while anything is subscribed: it pushes `live` frames to the watch.
+    private var liveSocket: WSClient?
+    private var liveTask: UIBackgroundTaskIdentifier = .invalid
+    private var liveSweep: Task<Void, Never>?
+    static let liveSubscription: TimeInterval = 10
+
+    private func handleLive(_ message: [String: Any], replyHandler: @escaping ([String: Any]) -> Void) {
+        guard let config = serverConfig() else { replyHandler(["error": WatchSnapshot.Failure.signedOut.rawValue]); return }
+        guard let id = message["id"] as? String else { replyHandler(["error": "server"]); return }
+        let client = APIClient(config: config)
+        subscribe(id, config: config)
+        Task {
+            if let data = try? await client.fetchLive(id: id) { replyHandler(["live": data]) }
+            else { replyHandler(["error": "server"]) }
+        }
+    }
+
+    /// Subscribe the watch to `id` for 10 s, opening the WebSocket and keeping the app running.
+    private func subscribe(_ id: String, config: ServerConfig) {
+        let needsSocket: Bool = lock.withLock {
+            liveSubscriptions[id] = Date().addingTimeInterval(Self.liveSubscription)
+            return liveSocket == nil
+        }
+        DispatchQueue.main.async { [self] in
+            // One background task while watching; iOS may still suspend us (the watch then polls).
+            if liveTask == .invalid {
+                liveTask = UIApplication.shared.beginBackgroundTask(withName: "watch-live") { [weak self] in
+                    self?.endLiveTask()
+                }
+            }
+        }
+        if needsSocket {
+            let socket = WSClient(config: config, onSessions: { _, _ in }, onOutput: { _, _ in },
+                                  onFullOutput: { _, _ in },
+                                  onConnectionChange: { up, reason in
+                                      liveLog.info("live socket \(up ? "connected" : "down", privacy: .public) \(reason ?? "", privacy: .public)")
+                                  },
+                                  onLive: { [weak self] data in self?.forwardLive(data) })
+            lock.withLock { liveSocket = socket }
+            socket.connect()
+        }
+        startSweep()
+    }
+
+    /// Push a frame to the watch the moment it arrives, if the watch is watching that session.
+    private func forwardLive(_ data: Data) {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let id = json["id"] as? String else { return }
+        let watching = lock.withLock { (liveSubscriptions[id] ?? .distantPast) > Date() }
+        guard watching, WCSession.default.isReachable else {
+            liveLog.info("live frame for \(id, privacy: .public) not forwarded: watching=\(watching) reachable=\(WCSession.default.isReachable)")
+            return
+        }
+        WCSession.default.sendMessage([WatchSnapshot.requestKey: WatchSnapshot.pushLiveFrame, "frame": data],
+                                      replyHandler: nil, errorHandler: nil)
+    }
+
+    /// Every 2 s: drop lapsed subscriptions; with none left, close the socket and end the task.
+    private func startSweep() {
+        let running = lock.withLock { liveSweep != nil }
+        guard !running else { return }
+        let sweep = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                guard let self else { return }
+                let socket: WSClient? = self.lock.withLock {
+                    self.liveSubscriptions = self.liveSubscriptions.filter { $0.value > Date() }
+                    guard self.liveSubscriptions.isEmpty else { return nil }
+                    let s = self.liveSocket
+                    self.liveSocket = nil
+                    self.liveSweep = nil
+                    return s
+                }
+                if let socket {
+                    socket.disconnect()
+                    DispatchQueue.main.async { self.endLiveTask() }
+                    return
+                }
+            }
+        }
+        lock.withLock { liveSweep = sweep }
+    }
+
+    private func endLiveTask() {
+        if liveTask != .invalid { UIApplication.shared.endBackgroundTask(liveTask) }
+        liveTask = .invalid
     }
 
     // MARK: - Full message (docs/plan-watch-app.md → Relay)
@@ -86,6 +182,10 @@ final class WatchRelay: NSObject, WCSessionDelegate, @unchecked Sendable {
                 try await client.cancel(id: id)
             case "continue":
                 _ = try await client.sendInput(id: id, text: "Continue.")
+            case "stop":
+                try await client.cancel(id: id)
+            case "sendNow":
+                try await client.flushQueue(sessionId: id)
             case "reply":
                 let text = (message["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { return false }
@@ -107,13 +207,16 @@ final class WatchRelay: NSObject, WCSessionDelegate, @unchecked Sendable {
 
     // MARK: - Snapshot
 
-    private func client() -> APIClient? {
+    private func client() -> APIClient? { serverConfig().map { APIClient(config: $0) } }
+
+    /// The saved server settings (nil when not signed in).
+    private func serverConfig() -> ServerConfig? {
         let d = UserDefaults.standard
         let token = d.string(forKey: "authToken") ?? ""
         guard !token.isEmpty else { return nil }
         let host = d.string(forKey: "serverHost") ?? "100.90.85.91"
         let port = d.integer(forKey: "serverPort")
-        return APIClient(config: ServerConfig(host: host, port: port > 0 ? port : 8377, token: token))
+        return ServerConfig(host: host, port: port > 0 ? port : 8377, token: token)
     }
 
     func buildSnapshot() async -> WatchSnapshot {
