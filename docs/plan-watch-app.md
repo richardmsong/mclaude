@@ -25,6 +25,8 @@ The watch handles the whole check-in loop without the iPhone leaving your pocket
 | Data path | The watch never talks to the network or holds the server token; the iPhone app relays (2026-11-06). |
 | Full message | A button on the session screen shows Claude's last answer in full, rendered (2026-11-07). |
 | Talk | Talk to the session on its screen, transcribed on the watch with Apple's dictation; tapping Done in dictation is fine (2026-11-07). |
+| Live view | While a session works, follow its train of thought: Claude's thinking and text as they're written, not its commands. As little delay as possible, pushed rather than polled (2026-11-10). |
+| Course correction | What you say while Claude works goes through the same queue as on the phone, no cut-in. One button stops Claude; with something queued it reads Send now, because stopping delivers the queue anyway (2026-11-10). |
 
 ## Server
 
@@ -59,6 +61,24 @@ The session's `prompt` object gains two optional fields so the watch can answer 
 
 `question` and `options` keep their current meaning (the first question), so older builds are unaffected.
 
+### Live stream
+
+The server passes on Claude's main-thread thinking and text while a turn runs, from Claude Code's partial-message stream (subagent output is left out).
+
+- **Live turn:** per session, the server keeps the current turn's blocks in order. A block is `thinking` (its text grows as Claude thinks; redacted thinking has none), `text` (Claude's reply as it's written) or `tool` (any tool call: no text, only when it started). A block is `done` when the next block starts or the turn ends; a tool block counts as running until then, which covers the tool's run time. A new turn (the session starts working again) replaces the previous turn's blocks; after a turn ends its blocks stay until the next one starts.
+- **WebSocket `live` frames**, to the same clients that receive the session's events (same ownership rule), at most one per session every 200 ms (the first change after a quiet spell goes out at once), carrying everything new since the last frame:
+
+```
+{"type": "live", "data": "<the JSON below, as a string, like every other frame's data>"}
+
+{"id": "s12", "turn": 7, "ended": false,
+ "blocks": [{"index": 3, "kind": "thinking", "append": "…new text…", "new": false},
+            {"index": 4, "kind": "tool", "append": "", "new": true, "startedAt": "<ISO date>"}]}
+```
+
+  `turn` counts up from 1 per session; `index` counts blocks within the turn from 0; `new` marks a block's first appearance (with `startedAt`); `append` is text added since the last frame. When the turn ends, one more frame carries `"ended": true`.
+- **`GET /sessions/:id/live`** returns the live turn as it stands: `{"turn": 7, "active": true|false, "blocks": [{"index", "kind", "text", "startedAt", "done"}]}`. It keeps the last 30 blocks, each with at most 4,000 characters of text (a cut block is "…" and its last 3,999 characters). `active` is false once the turn has ended. Before the session's first turn: `{"turn": 0, "active": false, "blocks": []}`. 404 for an unknown session; same ownership rule as the session's other endpoints.
+
 ### "Needs you" push
 
 When a session starts waiting on a question, a plan approval or a tool permission, the server sends a push to the registered devices: title = the session name, body = the question text (first question), "Approve the plan?", or "Allow <tool>?". The payload carries `sessionId`, like the long-turn push. One push per pending request. The existing long-turn push is unchanged. An auto-mode block sends a separate "Blocked: …" push (docs/design-claude-uplift.md → Permissions (auto mode)); it doesn't make the session wait, so it isn't a "needs you" push. On the iPhone, the banner is suppressed when that session is on screen (existing rule). The push mirrors to the watch.
@@ -85,8 +105,11 @@ The watch sends requests; the iPhone app (woken in the background if needed) han
   - `"deny"` → `POST /sessions/:id/cancel`.
   - `"continue"` → sends the message "Continue." (`POST /sessions/:id/input`).
   - `"reply"` with `"text"` → sends that text as a message.
+  - `"stop"` → `POST /sessions/:id/cancel` (interrupts the running turn; the turn ends and anything queued is delivered, as usual).
+  - `"sendNow"` → `POST /sessions/:id/queue/flush` (interrupts Claude's current step so it reads the queue now, like the phone's Send now).
   - An action also marks the session read.
 - **Full message** (`{"type":"message","id":"s12"}`): fetches `GET /sessions/:id/history?limit=40` and replies `{"text": "<the last assistant message, Markdown as written>"}` (capped at 20,000 characters, cut with "…"), or `{"text": null}` when there is none, or `{"error": "server"}`.
+- **Live** (`{"type":"live","id":"s12"}`): replies `{"live": <GET /sessions/:id/live, as JSON data>}` (or `{"error":"server"}`), and subscribes the watch to that session for 10 seconds from this request. While subscribed, the iPhone app keeps its own WebSocket to the server open and forwards each `live` frame for that session to the watch the moment it arrives, as `{"type":"liveFrame","frame":<the frame's data>}`. The watch repeats the request every 3 seconds while a session's screen is open, which renews the subscription; when it lapses, the iPhone app closes that WebSocket.
 - If the iPhone app isn't signed in, every request replies with `error: "signedOut"`.
 
 ### Snapshot
@@ -109,7 +132,8 @@ The watch sends requests; the iPhone app (woken in the background if needed) han
       "question": "<first question / request>" | null,
       "questions": [{"question", "options", "multiSelect"}] | null,
       "recap": {"goal", "progress", "next", "nextBy", "at"} | null,
-      "lastText": "<last assistant message, Markdown, ≤ 600 chars>" | null
+      "lastText": "<last assistant message, Markdown, ≤ 600 chars>" | null,
+      "queue": [{"id": "q3", "text": "<queued message>"}] | null   // the server's queue, oldest first
     }
   ]
 }
@@ -191,8 +215,42 @@ When nothing is pending, the same screen ends with `[ ▤ Full message ]`, `[ Co
   - **Talk** (clay mic capsule, "Talk"): always, except while a question is pending. See Talk below.
   - **Type** (secondary, small): a text field that opens the watch's text input (keyboard, Scribble or dictation). Hidden while a question is pending. A non-blank result is sent as `reply`.
   - While an action is in flight its buttons are disabled and show a spinner. Success plays the watch's success haptic and refreshes; failure plays the failure haptic and shows "Couldn't send. Try again." under the buttons, keeping the selections.
+- **While Claude works** (state `working`, or the live turn is still active), the recap, Full message, Continue and the question/approval area give way to the live view (below); the header stays.
 - **Read:** opening the screen marks the session seen (and again when an update arrives while it's open).
 - The screen scrolls with the Digital Crown, updates in place, and goes back to the list if the session ends.
+
+### Live view
+
+```
+┌──────────────────────┐
+│ ‹ Fix deploy         │
+│ ● Working · 2m       │
+│ The retry fires      │  ← thinking: muted, streaming
+│ before the token     │
+│ refresh, so 401s…▌   │
+│ ── working ⋯ 12s ──  │  ← a run of tool calls
+│ Found it: the retry  │  ← Claude's text: full brightness
+│ ignores 401s…        │
+│ QUEUED               │
+│  ┆ use the new token ┆│  ← your queued message
+│ (■)    (⌨)     (🎤)  │  ← bottom toolbar, always in view
+└──────────────────────┘
+```
+
+- **Feed:** the live turn's blocks in order, growing as Claude writes.
+  - **Thinking** in the muted text colour with inline Markdown; **text** in the primary colour with its full formatting (headings, lists, bold, code), rendered like the Last answer screen. A block that's still growing ends with a clay cursor.
+  - **Tools:** each run of consecutive tool blocks is one quiet centred line: `working ⋯ <seconds>` counting up while it runs, then `worked <duration>` (e.g. `worked 41s`, `worked 2m 5s`). Commands and file names never show.
+  - Long thinking blocks show their last 1,500 characters, starting with "…".
+  - Before the first block arrives: "Starting…".
+- **Following:** the feed stays scrolled to the newest line, just above the toolbar. On watchOS 11 and later, scrolling it yourself (a drag or the Digital Crown) stops following, and coming to rest at the bottom follows again; on watchOS 10 it always follows.
+- **Queued:** under the feed, when the session's queue isn't empty: a small muted `QUEUED` label, each queued message (oldest first) as a muted bubble with a dashed outline, and "Claude reads these at its next step".
+- **Bottom toolbar** (the watch's bottom bar, so the controls stay in view while the feed follows the newest line), three round buttons:
+  - **Stop / Send now** (leading): `stop.fill` in the danger colour, labelled Stop, sending `stop` when nothing is queued; `paperplane.fill` in clay, labelled Send now, sending `sendNow` when something is queued. Either way Claude's current work is interrupted; with a queue, Claude reads the queued messages next.
+  - **Type** (centre, `keyboard`): opens the watch's text input (keyboard, Scribble or dictation); a non-blank result is sent as `reply`.
+  - **Talk** (trailing, `mic.fill`, clay): as on the rest of the session screen.
+  - What you send with Type or Talk joins the queue while Claude works. A button shows a spinner while its action is in flight, and all three are disabled meanwhile; a failure shows "Couldn't send. Try again." under the feed.
+- **Push, then poll:** while a session's screen is open (live view or not, so a turn that starts while you're looking switches to the live view as soon as Claude writes) the watch asks the iPhone for the live turn (`live` request) when it opens and every 3 seconds, and applies each pushed `liveFrame` as it arrives. A frame applies only when its `turn` matches and it continues from the blocks the watch has (no gap in `index`); otherwise the watch re-requests the live turn. If no frame has arrived for 1.5 seconds while the turn is active, the watch requests the live turn every second until frames resume.
+- **Turn end:** when the live turn ends (or the session stops working), the screen goes back to the normal layout; the new recap arrives with the next refresh.
 
 ### Last answer
 
