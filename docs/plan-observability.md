@@ -262,7 +262,11 @@ Missing data is never drawn as healthy: `nodata` is grey with the words "no data
   ```
 - **Boxes** show the label, a state word ("ok", "degraded", "failing", "no data") and the value. Colors: green ok, amber degraded, red failing, grey no data. The word is always shown, so meaning never depends on color alone.
 - **Lines** are colored the same way, labelled with the edge label. The Mac and Obs boxes have no lines.
-- **Events strip:** the `events` of the selected moment, newest first. Tapping a rule event opens its finding sheet.
+- **Events strip:** the `events` of the selected moment, newest first. Tapping an event goes to its Finding card in the Ops conversation (Richard, 2026-11-09: "when I click on a finding, navigate to the ops conversation and snap to the message where ops is notified of the finding"):
+  - An event **belongs to a finding** when its trace ID is in that finding's trace IDs (`GET /api/findings`) and the finding was delivered. The map fetches the findings list when it opens and again with each timeline poll. When the tapped event isn't linked yet, it fetches the list once more before deciding.
+  - **Linked**, with an Ops session in the session list: the map closes and the app opens the Ops session. The session is the one named "Ops", preferring one working in `~/work/mclaude-v1`, then the oldest, the same pick the dispatcher makes. The conversation scrolls so the card that delivered the finding is at the top, rings it in clay for about a second, and stops following the bottom. If the card isn't loaded yet, older history loads page by page until it's found or the start is reached. If it's not in the transcript at all (still waiting in the queue, or the transcript was cleared), the conversation stays at the bottom, where the queue group is.
+  - **Not linked** (held by the rate limit, no finding, or no Ops session): a rule event opens its finding sheet as before. Other events do nothing.
+  - Rows that respond to a tap show a chevron. The VoiceOver hint is "Opens the finding in Ops" or "Opens the finding".
 - **Scrubber:** the timeline bins for the last 24 hours, each colored by its worst state, with ▲ pins for rule breaks.
   - Dragging selects a moment, and the map and events update to it. **● Live** returns to now.
   - While Live, the map polls every 3 s, and the timeline every 60 s.
@@ -321,6 +325,7 @@ Part of the obs-api service.
   - ▲ "Finding F-12 · composer_desync"
   - the time, the summary, and "×N" when count > 1
   - an **Open** button that opens the System map's finding sheet for that trace
+  - the card is where an events-strip tap on the System map lands (see Map screen → Events strip)
   - the trailing instruction line is not shown
 
 ### Ops API

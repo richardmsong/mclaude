@@ -82,7 +82,12 @@ struct SessionDetailView: View {
                         }
                     },
                     onLoadOlder: { await appState.loadOlderEvents(sessionId: sessionId) },
-                    historyComplete: appState.historyComplete.contains(sessionId)
+                    historyComplete: appState.historyComplete.contains(sessionId),
+                    focusFinding: appState.findingFocus.flatMap { $0.sessionId == sessionId ? $0 : nil },
+                    onLocateFinding: { await appState.locateFinding($0, sessionId: sessionId) },
+                    onFocusFindingHandled: { focus in
+                        if appState.findingFocus == focus { appState.findingFocus = nil }
+                    }
                 )
             } else {
                 TerminalOutputView(
@@ -178,6 +183,10 @@ struct SessionDetailView: View {
         }
         .onChange(of: events.count) {
             viewModel.clearMatchedPending(events: events)
+        }
+        .onChange(of: appState.findingFocus, initial: true) { _, focus in
+            // Landing on a finding's card needs the conversation, not the terminal view
+            if focus?.sessionId == sessionId { showStructured = true }
         }
         .onChange(of: session?.status, initial: true) { _, status in
             viewModel.sessionBusy = status == .working
