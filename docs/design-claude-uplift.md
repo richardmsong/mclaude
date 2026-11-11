@@ -210,6 +210,15 @@ Added 2026-11-04 (Richard). Everything Claude does in a turn used to be spelled 
   - PDF and Full Page render work groups **collapsed** (summary rows only) and thinking **expanded**, which keeps screenshots short.
   - Markdown and plain text keep one line per tool call. They now include thinking: Markdown as a `> 💭 *Thinking*` quote with the text quoted line by line; plain text as `Thinking:` followed by the text.
 
+- **A skill's text** goes in the Skill block as its result, never as a user message (Ops F-25, 2026-11-11). Project and user skills begin with "Base directory for this skill:". Built-in skills (such as `update-config`, about 300 KB) don't: in the transcript their line is `isMeta` with a `sourceToolUseID`, which only skill texts carry; live, it's an `isSynthetic` user line right after the Skill call's result. As a user bubble, update-config's text froze the app for seconds and iOS killed it.
+
+## Long text
+
+Added 2026-11-11 (Ops F-25). Text views lay out every character they're given, on the main thread, so very long text is cut before layout:
+- In the transcript, a user message, Claude's text or a thinking block longer than 10,000 characters shows its first 10,000, followed by a muted note: "Long text: showing the first 10,000 of N characters. Open it and use Copy for all of it." Tool results already show only their first 300 characters.
+- In the detail sheet, text is cut at 60,000 characters with the same note. Copy copies all of it.
+- Text sizes are measured once per text and width, not again on every layout pass, and text over 8,000 characters skips the tightest-width measurement (it fills the width anyway).
+
 ## Transcript scrolling
 
 Added 2026-11-04 (Richard: the conversation "sometimes left adjusts", and "sometimes the screen goes blank and I have to scroll up to find the last messages", on first load and mid-turn).
@@ -422,6 +431,7 @@ Added 2026-11-05 (Richard: every open session should stay reachable by other ses
 - **No idle stop:** processes aren't stopped for being idle. The earlier 2-hour idle reap is removed. A typical idle Claude process uses about 80–210 MB.
 - **Server stop (drain):** unchanged. Running turns finish, every process stops, and all of them start again at the next startup.
 - **Server restarts are invisible.** After a restart, every session that was open is open and running again, with the same status words. Nothing about the restart shows in the transcript or the terminal view: no "↻ Server restarted" line, and the "The previous turn was interrupted by a server restart. Continue where you left off." message sent to a mid-turn session isn't shown as a user message, live or in history. Crash notices ("⚠︎ Claude exited", "↻ Restarted Claude") still show, because a crash is something the user should know about.
+- **A session whose folder is gone** (Ops F-28, 2026-11-11): when Claude can't be started because the session's working folder no longer exists, the server doesn't retry. It says so once in the terminal view ("⚠︎ This session's folder no longer exists: <path>. Restore it and send a message, or end the session."), leaves the session idle, and logs `mclaude.process.folder_missing`. Sending a message tries again, so restoring the folder brings the session back. (Retrying with backoff only crash-looped: s73 failed six times in 33 s, then every 10 minutes.)
 - **Process state (server → app):** each session in the sessions list gains an optional `process` field. It's omitted for k8s sessions. The existing `status` field and its values are unchanged, so older app builds keep decoding the list.
   - `starting`: a process was launched and hasn't reported ready yet. Ready means Claude's `system` `init` line, or its first output line of any kind.
   - `running`: the process is up. Only now does `status` describe the session (idle, working, …).

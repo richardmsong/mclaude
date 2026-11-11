@@ -74,17 +74,50 @@ private struct SelectableTextRepresentable: UIViewRepresentable {
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: SelectableTextView, context: Context) -> CGSize? {
         let maxWidth = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? .greatestFiniteMagnitude
-        // Tight width of the laid-out text (≤ maxWidth). With no width proposed (e.g. inside a
-        // horizontal ScrollView) this is the longest line, so code blocks don't wrap.
-        let bounds = text.boundingRect(with: CGSize(width: maxWidth, height: .greatestFiniteMagnitude),
-                                       options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
-        let tight = min(maxWidth, ceil(bounds.width) + 1)
-        let width = (hugsContent || proposal.width == nil) ? tight : maxWidth
+        // SwiftUI asks several times per layout pass, and again on every update: measure each text
+        // and width once. Typesetting long text on every ask froze the app (Ops F-25: a sample
+        // showed the main thread in this method for 6 s, inside Core Text).
+        let key = Coordinator.SizeKey(text: text, width: maxWidth, hugs: hugsContent)
+        if let cached = context.coordinator.sizes[key] { return cached }
+        let width: CGFloat
+        if (hugsContent || proposal.width == nil), text.length <= Self.tightMeasureLimit {
+            // Tight width of the laid-out text (≤ maxWidth). With no width proposed (e.g. inside a
+            // horizontal ScrollView) this is the longest line, so code blocks don't wrap.
+            let bounds = text.boundingRect(with: CGSize(width: maxWidth, height: .greatestFiniteMagnitude),
+                                           options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+            width = min(maxWidth, ceil(bounds.width) + 1)
+        } else if maxWidth.isFinite {
+            width = maxWidth   // long text fills the width anyway
+        } else {
+            // No width proposed and too long to measure as one line: wrap at the screen width
+            width = uiView.window?.windowScene?.screen.bounds.width ?? 400
+        }
         let height = uiView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
-        return CGSize(width: width, height: ceil(height))
+        let size = CGSize(width: width, height: ceil(height))
+        context.coordinator.remember(key, size)
+        return size
     }
 
+    /// Longer texts skip the tight-width (one-line) measurement.
+    static let tightMeasureLimit = 8_000
+
     final class Coordinator: NSObject, UIGestureRecognizerDelegate, UITextViewDelegate {
+        /// Measured sizes for the last few (text, width) pairs this view was asked about.
+        struct SizeKey: Hashable {
+            let text: NSAttributedString
+            let width: CGFloat
+            let hugs: Bool
+            func hash(into h: inout Hasher) { h.combine(text.length); h.combine(width); h.combine(hugs) }
+            static func == (a: SizeKey, b: SizeKey) -> Bool {
+                a.width == b.width && a.hugs == b.hugs && (a.text === b.text || a.text.isEqual(to: b.text))
+            }
+        }
+        private(set) var sizes: [SizeKey: CGSize] = [:]
+        func remember(_ key: SizeKey, _ size: CGSize) {
+            if sizes.count >= 8 { sizes.removeAll() }
+            sizes[key] = size
+        }
+
         weak var textView: SelectableTextView?
         var onTap: (() -> Void)?
         /// The system tap clears a selection before ours fires, so it's sampled at touch-down.
