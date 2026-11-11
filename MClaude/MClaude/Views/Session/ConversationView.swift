@@ -65,6 +65,10 @@ struct ConversationView: View {
     /// win over everything, and the groups of the running turn, auto-expanded while it runs.
     @State private var groupOverride: [String: Bool] = [:]
     @State private var liveExpanded: Set<String> = []
+    /// Groups that were already there when the session started working: a finished turn's. The
+    /// working status can land before the new turn's user event, and until it does the previous
+    /// turn looks like the running one.
+    @State private var finishedTurnGroups: Set<String> = []
     /// Thinking blocks are expanded by default; ids the user collapsed.
     @State private var thinkingCollapsed: Set<String> = []
     /// Whether the list is moving (or just stopped). A tap that stops a fling must not open a row.
@@ -481,7 +485,8 @@ struct ConversationView: View {
 
     private var liveBody: some View {
         let items = timelineItems
-        let liveIds = Self.liveGroupIds(items, running: sessionWorking)
+        let lastTurnGroups = Self.liveGroupIds(items, running: true)
+        let liveIds = sessionWorking ? lastTurnGroups.filter { !finishedTurnGroups.contains($0) } : []
         let cut = Self.eagerCut(items.count)
         return ScrollViewReader { proxy in
             ScrollView {
@@ -526,18 +531,23 @@ struct ConversationView: View {
                             .padding(.horizontal, 16)
                             .transcriptRowProbe(id: item.id, kind: Self.probeKind(item.kind))   // telemetry
                     }
+                    // Visibility from geometry, not onAppear/onDisappear: outside a lazy stack those
+                    // fire once, so the sentinel stayed "on screen" and every scroll the user ended
+                    // turned following back on (new messages snapped a scrolled-up reader down).
                     Color.clear.frame(height: 1).id("bottom")
-                        .onAppear {
-                            sentinelVisible = true
-                            isNearBottom = true
-                            TranscriptProbe.shared.bottomSentinel(true)   // telemetry
-                        }
-                        .onDisappear {
-                            sentinelVisible = false
-                            TranscriptProbe.shared.bottomSentinel(false)   // telemetry
-                            // New content pushing the bottom off screen must not stop following;
-                            // only a user scroll does (tracked via scroll phase on iOS 18+).
-                            if !Self.tracksScrollPhase || userScrolling { isNearBottom = false }
+                        .onGeometryChange(for: Bool.self) { proxy in
+                            guard let visible = proxy.bounds(of: .scrollView) else { return false }
+                            return CGRect(origin: .zero, size: proxy.size).intersects(visible)
+                        } action: { visible in
+                            sentinelVisible = visible
+                            TranscriptProbe.shared.bottomSentinel(visible)   // telemetry
+                            if visible {
+                                isNearBottom = true
+                            } else if !Self.tracksScrollPhase || userScrolling {
+                                // New content pushing the bottom off screen must not stop
+                                // following; only a user scroll does (scroll phase, iOS 18+).
+                                isNearBottom = false
+                            }
                         }
                 }
                 }
@@ -562,6 +572,16 @@ struct ConversationView: View {
             .background(Theme.bgPage)
             .refreshable {
                 await onRefresh?()
+            }
+            // While idle, the last turn's groups are a finished turn's. Recorded before the next
+            // turn starts, because its working status can land before its user event, and in that
+            // update the old groups would otherwise count as live and expand. Opened mid-turn
+            // (working from the start), nothing is recorded and the running turn's groups expand.
+            .onChange(of: lastTurnGroups, initial: true) { _, new in
+                if !sessionWorking { finishedTurnGroups = Set(new) }
+            }
+            .onChange(of: sessionWorking) { _, now in
+                if !now { finishedTurnGroups = Set(lastTurnGroups) }
             }
             .onChange(of: liveIds, initial: true) { old, new in
                 if !new.isEmpty {
