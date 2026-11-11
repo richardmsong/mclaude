@@ -71,15 +71,15 @@ enum JSONLParser {
         // Skill expansion content → show as tool result so it renders in the Skill block.
         // Checked before the isMeta skip below: the CLI may mark these entries isMeta too.
         if text.hasPrefix("Base directory for this skill:") {
-            // Extract skill path from first line
-            let firstLine = text.prefix(while: { $0 != "\n" })
-            let skillPath = firstLine.replacingOccurrences(of: "Base directory for this skill: ", with: "")
-            return SessionEvent(
-                uuid: uuid, timestamp: timestamp, type: .toolResult,
-                text: nil, thinking: nil, toolUse: nil,
-                toolResults: [ToolResultBlock(toolUseId: "", content: text, isError: false)],
-                model: nil, durationMs: nil
-            )
+            return skillTextEvent(text, uuid: uuid, timestamp: timestamp)
+        }
+        // A built-in skill's text has no "Base directory" line. In the transcript it's a meta line
+        // tied to the Skill call (sourceToolUseID); only skill texts carry that link. Live, it's an
+        // isSynthetic line right after the Skill call's result (SessionManager tracks that). Shown
+        // in the Skill block, never as a user bubble: update-config's 300 KB as a bubble froze the
+        // app until iOS killed it (Ops F-25).
+        if json["isMeta"] as? Bool == true, json["sourceToolUseID"] is String, toolResults.isEmpty, !text.isEmpty {
+            return skillTextEvent(text, uuid: uuid, timestamp: timestamp)
         }
 
         // Skip internal metadata entries. isMeta marks CLI-generated lines the user never typed
@@ -299,6 +299,13 @@ enum JSONLParser {
             text: nil, thinking: nil, toolUse: nil, toolResults: nil,
             model: nil, durationMs: durationMs
         )
+    }
+
+    /// A skill's expanded text, shown as a tool result in the Skill block.
+    static func skillTextEvent(_ text: String, uuid: String, timestamp: String) -> SessionEvent {
+        SessionEvent(uuid: uuid, timestamp: timestamp, type: .toolResult, text: nil, thinking: nil, toolUse: nil,
+                     toolResults: [ToolResultBlock(toolUseId: "", content: text, isError: false)],
+                     model: nil, durationMs: nil)
     }
 
     // MARK: - Local slash commands

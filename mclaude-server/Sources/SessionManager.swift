@@ -129,9 +129,12 @@ private final class LiveSession {
     var transcript: [String] = []
     var subagents: [String: SubagentInfo] = [:]   // Agent tool_use id -> info
     var shownTaskNotices: [String: Int] = [:]    // task id -> cards shown from stdout system lines, not yet replayed
+    var skillToolUseIds: Set<String> = []        // Skill calls this run, so their text can be recognized
+    var expectSkillText = false                  // a Skill call's result just arrived; its text comes next
     var foregroundTasks: Set<String> = []          // task ids started in the foreground (no notification card)
     var lastActivity = Date()
     var crashTimes: [Date] = []
+    var folderMissingNoted = false               // said once that the session's folder is gone
     var ready = false                    // the current process has reported in (init or any output)
     var mcpSettledGeneration = 0         // the generation whose MCP servers finished connecting
     var restartPending = false           // exited unexpectedly or failed to launch; a restart is scheduled
@@ -1217,6 +1220,22 @@ actor SessionManager {
     /// 8, 16 s), or every 10 minutes after more than 5 crashes in 5 minutes.
     private func scheduleRestart(_ live: LiveSession, resumeTurn: Bool) {
         let id = live.record.id
+        // A session whose folder is gone can't launch: retrying only crash-loops (Ops F-28: s73's
+        // folder was deleted, and every restart failed until the session was ended). Say so once
+        // and stay idle; sending a message tries again, so restoring the folder recovers it.
+        var isDir: ObjCBool = false
+        if !FileManager.default.fileExists(atPath: live.record.cwd, isDirectory: &isDir) || !isDir.boolValue {
+            live.restartPending = false
+            setStatus(live, .idle)
+            if !live.folderMissingNoted {
+                live.folderMissingNoted = true
+                addTranscript(live, "⚠︎ This session's folder no longer exists: \(live.record.cwd). Restore it and send a message, or end the session.")
+                Telemetry.shared.log("mclaude.process.folder_missing", attributes: ["mclaude.session_id": id], severity: 13)  // telemetry
+            }
+            publishSessions()
+            return
+        }
+        live.folderMissingNoted = false
         let generation = live.generation
         let crashes = max(1, live.crashTimes.count)
         let delay = crashes > SessionManager.maxCrashesInWindow
@@ -1580,6 +1599,18 @@ actor SessionManager {
 
         case "user":
             guard var event = JSONLParser.parseUserEvent(json: json, uuid: uuid, timestamp: now) else { return }
+            // A built-in skill's text is a synthetic user line right after the Skill call's result:
+            // show it in the Skill block, not as a user message (Ops F-25; JSONLParser.skillTextEvent)
+            if event.type == .toolResult,
+               (event.toolResults ?? []).contains(where: { live.skillToolUseIds.contains($0.toolUseId) }) {
+                live.expectSkillText = true
+            } else if live.expectSkillText, event.type == .user, json["isSynthetic"] as? Bool == true,
+                      let text = event.text {
+                live.expectSkillText = false
+                event = JSONLParser.skillTextEvent(text, uuid: uuid, timestamp: now)
+            } else if event.type == .user {
+                live.expectSkillText = false
+            }
             if event.type == .compaction {
                 // The summary belongs to the compaction marker emitted at the turn's result
                 live.pendingCompactionSummary = event.text
@@ -1633,6 +1664,9 @@ actor SessionManager {
                 single["message"] = msg
                 let blockUuid = blocks.count == 1 ? uuid : "\(uuid)-\(i)"
                 guard let event = JSONLParser.parseAssistantEvent(json: single, uuid: blockUuid, timestamp: now) else { continue }
+                if event.type == .toolUse, event.toolUse?.name == "Skill", let toolId = event.toolUse?.id {
+                    live.skillToolUseIds.insert(toolId)
+                }
                 if event.type == .toolUse, event.toolUse?.name == "Agent" || event.toolUse?.name == "Task",
                    let toolId = event.toolUse?.id {
                     let input = block["input"] as? [String: Any] ?? [:]

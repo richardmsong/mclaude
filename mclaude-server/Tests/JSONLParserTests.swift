@@ -476,6 +476,26 @@ final class JSONLParserTests: XCTestCase {
         XCTAssertTrue(event?.toolResults?.first?.content.hasPrefix("Base directory for this skill:") ?? false)
     }
 
+    func testBuiltinSkillTextGoesToSkillBlock() {
+        // Built-in skills have no "Base directory" line; the transcript ties them to the Skill call
+        // with sourceToolUseID (Ops F-25: update-config's 300 KB text was shown as a user bubble)
+        let line = """
+        {"type":"user","isMeta":true,"sourceToolUseID":"toolu_1","uuid":"sk-2","timestamp":"2026-11-11T00:00:00Z","message":{"role":"user","content":[{"type":"text","text":"# Update Config Skill\\n\\nModify Claude Code configuration."}]}}
+        """
+        let event = JSONLParser.parseEvent(line: line)
+        XCTAssertEqual(event?.type, .toolResult)
+        XCTAssertTrue(event?.toolResults?.first?.content.hasPrefix("# Update Config Skill") ?? false)
+        XCTAssertNil(event?.text)
+    }
+
+    func testOtherMetaLinesStillSkipped() {
+        // Meta lines without a Skill link (image notes, peer-message copies) stay hidden
+        let line = """
+        {"type":"user","isMeta":true,"uuid":"m-1","timestamp":"2026-11-11T00:00:00Z","message":{"role":"user","content":[{"type":"text","text":"[Image: original 1206x2622, displayed at 920x2000.]"}]}}
+        """
+        XCTAssertNil(JSONLParser.parseEvent(line: line))
+    }
+
     func testRegularUserMessageNotMeta() {
         let line = """
         {"type":"user","isMeta":false,"uuid":"u-1","timestamp":"2026-11-02T00:00:00Z","message":{"role":"user","content":"Look at this"}}
