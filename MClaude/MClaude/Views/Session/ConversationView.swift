@@ -658,7 +658,7 @@ struct ConversationView: View {
                 peerCards(event)
             } else if let text = event.text, text.hasPrefix("[Request interrupted") {
                 interruptedNotice
-            } else if let text = event.text, let parsed = FindingParser.cards(in: text) {
+            } else if let text = event.text, !LongText.isHuge(text), let parsed = FindingParser.cards(in: text) {
                 // Ops findings (docs/plan-observability.md → Delivery: the Finding card)
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(Array(parsed.findings.enumerated()), id: \.offset) {
@@ -670,7 +670,7 @@ struct ConversationView: View {
                                                 toolResults: nil, model: nil, durationMs: nil))
                     }
                 }
-            } else if let text = event.text, TaskNotificationParser.containsNotice(text) {
+            } else if let text = event.text, !LongText.isHuge(text), TaskNotificationParser.containsNotice(text) {
                 // Background-task notifications Claude Code injects: compact cards, not a user bubble
                 let parsed = TaskNotificationParser.parse(text)
                 VStack(alignment: .leading, spacing: 4) {
@@ -786,7 +786,9 @@ struct ConversationView: View {
     }
 
     private func userBubble(_ event: SessionEvent) -> some View {
-        let parsed = Self.parseUserContent(event.text ?? "")
+        // Cut first, so nothing below scans a huge text (Ops F-25)
+        let long = LongText.cut(event.text ?? "", LongText.transcriptLimit)
+        let parsed = Self.parseUserContent(long.text)
         return HStack {
             Spacer(minLength: 40)
             VStack(alignment: .trailing, spacing: 6) {
@@ -805,6 +807,7 @@ struct ConversationView: View {
                         .padding(.vertical, 10)
                         .background(Theme.bgSunken,
                                     in: RoundedRectangle(cornerRadius: Theme.radiusBubble, style: .continuous))
+                    if long.omitted > 0 { LongText.note(shown: long.text.count, total: long.total) }
                 }
             }
         }
@@ -815,7 +818,8 @@ struct ConversationView: View {
     // MARK: - Assistant text
 
     private func assistantTextBlock(_ event: SessionEvent) -> some View {
-        let raw = event.text ?? ""
+        let long = LongText.cut(event.text ?? "", LongText.transcriptLimit)
+        let raw = long.text
         let segments = splitMarkdownSegments(raw)
         let open = { openDetail(event) }
         return VStack(alignment: .leading, spacing: 10) {
@@ -836,6 +840,7 @@ struct ConversationView: View {
                     codeBlockView(language: language, code: code, onTap: open)
                 }
             }
+            if long.omitted > 0 { LongText.note(shown: long.text.count, total: long.total) }
         }
         .tint(Theme.link)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1087,7 +1092,8 @@ struct ConversationView: View {
             .buttonStyle(.plain)
             .accessibilityLabel(expanded ? "Thinking, expanded" : "Thinking, collapsed")
             if expanded {
-                SelectableText(text: RichText.plain(event.thinking ?? "", font: RichText.serif(14, italic: true),
+                SelectableText(text: RichText.plain(LongText.cut(event.thinking ?? "", LongText.transcriptLimit).text,
+                                                    font: RichText.serif(14, italic: true),
                                                     color: Theme.textMuted, lineSpacing: 3))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.leading, 10)
@@ -1726,13 +1732,21 @@ struct EventDetailSheet: View {
     }
 
     private func contentText(_ text: String) -> some View {
-        SelectableText(text: RichText.plain(text, font: RichText.mono(14), color: Theme.textPrimary))
-            .frame(maxWidth: .infinity, alignment: .leading)
+        let long = LongText.cut(text, LongText.detailLimit)
+        return VStack(alignment: .leading, spacing: 8) {
+            SelectableText(text: RichText.plain(long.text, font: RichText.mono(14), color: Theme.textPrimary))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if long.omitted > 0 { LongText.note(shown: long.text.count, total: long.total) }
+        }
     }
 
     private func markdownContent(_ text: String) -> some View {
-        SelectableText(text: RichText.prose(text))
-            .frame(maxWidth: .infinity, alignment: .leading)
+        let long = LongText.cut(text, LongText.detailLimit)
+        return VStack(alignment: .leading, spacing: 8) {
+            SelectableText(text: RichText.prose(long.text))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if long.omitted > 0 { LongText.note(shown: long.text.count, total: long.total) }
+        }
     }
 
     private var toolUseDetail: some View {
@@ -2860,3 +2874,30 @@ private struct QueueEditSheet: View {
     }
 }
 
+
+
+/// Very long text is cut before layout (docs/design-claude-uplift.md → Long text; Ops F-25): laying
+/// out 300 KB of text in one view took 4+ s on the main thread, and iOS killed the app. The detail
+/// sheet's Copy still copies all of it.
+enum LongText {
+    static let transcriptLimit = 10_000
+    static let detailLimit = 60_000
+
+    /// Far longer than anything the card parsers look for (findings, task notices are short).
+    static func isHuge(_ s: String) -> Bool { s.utf16.count > 50_000 }
+
+    static func cut(_ s: String, _ limit: Int) -> (text: String, omitted: Int, total: Int) {
+        // utf16 count first: O(1) for native strings, so short texts cost nothing
+        guard s.utf16.count > limit else { return (s, 0, 0) }
+        let total = s.count
+        guard total > limit else { return (s, 0, 0) }
+        return (String(s.prefix(limit)), total - limit, total)
+    }
+
+    static func note(shown: Int, total: Int) -> some View {
+        Text("Long text: showing the first \(shown.formatted()) of \(total.formatted()) characters. Open it and use Copy for all of it.")
+            .font(.claudeFootnote)
+            .foregroundStyle(Theme.textMuted)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
