@@ -1,5 +1,5 @@
 #!/bin/bash
-# PreToolUse guard: block deploy commands that must run via CI, not locally.
+# PreToolUse guard: block git apply (bypasses the /feature-change loop).
 # Receives tool input JSON on stdin.
 
 COMMAND=$(python3 -c "
@@ -23,41 +23,6 @@ print(json.dumps({
 }))" "$1"
   exit 0
 }
-
-# Block: helm deploy operations (upgrade/install — but not uninstall/list/get)
-# Exception: set LOCAL_DEPLOY=1 to allow local helm installs (e.g. k3d dev cluster).
-if echo "$COMMAND" | grep -qE '(^|[;&|])\s*helm\s+(upgrade|install)\b'; then
-  if [ "${LOCAL_DEPLOY:-}" = "1" ]; then
-    : # allow — local deploy mode
-  else
-    deny "BLOCKED: 'helm upgrade/install' must run via CI, not locally. Push to branch and let deploy-preview.yml handle it. Set LOCAL_DEPLOY=1 to override for local k3d deploys."
-  fi
-fi
-
-# Block: local docker builds
-# Exception: set LOCAL_DEPLOY=1 to allow local builds (e.g. k3d dev cluster).
-if echo "$COMMAND" | grep -qE '(^|[;&|])\s*docker\s+build\b'; then
-  if [ "${LOCAL_DEPLOY:-}" = "1" ]; then
-    : # allow — local deploy mode
-  else
-    deny "BLOCKED: 'docker build' must run via CI. Push to branch — the workflow builds and pushes to GHCR. Set LOCAL_DEPLOY=1 to override for local k3d builds."
-  fi
-fi
-
-# Block: loading images into k3d manually
-# Exception: set LOCAL_DEPLOY=1 to allow local imports (e.g. k3d dev cluster).
-if echo "$COMMAND" | grep -qE '(^|[;&|])\s*k3d\s+image\s+import\b'; then
-  if [ "${LOCAL_DEPLOY:-}" = "1" ]; then
-    : # allow — local deploy mode
-  else
-    deny "BLOCKED: 'k3d image import' bypasses CI. Push to branch — CI pushes to GHCR and the cluster pulls from there. Set LOCAL_DEPLOY=1 to override for local k3d deploys."
-  fi
-fi
-
-# Block: gh run watch (hangs for full run duration)
-if echo "$COMMAND" | grep -qE '(^|[;&|])\s*gh\s+run\s+watch\b'; then
-  deny "BLOCKED: 'gh run watch' blocks until timeout. Use 'gh run view {id}' (one-shot) to poll status instead."
-fi
 
 # Block: git apply (bypasses /feature-change workflow)
 if echo "$COMMAND" | grep -qE '(^|[;&|])\s*git\s+apply\b'; then
