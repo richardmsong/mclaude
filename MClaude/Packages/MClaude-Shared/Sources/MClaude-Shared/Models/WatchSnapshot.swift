@@ -25,6 +25,8 @@ public struct WatchSnapshot: Codable, Sendable, Equatable {
     /// Live view (docs/plan-watch-app.md → Relay → Live): request, and the iPhone's pushed frames.
     public static let requestLive = "live"
     public static let pushLiveFrame = "liveFrame"
+    /// Past turns (docs/plan-watch-app.md → Relay → Past turns).
+    public static let requestTurns = "turns"
 
     private static let encoder: JSONEncoder = {
         let e = JSONEncoder(); e.dateEncodingStrategy = .iso8601; return e

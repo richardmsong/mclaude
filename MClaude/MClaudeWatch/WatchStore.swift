@@ -63,9 +63,6 @@ final class WatchStore: NSObject {
     var listed: [WatchSession] { sessions.filter { dot($0) != nil } }
     var read: [WatchSession] { sessions.filter { dot($0) == nil } }
 
-    var needsYouCount: Int { sessions.filter { dot($0) == .needsYou }.count }
-    var workingCount: Int { sessions.filter { dot($0) == .working || dot($0) == .background }.count }
-    var unreadCount: Int { sessions.filter { dot($0) == .unread }.count }
 
     func session(_ id: String) -> WatchSession? { sessions.first { $0.id == id } }
 
@@ -155,6 +152,13 @@ final class WatchStore: NSObject {
                                           errorHandler: { _ in once.resume(nil) })
             DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { once.resume(nil) }
         }
+    }
+
+    /// Earlier turns (docs/plan-watch-app.md → Past turns); nil when the request failed.
+    func pastTurns(_ id: String) async -> [PastTurn]? {
+        guard let reply = await request([WatchSnapshot.requestKey: WatchSnapshot.requestTurns, "id": id], timeout: 20),
+              let data = reply["turns"] as? Data else { return nil }
+        return LiveTurn.decodeTurns(data)
     }
 
     enum FullMessage { case text(String), none, failed }

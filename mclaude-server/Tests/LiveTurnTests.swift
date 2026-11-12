@@ -136,7 +136,8 @@ final class LiveTurnTests: XCTestCase {
         XCTAssertNotNil(ISO8601DateFormatter().date(from: block["startedAt"] as! String))
 
         let snap = try JSONSerialization.jsonObject(with: encoder.encode(t.snapshot)) as! [String: Any]
-        XCTAssertEqual(Set(snap.keys), ["turn", "active", "blocks"])
+        XCTAssertEqual(Set(snap.keys), ["turn", "active", "prompt", "blocks"])
+        XCTAssertTrue(snap["prompt"] is NSNull)               // null until known
         let sb = (snap["blocks"] as! [[String: Any]])[0]
         XCTAssertEqual(Set(sb.keys), ["index", "kind", "text", "startedAt", "done"])
 
@@ -146,5 +147,112 @@ final class LiveTurnTests: XCTestCase {
         t.ingest(text(1, "y"))
         let later = try JSONSerialization.jsonObject(with: encoder.encode(t.takeFrame(id: "s12")!)) as! [String: Any]
         XCTAssertEqual(Set((later["blocks"] as! [[String: Any]])[0].keys), ["index", "kind", "append", "new"])
+    }
+
+    // MARK: - What started the turn
+
+    private func userEvent(_ text: String, type: SessionEventType = .user, subagent: Bool = false) -> SessionEvent {
+        SessionEvent(uuid: "u1", timestamp: "2026-11-11T10:00:00.000Z", type: type, text: text, thinking: nil,
+                     toolUse: nil, toolResults: nil, model: nil, durationMs: nil,
+                     subagentInfo: subagent ? SubagentInfo(agentId: "a", agentType: "Explore", description: "d", parentToolUseId: "t") : nil)
+    }
+
+    private func peerEvent(_ body: String, other: String? = nil) -> SessionEvent {
+        var e = userEvent("<cross-session-message from=\"uds:/tmp/cc-socks/1.sock\">\(body)</cross-session-message>")
+        let ref = PeerRef(claudeSessionId: "uuid-a", ccName: "mclaude-v1-f1", address: "uds:/tmp/cc-socks/1.sock",
+                          sessionId: nil, displayName: "mclaude-v1-f1", open: false)
+        e.peerMessages = [PeerMessage(id: "k1", direction: "received", peer: ref, summary: nil, text: body,
+                                      at: e.timestamp, status: "received", error: nil)]
+        e.peerOtherText = other
+        return e
+    }
+
+    func testPromptAfterTurnStartIsInTheFirstFrameOnly() throws {
+        var t = LiveTurn()
+        t.begin()
+        XCTAssertNil(t.snapshot.prompt)
+        _ = t.takeFrame(id: "s1")
+        XCTAssertTrue(t.notePrompt(LiveTurn.Prompt(text: "Fix the build")))
+        XCTAssertFalse(t.notePrompt(LiveTurn.Prompt(text: "a mid-turn message")))   // the first one stays
+        t.ingest(start(0, "text"))
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let first = try JSONSerialization.jsonObject(with: encoder.encode(t.takeFrame(id: "s1")!)) as! [String: Any]
+        XCTAssertEqual(Set(first.keys), ["id", "turn", "ended", "blocks", "prompt"])
+        let p = first["prompt"] as! [String: Any]
+        XCTAssertEqual(p["text"] as? String, "Fix the build")
+        XCTAssertTrue(p["from"] is NSNull)
+        XCTAssertEqual(Set(p.keys), ["text", "from"])
+
+        t.ingest(text(0, "ok"))
+        let later = try JSONSerialization.jsonObject(with: encoder.encode(t.takeFrame(id: "s1")!)) as! [String: Any]
+        XCTAssertEqual(Set(later.keys), ["id", "turn", "ended", "blocks"])
+        XCTAssertNil(t.takeFrame(id: "s1"))
+        t.end()
+        XCTAssertNil(t.takeFrame(id: "s1")!.prompt)
+
+        // The snapshot keeps it, also after the turn ended; the next turn starts without one
+        XCTAssertEqual(t.snapshot.prompt, LiveTurn.Prompt(text: "Fix the build"))
+        let snap = try JSONSerialization.jsonObject(with: encoder.encode(t.snapshot)) as! [String: Any]
+        XCTAssertEqual((snap["prompt"] as? [String: Any])?["text"] as? String, "Fix the build")
+        t.begin()
+        XCTAssertNil(t.snapshot.prompt)
+        XCTAssertNil(t.takeFrame(id: "s1"))
+    }
+
+    func testPromptJustBeforeTurnStartIsCarriedIntoIt() {
+        var t = LiveTurn()
+        XCTAssertFalse(t.notePrompt(LiveTurn.Prompt(text: "Hello")))
+        XCTAssertFalse(t.hasPending)
+        XCTAssertNil(t.snapshot.prompt)
+        t.begin()
+        XCTAssertEqual(t.snapshot.prompt?.text, "Hello")
+        let f = t.takeFrame(id: "s1")!                        // a frame for the prompt alone
+        XCTAssertEqual(f.prompt?.text, "Hello")
+        XCTAssertEqual(f.blocks.count, 0)
+        XCTAssertNil(t.takeFrame(id: "s1"))
+        t.end()
+        t.begin()
+        XCTAssertNil(t.snapshot.prompt)                       // carried once, into one turn
+    }
+
+    func testPromptOfEvents() {
+        XCTAssertEqual(LiveTurn.prompt(of: userEvent("look at /tmp/mclaude-screenshots/a.png this\nplease")),
+                       LiveTurn.Prompt(text: "look at this please"))
+        XCTAssertNil(LiveTurn.prompt(of: userEvent("x", type: .toolResult)))
+        XCTAssertNil(LiveTurn.prompt(of: userEvent("x", subagent: true)))
+        XCTAssertNil(LiveTurn.prompt(of: userEvent(SessionManager.crashResumeText)))
+        XCTAssertNil(LiveTurn.prompt(of: userEvent("<task-notification>\n<task-id>b1</task-id>\n</task-notification>")))
+
+        let long = String(repeating: "a", count: 1200)
+        let cut = LiveTurn.prompt(of: userEvent(long))!.text
+        XCTAssertEqual(cut.count, LiveTurn.maxPrompt)
+        XCTAssertEqual(cut, String(repeating: "a", count: 999) + "…")
+        XCTAssertEqual(LiveTurn.prompt(of: userEvent(String(repeating: "b", count: 1000)))!.text.count, 1000)
+    }
+
+    func testPeerPrompt() async throws {
+        let p = LiveTurn.prompt(of: peerEvent(" Can you review s3? "))!
+        XCTAssertEqual(p.text, "Can you review s3?")
+        XCTAssertEqual(p.from, "mclaude-v1-f1")
+        XCTAssertEqual(p.peer?.claudeSessionId, "uuid-a")
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(p)) as! [String: Any]
+        XCTAssertEqual(Set(json.keys), ["text", "from"])      // the PeerRef stays off the wire
+        XCTAssertEqual(json["from"] as? String, "mclaude-v1-f1")
+
+        // Named per viewer: the peer's session name when they can see it
+        let directory = PeerDirectory(open: ["uuid-a": .init(id: "s3", name: "🔐 Fix Login")], ended: [:])
+        let seen = await p.named(by: directory, canSee: { $0 == "s3" })
+        XCTAssertEqual(seen.from, "🔐 Fix Login")
+        let hidden = await p.named(by: directory, canSee: { _ in false })
+        XCTAssertEqual(hidden.from, "mclaude-v1-f1")
+        let mine = LiveTurn.Prompt(text: "hi")
+        let unchanged = await mine.named(by: directory, canSee: { _ in true })
+        XCTAssertEqual(unchanged, mine)
+
+        // Peer tags plus the user's own text: the user's message
+        XCTAssertEqual(LiveTurn.prompt(of: peerEvent("fyi", other: "and also do this")),
+                       LiveTurn.Prompt(text: "and also do this"))
     }
 }

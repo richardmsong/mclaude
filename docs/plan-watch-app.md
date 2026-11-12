@@ -7,7 +7,7 @@ Added 2026-11-06 (Richard: "Scaffold out a simple watch app that I can see updat
 The watch handles the whole check-in loop without the iPhone leaving your pocket:
 1. **Know when to look:** a push when a session needs you (mirrored to the watch).
 2. **See what matters:** one list in the order you last worked in each session, with a dot for what each is doing (needs you, working, background work, unread) and read sessions folded away.
-3. **Get back into a session:** each session has a short recap (Goal / Where it is / Next), shown on its detail screen.
+3. **Get back into a session:** its screen opens on the conversation: what started the latest turn and Claude's thinking and reply as they're written, with past turns a tap away.
 4. **Act on it:** answer a question, approve or deny, tell Claude to continue, or talk to it.
 
 ## Decisions (Richard)
@@ -26,6 +26,9 @@ The watch handles the whole check-in loop without the iPhone leaving your pocket
 | Full message | A button on the session screen shows Claude's last answer in full, rendered (2026-11-07). |
 | Talk | Talk to the session on its screen, transcribed on the watch with Apple's dictation; tapping Done in dictation is fine (2026-11-07). |
 | Live view | While a session works, follow its train of thought: Claude's thinking and text as they're written, not its commands. As little delay as possible, pushed rather than polled (2026-11-10). |
+| Session screen | One conversation-style screen that never swaps layouts: the latest turn (what started it, then Claude's thinking and reply) streams in while Claude works and simply stops growing when it's done, with the recap as one line on top and a Past turns button to review earlier turns (2026-11-11: the swap between the recap and the live feed was "jarring/disjointed"). |
+| List summary | No summary line of counts at the top of the list (2026-11-11: "I don't even like that one unread message. I don't really care."). |
+| Session screen top | The conversation starts at the top: no project name or recap line; Past turns is a small title-bar button (2026-11-11: "the actual important stuff is not right at the top of the screen"). |
 | Course correction | What you say while Claude works goes through the same queue as on the phone, no cut-in. One button stops Claude; with something queued it reads Send now, because stopping delivers the queue anyway (2026-11-10). |
 
 ## Server
@@ -77,7 +80,8 @@ The server passes on Claude's main-thread thinking and text while a turn runs, f
 ```
 
   `turn` counts up from 1 per session; `index` counts blocks within the turn from 0; `new` marks a block's first appearance (with `startedAt`); `append` is text added since the last frame. When the turn ends, one more frame carries `"ended": true`.
-- **`GET /sessions/:id/live`** returns the live turn as it stands: `{"turn": 7, "active": true|false, "blocks": [{"index", "kind", "text", "startedAt", "done"}]}`. It keeps the last 30 blocks, each with at most 4,000 characters of text (a cut block is "…" and its last 3,999 characters). `active` is false once the turn has ended. Before the session's first turn: `{"turn": 0, "active": false, "blocks": []}`. 404 for an unknown session; same ownership rule as the session's other endpoints.
+- **What started the turn:** the live turn also carries `prompt`, the turn's first main-thread user message: `{"text": "…", "from": null}` for your message, or `{"text": "…", "from": "<peer session name>"}` for a message from another session. The text is what was typed (uploaded file paths removed), at most 1,000 characters (cut with "…"). It's `null` until that message arrives. A message that was only an attachment has empty `text`. A frame carries `"prompt"` once, in the first frame after it's known. A peer's name is the one the viewer would see for that session (its MClaude name if they can see it, otherwise its last known name, or "Another session").
+- **`GET /sessions/:id/live`** returns the live turn as it stands: `{"turn": 7, "active": true|false, "prompt": {…} | null, "blocks": [{"index", "kind", "text", "startedAt", "done"}]}`. It keeps the last 30 blocks, each with at most 4,000 characters of text (a cut block is "…" and its last 3,999 characters). `active` is false once the turn has ended. Before the session's first turn: `{"turn": 0, "active": false, "prompt": null, "blocks": []}`. 404 for an unknown session; same ownership rule as the session's other endpoints.
 
 ### "Needs you" push
 
@@ -90,7 +94,7 @@ When a session starts waiting on a question, a plan approval or a tool permissio
 Read state is kept on the server and shared by every device (docs/design-claude-uplift.md → Session order, read state and background work). The server's `unread` flag is the only source; the iPhone app keeps no seen times of its own.
 
 - The iPhone app marks a session read (`POST /sessions/:id/read`) when its screen is shown with the app in the foreground, and when a sessions update says the session on screen is unread while the app is in the foreground.
-- Opening a session's detail screen on the watch, and any watch action on a session, marks it read too (the watch asks the iPhone app, which calls the server).
+- Opening a session's screen on the watch, and any watch action on a session, marks it read too (the watch asks the iPhone app, which calls the server).
 - A session is **unread** when the server says so: a turn that wasn't started by a peer message finished, and the session is now idle with no background work running.
 
 ### Relay
@@ -110,6 +114,7 @@ The watch sends requests; the iPhone app (woken in the background if needed) han
   - An action also marks the session read.
 - **Full message** (`{"type":"message","id":"s12"}`): fetches `GET /sessions/:id/history?limit=40` and replies `{"text": "<the last assistant message, Markdown as written>"}` (capped at 20,000 characters, cut with "…"), or `{"text": null}` when there is none, or `{"error": "server"}`.
 - **Live** (`{"type":"live","id":"s12"}`): replies `{"live": <GET /sessions/:id/live, as JSON data>}` (or `{"error":"server"}`), and subscribes the watch to that session for 10 seconds from this request. While subscribed, the iPhone app keeps its own WebSocket to the server open and forwards each `live` frame for that session to the watch the moment it arrives, as `{"type":"liveFrame","frame":<the frame's data>}`. The watch repeats the request every 3 seconds while a session's screen is open, which renews the subscription; when it lapses, the iPhone app closes that WebSocket.
+- **Past turns** (`{"type":"turns","id":"s12"}`): fetches `GET /sessions/:id/history?limit=300` and groups it into turns. A turn starts at a main-thread user message (yours, or another session's, with that session's name as `from`) and its reply is Claude's last text before the next turn. It replies `{"turns": [{"prompt": "…", "from": null | "<name>", "reply": "<Markdown>" | null, "at": <date>}]}`, newest first, up to 15, leaving out the newest turn (it's on the session screen). Prompts are capped at 300 characters and replies at 3,000 (cut with "…"). On failure: `{"error": "server"}`.
 - If the iPhone app isn't signed in, every request replies with `error: "signedOut"`.
 
 ### Snapshot
@@ -151,7 +156,6 @@ The watch sends requests; the iPhone app (woken in the background if needed) han
 ```
 ┌──────────────────────┐
 │ MClaude         9:41 │
-│ 1 needs you · 2 working · 1 unread │
 │ ● Fix deploy         │  ← blue dot
 │   2m                 │
 │ ● Weekly meals       │  ← green dot
@@ -165,7 +169,6 @@ The watch sends requests; the iPhone app (woken in the background if needed) han
 └──────────────────────┘
 ```
 
-- **Summary line** under the title: the non-zero counts of `needs you`, `working` (working or with background work running) and `unread`, joined with ` · `. When all three are zero: "All caught up".
 - **One list, no sections:** every session that needs you, is working, has background work running or is unread, in the snapshot's order (newest `inputAt` first, Ops last). Status never changes the order.
 - **Row** (two lines): a dot and the name (one line, semibold); then the age of your last input (`inputAt`), muted (`now`, `14s`, `2m`, `3h`, `2d`). Tapping a row opens the session.
 - **Dot**, the first that applies: blue (filled) = needs you; clay (filled) = working; clay ring (hollow) = background work running; green (filled, `#65BB30`) = unread.
@@ -177,58 +180,21 @@ The watch sends requests; the iPhone app (woken in the background if needed) han
 
 Titled "Read". Every other session (idle, read, no background work, or its process isn't running), in the snapshot's order, with the same two-line rows (no dot). Tapping opens the session.
 
-### Session detail
+### Session screen
+
+One screen that reads like a conversation and never swaps layouts: while Claude works, the latest turn streams in; when it's done, the same turn simply stops growing.
 
 ```
 ┌──────────────────────┐
-│ ‹ Fix deploy         │
-│ ● Needs you · 2m     │
-│ mclaude-v1           │
-│ GOAL                 │
-│ Ship the retry fix   │
-│ WHERE IT IS          │
-│ Tests pass; ready to │
-│ run the migration    │
-│ NEXT                 │
-│ Run it now or back   │
-│ up first?            │
-│ [ ▤ Full message ]   │
-│ ┌──────────────────┐ │
-│ │ Run now or back… │ │
-│ │ ○ Run now        │ │
-│ │ ● Back up first  │ │
-│ │ ○ Other…         │ │
-│ └──────────────────┘ │
-│ [      Send      ]   │
-└──────────────────────┘
-```
-
-When nothing is pending, the same screen ends with `[ ▤ Full message ]`, `[ Continue ]` (if Claude proposed a next step), `[ 🎤 Talk ]` and a small `Type…` field.
-
-- **Header:** dot, state label (`Needs you`, `Working`, `Idle`, `Starting`, `Restarting`, `Not running`) · age; the project name, muted.
-- **Recap:** three blocks, each a small muted uppercase label (`GOAL`, `WHERE IT IS`, `NEXT`) and its text. Without a recap yet: the last message under a `LAST MESSAGE` label (if any), rendered like the Last answer screen.
-- **Full message** (secondary capsule, `doc.text` icon): shown when the session has a last message. Opens the Last answer screen.
-- **Actions**, by situation:
-  - **Question** (`kind: "question"`): a card per question with its text and its options as rows (radio for single-select, checkbox for multi-select), plus **Other…**, which opens text input (dictation, Scribble or keyboard) and selects Other with that text. **Send** (clay capsule) is enabled once every question has an answer; it sends `answer`. Single-select: the option label (or the Other text). Multi-select: ticked labels in option order, Other text last, joined with ", ".
-  - **Plan or tool permission** (`kind: "plan"` / `"tool"`): the request text, then **Approve** (clay capsule) and **Deny** (secondary) buttons.
-  - **Continue** (secondary capsule): when the session isn't working or waiting and its recap's `nextBy` is `"claude"`.
-  - **Talk** (clay mic capsule, "Talk"): always, except while a question is pending. See Talk below.
-  - **Type** (secondary, small): a text field that opens the watch's text input (keyboard, Scribble or dictation). Hidden while a question is pending. A non-blank result is sent as `reply`.
-  - While an action is in flight its buttons are disabled and show a spinner. Success plays the watch's success haptic and refreshes; failure plays the failure haptic and shows "Couldn't send. Try again." under the buttons, keeping the selections.
-- **While Claude works** (state `working`, or the live turn is still active), the recap, Full message, Continue and the question/approval area give way to the live view (below); the header stays.
-- **Read:** opening the screen marks the session seen (and again when an update arrives while it's open).
-- The screen scrolls with the Digital Crown, updates in place, and goes back to the list if the session ends.
-
-### Live view
-
-```
-┌──────────────────────┐
-│ ‹ Fix deploy         │
-│ ● Working · 2m       │
+│ ‹ Fix deploy     (⟲) │  ← Past turns: small top-bar button
+│ ● Working · 2m       │  ← one small status line
+│        ┌───────────┐ │
+│        │ fix the   │ │  ← what started this turn
+│        │ retry bug │ │
+│        └───────────┘ │
 │ The retry fires      │  ← thinking: muted, streaming
-│ before the token     │
-│ refresh, so 401s…▌   │
-│ ── working ⋯ 12s ──  │  ← a run of tool calls
+│ before the token…▌   │
+│ ── worked 41s ──     │  ← a run of tool calls
 │ Found it: the retry  │  ← Claude's text: full brightness
 │ ignores 401s…        │
 │ QUEUED               │
@@ -237,20 +203,34 @@ When nothing is pending, the same screen ends with `[ ▤ Full message ]`, `[ Co
 └──────────────────────┘
 ```
 
-- **Feed:** the live turn's blocks in order, growing as Claude writes.
-  - **Thinking** in the muted text colour with inline Markdown; **text** in the primary colour with its full formatting (headings, lists, bold, code), rendered like the Last answer screen. A block that's still growing ends with a clay cursor.
-  - **Tools:** each run of consecutive tool blocks is one quiet centred line: `working ⋯ <seconds>` counting up while it runs, then `worked <duration>` (e.g. `worked 41s`, `worked 2m 5s`). Commands and file names never show.
-  - Long thinking blocks show their last 1,500 characters, starting with "…".
-  - Before the first block arrives: "Starting…".
-- **Following:** the feed stays scrolled to the newest line, just above the toolbar. On watchOS 11 and later, scrolling it yourself (a drag or the Digital Crown) stops following, and coming to rest at the bottom follows again; on watchOS 10 it always follows.
+- **The conversation starts at the top** (Richard, 2026-11-11: the important stuff shouldn't need a scroll; the recap, next step and project name aren't that important). Above it there's only:
+  - **Title bar:** the session name, and **Past turns** as a small round button beside it (`clock.arrow.circlepath`), which opens the Past turns screen.
+  - **Status line:** one small muted line: dot, state label (`Needs you`, `Working`, `Idle`, `Starting`, `Restarting`, `Not running`) · age.
+  - The recap and the project name aren't shown on this screen (the recap still decides when Continue appears).
+- **The latest turn:**
+  - **What started it:** the live turn's `prompt` as a right-aligned bubble (raised card colour, 12pt radius) with up to 4 lines; tapping it shows it in full. A message from another session gets a small muted `From <name>` label above the bubble. An attachment-only message reads "Attachment" (muted). No bubble while `prompt` is unknown.
+  - **Feed:** the live turn's blocks in order, growing as Claude writes. **Thinking** in the muted text colour with inline Markdown; **text** in the primary colour with its full formatting (headings, lists, bold, code), rendered like the Last answer screen. A block that's still growing ends with a clay cursor. Each run of consecutive tool blocks is one quiet centred line: `working ⋯ <seconds>` counting up while it runs, then `worked <duration>` (e.g. `worked 41s`, `worked 2m 5s`); commands and file names never show. Long thinking blocks show their last 1,500 characters, starting with "…". While a turn is starting and no block has arrived yet: "Starting…".
+  - **When the live turn has nothing yet** (no turn since the server started): Claude's last message (the snapshot's `lastText`), rendered like the Last answer screen, if there is one.
+  - **Full message** (secondary capsule, `doc.text` icon): under the feed when the turn has ended and its reply was cut (the text starts with "…"), or when the last message is shown instead of the live turn. Opens the Last answer screen.
 - **Queued:** under the feed, when the session's queue isn't empty: a small muted `QUEUED` label, each queued message (oldest first) as a muted bubble with a dashed outline, and "Claude reads these at its next step".
-- **Bottom toolbar** (the watch's bottom bar, so the controls stay in view while the feed follows the newest line), three round buttons:
-  - **Stop / Send now** (leading): `stop.fill` in the danger colour, labelled Stop, sending `stop` when nothing is queued; `paperplane.fill` in clay, labelled Send now, sending `sendNow` when something is queued. Either way Claude's current work is interrupted; with a queue, Claude reads the queued messages next.
-  - **Type** (centre, `keyboard`): opens the watch's text input (keyboard, Scribble or dictation); a non-blank result is sent as `reply`.
-  - **Talk** (trailing, `mic.fill`, clay): as on the rest of the session screen.
-  - What you send with Type or Talk joins the queue while Claude works. A button shows a spinner while its action is in flight, and all three are disabled meanwhile; a failure shows "Couldn't send. Try again." under the feed.
-- **Push, then poll:** while a session's screen is open (live view or not, so a turn that starts while you're looking switches to the live view as soon as Claude writes) the watch asks the iPhone for the live turn (`live` request) when it opens and every 3 seconds, and applies each pushed `liveFrame` as it arrives. A frame applies only when its `turn` matches and it continues from the blocks the watch has (no gap in `index`); otherwise the watch re-requests the live turn. If no frame has arrived for 1.5 seconds while the turn is active, the watch requests the live turn every second until frames resume.
-- **Turn end:** when the live turn ends (or the session stops working), the screen goes back to the normal layout; the new recap arrives with the next refresh.
+- **Waiting on you**, under the feed:
+  - **Question** (`kind: "question"`): a card per question with its text and its options as rows (radio for single-select, checkbox for multi-select), plus **Other…**, which opens text input (dictation, Scribble or keyboard) and selects Other with that text. **Send** (clay capsule) is enabled once every question has an answer; it sends `answer`. Single-select: the option label (or the Other text). Multi-select: ticked labels in option order, Other text last, joined with ", ".
+  - **Plan or tool permission** (`kind: "plan"` / `"tool"`): the request text, then **Approve** (clay capsule) and **Deny** (secondary) buttons.
+- **Continue** (secondary capsule, under the feed): when the session isn't working or waiting and its recap's `nextBy` is `"claude"`.
+- **Bottom toolbar** (the watch's bottom bar, always in view), round buttons:
+  - **Stop / Send now** (leading), only while Claude works: `stop.fill` in the danger colour, labelled Stop, sending `stop` when nothing is queued; `paperplane.fill` in clay, labelled Send now, sending `sendNow` when something is queued. Either way Claude's current work is interrupted; with a queue, Claude reads the queued messages next.
+  - **Type** (`keyboard`): opens the watch's text input (keyboard, Scribble or dictation); a non-blank result is sent as `reply`.
+  - **Talk** (`mic.fill`, clay): see Talk below.
+  - Type and Talk are hidden while a question is pending (answer it with the card). What you send while Claude works joins the queue.
+- **In flight:** a button shows a spinner while its action runs, and the action buttons are disabled meanwhile. Success plays the watch's success haptic and refreshes; failure plays the failure haptic and shows "Couldn't send. Try again." under the feed, keeping any selections.
+- **Following:** while Claude works, the screen opens scrolled to the bottom (the newest line, just above the toolbar) and stays there as Claude writes; when Claude isn't working, it opens at the top, on the start of the latest turn. A turn starting while the screen is open scrolls to the newest line and follows it. On watchOS 11 and later, scrolling it yourself (a drag or the Digital Crown) stops following, and coming to rest at the bottom follows again; a new turn starting follows again too. On watchOS 10 it always follows. The status line and the start of the turn are above, a scroll up.
+- **Push, then poll:** while the screen is open the watch asks the iPhone for the live turn (`live` request) when it opens and every 3 seconds, and applies each pushed `liveFrame` as it arrives. A frame applies only when its `turn` matches and it continues from the blocks the watch has (no gap in `index`); otherwise the watch re-requests the live turn. If no frame has arrived for 1.5 seconds while the turn is active, the watch requests the live turn every second until frames resume. When a turn ends, the watch refreshes so the state and recap catch up.
+- **Read:** opening the screen marks the session read (and again when an update arrives while it's open).
+- The screen updates in place and goes back to the list if the session ends.
+
+### Past turns
+
+Titled "Past turns". A spinner while it loads, then the earlier turns, newest first. Each row: what started the turn (muted `From <name>` first for another session's message) in up to 2 lines, then Claude's reply in up to 2 muted lines (or "No reply" when there wasn't one), and the turn's age. Tapping a row opens it: the prompt bubble, then the reply rendered like the Last answer screen. "No earlier turns" when there are none; "Couldn't load past turns" with a Retry button when the request fails or the iPhone isn't reachable.
 
 ### Last answer
 
@@ -261,13 +241,13 @@ Titled "Last answer". Shows a spinner while it loads, then Claude's last answer 
 ### Talk
 
 - Tapping **Talk** opens Apple's dictation on the watch directly: the text appears as you speak, and you tap **Done** when you're finished. The transcription happens on the watch; the iPhone only relays the message.
-- **Done** with non-blank text sends it right away as `reply` (while Claude is working, the server queues it as usual). The Talk button shows a spinner while sending; success plays the success haptic; failure plays the failure haptic, shows "Couldn't send. Try again." and puts the text in the Type field so it can be sent again.
+- **Done** with non-blank text sends it right away as `reply` (while Claude is working, the server queues it as usual). The Talk button shows a spinner while sending; success plays the success haptic; failure plays the failure haptic, shows "Couldn't send. Try again." and keeps the text so it can be sent again with Type.
 - **Cancel**, or Done with nothing said, sends nothing.
-- If dictation can't be opened, the Type field's text input opens instead.
+- If dictation can't be opened, the watch's text input (as for Type) opens instead.
 
 ### Notifications
 
-Tapping a MClaude notification on the watch opens the app on that session's detail screen.
+Tapping a MClaude notification on the watch opens the app on that session's screen.
 
 ### Refreshing
 
