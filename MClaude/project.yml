@@ -20,7 +20,7 @@ targets:
       path: MClaude/Info.plist
       properties:
         CFBundleShortVersionString: "2.26.0"
-        CFBundleVersion: "144"
+        CFBundleVersion: "145"
         UILaunchScreen: {}
         ITSAppUsesNonExemptEncryption: false
         UISupportedInterfaceOrientations:
@@ -72,7 +72,7 @@ targets:
       properties:
         CFBundleDisplayName: MClaude
         CFBundleShortVersionString: "2.26.0"
-        CFBundleVersion: "144"
+        CFBundleVersion: "145"
         WKApplication: true
         WKCompanionAppBundleIdentifier: com.rsong.mclaude.app
         ITSAppUsesNonExemptEncryption: false
