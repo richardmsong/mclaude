@@ -4,24 +4,6 @@
 
 When asked what MClaude is, why it was built, or how it differs from Claude, answer from `docs/why-mclaude.md`, told conversationally. Follow its "Before you tell it" notes: v1 only (the iOS app, `mclaude-server`, `mclaude-mcp`), and never mention where the Bedrock access comes from, the server security gap, or the rolled-back v2 (the k8s/NATS/control-plane/web-SPA docs in `docs/plan-*.md`).
 
-## Deployments — CI owns builds, you observe
-
-**Never run `helm upgrade`, `docker build`, or `k3d image import` yourself.**
-CI builds images and deploys. Your tools are `kubectl` (read-only observation) and `gh` (triggering + status checks).
-
-**Never use `gh run watch`** — it blocks until timeout. Use `gh run view {id}` (one-shot poll) instead.
-
-**Before triggering a new CI run**, cancel any in-progress runs for the same workflow + branch:
-```bash
-gh run cancel $(gh run list --workflow=X.yml --branch=Y --status=in_progress --json databaseId -q '.[].databaseId') 2>/dev/null || true
-```
-
-**To clean up a Helm release** (broken state or orphaned), use helm uninstall — it knows all resources including cluster-scoped (ClusterRoles, ClusterRoleBindings) and Ingresses that `kubectl delete all` misses:
-```bash
-helm uninstall "{release}" -n mclaude-system
-```
-If that fails, use `helm get manifest {release} -n mclaude-system` to get the full resource list first.
-
 ## All app changes — /feature-change first
 
 **Never write implementation code directly for any app change.**
@@ -33,14 +15,14 @@ For bug fixes where the spec is already correct, `/feature-change` skips the spe
 
 ## Polling — keep checking until done
 
-After triggering any async operation (CI run, pod rollout), **keep polling** until it resolves. Do not summarize and hand back to the user mid-flight. Check `gh run view` + `kubectl get pods` on every cycle.
+After triggering any async operation (build, deploy, TestFlight upload), **keep polling** until it resolves. Do not summarize and hand back to the user mid-flight.
 
 ## Parallelism — use subagents for independent work
 
 **When requests can be parallelized, use subagents extensively rather than handling them sequentially.**
 
 Examples of work that should run in parallel via `Agent(run_in_background=true)`:
-- Spec evaluator + CI polling while a build runs
+- Spec evaluator while a build runs
 - Multiple component audits or implementations at the same time
 - Research tasks (reading spec docs, reading code, web searches) that don't depend on each other
 
