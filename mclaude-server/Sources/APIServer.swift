@@ -1070,8 +1070,12 @@ func buildRouter(monitor: SessionManager, broadcaster: WSBroadcaster, sessionSto
         }
         guard let userId = await requireAuth(request: request) else { return unauthorized }
         guard await capturedStore!.userOwns(sessionId: id, userId: userId),
-              let snapshot = await capturedMonitor.liveSnapshot(id: id) else {
+              var snapshot = await capturedMonitor.liveSnapshot(id: id) else {
             return jsonResponse(.notFound, "{\"error\":\"not found\"}")
+        }
+        if let prompt = snapshot.prompt, prompt.peer != nil {       // the peer's name, as this caller may see it
+            snapshot.prompt = await prompt.named(by: capturedMonitor.peerDirectory(),
+                                                 canSee: { await canSeeSession($0, userId) })
         }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601

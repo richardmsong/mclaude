@@ -27,6 +27,60 @@ struct LiveTurn: Sendable {
 
     static let maxBlocks = 30
     static let maxText = 4000
+    static let maxPrompt = 1000
+
+    /// What started the turn: its first main-thread user message. `from` is the peer session's
+    /// name for a peer message, nil for the user's own.
+    struct Prompt: Codable, Sendable, Equatable {
+        let text: String
+        var from: String?
+        /// The sender of a peer message, so `from` can be named per viewer. Not on the wire.
+        var peer: PeerRef? = nil
+
+        enum CodingKeys: String, CodingKey { case text, from }
+
+        /// `text` is cut to 1,000 characters (its first 999 and "…").
+        init(text: String, from: String? = nil, peer: PeerRef? = nil) {
+            self.text = text.count > LiveTurn.maxPrompt ? String(text.prefix(LiveTurn.maxPrompt - 1)) + "…" : text
+            self.from = from
+            self.peer = peer
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(text, forKey: .text)
+            try c.encode(from, forKey: .from)               // null for the user's own message
+        }
+
+        /// `from` as `viewer` may see it: the peer's session name when it can see that session.
+        func named(by directory: PeerDirectory, canSee: (String) async -> Bool) async -> Prompt {
+            guard let peer else { return self }
+            let sid = peer.claudeSessionId.flatMap { directory.open[$0]?.id }
+            var ok = false
+            if let sid { ok = await canSee(sid) }
+            var copy = self
+            copy.from = directory.refresh(peer, visible: { _ in ok }).displayName
+            return copy
+        }
+    }
+
+    /// The prompt a top-level user event gives the turn, or nil when it isn't a real message:
+    /// tool results, subagent lines, replayed task notifications and the server's own
+    /// "The previous turn was interrupted…" nudge (meta lines and command echoes never become
+    /// user events). A peer-only line is the peer's message; otherwise what the user typed.
+    static func prompt(of e: SessionEvent) -> Prompt? {
+        guard e.type == .user, e.subagentInfo == nil, let text = e.text,
+              !text.hasPrefix("The previous turn was interrupted by"),
+              !JSONLParser.isOnlyTaskNotifications(text) else { return nil }
+        if let sender = SessionManager.peerOnlySender(e), let first = e.peerMessages?.first {
+            let body = first.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return Prompt(text: body, from: sender, peer: first.peer)
+        }
+        if e.peerMessages != nil, let other = e.peerOtherText {
+            return Prompt(text: SessionTitler.typedText(of: other))
+        }
+        return Prompt(text: SessionTitler.typedText(of: text))
+    }
 
     private(set) var turn = 0
     private(set) var active = false
@@ -36,11 +90,16 @@ struct LiveTurn: Sendable {
     private var claudeIndex: [Int: Int] = [:]
     private var pending: [Pending] = []
     private var endedPending = false
+    private(set) var prompt: Prompt?
+    /// A prompt that arrived while no turn was running: the next turn's
+    private var nextPrompt: Prompt?
+    /// `prompt` is known and no frame has carried it yet
+    private var promptPending = false
 
     /// A frame is waiting to be sent
-    var hasPending: Bool { !pending.isEmpty || endedPending }
+    var hasPending: Bool { !pending.isEmpty || endedPending || promptPending }
 
-    /// A new turn: replaces the previous turn's blocks.
+    /// A new turn: replaces the previous turn's blocks (and takes a prompt that came just before).
     mutating func begin() {
         turn += 1
         active = true
@@ -49,6 +108,23 @@ struct LiveTurn: Sendable {
         claudeIndex = [:]
         pending = []
         endedPending = false
+        prompt = nextPrompt
+        nextPrompt = nil
+        promptPending = prompt != nil
+    }
+
+    /// A main-thread user message: the running turn's prompt while it has none, or (no turn
+    /// running) the next turn's. True when a frame has news.
+    @discardableResult
+    mutating func notePrompt(_ p: Prompt) -> Bool {
+        guard active else {
+            if nextPrompt == nil { nextPrompt = p }
+            return false
+        }
+        guard prompt == nil else { return false }
+        prompt = p
+        promptPending = true
+        return true
     }
 
     /// The turn ended: its last block is done. False when no turn was running.
@@ -141,6 +217,8 @@ struct LiveTurn: Sendable {
         let turn: Int
         let ended: Bool
         let blocks: [Block]
+        /// Only in the first frame after the prompt is known (omitted otherwise)
+        var prompt: Prompt? = nil
     }
 
     struct Snapshot: Codable, Sendable, Equatable {
@@ -154,6 +232,17 @@ struct LiveTurn: Sendable {
         let turn: Int
         let active: Bool
         let blocks: [Block]
+        var prompt: Prompt? = nil
+
+        enum CodingKeys: String, CodingKey { case turn, active, prompt, blocks }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(turn, forKey: .turn)
+            try c.encode(active, forKey: .active)
+            try c.encode(prompt, forKey: .prompt)           // null until known
+            try c.encode(blocks, forKey: .blocks)
+        }
     }
 
     /// Everything since the last frame, then cleared. Nil when there's nothing to send.
@@ -162,9 +251,10 @@ struct LiveTurn: Sendable {
         let frame = Frame(id: id, turn: turn, ended: endedPending, blocks: pending.map {
             Frame.Block(index: $0.index, kind: $0.kind, append: $0.append, isNew: $0.isNew,
                         startedAt: $0.isNew ? $0.startedAt : nil)
-        })
+        }, prompt: promptPending ? prompt : nil)
         pending = []
         endedPending = false
+        promptPending = false
         return frame
     }
 
@@ -174,6 +264,6 @@ struct LiveTurn: Sendable {
         Snapshot(turn: turn, active: active, blocks: blocks.map { b in
             let text = (b.cut || b.count > Self.maxText) ? "…" + String(b.text.suffix(Self.maxText - 1)) : b.text
             return Snapshot.Block(index: b.index, kind: b.kind, text: text, startedAt: b.startedAt, done: b.done)
-        })
+        }, prompt: prompt)
     }
 }

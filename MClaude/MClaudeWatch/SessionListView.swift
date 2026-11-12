@@ -4,6 +4,7 @@ enum WatchRoute: Hashable {
     case session(String)
     case read
     case lastAnswer(String)
+    case pastTurns(String)
 }
 
 /// docs/plan-watch-app.md → Session list.
@@ -21,6 +22,7 @@ struct SessionListView: View {
                     case .session(let id): SessionDetailView(sessionId: id)
                     case .read: ReadListView()
                     case .lastAnswer(let id): LastAnswerView(sessionId: id)
+                    case .pastTurns(let id): PastTurnsView(sessionId: id)
                     }
                 }
         }
@@ -52,10 +54,6 @@ struct SessionListView: View {
                                 .foregroundStyle(WatchTheme.textMuted)
                                 .listRowBackground(Color.clear)
                         } else {
-                            Text(summary)
-                                .font(.caption2)
-                                .foregroundStyle(WatchTheme.textSecondary)
-                                .listRowBackground(Color.clear)
                             // One list in the snapshot's order (your last input); status is only the dot
                             ForEach(store.listed) { session in
                                 NavigationLink(value: WatchRoute.session(session.id)) {
@@ -83,14 +81,6 @@ struct SessionListView: View {
                 Text("Connecting to iPhone…").font(.footnote).foregroundStyle(WatchTheme.textMuted)
             }
         }
-    }
-
-    /// "1 needs you · 2 working · 3 unread", or "All caught up".
-    private var summary: String {
-        let parts = [(store.needsYouCount, "needs you"), (store.workingCount, "working"), (store.unreadCount, "unread")]
-            .filter { $0.0 > 0 }
-            .map { "\($0.0) \($0.1)" }
-        return parts.isEmpty ? "All caught up" : parts.joined(separator: " · ")
     }
 
     private func message(_ text: String) -> some View {

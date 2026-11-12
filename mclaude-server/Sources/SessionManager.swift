@@ -1638,6 +1638,10 @@ actor SessionManager {
                 enriched.quiet = true                       // the app folds this turn
             }
             append(enriched, to: live)
+            // What started the turn (docs/plan-watch-app.md → Live stream); the turn is running by now
+            if parentToolUse == nil, let prompt = LiveTurn.prompt(of: enriched), live.liveTurn.notePrompt(prompt) {
+                scheduleLiveFrame(live)
+            }
             if event.type == .toolResult { notifyBlocked(live, event) }
             if parentToolUse == nil, event.type == .toolResult {
                 // A step finished; Claude reads stdin before its next model call

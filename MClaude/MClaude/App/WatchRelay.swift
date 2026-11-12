@@ -35,6 +35,7 @@ final class WatchRelay: NSObject, WCSessionDelegate, @unchecked Sendable {
         let type = message[WatchSnapshot.requestKey] as? String
         if type == WatchSnapshot.requestMessage { handleFullMessage(message, replyHandler: replyHandler); return }
         if type == WatchSnapshot.requestLive { handleLive(message, replyHandler: replyHandler); return }
+        if type == WatchSnapshot.requestTurns { handleTurns(message, replyHandler: replyHandler); return }
         guard type == WatchSnapshot.requestRefresh || type == WatchSnapshot.requestAction
                 || type == WatchSnapshot.requestMarkRead else {
             replyHandler([:]); return
@@ -145,6 +146,24 @@ final class WatchRelay: NSObject, WCSessionDelegate, @unchecked Sendable {
     private func endLiveTask() {
         if liveTask != .invalid { UIApplication.shared.endBackgroundTask(liveTask) }
         liveTask = .invalid
+    }
+
+    // MARK: - Past turns (docs/plan-watch-app.md → Relay → Past turns)
+
+    private func handleTurns(_ message: [String: Any], replyHandler: @escaping ([String: Any]) -> Void) {
+        guard let client = client() else { replyHandler(["error": WatchSnapshot.Failure.signedOut.rawValue]); return }
+        guard let id = message["id"] as? String else { replyHandler(["error": "server"]); return }
+        let task = UIApplication.shared.beginBackgroundTask(withName: "watch-turns")
+        Task {
+            defer { if task != .invalid { UIApplication.shared.endBackgroundTask(task) } }
+            guard let page = try? await client.fetchHistory(id: id, before: nil, limit: 300) else {
+                replyHandler(["error": "server"]); return
+            }
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let data = (try? encoder.encode(PastTurn.group(page.events))) ?? Data("[]".utf8)
+            replyHandler(["turns": data])
+        }
     }
 
     // MARK: - Full message (docs/plan-watch-app.md → Relay)

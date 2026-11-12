@@ -124,9 +124,19 @@ await monitor.setOnLive { frame in liveFramesIn.yield(frame) }
 Task {
     for await frame in liveFrames {
         guard let message = encodeWSMessage(type: "live", data: frame) else { continue }
+        // A peer's prompt: its session name, as each user may see it (like peer messages in events)
+        let directory = frame.prompt?.peer != nil ? await monitor.peerDirectory() : nil
         await broadcaster.broadcastFiltered { userId in
             guard await capturedStore.userOwns(sessionId: frame.id, userId: userId) else { return nil }
-            return message
+            guard let directory, let prompt = frame.prompt else { return message }
+            let owner = await capturedStore.ownerUserId
+            let laptopOwner = userId == nil || userId == "owner" || userId == owner
+            var named = frame
+            named.prompt = await prompt.named(by: directory, canSee: { sid in
+                if laptopOwner { return true }
+                return await capturedStore.userOwns(sessionId: sid, userId: userId)
+            })
+            return encodeWSMessage(type: "live", data: named)
         }
     }
 }

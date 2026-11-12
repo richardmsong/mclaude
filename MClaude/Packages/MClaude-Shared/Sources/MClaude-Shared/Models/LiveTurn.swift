@@ -21,13 +21,23 @@ public struct LiveTurn: Codable, Sendable, Equatable {
         }
     }
 
+    /// The message that started the turn (docs/plan-watch-app.md → Live stream).
+    public struct Prompt: Codable, Sendable, Equatable {
+        public let text: String
+        /// nil for your own message; the other session's name for a peer message.
+        public let from: String?
+        public init(text: String, from: String?) { self.text = text; self.from = from }
+    }
+
     public var turn: Int
     public var active: Bool
+    public var prompt: Prompt?
     public var blocks: [Block]
 
-    public init(turn: Int, active: Bool, blocks: [Block]) {
+    public init(turn: Int, active: Bool, prompt: Prompt? = nil, blocks: [Block]) {
         self.turn = turn
         self.active = active
+        self.prompt = prompt
         self.blocks = blocks
     }
 
@@ -38,13 +48,18 @@ public struct LiveTurn: Codable, Sendable, Equatable {
         if frame.turn > turn {
             // A new turn: only usable if this frame starts it (its first block is block 0).
             guard let first = frame.blocks.first, first.index == 0, first.new == true else {
-                if frame.blocks.isEmpty { turn = frame.turn; active = !(frame.ended ?? false); blocks = []; return true }
+                if frame.blocks.isEmpty {
+                    turn = frame.turn; active = !(frame.ended ?? false); blocks = []; prompt = frame.prompt
+                    return true
+                }
                 return false
             }
             turn = frame.turn
             active = true
             blocks = []
+            prompt = nil
         }
+        if let p = frame.prompt { prompt = p }
         for fb in frame.blocks {
             if let i = blocks.firstIndex(where: { $0.index == fb.index }) {
                 blocks[i].text += fb.append
@@ -79,6 +94,7 @@ public struct LiveTurn: Codable, Sendable, Equatable {
 
     public static func decode(_ data: Data) -> LiveTurn? { try? decoder.decode(LiveTurn.self, from: data) }
     public static func decodeFrame(_ data: Data) -> LiveFrame? { try? decoder.decode(LiveFrame.self, from: data) }
+    public static func decodeTurns(_ data: Data) -> [PastTurn]? { try? decoder.decode([PastTurn].self, from: data) }
 
     /// The feed as the watch shows it: thinking and text blocks, and each run of consecutive
     /// tool blocks folded into one item.
@@ -130,7 +146,61 @@ public struct LiveFrame: Codable, Sendable {
     public let id: String
     public let turn: Int
     public let ended: Bool?
+    /// Present once, in the first frame after the turn's starting message is known.
+    public let prompt: LiveTurn.Prompt?
     public let blocks: [Block]
+}
+
+/// An earlier turn for the Past turns screen (docs/plan-watch-app.md → Relay → Past turns).
+public struct PastTurn: Codable, Sendable, Equatable, Identifiable {
+    public let prompt: String
+    public let from: String?
+    public let reply: String?
+    public let at: Date?
+    public var id: String { "\(at?.timeIntervalSince1970 ?? 0)-\(prompt.prefix(20))" }
+
+    public init(prompt: String, from: String?, reply: String?, at: Date?) {
+        self.prompt = prompt; self.from = from; self.reply = reply; self.at = at
+    }
+
+    /// Group history (oldest first) into turns: each starts at a main-thread user message (yours
+    /// or another session's); its reply is Claude's last text before the next turn. Newest first,
+    /// up to `limit`, leaving out the newest turn (it's on the session screen).
+    public static func group(_ events: [SessionEvent], limit: Int = 15) -> [PastTurn] {
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        func date(_ s: String) -> Date? { iso.date(from: s) ?? ISO8601DateFormatter().date(from: s) }
+
+        var turns: [(prompt: String, from: String?, reply: String?, at: Date?)] = []
+        for e in events where e.subagentInfo == nil {
+            switch e.type {
+            case .user:
+                if let peers = e.peerMessages, let first = peers.first(where: { !$0.isSent }) {
+                    let own = (e.peerOtherText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if own.isEmpty {
+                        turns.append((first.body, first.peer?.name ?? "Another session", nil, date(e.timestamp)))
+                        continue
+                    }
+                }
+                let text = (e.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty, !text.hasPrefix("<"), !text.hasPrefix("The previous turn was interrupted"),
+                      !text.hasPrefix("Caveat:") else { continue }
+                turns.append((text, nil, nil, date(e.timestamp)))
+            case .text:
+                guard !turns.isEmpty, let t = e.text, !t.allSatisfy(\.isWhitespace) else { continue }
+                turns[turns.count - 1].reply = t
+            default:
+                continue
+            }
+        }
+        return turns.dropLast().reversed().prefix(limit).map {
+            PastTurn(prompt: cap($0.prompt, 300), from: $0.from, reply: $0.reply.map { cap($0, 3000) }, at: $0.at)
+        }
+    }
+
+    static func cap(_ s: String, _ limit: Int) -> String {
+        s.count > limit ? String(s.prefix(limit)) + "…" : s
+    }
 }
 
 public enum LiveFormat {

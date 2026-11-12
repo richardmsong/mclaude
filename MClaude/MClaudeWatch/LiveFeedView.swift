@@ -8,7 +8,7 @@ struct LiveFeedView: View {
     var body: some View {
         let items = turn?.feed ?? []
         VStack(alignment: .leading, spacing: 8) {
-            if items.isEmpty {
+            if items.isEmpty, turn?.active == true {
                 Text("Starting…").font(.footnote).foregroundStyle(WatchTheme.textMuted)
             }
             ForEach(items) { item in
